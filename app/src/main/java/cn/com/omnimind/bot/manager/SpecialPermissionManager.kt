@@ -10,7 +10,7 @@ import android.provider.Settings
 import androidx.core.content.ContextCompat
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
 import cn.com.omnimind.baselib.permission.PermissionRequest
-import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
+import cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
@@ -39,7 +39,7 @@ class SpecialPermissionManager(private val context: Context) {
     }
     private val embeddedTerminalSetupManager = EmbeddedTerminalSetupManager(context)
     private val embeddedTerminalAutoStartManager = EmbeddedTerminalAutoStartManager(context)
-    private val shizukuCapabilityManager = ShizukuCapabilityManager.get(context)
+    private val privilegedCapabilityManager = PrivilegedCapabilityManager.get(context)
 
     fun isIgnoringBatteryOptimizations(result: MethodChannel.Result) {
         try {
@@ -179,72 +179,37 @@ class SpecialPermissionManager(private val context: Context) {
         }
     }
 
-    fun isShizukuInstalled(result: MethodChannel.Result) {
-        try {
-            result.success(shizukuCapabilityManager.isShizukuInstalled())
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "Error checking Shizuku installation", e)
-            result.error("CHECK_FAILED", "Failed to check Shizuku installation.", e.message)
-        }
+    fun getPrivilegedStatus(result: MethodChannel.Result) {
+        runCatching { privilegedCapabilityManager.getStatus().toMap() }
+            .onSuccess(result::success)
+            .onFailure { result.error("READ_FAILED", "Failed to read privileged status.", it.message) }
     }
 
-    fun isShizukuRunning(result: MethodChannel.Result) {
-        try {
-            result.success(shizukuCapabilityManager.getStatus().running)
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "Error checking Shizuku running status", e)
-            result.error("CHECK_FAILED", "Failed to check Shizuku running status.", e.message)
-        }
-    }
-
-    fun openShizukuDownloadOrApp(result: MethodChannel.Result) {
-        try {
-            result.success(shizukuCapabilityManager.openShizukuDownloadOrApp())
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "Error opening Shizuku app or website", e)
-            result.error("INTENT_FAILED", "Failed to open Shizuku app or website.", e.message)
-        }
-    }
-
-    fun requestShizukuPermission(result: MethodChannel.Result) {
+    fun setPrivilegedSource(call: MethodCall, result: MethodChannel.Result) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val status = shizukuCapabilityManager.requestPermission()
-                withContext(Dispatchers.Main) {
-                    result.success(status.toMap())
-                }
+                val source = call.argument<String>("source") ?: throw IllegalArgumentException("source is required")
+                val status = privilegedCapabilityManager.setSource(source)
+                withContext(Dispatchers.Main) { result.success(status.toMap()) }
             } catch (e: Exception) {
-                OmniLog.e(TAG, "Error requesting Shizuku permission", e)
-                withContext(Dispatchers.Main) {
-                    result.error("REQUEST_FAILED", "Failed to request Shizuku permission.", e.message)
-                }
+                withContext(Dispatchers.Main) { result.error("INVALID_SOURCE", e.message, null) }
             }
         }
     }
 
-    fun getShizukuStatus(result: MethodChannel.Result) {
-        try {
-            result.success(shizukuCapabilityManager.getStatus().toMap())
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "Error reading Shizuku status", e)
-            result.error("READ_FAILED", "Failed to read Shizuku status.", e.message)
+    fun authorizePrivilegedSource(result: MethodChannel.Result) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val status = privilegedCapabilityManager.authorize()
+                withContext(Dispatchers.Main) { result.success(status.toMap()) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { result.error("AUTHORIZE_FAILED", e.message, null) }
+            }
         }
     }
 
-    fun runShizukuHealthCheck(result: MethodChannel.Result) {
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val payload = shizukuCapabilityManager.runHealthCheck()
-                withContext(Dispatchers.Main) {
-                    result.success(payload)
-                }
-            } catch (e: Exception) {
-                OmniLog.e(TAG, "Error running Shizuku health check", e)
-                withContext(Dispatchers.Main) {
-                    result.error("HEALTH_CHECK_FAILED", "Failed to run Shizuku health check.", e.message)
-                }
-            }
-        }
+    fun openPrivilegedSourceApp(result: MethodChannel.Result) {
+        result.success(privilegedCapabilityManager.openSelectedSourceApp())
     }
 
     fun isTermuxInstalled(result: MethodChannel.Result) {

@@ -250,9 +250,9 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
     );
   }
 
-  Future<void> _requestShizuku() async {
+  Future<void> _requestPrivileged() async {
     if (!mounted) return;
-    await ensureShizukuPermission(context);
+    await ensurePrivilegedPermission(context);
     if (mounted) {
       await _permission.refresh();
     }
@@ -382,7 +382,7 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
       TutorialPage.permissions => OnboardingPermissionsPage(
         controller: _permission,
         scrollController: _scrollController,
-        onRequestShizuku: _requestShizuku,
+        onRequestPrivileged: _requestPrivileged,
       ),
       TutorialPage.provider => OnboardingProviderPage(
         controller: _provider,

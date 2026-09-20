@@ -1,3 +1,3 @@
--keepclassmembers class cn.com.omnimind.baselib.shizuku.OmnibotPrivilegedUserService {
+-keepclassmembers class cn.com.omnimind.baselib.privileged.OmnibotPrivilegedUserService {
     public <init>(...);
 }

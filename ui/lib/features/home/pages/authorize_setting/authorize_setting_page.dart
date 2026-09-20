@@ -28,7 +28,8 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
   bool _overlayPermission = false;
   bool _installedAppsPermission = false;
   bool _publicStoragePermission = false;
-  ShizukuStatusSnapshot _shizukuStatus = ShizukuStatusSnapshot.fallback();
+  PrivilegedStatusSnapshot _privilegedStatus =
+      PrivilegedStatusSnapshot.fallback();
 
   Color get _pageBackground => context.omniPalette.pageBackground;
   Color get _titleColor => context.omniPalette.textPrimary;
@@ -215,17 +216,17 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
             },
           ),
           _AuthorizeSettingItem(
-            icon: LucideIcons.usb,
-            title: context.trLegacy('Shizuku 权限'),
-            subtitle: _shizukuStatus.localizedGuide,
+            icon: LucideIcons.shieldCheck,
+            title: context.trLegacy('特权访问'),
+            subtitle: _privilegedStatus.localizedGuide,
             trailing: _buildPermissionTrailing(
-              label: _shizukuStatus.localizedStatusLabel,
-              color: _shizukuStatus.isGranted
+              label: _privilegedStatus.localizedStatusLabel,
+              color: _privilegedStatus.isGranted
                   ? _tertiaryTextColor
                   : _accentColor,
             ),
             onTap: () async {
-              await ensureShizukuPermission(context);
+              await showPrivilegedSourceSheet(context);
               if (mounted) {
                 await _checkPermissions();
               }
@@ -252,7 +253,7 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
           ) ??
           false;
       final publicStoragePermission = await isPublicStorageAccessGranted();
-      final shizukuStatus = await getShizukuStatus();
+      final privilegedStatus = await getPrivilegedStatus();
 
       if (mounted) {
         setState(() {
@@ -261,7 +262,7 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
           _overlayPermission = overlayPermission;
           _installedAppsPermission = installedAppsPermission;
           _publicStoragePermission = publicStoragePermission;
-          _shizukuStatus = shizukuStatus;
+          _privilegedStatus = privilegedStatus;
         });
       }
     } catch (e) {

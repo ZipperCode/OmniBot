@@ -33,6 +33,6 @@ dependencies {
 }
 
 task sourceJar(type: Jar) {
-    from android.sourceSets.main.java.srcDirs
+    from project.extensions.getByName('android').sourceSets.main.java.srcDirs
     archiveClassifier.set("sources")
 }

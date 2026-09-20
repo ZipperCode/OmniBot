@@ -222,7 +222,7 @@ Codex Plan 补验：用户指定模拟器验收，实际 UI 27 步（计划、�
 
 ### Shizuku 冷启动被提前判定失败（2026-09-09）
 - 真实 API 授权后工具失败：服务启动 20:28:13.883，App 收到连接 20:28:18.017，耗时 4134ms；本地只等 3000ms，官方服务端日志允许 30000ms。原始证据 artifacts/shizuku-binding-20260909/before-bind.log。
-- 保留现有 ShizukuCapabilityManager 所有权，连接等待对齐上游 30 秒，协程取消仍可立即结束等待，不重放工具操作。
+- 该历史修复当时由 `ShizukuCapabilityManager` 所有；当前所有权已整体迁移到中立的 `PrivilegedCapabilityManager`，Shizuku 绑定等待仍由同一 privileged 能力边界负责，协程取消结束本地等待且不重放工具操作。
 - 执行入口：`:baselib:testDebugUnitTest --tests '*ShizukuServiceBindingTest'`（已加入 scripts/test-agent-runtime.sh）。覆盖 4.2 秒冷启动、取消后连接可用、有界超时及晚到回调。旧 3 秒实现下新增冷启动用例确实失败；绿测及升级后真实 API 流程待运行。全部待真机验证。
 - 测试前置修复：AccountApiClientTest 的 StubCall 对齐当前 OkHttp 5.5 的新增元数据接口，执行仍由测试响应替身控制；该类一并回归。
 - 绿测 14 项全部通过，APK 覆盖安装成功（SHA 2b11eef4d2ad2e7924f72e860e3f8dd82c74968e409afa34b1d0a734dcf35c3d）。第一轮真实 API 的 16 步全部通过，含当前授权等待停止、下一轮允许真实 id 命令、原始参数保留、正式 end_turn 和重启恢复；冷启动 1597ms，超 3 秒边界由 4.2 秒单测覆盖。

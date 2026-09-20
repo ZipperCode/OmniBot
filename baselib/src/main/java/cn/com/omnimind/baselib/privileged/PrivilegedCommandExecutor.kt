@@ -1,17 +1,17 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
-import android.os.Process
 import cn.com.omnimind.baselib.util.OmniLog
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlin.concurrent.thread
 
-internal object PrivilegedCommandExecutor {
-
-    private const val TAG = "PrivilegedCommandExec"
-    private const val OUTPUT_LIMIT = 16_000
-    private const val DEFAULT_TYPED_TIMEOUT_SECONDS = 8L
-    private const val DEFAULT_SHELL_TIMEOUT_SECONDS = 60L
+internal class PrivilegedCommandExecutor(
+    private val source: PrivilegedSource,
+    private val launcher: PrivilegedShellLauncher,
+) {
 
     private val allowedSettingsNamespaces = setOf("system", "secure", "global")
     private val allowedDumpsysServices = setOf(
@@ -33,31 +33,44 @@ internal object PrivilegedCommandExecutor {
     private val allowedAppOpsModes = setOf("allow", "ignore", "deny", "default", "foreground")
     private val envKeyPattern = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
 
-    fun currentBackend(): ShizukuBackend {
-        return if (Process.myUid() == 0) ShizukuBackend.ROOT else ShizukuBackend.ADB
-    }
-
     fun execute(request: PrivilegedRequest): PrivilegedResult {
-        val backend = currentBackend()
         val action = PrivilegedActionPolicy.normalizeAction(request.action)
+        if (action == PrivilegedActionPolicy.ACTION_SESSION_EXEC ||
+            action == PrivilegedActionPolicy.ACTION_SESSION_READ ||
+            action == PrivilegedActionPolicy.ACTION_SESSION_STOP
+        ) {
+            return executeExistingSession(request, action)
+        }
+        val launched = try {
+            launcher.launch(source)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: SuDeniedException) {
+            return failure(request, PrivilegedAuthority.NONE, "permission_denied", error.message ?: "Privileged source authorization was denied.")
+        } catch (error: AuthorityUnexpectedException) {
+            return failure(request, PrivilegedAuthority.NONE, "authority_unexpected", error.message ?: "Privileged shell returned an unexpected identity.")
+        } catch (error: Exception) {
+            return failure(request, PrivilegedAuthority.NONE, "process_start_failed", error.message ?: "Failed to start privileged shell.")
+        }
+        val authority = launched.authority
         val arguments = request.arguments
 
-        if (!PrivilegedActionPolicy.isSupported(action, backend, includeInternal = true, arguments = arguments)) {
+        if (!PrivilegedActionPolicy.isSupported(action, authority, includeInternal = true, arguments = arguments)) {
+            PrivilegedProcessCleanup.closeAndDestroy(launched.process)
             return failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "unsupported_action",
-                message = "Action is not available for the current Shizuku backend."
+                message = "Action is not available for the measured authority."
             ).also { audit(request, it) }
         }
 
-        if (action == PrivilegedActionPolicy.ACTION_SHELL_EXEC ||
-            action == PrivilegedActionPolicy.ACTION_SESSION_EXEC
-        ) {
+        if (action == PrivilegedActionPolicy.ACTION_SHELL_EXEC) {
             PrivilegedActionPolicy.blockedCommandReason(request.command)?.let { reason ->
+                PrivilegedProcessCleanup.closeAndDestroy(launched.process)
                 return failure(
                     request = request,
-                    backend = backend,
+                    authority = authority,
                     code = "blocked_by_policy",
                     message = reason,
                     blockedByPolicy = true
@@ -68,9 +81,10 @@ internal object PrivilegedCommandExecutor {
         if ((request.requiresConfirmation || PrivilegedActionPolicy.requiresConfirmation(action)) &&
             !isExplicitlyConfirmed(arguments)
         ) {
+            PrivilegedProcessCleanup.closeAndDestroy(launched.process)
             return failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "confirmation_required",
                 message = "This privileged action requires explicit confirmation.",
                 requiresConfirmation = true
@@ -78,48 +92,38 @@ internal object PrivilegedCommandExecutor {
         }
 
         val result = when (action) {
-            PrivilegedActionPolicy.ACTION_SHELL_EXEC -> executeRawShell(request, backend)
+            PrivilegedActionPolicy.ACTION_SHELL_EXEC -> executeRawShell(request, authority, launched)
             PrivilegedActionPolicy.ACTION_SESSION_START ->
-                PrivilegedShellSessionManager.startSession(request, backend)
+                PrivilegedShellSessionManager.startSession(request, authority, source, launched.process)
 
-            PrivilegedActionPolicy.ACTION_SESSION_EXEC ->
-                PrivilegedShellSessionManager.execSession(request, backend)
-
-            PrivilegedActionPolicy.ACTION_SESSION_READ ->
-                PrivilegedShellSessionManager.readSession(request, backend)
-
-            PrivilegedActionPolicy.ACTION_SESSION_STOP ->
-                PrivilegedShellSessionManager.stopSession(request, backend)
-
-            else -> executeTypedAction(request, backend, action, arguments)
+            else -> executeTypedAction(request, authority, action, arguments, launched)
         }
+        if (action != PrivilegedActionPolicy.ACTION_SESSION_START) PrivilegedProcessCleanup.closeAndDestroy(launched.process)
         audit(request, result)
         return result
     }
 
-    fun shutdown() {
-        PrivilegedShellSessionManager.shutdown()
-    }
-
     private fun executeTypedAction(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
         action: String,
         arguments: Map<String, String>,
+        launched: LaunchedPrivilegedShell,
     ): PrivilegedResult {
         val command = runCatching {
-            buildCommand(action, arguments, backend)
+            buildCommand(action, arguments, authority)
         }.getOrElse { error ->
             return failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = error.message ?: "Invalid privileged action arguments."
             )
         }
 
         val result = exec(
-            command = command,
+            launched = launched,
+            script = command.joinToString(" ") { shellQuote(it) },
             timeoutSeconds = DEFAULT_TYPED_TIMEOUT_SECONDS
         )
         val stdout = trimOutput(result.stdout)
@@ -146,20 +150,21 @@ internal object PrivilegedCommandExecutor {
                 success = true,
                 code = "ok",
                 message = "Privileged action executed successfully.",
-                backend = backend,
+                authority = authority,
+                source = source,
                 output = combineOutput(stdout, stderr),
                 stdout = stdout,
                 stderr = stderr,
                 exitCode = result.exitCode,
-                availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
-                data = data,
+                availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
+                data = data + ("outputComplete" to result.outputComplete.toString()),
                 command = command.joinToString(" "),
                 timeoutSeconds = DEFAULT_TYPED_TIMEOUT_SECONDS.toInt()
             )
         } else {
             failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = if (result.timedOut) "timeout" else "command_failed",
                 message = if (result.timedOut) {
                     "Privileged action timed out."
@@ -171,19 +176,20 @@ internal object PrivilegedCommandExecutor {
                 exitCode = result.exitCode,
                 command = command.joinToString(" "),
                 timeoutSeconds = DEFAULT_TYPED_TIMEOUT_SECONDS.toInt()
-            )
+            ).copy(data = mapOf("outputComplete" to result.outputComplete.toString()))
         }
     }
 
-    private fun executeRawShell(
+    internal fun executeRawShell(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
+        launched: LaunchedPrivilegedShell,
     ): PrivilegedResult {
         val command = request.command?.trim().orEmpty()
         if (command.isEmpty()) {
             return failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = "command is required for shell.exec."
             )
@@ -199,14 +205,15 @@ internal object PrivilegedCommandExecutor {
         }.getOrElse { error ->
             return failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = error.message ?: "Invalid shell.exec arguments."
             )
         }
 
         val result = exec(
-            command = listOf("/system/bin/sh", "-lc", script),
+            launched = launched,
+            script = script,
             timeoutSeconds = timeoutSeconds
         )
         val stdout = trimOutput(result.stdout)
@@ -218,21 +225,23 @@ internal object PrivilegedCommandExecutor {
                 success = true,
                 code = "ok",
                 message = "Privileged shell command executed successfully.",
-                backend = backend,
+                authority = authority,
+                source = source,
                 output = combineOutput(stdout, stderr),
                 stdout = stdout,
                 stderr = stderr,
                 exitCode = result.exitCode,
-                availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+                availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
                 command = command,
                 timeoutSeconds = timeoutSeconds.toInt(),
                 workingDirectory = request.workingDirectory,
-                environment = request.environment
+                environment = request.environment,
+                data = mapOf("outputComplete" to result.outputComplete.toString()),
             )
         } else {
             failure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = if (result.timedOut) "timeout" else "command_failed",
                 message = if (result.timedOut) {
                     "Privileged shell command timed out."
@@ -244,14 +253,14 @@ internal object PrivilegedCommandExecutor {
                 exitCode = result.exitCode,
                 command = command,
                 timeoutSeconds = timeoutSeconds.toInt()
-            )
+            ).copy(data = mapOf("outputComplete" to result.outputComplete.toString()))
         }
     }
 
     private fun buildCommand(
         action: String,
         arguments: Map<String, String>,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
     ): List<String> {
         return when (action) {
             PrivilegedActionPolicy.ACTION_PACKAGE_LAUNCH -> {
@@ -335,7 +344,7 @@ internal object PrivilegedCommandExecutor {
                 listOf("svc", "wifi", if (isEnabled(arguments)) "enable" else "disable")
             }
             PrivilegedActionPolicy.ACTION_DEVICE_SET_MOBILE_DATA_ENABLED -> {
-                require(backend == ShizukuBackend.ROOT) { "Mobile data control requires root backend." }
+                require(authority == PrivilegedAuthority.ROOT) { "Mobile data control requires root authority." }
                 listOf("svc", "data", if (isEnabled(arguments)) "enable" else "disable")
             }
             PrivilegedActionPolicy.ACTION_DEVICE_INPUT_TEXT -> {
@@ -363,7 +372,7 @@ internal object PrivilegedCommandExecutor {
                 val buffer = arguments["buffer"]?.trim()?.lowercase()?.ifEmpty { "main" } ?: "main"
                 require(allowedLogcatBuffers.contains(buffer)) { "Unsupported logcat buffer." }
                 if (buffer == "kernel") {
-                    require(backend == ShizukuBackend.ROOT) { "Kernel logcat requires root backend." }
+                    require(authority == PrivilegedAuthority.ROOT) { "Kernel logcat requires root authority." }
                 }
                 val lines = arguments["lines"]?.trim()?.toIntOrNull()?.coerceIn(1, 200) ?: 80
                 listOf("logcat", "-d", "-b", buffer, "-t", lines.toString())
@@ -390,46 +399,78 @@ internal object PrivilegedCommandExecutor {
     }
 
     private fun exec(
-        command: List<String>,
+        launched: LaunchedPrivilegedShell,
+        script: String,
         timeoutSeconds: Long,
     ): ExecResult {
-        val process = ProcessBuilder(command)
-            .redirectErrorStream(false)
-            .start()
+        val process = launched.process
+        process.outputStream.bufferedWriter().use { writer ->
+            writer.write(script)
+            writer.newLine()
+        }
         val stdoutBuffer = ByteArrayOutputStream()
         val stderrBuffer = ByteArrayOutputStream()
+        val stdoutFailure = AtomicReference<IOException?>()
+        val stderrFailure = AtomicReference<IOException?>()
+        val stdoutInput = process.inputStream
+        val stderrInput = process.errorStream
         val stdoutReader = thread(start = true, isDaemon = true) {
-            process.inputStream.use { input ->
-                input.copyTo(stdoutBuffer)
+            try {
+                stdoutInput.use { input -> copyBounded(input, stdoutBuffer) }
+            } catch (error: IOException) {
+                stdoutFailure.set(error)
             }
         }
         val stderrReader = thread(start = true, isDaemon = true) {
-            process.errorStream.use { input ->
-                input.copyTo(stderrBuffer)
+            try {
+                stderrInput.use { input -> copyBounded(input, stderrBuffer) }
+            } catch (error: IOException) {
+                stderrFailure.set(error)
             }
         }
-        val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        val finished = try {
+            process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        } catch (error: InterruptedException) {
+            PrivilegedProcessCleanup.closeAndDestroy(process)
+            joinReaders(stdoutReader, stderrReader)
+            Thread.currentThread().interrupt()
+            throw CancellationException("Privileged process wait was cancelled.").also { it.initCause(error) }
+        }
         if (!finished) {
-            process.destroyForcibly()
-            stdoutReader.join(500)
-            stderrReader.join(500)
+            PrivilegedProcessCleanup.destroy(process)
+            joinReaders(stdoutReader, stderrReader)
             return ExecResult(
                 success = false,
                 timedOut = true,
                 exitCode = null,
                 stdout = stdoutBuffer.toString(),
-                stderr = stderrBuffer.toString()
+                stderr = stderrBuffer.toString(),
+                outputComplete = false,
             )
         }
-        stdoutReader.join(500)
-        stderrReader.join(500)
+        joinReaders(stdoutReader, stderrReader)
+        val outputComplete = !stdoutReader.isAlive && !stderrReader.isAlive
+        val readFailure = stdoutFailure.get() ?: stderrFailure.get()
+        if (!outputComplete) {
+            // 正常退出但输出管道未闭合时主动关闭本端读取流；结果仍如实标记为不完整。
+            runCatching { stdoutInput.close() }
+            runCatching { stderrInput.close() }
+            joinReaders(stdoutReader, stderrReader)
+        }
         return ExecResult(
-            success = process.exitValue() == 0,
+            // 正常退出时读取失败不能伪装成命令成功；取消/超时收尾导致的关闭异常由对应分支拥有。
+            success = process.exitValue() == 0 && readFailure == null,
             timedOut = false,
             exitCode = process.exitValue(),
             stdout = stdoutBuffer.toString(),
-            stderr = stderrBuffer.toString()
+            stderr = stderrBuffer.toString(),
+            outputComplete = outputComplete,
         )
+    }
+
+    private fun joinReaders(stdoutReader: Thread, stderrReader: Thread) {
+        stdoutReader.join(READER_JOIN_MILLIS)
+        stderrReader.join(READER_JOIN_MILLIS)
     }
 
     private fun trimOutput(value: String): String {
@@ -450,7 +491,7 @@ internal object PrivilegedCommandExecutor {
 
     private fun failure(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
         code: String,
         message: String,
         output: String = "",
@@ -470,14 +511,15 @@ internal object PrivilegedCommandExecutor {
             success = false,
             code = code,
             message = message,
-            backend = backend,
+            authority = authority,
+            source = source,
             output = mergedOutput,
             stdout = stdout,
             stderr = stderr,
             transcript = transcript,
             exitCode = exitCode,
             requiresConfirmation = requiresConfirmation,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             command = command,
             timeoutSeconds = timeoutSeconds,
             workingDirectory = request.workingDirectory,
@@ -502,7 +544,7 @@ internal object PrivilegedCommandExecutor {
                 append(", blockedByPolicy=true")
             }
         }
-        OmniLog.i(TAG, "Shizuku privileged audit: $summary")
+        OmniLog.i(TAG, "Privileged audit: $summary")
     }
 
     private fun requirePackageName(value: String?): String {
@@ -564,11 +606,53 @@ internal object PrivilegedCommandExecutor {
         return "'${value.replace("'", "'\"'\"'")}'"
     }
 
-    private data class ExecResult(
+    private fun executeExistingSession(request: PrivilegedRequest, action: String): PrivilegedResult {
+        val authority = PrivilegedShellSessionManager.sessionAuthority(request.sessionId, source)
+            ?: return failure(request, PrivilegedAuthority.NONE, "session_not_found", "The privileged shell session does not exist.")
+        if (!PrivilegedActionPolicy.isSupported(action, authority, includeInternal = true, arguments = request.arguments)) {
+            return failure(request, authority, "unsupported_action", "Action is not available for the measured authority.")
+        }
+        if (action == PrivilegedActionPolicy.ACTION_SESSION_EXEC) {
+            PrivilegedActionPolicy.blockedCommandReason(request.command)?.let {
+                return failure(request, authority, "blocked_by_policy", it, blockedByPolicy = true)
+            }
+            if (!isExplicitlyConfirmed(request.arguments)) {
+                return failure(request, authority, "confirmation_required", "This privileged action requires explicit confirmation.", requiresConfirmation = true)
+            }
+        }
+        return when (action) {
+            PrivilegedActionPolicy.ACTION_SESSION_EXEC -> PrivilegedShellSessionManager.execSession(request, authority, source)
+            PrivilegedActionPolicy.ACTION_SESSION_READ -> PrivilegedShellSessionManager.readSession(request, authority, source)
+            else -> PrivilegedShellSessionManager.stopSession(request, authority, source)
+        }
+    }
+
+    internal fun copyBounded(input: java.io.InputStream, output: ByteArrayOutputStream) {
+        val buffer = ByteArray(2048)
+        var remaining = OUTPUT_LIMIT
+        while (remaining > 0) {
+            val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+            if (count < 0) break
+            output.write(buffer, 0, count)
+            remaining -= count
+        }
+        while (input.read(buffer) >= 0) Unit
+    }
+
+    internal data class ExecResult(
         val success: Boolean,
         val timedOut: Boolean,
         val exitCode: Int?,
         val stdout: String,
         val stderr: String,
+        val outputComplete: Boolean,
     )
+
+    private companion object {
+        const val TAG = "PrivilegedCommandExec"
+        const val OUTPUT_LIMIT = 16_000
+        const val DEFAULT_TYPED_TIMEOUT_SECONDS = 8L
+        const val DEFAULT_SHELL_TIMEOUT_SECONDS = 60L
+        const val READER_JOIN_MILLIS = 500L
+    }
 }

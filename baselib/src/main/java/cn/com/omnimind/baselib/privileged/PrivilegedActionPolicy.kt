@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 object PrivilegedActionPolicy {
     private data class CommandBlockRule(
@@ -124,20 +124,21 @@ object PrivilegedActionPolicy {
 
     fun normalizeAction(raw: String): String = raw.trim().lowercase()
 
-    fun visibleAgentActions(backend: ShizukuBackend): List<String> {
-        return when (backend) {
-            ShizukuBackend.ROOT -> rootVisibleActions.toList()
-            ShizukuBackend.ADB,
-            ShizukuBackend.NONE -> adbVisibleActions.toList()
+    fun visibleAgentActions(authority: PrivilegedAuthority): List<String> {
+        return when (authority) {
+            PrivilegedAuthority.ROOT -> rootVisibleActions.toList()
+            PrivilegedAuthority.ADB -> adbVisibleActions.toList()
+            PrivilegedAuthority.NONE -> emptyList()
         }
     }
 
     fun supportedActions(
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
         includeInternal: Boolean = false,
     ): Set<String> {
+        if (authority == PrivilegedAuthority.NONE) return emptySet()
         val actions = linkedSetOf<String>()
-        actions += visibleAgentActions(backend)
+        actions += visibleAgentActions(authority)
         if (includeInternal) {
             actions += internalOnlyActions
         }
@@ -146,15 +147,15 @@ object PrivilegedActionPolicy {
 
     fun isSupported(
         action: String,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
         includeInternal: Boolean = false,
         arguments: Map<String, String> = emptyMap(),
     ): Boolean {
         val normalizedAction = normalizeAction(action)
-        if (!supportedActions(backend, includeInternal).contains(normalizedAction)) {
+        if (!supportedActions(authority, includeInternal).contains(normalizedAction)) {
             return false
         }
-        if (requiresRoot(normalizedAction, arguments) && backend != ShizukuBackend.ROOT) {
+        if (requiresRoot(normalizedAction, arguments) && authority != PrivilegedAuthority.ROOT) {
             return false
         }
         return true

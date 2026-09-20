@@ -1,6 +1,6 @@
 package cn.com.omnimind.bot.agent
 
-import cn.com.omnimind.baselib.shizuku.ShizukuBackend
+import cn.com.omnimind.baselib.privileged.PrivilegedAuthority
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.i18n.PromptLocale
 import com.rk.terminal.runtime.TerminalDistribution
@@ -594,16 +594,16 @@ object AgentToolDefinitions {
 
     fun androidPrivilegedActionTool(
         visibleActions: List<String>,
-        backend: ShizukuBackend,
+        backend: PrivilegedAuthority,
         locale: PromptLocale = currentLocale()
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
         val backendLabel = when (backend) {
-            ShizukuBackend.ROOT -> text("root/Sui", "root/Sui")
-            ShizukuBackend.ADB -> text("adb shell", "adb shell")
-            ShizukuBackend.NONE -> text("未授权", "not granted")
+            PrivilegedAuthority.ROOT -> text("root", "root")
+            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
+            PrivilegedAuthority.NONE -> text("未授权", "not granted")
         }
         val actionList = visibleActions.joinToString(", ")
 
@@ -616,8 +616,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "通过 Shizuku 执行安卓高权限动作。这条能力链路独立于 `terminal_execute`：既保留受控 typed action，也支持 `action=shell.exec` 的一次性任意 shell。若确实需要保留 cwd、环境变量或 shell 状态，请改用 `android_privileged_session_*`。当前后端：$backendLabel。当前可见 action：$actionList。需要授权时由 ACP 客户端统一请求确认。",
-                        "Run Android privileged actions through Shizuku. This path stays separate from `terminal_execute`: it keeps the typed allowlisted actions and also supports one-shot arbitrary shell via `action=shell.exec`. When you truly need persistent cwd, environment, or shell state, switch to `android_privileged_session_*`. Current backend: $backendLabel. Currently visible actions: $actionList. Permission is requested through the standard ACP client boundary when needed."
+                        "通过用户显式选择的高权限来源执行安卓动作。这条能力链路独立于 `terminal_execute`：既保留 typed action，也支持 `action=shell.exec` 的一次性非 login shell；不会加载 login profile，环境和命令可见性可能不同。若需要保留 cwd、环境变量或 shell 状态，请改用 `android_privileged_session_*`。当前实测权限：$backendLabel。当前可见 action：$actionList。需要确认时由 ACP 客户端统一请求。",
+                        "Run Android privileged actions through the explicitly selected privileged source. This path stays separate from `terminal_execute`: it keeps typed actions and supports a one-shot non-login shell via `action=shell.exec`; login profiles are not loaded, so environment and command visibility may differ. For persistent cwd, environment, or shell state, use `android_privileged_session_*`. Current authority: $backendLabel. Currently visible actions: $actionList. Permission is requested through the standard ACP client boundary when needed."
                     )
                 )
                 put(
@@ -739,10 +739,6 @@ object AgentToolDefinitions {
                                         put("type", "string")
                                     }
                                 }
-                                putJsonObject("confirmed") {
-                                    put("type", "boolean")
-                                    put("description", text("仅用于已完成用户确认的高风险动作。", "Use only after the user has confirmed a high-risk action."))
-                                }
                             }
                             put("additionalProperties", false)
                             put(
@@ -758,22 +754,23 @@ object AgentToolDefinitions {
                         add("action")
                         add("arguments")
                     }
+                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionStartTool(
-        backend: ShizukuBackend,
+        backend: PrivilegedAuthority,
         locale: PromptLocale = currentLocale()
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
         val backendLabel = when (backend) {
-            ShizukuBackend.ROOT -> text("root/Sui", "root/Sui")
-            ShizukuBackend.ADB -> text("adb shell", "adb shell")
-            ShizukuBackend.NONE -> text("未授权", "not granted")
+            PrivilegedAuthority.ROOT -> text("root", "root")
+            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
+            PrivilegedAuthority.NONE -> text("未授权", "not granted")
         }
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
@@ -784,8 +781,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "启动一个可复用的 Shizuku 高权限 shell 会话，仅用于确实需要跨多轮保留 cwd、环境变量或 shell 状态的任务。当前后端：$backendLabel。需要确认时由 ACP 客户端统一请求权限。",
-                        "Start a reusable Shizuku privileged shell session. Use it only when a task truly needs persistent cwd, environment variables, or shell state across turns. Current backend: $backendLabel. When confirmation is needed, the standard ACP client boundary requests permission."
+                        "启动一个绑定到当前所选来源的高权限 shell 会话，仅用于需要跨多轮保留 cwd、环境变量或 shell 状态的任务。当前实测权限：$backendLabel。需要确认时由 ACP 客户端统一请求。",
+                        "Start a reusable shell session bound to the selected privileged source. Use it only for persistent cwd, environment variables, or shell state. Current authority: $backendLabel. Confirmation uses the standard ACP client boundary."
                     )
                 )
                 put(
@@ -814,22 +811,23 @@ object AgentToolDefinitions {
                             }
                         }
                     }
+                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionExecTool(
-        backend: ShizukuBackend,
+        backend: PrivilegedAuthority,
         locale: PromptLocale = currentLocale()
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
         val backendLabel = when (backend) {
-            ShizukuBackend.ROOT -> text("root/Sui", "root/Sui")
-            ShizukuBackend.ADB -> text("adb shell", "adb shell")
-            ShizukuBackend.NONE -> text("未授权", "not granted")
+            PrivilegedAuthority.ROOT -> text("root", "root")
+            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
+            PrivilegedAuthority.NONE -> text("未授权", "not granted")
         }
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
@@ -840,8 +838,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "向已有的 Shizuku 高权限 shell 会话发送一条命令，并等待该命令完成。当前后端：$backendLabel。每次需要确认时由 ACP 客户端统一请求权限。",
-                        "Send a command to an existing Shizuku privileged shell session and wait for that command to finish. Current backend: $backendLabel. When confirmation is needed, permission is requested through the standard ACP client boundary."
+                        "向已有且来源固定的高权限 shell 会话发送命令，并等待该命令完成。当前实测权限：$backendLabel。需要确认时由 ACP 客户端统一请求。",
+                        "Send a command to an existing source-bound privileged shell session and wait for completion. Current authority: $backendLabel. Confirmation uses the standard ACP client boundary."
                     )
                 )
                 put(
@@ -871,22 +869,23 @@ object AgentToolDefinitions {
                         add("sessionId")
                         add("command")
                     }
+                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionReadTool(
-        backend: ShizukuBackend,
+        backend: PrivilegedAuthority,
         locale: PromptLocale = currentLocale()
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
         val backendLabel = when (backend) {
-            ShizukuBackend.ROOT -> text("root/Sui", "root/Sui")
-            ShizukuBackend.ADB -> text("adb shell", "adb shell")
-            ShizukuBackend.NONE -> text("未授权", "not granted")
+            PrivilegedAuthority.ROOT -> text("root", "root")
+            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
+            PrivilegedAuthority.NONE -> text("未授权", "not granted")
         }
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
@@ -897,8 +896,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "读取 Shizuku 高权限 shell 会话最近的 transcript 尾部。当前后端：$backendLabel。该操作不会再次请求确认。",
-                        "Read the latest transcript tail from a Shizuku privileged shell session. Current backend: $backendLabel. This operation does not require another confirmation."
+                        "读取高权限 shell 会话最近的 transcript 尾部。当前实测权限：$backendLabel。该操作不会再次请求确认。",
+                        "Read the latest transcript tail from a privileged shell session. Current authority: $backendLabel. This operation does not require another confirmation."
                     )
                 )
                 put(
@@ -925,16 +924,16 @@ object AgentToolDefinitions {
     }
 
     fun androidPrivilegedSessionStopTool(
-        backend: ShizukuBackend,
+        backend: PrivilegedAuthority,
         locale: PromptLocale = currentLocale()
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
         val backendLabel = when (backend) {
-            ShizukuBackend.ROOT -> text("root/Sui", "root/Sui")
-            ShizukuBackend.ADB -> text("adb shell", "adb shell")
-            ShizukuBackend.NONE -> text("未授权", "not granted")
+            PrivilegedAuthority.ROOT -> text("root", "root")
+            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
+            PrivilegedAuthority.NONE -> text("未授权", "not granted")
         }
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
@@ -945,8 +944,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "结束已有的 Shizuku 高权限 shell 会话并清理状态。当前后端：$backendLabel。该操作不会再次请求确认。",
-                        "Stop an existing Shizuku privileged shell session and clean up its state. Current backend: $backendLabel. This operation does not require another confirmation."
+                        "结束已有的高权限 shell 会话并清理逻辑状态。当前实测权限：$backendLabel。若应用无权杀死 root 进程，物理进程可能残留。",
+                        "Stop an existing privileged shell session and clean up its logical state. Current authority: $backendLabel. A root process may survive if the app cannot kill it."
                     )
                 )
                 put(
@@ -2284,11 +2283,11 @@ object AgentToolDefinitions {
             addAll(staticTools(locale))
             addAll(memoryTools(locale))
             addAll(subagentTools(locale))
-            add(androidPrivilegedActionTool(emptyList(), ShizukuBackend.NONE, locale))
-            add(androidPrivilegedSessionStartTool(ShizukuBackend.NONE, locale))
-            add(androidPrivilegedSessionExecTool(ShizukuBackend.NONE, locale))
-            add(androidPrivilegedSessionReadTool(ShizukuBackend.NONE, locale))
-            add(androidPrivilegedSessionStopTool(ShizukuBackend.NONE, locale))
+            add(androidPrivilegedActionTool(emptyList(), PrivilegedAuthority.NONE, locale))
+            add(androidPrivilegedSessionStartTool(PrivilegedAuthority.NONE, locale))
+            add(androidPrivilegedSessionExecTool(PrivilegedAuthority.NONE, locale))
+            add(androidPrivilegedSessionReadTool(PrivilegedAuthority.NONE, locale))
+            add(androidPrivilegedSessionStopTool(PrivilegedAuthority.NONE, locale))
         }
         return definitions.mapNotNullTo(linkedSetOf()) { definition ->
             (definition["function"] as? JsonObject)

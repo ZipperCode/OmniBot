@@ -52,17 +52,24 @@ void main() {
           });
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(spePermission, (call) async {
-            if (call.method == 'getShizukuStatus') {
+            if (call.method == 'getPrivilegedStatus') {
               return <String, Object?>{
-                'status': 'GRANTED_ADB',
-                'backend': 'SHIZUKU',
-                'installed': true,
-                'running': true,
-                'permissionGranted': true,
-                'binderReady': true,
-                'serviceBound': true,
-                'availableActions': <String>[],
+                'selected': 'shizuku',
+                'granted': true,
+                'authority': 'adb',
+                'uid': 2000,
+                'code': 'granted',
                 'message': '',
+                'availableActions': <String>[],
+                'shizuku': <String, dynamic>{
+                  'installed': true,
+                  'running': true,
+                  'binderReady': true,
+                  'serviceBound': true,
+                  'permissionGranted': true,
+                  'version': 13,
+                },
+                'su': null,
               };
             }
             return true;
@@ -127,17 +134,24 @@ void main() {
               case 'openOverlaySettings':
                 openOverlaySettingsCalls += 1;
                 return null;
-              case 'getShizukuStatus':
+              case 'getPrivilegedStatus':
                 return <String, Object?>{
-                  'status': 'GRANTED_ADB',
-                  'backend': 'SHIZUKU',
-                  'installed': true,
-                  'running': true,
-                  'permissionGranted': true,
-                  'binderReady': true,
-                  'serviceBound': true,
-                  'availableActions': <String>[],
+                  'selected': 'shizuku',
+                  'granted': true,
+                  'authority': 'adb',
+                  'uid': 2000,
+                  'code': 'granted',
                   'message': '',
+                  'availableActions': <String>[],
+                  'shizuku': <String, dynamic>{
+                    'installed': true,
+                    'running': true,
+                    'binderReady': true,
+                    'serviceBound': true,
+                    'permissionGranted': true,
+                    'version': 13,
+                  },
+                  'su': null,
                 };
               default:
                 return true;

@@ -376,7 +376,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _SettingItem(
             icon: LucideIcons.shieldCheck,
             title: context.l10n.authorizePageTitle,
-            subtitle: context.trLegacy('查看并配置悬浮窗、后台运行、Shizuku 等权限'),
+            subtitle: context.trLegacy('查看并配置悬浮窗、后台运行、特权访问等权限'),
             onTap: () {
               GoRouterManager.push('/home/authorize_setting');
             },

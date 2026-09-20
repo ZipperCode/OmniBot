@@ -154,7 +154,8 @@ class LegacyTextLocalizer {
         'Browser tool view is not supported on this platform yet',
     '悬浮窗权限': 'Overlay',
     '应用列表读取权限': 'Installed Apps Access',
-    'Shizuku 权限': 'Shizuku Permission',
+    '特权访问': 'Privileged Access',
+    '特权访问权限': 'Privileged Access',
     '公共文件访问': 'Public Storage Access',
     '正在调用工具': 'Calling tool',
     '暂时无法生成回复，请重试。': "I can't generate a reply right now. Please try again.",
@@ -342,8 +343,16 @@ class LegacyTextLocalizer {
     '已开启': 'Enabled',
     '去开启': 'Enable',
     '清除缓存': 'Clear cache',
-    '查看并配置悬浮窗、后台运行、Shizuku 等权限':
-        'Review overlay, background operation, Shizuku, and related permissions',
+    '查看并配置悬浮窗、后台运行、特权访问等权限':
+        'Review overlay, background operation, privileged access, and related permissions',
+    '直接 Root (KernelSU)': 'Direct Root (KernelSU)',
+    '特权访问设置': 'Privileged Access Settings',
+    '选择提权来源': 'Select privileged source',
+    '切换特权来源将停止当前特权会话并移出路由表；已在后台运行的 Root 进程可能仍会残留，无法保证物理终止。':
+        'Switching privileged source stops active sessions and removes them from routing; processes already running as root may remain and cannot be guaranteed to terminate physically.',
+    '验证 Root 授权': 'Verify Root Authorization',
+    '发起授权 / 验证': 'Authorize / Verify',
+    '打开 Shizuku': 'Open Shizuku',
     '权限检查中...': 'Checking permissions...',
     '继续任务': 'Continue task',
     '继续任务仅要求': 'Continue requires only',

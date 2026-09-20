@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 import android.content.Context
 import android.util.Log
@@ -7,6 +7,16 @@ import kotlinx.serialization.json.Json
 
 @Keep
 class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
+
+    override fun probeIdentity(): String {
+        return runCatching {
+            val launched = StandardPrivilegedShellLauncher().launch(PrivilegedSource.SHIZUKU)
+            PrivilegedProcessCleanup.closeAndDestroy(launched.process)
+            "${launched.uid}|${launched.authority.name}"
+        }.getOrElse { "ERROR:authority_unexpected" }
+    }
+
+    override fun closeSessions(): Boolean = PrivilegedShellSessionManager.shutdown()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -22,7 +32,10 @@ class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
     override fun execute(requestJson: String?): String {
         val result = runCatching {
             val request = json.decodeFromString(PrivilegedRequest.serializer(), requestJson.orEmpty())
-            PrivilegedCommandExecutor.execute(request)
+            PrivilegedCommandExecutor(
+                PrivilegedSource.SHIZUKU,
+                StandardPrivilegedShellLauncher()
+            ).execute(request)
         }.getOrElse { error ->
             PrivilegedResult(
                 requestId = "",
@@ -30,7 +43,8 @@ class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
                 success = false,
                 code = "service_error",
                 message = error.message ?: "Privileged service failed.",
-                backend = PrivilegedCommandExecutor.currentBackend()
+                authority = PrivilegedAuthority.NONE,
+                source = PrivilegedSource.SHIZUKU
             )
         }
         return json.encodeToString(PrivilegedResult.serializer(), result)
@@ -38,7 +52,7 @@ class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
 
     override fun destroy() {
         Log.i(TAG, "Privileged user service destroy requested")
-        runCatching { PrivilegedCommandExecutor.shutdown() }
+        runCatching { PrivilegedShellSessionManager.shutdown() }
         System.exit(0)
     }
 

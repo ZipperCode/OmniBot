@@ -651,7 +651,7 @@ void main() {
       'tutorial-permission-overlay',
       'tutorial-permission-apps',
       'tutorial-permission-storage',
-      'tutorial-permission-shizuku',
+      'tutorial-permission-privileged',
       'tutorial-permission-notification',
     ]) {
       final row = find.byKey(ValueKey<String>(key));

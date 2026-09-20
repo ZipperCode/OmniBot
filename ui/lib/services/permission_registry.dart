@@ -136,23 +136,23 @@ class PermissionRegistry {
     ];
     final optionalPermissions = <PermissionSpec>[
       PermissionSpec(
-        id: 'shizuku',
+        id: 'privileged',
         iconPath: 'assets/welcome/permission_installed_apps.svg',
         iconWidth: 32.0,
         iconHeight: 32.0,
         name: LegacyTextLocalizer.isEnglish
-            ? 'Shizuku Permission'
-            : 'Shizuku 权限',
+            ? 'Privileged Access'
+            : '特权访问',
         description: LegacyTextLocalizer.isEnglish
             ? 'Optional advanced system actions for the agent'
             : '可选的高级系统能力，用于扩展 agent 的系统级操作边界',
-        openMethod: 'openShizukuDownloadOrApp',
+        openMethod: 'openPrivilegedSourceApp',
         customCheckMethod: () async {
-          final status = await getShizukuStatus();
+          final status = await getPrivilegedStatus();
           return status.isGranted;
         },
         customAuthMethod: (BuildContext context) async {
-          await ensureShizukuPermission(context);
+          await ensurePrivilegedPermission(context);
         },
       ),
     ];

@@ -98,9 +98,9 @@ python3 scripts/test-terminal-child-state.py
 python3 scripts/test-terminal-host-stop.py
 
 if [[ "$RUN_GRADLE" == "1" ]]; then
-  run_step "Shizuku binding lifecycle tests" \
+  run_step "Privileged binding lifecycle tests" \
     ./gradlew --no-daemon --no-parallel :baselib:testDebugUnitTest \
-      --tests 'cn.com.omnimind.baselib.shizuku.ShizukuServiceBindingTest'
+      --tests 'cn.com.omnimind.baselib.privileged.ShizukuServiceBindingTest'
   run_step "Android Agent/ACP JVM tests" \
     ./gradlew --no-daemon --no-parallel \
       -Dkotlin.incremental=false \

@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,7 +8,7 @@ class PrivilegedActionPolicyTest {
 
     @Test
     fun adbBackendDoesNotExposeRootOnlyAction() {
-        val actions = PrivilegedActionPolicy.visibleAgentActions(ShizukuBackend.ADB)
+        val actions = PrivilegedActionPolicy.visibleAgentActions(PrivilegedAuthority.ADB)
 
         assertFalse(actions.contains(PrivilegedActionPolicy.ACTION_DEVICE_SET_MOBILE_DATA_ENABLED))
         assertTrue(actions.contains(PrivilegedActionPolicy.ACTION_DEVICE_SET_WIFI_ENABLED))
@@ -16,7 +16,7 @@ class PrivilegedActionPolicyTest {
 
     @Test
     fun rootBackendExposesRootOnlyAction() {
-        val actions = PrivilegedActionPolicy.visibleAgentActions(ShizukuBackend.ROOT)
+        val actions = PrivilegedActionPolicy.visibleAgentActions(PrivilegedAuthority.ROOT)
 
         assertTrue(actions.contains(PrivilegedActionPolicy.ACTION_DEVICE_SET_MOBILE_DATA_ENABLED))
         assertTrue(actions.contains(PrivilegedActionPolicy.ACTION_SHELL_EXEC))
@@ -27,7 +27,7 @@ class PrivilegedActionPolicyTest {
         assertFalse(
             PrivilegedActionPolicy.isSupported(
                 action = PrivilegedActionPolicy.ACTION_DIAGNOSTICS_LOGCAT_TAIL,
-                backend = ShizukuBackend.ADB,
+                authority = PrivilegedAuthority.ADB,
                 arguments = mapOf("buffer" to "kernel")
             )
         )
@@ -35,7 +35,7 @@ class PrivilegedActionPolicyTest {
         assertTrue(
             PrivilegedActionPolicy.isSupported(
                 action = PrivilegedActionPolicy.ACTION_DIAGNOSTICS_LOGCAT_TAIL,
-                backend = ShizukuBackend.ROOT,
+                authority = PrivilegedAuthority.ROOT,
                 arguments = mapOf("buffer" to "kernel")
             )
         )

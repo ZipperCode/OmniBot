@@ -27,7 +27,7 @@ import cn.com.omnimind.bot.terminal.EmbeddedTerminalRuntime
 import cn.com.omnimind.bot.update.AppUpdateManager
 import cn.com.omnimind.bot.util.NestedBackgroundStateUtil
 import cn.com.omnimind.bot.vlm.DebugOmniMindProviderBootstrap
-import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
+import cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
 import com.rk.resources.Res
 import com.tencent.mmkv.MMKV
 import io.flutter.embedding.engine.FlutterEngine
@@ -145,7 +145,7 @@ class App : BaseApplication() {
             QuickLogWidgetUpdater.updateAll(this)
         }
         runCatching {
-            ShizukuCapabilityManager.get(this)
+            PrivilegedCapabilityManager.get(this)
         }
 
         initSDKsAfterPrivacyConsent()

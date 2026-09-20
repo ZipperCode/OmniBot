@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 import cn.com.omnimind.baselib.util.OmniLog
 import java.io.BufferedWriter
@@ -28,7 +28,7 @@ internal object PrivilegedShellSessionManager {
         val workingDirectory: String? = null,
     )
 
-    private class RollingTextBuffer {
+    internal class RollingTextBuffer(private val capacity: Int = 16_000) {
         private val builder = StringBuilder()
 
         fun appendLine(line: String) {
@@ -40,6 +40,7 @@ internal object PrivilegedShellSessionManager {
                 return
             }
             builder.append(text)
+            if (builder.length > capacity) builder.delete(0, builder.length - capacity)
         }
 
         fun snapshot(maxChars: Int? = null): String {
@@ -74,7 +75,8 @@ internal object PrivilegedShellSessionManager {
 
     private class ShellSession(
         val sessionId: String,
-        val backend: ShizukuBackend,
+        val authority: PrivilegedAuthority,
+        val source: PrivilegedSource,
         private val process: Process,
     ) {
         private val lock = Object()
@@ -227,7 +229,7 @@ internal object PrivilegedShellSessionManager {
                     runCatching { process.waitFor(200, TimeUnit.MILLISECONDS) }
                 }
                 lock.notifyAll()
-                return true
+                return !process.isAlive
             }
         }
 
@@ -235,10 +237,25 @@ internal object PrivilegedShellSessionManager {
             thread(start = true, isDaemon = true, name = "privileged-shell-$streamKind-$sessionId") {
                 runCatching {
                     inputStream.bufferedReader().use { reader ->
+                        val chunk = CharArray(READER_CHUNK_SIZE)
+                        val line = StringBuilder()
                         while (true) {
-                            val line = reader.readLine() ?: break
-                            handleLine(streamKind, line)
+                            val count = reader.read(chunk)
+                            if (count < 0) break
+                            for (index in 0 until count) {
+                                val character = chunk[index]
+                                if (character == '\n') {
+                                    handleLine(streamKind, line.toString().removeSuffix("\r"))
+                                    line.setLength(0)
+                                } else {
+                                    line.append(character)
+                                    if (line.length > OUTPUT_CAPACITY) {
+                                        line.delete(0, line.length - OUTPUT_CAPACITY)
+                                    }
+                                }
+                            }
                         }
+                        if (line.isNotEmpty()) handleLine(streamKind, line.toString().removeSuffix("\r"))
                     }
                 }.onFailure {
                     OmniLog.w(TAG, "Privileged shell reader stopped: $sessionId/$streamKind", it)
@@ -328,16 +345,24 @@ internal object PrivilegedShellSessionManager {
 
     private val sessions = ConcurrentHashMap<String, ShellSession>()
 
+    fun sessionAuthority(sessionId: String?, source: PrivilegedSource): PrivilegedAuthority? {
+        val session = sessions[sessionId?.trim().orEmpty()] ?: return null
+        return session.authority.takeIf { session.source == source }
+    }
+
     fun startSession(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
+        source: PrivilegedSource,
+        process: Process,
     ): PrivilegedResult {
         val requestedSessionId = request.sessionId?.trim().takeUnless { it.isNullOrEmpty() }
         val sessionId = requestedSessionId ?: UUID.randomUUID().toString()
         if (sessions.containsKey(sessionId)) {
+            PrivilegedProcessCleanup.closeAndDestroy(process)
             return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "session_exists",
                 message = "A privileged shell session with the same id already exists."
             )
@@ -345,13 +370,15 @@ internal object PrivilegedShellSessionManager {
         val session = runCatching {
             ShellSession(
                 sessionId = sessionId,
-                backend = backend,
-                process = ProcessBuilder(SHELL_PATH).start()
+                authority = authority,
+                source = source,
+                process = process
             )
         }.getOrElse { error ->
+            PrivilegedProcessCleanup.closeAndDestroy(process)
             return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "session_start_failed",
                 message = error.message ?: "Failed to start the privileged shell session."
             )
@@ -372,7 +399,7 @@ internal object PrivilegedShellSessionManager {
                 session.close()
                 return sessionFailure(
                     request = request,
-                    backend = backend,
+                    authority = authority,
                     code = bootstrap.code,
                     message = bootstrap.message,
                     stdout = bootstrap.stdout,
@@ -390,8 +417,9 @@ internal object PrivilegedShellSessionManager {
             success = true,
             code = "ok",
             message = "Privileged shell session started successfully.",
-            backend = backend,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            authority = authority,
+            source = source,
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             sessionId = sessionId,
             workingDirectory = request.workingDirectory,
             environment = request.environment,
@@ -405,13 +433,14 @@ internal object PrivilegedShellSessionManager {
 
     fun execSession(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
+        source: PrivilegedSource,
     ): PrivilegedResult {
         val sessionId = request.sessionId?.trim().orEmpty()
         if (sessionId.isEmpty()) {
             return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = "sessionId is required."
             )
@@ -419,11 +448,14 @@ internal object PrivilegedShellSessionManager {
         val session = sessions[sessionId]
             ?: return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "session_not_found",
                 message = "The privileged shell session does not exist.",
                 sessionId = sessionId
             )
+        if (session.source != source) return sessionFailure(
+            request, authority, "session_source_mismatch", "The session belongs to another privileged source."
+        )
         val timeoutSeconds = request.timeoutSeconds?.coerceIn(5, 600) ?: DEFAULT_SESSION_EXEC_TIMEOUT_SECONDS
         val result = session.execute(
             command = request.command,
@@ -441,13 +473,14 @@ internal object PrivilegedShellSessionManager {
             success = result.success,
             code = result.code,
             message = result.message,
-            backend = backend,
+            authority = authority,
+            source = source,
             output = combineOutput(result.stdout, result.stderr),
             stdout = result.stdout,
             stderr = result.stderr,
             transcript = result.transcript,
             exitCode = result.exitCode,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             command = request.command,
             timeoutSeconds = timeoutSeconds,
             workingDirectory = result.workingDirectory ?: request.workingDirectory,
@@ -462,13 +495,14 @@ internal object PrivilegedShellSessionManager {
 
     fun readSession(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
+        source: PrivilegedSource,
     ): PrivilegedResult {
         val sessionId = request.sessionId?.trim().orEmpty()
         if (sessionId.isEmpty()) {
             return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = "sessionId is required."
             )
@@ -476,11 +510,14 @@ internal object PrivilegedShellSessionManager {
         val session = sessions[sessionId]
             ?: return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "session_not_found",
                 message = "The privileged shell session does not exist.",
                 sessionId = sessionId
             )
+        if (session.source != source) return sessionFailure(
+            request, authority, "session_source_mismatch", "The session belongs to another privileged source."
+        )
         val maxChars = request.arguments["maxChars"]?.toIntOrNull()?.takeIf { it > 0 }
         val transcript = session.readTranscript(maxChars)
         if (!session.isAlive()) {
@@ -492,10 +529,11 @@ internal object PrivilegedShellSessionManager {
             success = true,
             code = "ok",
             message = "Privileged shell session output read successfully.",
-            backend = backend,
+            authority = authority,
+            source = source,
             output = transcript,
             transcript = transcript,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             sessionId = sessionId,
             data = mapOf(
                 "alive" to session.isAlive().toString(),
@@ -506,13 +544,14 @@ internal object PrivilegedShellSessionManager {
 
     fun stopSession(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
+        source: PrivilegedSource,
     ): PrivilegedResult {
         val sessionId = request.sessionId?.trim().orEmpty()
         if (sessionId.isEmpty()) {
             return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "invalid_arguments",
                 message = "sessionId is required."
             )
@@ -520,33 +559,42 @@ internal object PrivilegedShellSessionManager {
         val session = sessions.remove(sessionId)
             ?: return sessionFailure(
                 request = request,
-                backend = backend,
+                authority = authority,
                 code = "session_not_found",
                 message = "The privileged shell session does not exist.",
                 sessionId = sessionId
             )
-        session.close()
+        if (session.source != source) {
+            sessions[sessionId] = session
+            return sessionFailure(request, authority, "session_source_mismatch", "The session belongs to another privileged source.")
+        }
+        val stopped = session.close()
         return PrivilegedResult(
             requestId = request.requestId,
             action = request.action,
-            success = true,
-            code = "ok",
-            message = "Privileged shell session stopped successfully.",
-            backend = backend,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            success = stopped,
+            code = if (stopped) "ok" else "session_stop_failed",
+            message = if (stopped) "Privileged shell session stopped successfully." else "The privileged shell session could not be stopped.",
+            authority = authority,
+            source = source,
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             sessionId = sessionId,
             data = mapOf(
-                "stopped" to "true",
-                "alive" to "false",
+                "stopped" to stopped.toString(),
+                "alive" to session.isAlive().toString(),
                 "running" to "false"
             )
         )
     }
 
-    fun shutdown() {
+    fun shutdown(source: PrivilegedSource? = null): Boolean {
+        var allStopped = true
         sessions.keys.toList().forEach { sessionId ->
-            sessions.remove(sessionId)?.close()
+            val session = sessions[sessionId] ?: return@forEach
+            if (source != null && session.source != source) return@forEach
+            if (sessions.remove(sessionId, session) && !session.close()) allStopped = false
         }
+        return allStopped
     }
 
     private fun buildCommandScript(
@@ -585,7 +633,7 @@ internal object PrivilegedShellSessionManager {
 
     private fun sessionFailure(
         request: PrivilegedRequest,
-        backend: ShizukuBackend,
+        authority: PrivilegedAuthority,
         code: String,
         message: String,
         stdout: String = "",
@@ -593,6 +641,7 @@ internal object PrivilegedShellSessionManager {
         transcript: String = "",
         exitCode: Int? = null,
         sessionId: String? = request.sessionId,
+        source: PrivilegedSource = PrivilegedSource.NONE,
     ): PrivilegedResult {
         return PrivilegedResult(
             requestId = request.requestId,
@@ -600,13 +649,14 @@ internal object PrivilegedShellSessionManager {
             success = false,
             code = code,
             message = message,
-            backend = backend,
+            authority = authority,
+            source = source,
             output = combineOutput(stdout, stderr),
             stdout = stdout,
             stderr = stderr,
             transcript = transcript,
             exitCode = exitCode,
-            availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
+            availableActions = PrivilegedActionPolicy.visibleAgentActions(authority),
             command = request.command,
             timeoutSeconds = request.timeoutSeconds,
             workingDirectory = request.workingDirectory,
@@ -620,8 +670,9 @@ internal object PrivilegedShellSessionManager {
     }
 
     private const val TAG = "PrivilegedShellSessionMgr"
-    private const val SHELL_PATH = "/system/bin/sh"
     private const val DEFAULT_SESSION_EXEC_TIMEOUT_SECONDS = 120
     private const val UNIT_SEPARATOR = '\u001F'
+    private const val OUTPUT_CAPACITY = 16_000
+    private const val READER_CHUNK_SIZE = 2_048
     private val ENV_KEY_PATTERN = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
 }

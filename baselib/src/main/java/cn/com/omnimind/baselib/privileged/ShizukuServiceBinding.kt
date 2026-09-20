@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.withTimeoutOrNull

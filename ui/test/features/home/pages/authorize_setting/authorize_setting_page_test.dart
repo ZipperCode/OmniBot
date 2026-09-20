@@ -42,17 +42,17 @@ void main() {
               return false;
             case 'isPublicStorageAccessGranted':
               return false;
-            case 'getShizukuStatus':
+            case 'getPrivilegedStatus':
               return <String, dynamic>{
-                'status': 'NOT_INSTALLED',
-                'backend': 'NONE',
-                'installed': false,
-                'running': false,
-                'permissionGranted': false,
-                'binderReady': false,
-                'serviceBound': false,
-                'availableActions': <String>[],
+                'selected': 'none',
+                'granted': false,
+                'authority': 'none',
+                'uid': null,
+                'code': 'not_selected',
                 'message': '',
+                'availableActions': <String>[],
+                'shizuku': null,
+                'su': null,
               };
             case 'openPublicStorageSettings':
               return true;
@@ -105,17 +105,17 @@ void main() {
             case 'isAndroidGuiAccessibilityReady':
             case 'isPublicStorageAccessGranted':
               return false;
-            case 'getShizukuStatus':
+            case 'getPrivilegedStatus':
               return <String, dynamic>{
-                'status': 'NOT_INSTALLED',
-                'backend': 'NONE',
-                'installed': false,
-                'running': false,
-                'permissionGranted': false,
-                'binderReady': false,
-                'serviceBound': false,
-                'availableActions': <String>[],
+                'selected': 'none',
+                'granted': false,
+                'authority': 'none',
+                'uid': null,
+                'code': 'not_selected',
                 'message': '',
+                'availableActions': <String>[],
+                'shizuku': null,
+                'su': null,
               };
             case 'openAndroidGuiAccessibilitySettings':
               return null;

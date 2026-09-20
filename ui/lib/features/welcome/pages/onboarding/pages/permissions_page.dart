@@ -16,12 +16,12 @@ class OnboardingPermissionsPage extends StatelessWidget {
     super.key,
     required this.controller,
     required this.scrollController,
-    required this.onRequestShizuku,
+    required this.onRequestPrivileged,
   });
 
   final OnboardingPermissionController controller;
   final ScrollController scrollController;
-  final FutureOr<void> Function() onRequestShizuku;
+  final FutureOr<void> Function() onRequestPrivileged;
 
   @override
   Widget build(BuildContext context) {
@@ -95,13 +95,13 @@ class OnboardingPermissionsPage extends StatelessWidget {
           onTap: controller.openStorageSettings,
         ),
         _PermissionRow(
-          tapKey: const ValueKey('tutorial-permission-shizuku'),
-          icon: LucideIcons.shieldPlus,
-          title: onbTr(context, 'Shizuku 权限', 'Shizuku access'),
-          subtitle: controller.shizukuStatus.localizedGuide,
-          granted: controller.shizukuStatus.isGranted,
-          actionLabel: controller.shizukuStatus.localizedStatusLabel,
-          onTap: onRequestShizuku,
+          tapKey: const ValueKey('tutorial-permission-privileged'),
+          icon: LucideIcons.shieldCheck,
+          title: onbTr(context, '特权访问', 'Privileged access'),
+          subtitle: controller.privilegedStatus.localizedGuide,
+          granted: controller.privilegedStatus.isGranted,
+          actionLabel: controller.privilegedStatus.localizedStatusLabel,
+          onTap: onRequestPrivileged,
         ),
         const SizedBox(height: 26),
         _SectionLabel(label: onbTr(context, '通知与提醒', 'Notifications')),

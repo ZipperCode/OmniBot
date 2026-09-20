@@ -47,7 +47,7 @@ class SharedHelper(
     private val englishTextMap: Map<String, String> = mapOf(
         "应用列表读取权限" to "Installed Apps Access",
         "悬浮窗权限" to "Overlay",
-        "Shizuku 权限" to "Shizuku Permission",
+        "高权限来源" to "Privileged Source",
         "精确闹钟权限(SCHEDULE_EXACT_ALARM)" to "Exact alarm permission (SCHEDULE_EXACT_ALARM)",
         "通知权限(POST_NOTIFICATIONS)" to "Notification permission (POST_NOTIFICATIONS)",
         "日历权限(READ/WRITE_CALENDAR)" to "Calendar permission (READ/WRITE_CALENDAR)",
@@ -162,9 +162,9 @@ class SharedHelper(
             "Terminal session initialization timed out and may still be running in the background.",
         "终端命令等待超时，可能仍在后台继续运行。" to
             "Terminal command timed out and may still be running in the background.",
-        "正在执行 Shizuku 高级动作" to "Executing privileged Shizuku action",
-        "正在启动高权限 Shizuku 会话" to "Starting privileged Shizuku session",
-        "正在执行高权限 Shizuku 命令" to "Running privileged Shizuku command",
+        "正在执行高级动作" to "Executing privileged action",
+        "正在启动高权限会话" to "Starting privileged session",
+        "正在执行高权限命令" to "Running privileged command",
         "高权限会话不存在或不属于当前 workspace：" to
             "Privileged session does not exist or does not belong to the current workspace: ",
         "高权限会话已启动：" to "Privileged session started: ",
@@ -177,7 +177,12 @@ class SharedHelper(
         "读取高权限会话失败" to "Failed to read privileged session output",
         "正在结束高权限会话" to "Stopping privileged session",
         "结束高权限会话失败" to "Failed to stop privileged session",
-        "Shizuku 动作执行失败" to "Shizuku action failed",
+        "高级动作执行失败" to "Privileged action failed",
+        "高权限来源授权被拒绝或已撤销。" to "The privileged source authorization was denied or revoked.",
+        "无法启动所选高权限来源进程。" to "Failed to start the selected privileged source process.",
+        "高权限进程返回了非预期身份。" to "The privileged process returned an unexpected identity.",
+        "高权限服务处理请求失败。" to "The privileged service failed to process the request.",
+        "高权限 shell 会话属于其他执行来源。" to "The privileged shell session belongs to another source.",
         "command 不能为空" to "`command` cannot be empty",
         "terminal_execute 缺少 command" to "`terminal_execute` is missing `command`",
         "executionMode 仅支持 termux 或 proot" to
@@ -254,12 +259,12 @@ class SharedHelper(
                 return "${terminalDistribution.displayName} session does not exist: ${text.removePrefix("终端会话不存在：")}"
             text.startsWith("不支持的 action：") ->
                 return "Unsupported action: ${text.removePrefix("不支持的 action：")}"
-            text.startsWith("已执行 Shizuku 动作：") ->
-                return "Executed Shizuku action: ${text.removePrefix("已执行 Shizuku 动作：")}"
-            text.startsWith("Shizuku 动作执行失败：") ->
-                return "Shizuku action failed: ${text.removePrefix("Shizuku 动作执行失败：")}"
-            text.startsWith("当前 Shizuku 后端不支持该动作：") ->
-                return "This Shizuku backend does not support the action: ${text.removePrefix("当前 Shizuku 后端不支持该动作：")}"
+            text.startsWith("已执行高级动作：") ->
+                return "Executed privileged action: ${text.removePrefix("已执行高级动作：")}"
+            text.startsWith("高级动作执行失败：") ->
+                return "Privileged action failed: ${text.removePrefix("高级动作执行失败：")}"
+            text.startsWith("当前实测权限不支持该动作：") ->
+                return "The measured authority does not support the action: ${text.removePrefix("当前实测权限不支持该动作：")}"
             text.startsWith("高权限会话已启动：") ->
                 return "Privileged session started: ${text.removePrefix("高权限会话已启动：")}"
             text.startsWith("高权限会话不存在或不属于当前 workspace：") ->

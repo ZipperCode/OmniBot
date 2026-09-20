@@ -17,12 +17,12 @@ class AgentPermissionSupportTest {
     @Test
     fun `maps the other shared permission aliases`() {
         assertEquals(
-            listOf("overlay", "installed_apps", "shizuku", "public_storage"),
+            listOf("overlay", "installed_apps", "privileged", "public_storage"),
             resolveAgentPermissionIds(
                 listOf(
                     "Overlay",
                     "Installed Apps Access",
-                    "Shizuku Permission",
+                    "Privileged Source",
                     "Public Storage Access",
                 )
             )

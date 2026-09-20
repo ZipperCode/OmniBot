@@ -169,6 +169,7 @@ android {
         applicationId = "cn.com.omnimind.bot"
         minSdk = 29
         targetSdk = 36
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Release 0.6.1. Keep the Android version code monotonic so the APK
         // can be installed as an update over the previously tested build.
         versionCode = 16
@@ -401,6 +402,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation("org.mockito:mockito-core:5.20.0")
     testImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation("androidx.test:runner:1.7.0")
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest )
 }

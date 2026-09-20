@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:ui/features/home/pages/authorize/widgets/privileged_source_sheet.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
-import 'package:ui/utils/ui.dart';
+
+export '../features/home/pages/authorize/widgets/privileged_source_sheet.dart';
 
 // The channel name must match the one in MainActivity.kt
 const spePermission = MethodChannel(
@@ -550,276 +552,298 @@ Future<void> openNativeTerminal({
   });
 }
 
-class ShizukuStatusSnapshot {
-  const ShizukuStatusSnapshot({
-    required this.status,
-    required this.backend,
+class PrivilegedShizukuDetail {
+  const PrivilegedShizukuDetail({
     required this.installed,
     required this.running,
-    required this.permissionGranted,
     required this.binderReady,
     required this.serviceBound,
-    required this.availableActions,
-    required this.message,
-    this.uid,
+    required this.permissionGranted,
     this.version,
   });
 
-  final String status;
-  final String backend;
   final bool installed;
   final bool running;
-  final bool permissionGranted;
   final bool binderReady;
   final bool serviceBound;
-  final List<String> availableActions;
-  final String message;
-  final int? uid;
+  final bool permissionGranted;
   final int? version;
 
-  bool get isGranted => status == 'GRANTED_ADB' || status == 'GRANTED_ROOT';
-  bool get isRootBackend => backend == 'ROOT';
-
-  factory ShizukuStatusSnapshot.fromMap(Map<dynamic, dynamic>? map) {
-    final rawActions = map?['availableActions'];
-    return ShizukuStatusSnapshot(
-      status: (map?['status'] as String? ?? 'NOT_INSTALLED').trim(),
-      backend: (map?['backend'] as String? ?? 'NONE').trim(),
+  factory PrivilegedShizukuDetail.fromMap(Map<dynamic, dynamic>? map) {
+    return PrivilegedShizukuDetail(
       installed: map?['installed'] == true,
       running: map?['running'] == true,
-      permissionGranted: map?['permissionGranted'] == true,
       binderReady: map?['binderReady'] == true,
       serviceBound: map?['serviceBound'] == true,
-      availableActions: rawActions is List
-          ? rawActions.map((item) => item.toString()).toList(growable: false)
-          : const <String>[],
-      message: (map?['message'] as String? ?? '').trim(),
-      uid: (map?['uid'] as num?)?.toInt(),
+      permissionGranted: map?['permissionGranted'] == true,
       version: (map?['version'] as num?)?.toInt(),
     );
   }
+}
 
-  factory ShizukuStatusSnapshot.fallback() {
-    return const ShizukuStatusSnapshot(
-      status: 'NOT_INSTALLED',
-      backend: 'NONE',
-      installed: false,
-      running: false,
-      permissionGranted: false,
-      binderReady: false,
-      serviceBound: false,
-      availableActions: <String>[],
-      message: '',
+class PrivilegedSuDetail {
+  const PrivilegedSuDetail({
+    this.binaryPath,
+  });
+
+  final String? binaryPath;
+
+  factory PrivilegedSuDetail.fromMap(Map<dynamic, dynamic>? map) {
+    return PrivilegedSuDetail(
+      binaryPath: map?['binaryPath'] as String?,
+    );
+  }
+}
+
+class PrivilegedStatusSnapshot {
+  const PrivilegedStatusSnapshot({
+    required this.selected,
+    required this.granted,
+    required this.authority,
+    this.uid,
+    required this.code,
+    required this.message,
+    required this.availableActions,
+    this.shizuku,
+    this.su,
+  });
+
+  final String selected;
+  final bool granted;
+  final String authority;
+  final int? uid;
+  final String code;
+  final String message;
+  final List<String> availableActions;
+  final PrivilegedShizukuDetail? shizuku;
+  final PrivilegedSuDetail? su;
+
+  bool get isGranted => granted;
+  bool get isNone => selected == 'none';
+  bool get isShizuku => selected == 'shizuku';
+  bool get isSu => selected == 'su';
+  bool get isRoot => authority == 'root';
+  bool get isAdb => authority == 'adb';
+
+  factory PrivilegedStatusSnapshot.fromMap(Map<dynamic, dynamic>? map) {
+    final rawActions = map?['availableActions'];
+    final shizukuMap = map?['shizuku'] as Map<dynamic, dynamic>?;
+    final suMap = map?['su'] as Map<dynamic, dynamic>?;
+    final selectedStr =
+        (map?['selected'] as String? ?? 'none').trim().toLowerCase();
+    final codeStr =
+        (map?['code'] as String? ?? 'not_selected').trim().toLowerCase();
+    final authorityStr =
+        (map?['authority'] as String? ?? 'none').trim().toLowerCase();
+
+    return PrivilegedStatusSnapshot(
+      selected: selectedStr,
+      granted: map?['granted'] == true || codeStr == 'granted',
+      authority: authorityStr,
+      uid: (map?['uid'] as num?)?.toInt(),
+      code: codeStr,
+      message: (map?['message'] as String? ?? '').trim(),
+      availableActions: rawActions is List
+          ? rawActions.map((item) => item.toString()).toList(growable: false)
+          : const <String>[],
+      shizuku: shizukuMap != null
+          ? PrivilegedShizukuDetail.fromMap(shizukuMap)
+          : null,
+      su: suMap != null ? PrivilegedSuDetail.fromMap(suMap) : null,
     );
   }
 
-  String get localizedStatusLabel {
-    switch (status) {
-      case 'GRANTED_ROOT':
-        return LegacyTextLocalizer.isEnglish ? 'Granted (root)' : '已授权（root）';
-      case 'GRANTED_ADB':
-        return LegacyTextLocalizer.isEnglish ? 'Granted (adb)' : '已授权（adb）';
-      case 'PERMISSION_DENIED':
+  factory PrivilegedStatusSnapshot.fallback() {
+    return const PrivilegedStatusSnapshot(
+      selected: 'none',
+      granted: false,
+      authority: 'none',
+      code: 'not_selected',
+      message: '',
+      availableActions: <String>[],
+    );
+  }
+
+  String get localizedSelectedSourceName {
+    switch (selected) {
+      case 'shizuku':
+        return 'Shizuku';
+      case 'su':
         return LegacyTextLocalizer.isEnglish
-            ? 'Running, permission not granted'
-            : '已启动，尚未授权';
-      case 'NOT_RUNNING':
-        return LegacyTextLocalizer.isEnglish
-            ? 'Installed, not running'
-            : '已安装，未启动';
-      case 'BINDER_DEAD':
-        return LegacyTextLocalizer.isEnglish
-            ? 'Binder lost, restart required'
-            : '连接已断开，需要重新启动';
+            ? 'Direct Root (KernelSU)'
+            : '直接 Root (KernelSU)';
+      case 'none':
       default:
-        return LegacyTextLocalizer.isEnglish ? 'Not installed' : '未安装';
+        return LegacyTextLocalizer.isEnglish ? 'Disabled' : '未启用';
+    }
+  }
+
+  String get localizedStatusLabel {
+    switch (code) {
+      case 'granted':
+        if (authority == 'root') {
+          return LegacyTextLocalizer.isEnglish
+              ? 'Granted (root)'
+              : '已授权（Root）';
+        } else if (authority == 'adb') {
+          return LegacyTextLocalizer.isEnglish
+              ? 'Granted (adb)'
+              : '已授权（ADB）';
+        }
+        return LegacyTextLocalizer.isEnglish ? 'Granted' : '已授权';
+      case 'not_selected':
+        return LegacyTextLocalizer.isEnglish ? 'Not configured' : '未配置';
+      case 'shizuku_not_installed':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Shizuku not installed'
+            : '未安装 Shizuku';
+      case 'shizuku_not_running':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Shizuku not running'
+            : 'Shizuku 未运行';
+      case 'shizuku_binder_dead':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Shizuku disconnected'
+            : 'Shizuku 连接中断';
+      case 'shizuku_permission_denied':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Shizuku not granted'
+            : 'Shizuku 未授权';
+      case 'su_not_authorized':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Authorization pending'
+            : '待验证授权';
+      case 'su_denied':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Root authorization denied'
+            : 'Root 授权被拒绝';
+      case 'su_unavailable':
+        return LegacyTextLocalizer.isEnglish
+            ? 'su unavailable'
+            : 'su 不可用';
+      case 'authority_unexpected':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Unexpected authority'
+            : '权限异常';
+      default:
+        return LegacyTextLocalizer.isEnglish ? 'Unauthorized' : '未授权';
     }
   }
 
   String get localizedGuide {
-    switch (status) {
-      case 'GRANTED_ROOT':
+    switch (code) {
+      case 'granted':
+        if (authority == 'root') {
+          final uidText = uid != null ? ' (UID: $uid)' : '';
+          return LegacyTextLocalizer.isEnglish
+              ? 'Privileged access active via Root$uidText. High-privilege actions and sessions are enabled with full device access; every command still requires confirmation.'
+              : '已通过 Root$uidText 取得特权访问。高权限工具与会话已就绪，具备设备完全控制能力；每次命令执行仍需确认。';
+        } else if (authority == 'adb') {
+          final uidText = uid != null ? ' (UID: $uid)' : '';
+          return LegacyTextLocalizer.isEnglish
+              ? 'Privileged access active via ADB$uidText. High-privilege actions and sessions are enabled under ADB shell limits; every command still requires confirmation.'
+              : '已通过 ADB$uidText 取得特权访问。高权限工具与会话已就绪，受 ADB shell 权限边界约束；每次命令执行仍需确认。';
+        }
         return LegacyTextLocalizer.isEnglish
-            ? 'Shizuku is ready through root/Sui. Agent privileged tools are enabled, including arbitrary shell and persistent shell sessions. Every raw shell and privileged session command still requires confirmation.'
-            : 'Shizuku 已通过 root/Sui 就绪。Agent 高权限工具已启用，支持任意 shell 和持久高权限会话；每次 raw shell 与高权限会话命令仍需用户确认。';
-      case 'GRANTED_ADB':
+            ? 'Privileged access is ready.'
+            : '特权访问已授权就绪。';
+      case 'not_selected':
         return LegacyTextLocalizer.isEnglish
-            ? 'Shizuku is ready through adb shell. Agent privileged tools are enabled, including arbitrary shell and persistent shell sessions. Commands still follow adb-shell capability limits, and every raw shell and privileged session command requires confirmation.'
-            : 'Shizuku 已通过 adb shell 就绪。Agent 高权限工具已启用，支持任意 shell 和持久高权限会话，但能力仍受 adb shell 后端限制；每次 raw shell 与高权限会话命令都需要用户确认。';
-      case 'PERMISSION_DENIED':
+            ? 'Privileged access source is not selected. Choose Shizuku or Direct Root (KernelSU) to enable privileged system actions.'
+            : '尚未选择特权访问来源。可按需选择 Shizuku 或直接 Root (KernelSU) 以启用高级系统能力。';
+      case 'shizuku_not_installed':
         return LegacyTextLocalizer.isEnglish
-            ? 'Open Shizuku and grant Omnibot permission.'
-            : '请打开 Shizuku 并授予 Omnibot 权限。';
-      case 'NOT_RUNNING':
+            ? 'Shizuku is not installed. Install Shizuku, start the service, and grant permission to Omnibot.'
+            : '设备未安装 Shizuku。请先安装 Shizuku 并启动服务，然后向小万授权。';
+      case 'shizuku_not_running':
         return LegacyTextLocalizer.isEnglish
-            ? 'Open Shizuku and start it. On Android 11+, non-root devices usually start it from Wireless debugging. You need to restart Shizuku after each reboot.'
-            : '请打开 Shizuku 并启动它。Android 11+ 非 root 设备通常需要从无线调试启动，并且每次重启后都需要重新启动 Shizuku。';
-      case 'BINDER_DEAD':
+            ? 'Shizuku service is not running. Open Shizuku to start its service.'
+            : 'Shizuku 服务未运行。请打开 Shizuku 应用启动服务。';
+      case 'shizuku_binder_dead':
         return LegacyTextLocalizer.isEnglish
-            ? 'Shizuku was restarted or disconnected. Open it again to reconnect.'
-            : 'Shizuku 已重启或断开，请重新打开并启动。';
+            ? 'Shizuku connection was interrupted. Please reopen Shizuku to reconnect.'
+            : '与 Shizuku 服务的连接已断开，请重新打开 Shizuku 恢复连接。';
+      case 'shizuku_permission_denied':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Shizuku permission not granted. Open Shizuku and allow Omnibot.'
+            : '尚未在 Shizuku 中授予小万权限。请在 Shizuku 应用中允许授权。';
+      case 'su_not_authorized':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Direct Root (KernelSU) selected. Tap authorize to test su availability and verify UID.'
+            : '已选择直接 Root (KernelSU)。请点击下方按钮验证 Root 授权与 UID 探针。';
+      case 'su_denied':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Root authorization was denied. Please allow Omnibot in KernelSU / Magisk / APatch.'
+            : 'Root 授权请求被拒绝。请在 KernelSU / APatch / Magisk 管理器中允许小万的 Root 权限。';
+      case 'su_unavailable':
+        return LegacyTextLocalizer.isEnglish
+            ? 'su binary was not found or is not executable. Note that KernelSU/root compatibility is not guaranteed on all devices.'
+            : '未找到可用且可执行的 su 二进制文件。直接 Root (KernelSU) 不保证在所有设备与系统上均可用。';
+      case 'authority_unexpected':
+        return LegacyTextLocalizer.isEnglish
+            ? 'Privileged probe returned an unexpected UID.'
+            : '特权探针返回的 UID 不符合要求。';
       default:
         return LegacyTextLocalizer.isEnglish
-            ? 'Install Shizuku first, then start it and grant Omnibot permission.'
-            : '请先安装 Shizuku，然后启动它并授予 Omnibot 权限。';
+            ? 'Privileged access is not authorized.'
+            : '特权访问未授权。';
     }
   }
 }
 
-class ShizukuHealthCheckSnapshot {
-  const ShizukuHealthCheckSnapshot({
-    required this.status,
-    required this.probeSuccess,
-    required this.probeMessage,
-    required this.rawShellProbeSuccess,
-    required this.rawShellProbeMessage,
-    required this.sessionProbeSuccess,
-    required this.sessionProbeMessage,
-  });
-
-  final ShizukuStatusSnapshot status;
-  final bool probeSuccess;
-  final String probeMessage;
-  final bool rawShellProbeSuccess;
-  final String rawShellProbeMessage;
-  final bool sessionProbeSuccess;
-  final String sessionProbeMessage;
-
-  factory ShizukuHealthCheckSnapshot.fromMap(Map<dynamic, dynamic>? map) {
-    final probe = map?['probe'];
-    final probeMap = probe is Map ? Map<dynamic, dynamic>.from(probe) : null;
-    final rawShellProbe = map?['rawShellProbe'];
-    final rawShellProbeMap = rawShellProbe is Map
-        ? Map<dynamic, dynamic>.from(rawShellProbe)
-        : null;
-    final sessionProbe = map?['sessionProbe'];
-    final sessionProbeMap = sessionProbe is Map
-        ? Map<dynamic, dynamic>.from(sessionProbe)
-        : null;
-    final sessionStart = _asNestedMap(sessionProbeMap?['start']);
-    final sessionExec = _asNestedMap(sessionProbeMap?['exec']);
-    final sessionRead = _asNestedMap(sessionProbeMap?['read']);
-    final sessionStop = _asNestedMap(sessionProbeMap?['stop']);
-    final sessionStages = [
-      if (sessionStart != null) sessionStart,
-      if (sessionExec != null) sessionExec,
-      if (sessionRead != null) sessionRead,
-      if (sessionStop != null) sessionStop,
-    ];
-    return ShizukuHealthCheckSnapshot(
-      status: ShizukuStatusSnapshot.fromMap(map),
-      probeSuccess: probeMap?['success'] == true,
-      probeMessage: (probeMap?['message'] as String? ?? '').trim(),
-      rawShellProbeSuccess: rawShellProbeMap?['success'] == true,
-      rawShellProbeMessage: (rawShellProbeMap?['message'] as String? ?? '')
-          .trim(),
-      sessionProbeSuccess:
-          sessionStages.isNotEmpty &&
-          sessionStages.every((stage) => stage['success'] == true),
-      sessionProbeMessage:
-          ((sessionExec ?? sessionStart)?['message'] as String? ??
-                  (sessionStop?['message'] as String? ?? ''))
-              .trim(),
+Future<PrivilegedStatusSnapshot> getPrivilegedStatus() async {
+  try {
+    final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+      'getPrivilegedStatus',
     );
+    return PrivilegedStatusSnapshot.fromMap(result);
+  } catch (e) {
+    debugPrint('读取特权状态失败: $e');
+    return PrivilegedStatusSnapshot.fallback();
   }
 }
 
-Map<dynamic, dynamic>? _asNestedMap(dynamic raw) {
-  return raw is Map ? Map<dynamic, dynamic>.from(raw) : null;
+Future<PrivilegedStatusSnapshot> setPrivilegedSource(String source) async {
+  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+    'setPrivilegedSource',
+    {'source': source},
+  );
+  return PrivilegedStatusSnapshot.fromMap(result);
 }
 
-Future<bool> isShizukuInstalled() async {
+Future<PrivilegedStatusSnapshot> authorizePrivilegedSource() async {
+  final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
+    'authorizePrivilegedSource',
+  );
+  return PrivilegedStatusSnapshot.fromMap(result);
+}
+
+Future<bool> openPrivilegedSourceApp() async {
   try {
-    return await spePermission.invokeMethod<bool>('isShizukuInstalled') ??
+    return await spePermission.invokeMethod<bool>('openPrivilegedSourceApp') ??
         false;
   } catch (e) {
-    debugPrint('检查 Shizuku 安装状态失败: $e');
+    debugPrint('打开特权来源应用失败: $e');
     return false;
   }
 }
 
-Future<bool> isShizukuRunning() async {
-  try {
-    return await spePermission.invokeMethod<bool>('isShizukuRunning') ?? false;
-  } catch (e) {
-    debugPrint('检查 Shizuku 运行状态失败: $e');
-    return false;
-  }
+Future<PrivilegedStatusSnapshot?> showPrivilegedSourceSheet(
+  BuildContext context,
+) {
+  return PrivilegedSourceSheet.show(context);
 }
 
-Future<void> openShizukuDownloadOrApp() async {
-  await spePermission.invokeMethod<void>('openShizukuDownloadOrApp');
-}
-
-Future<ShizukuStatusSnapshot> getShizukuStatus() async {
-  try {
-    final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
-      'getShizukuStatus',
-    );
-    return ShizukuStatusSnapshot.fromMap(result);
-  } catch (e) {
-    debugPrint('读取 Shizuku 状态失败: $e');
-    return ShizukuStatusSnapshot.fallback();
-  }
-}
-
-Future<bool> requestShizukuPermission() async {
-  try {
-    final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
-      'requestShizukuPermission',
-    );
-    return ShizukuStatusSnapshot.fromMap(result).isGranted;
-  } catch (e) {
-    debugPrint('请求 Shizuku 权限失败: $e');
-    return false;
-  }
-}
-
-Future<ShizukuHealthCheckSnapshot> runShizukuHealthCheck() async {
-  try {
-    final result = await spePermission.invokeMethod<Map<dynamic, dynamic>>(
-      'runShizukuHealthCheck',
-    );
-    return ShizukuHealthCheckSnapshot.fromMap(result);
-  } catch (e) {
-    debugPrint('执行 Shizuku 健康检查失败: $e');
-    return ShizukuHealthCheckSnapshot(
-      status: ShizukuStatusSnapshot.fallback(),
-      probeSuccess: false,
-      probeMessage: '',
-      rawShellProbeSuccess: false,
-      rawShellProbeMessage: '',
-      sessionProbeSuccess: false,
-      sessionProbeMessage: '',
-    );
-  }
-}
-
-Future<bool> ensureShizukuPermission(BuildContext context) async {
-  final status = await getShizukuStatus();
+Future<bool> ensurePrivilegedPermission(BuildContext context) async {
+  final status = await getPrivilegedStatus();
   if (status.isGranted) {
     return true;
   }
   if (!context.mounted) {
     return false;
   }
-  final confirmed = await AppDialog.confirm(
-    context,
-    title: LegacyTextLocalizer.isEnglish ? 'Shizuku Permission' : 'Shizuku 权限',
-    content: status.localizedGuide,
-    cancelText: LegacyTextLocalizer.isEnglish ? 'Cancel' : '取消',
-    confirmText: LegacyTextLocalizer.isEnglish
-        ? (status.installed ? 'Open Shizuku' : 'Install Shizuku')
-        : (status.installed ? '打开 Shizuku' : '安装 Shizuku'),
-  );
-  if (confirmed != true) {
-    return false;
-  }
-  await openShizukuDownloadOrApp();
-  if (!status.installed || !status.running) {
-    return false;
-  }
-  return requestShizukuPermission();
+  final result = await showPrivilegedSourceSheet(context);
+  return result?.isGranted ?? (await getPrivilegedStatus()).isGranted;
 }
 
 Future<bool> requestPermission(List<String> permissions) async {

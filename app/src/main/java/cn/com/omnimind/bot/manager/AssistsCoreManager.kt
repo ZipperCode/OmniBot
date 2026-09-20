@@ -312,8 +312,8 @@ class AssistsCoreManager(private val context: Context) {
                 t("悬浮窗权限", "Overlay")
             "应用列表读取权限", "Installed Apps Access", "Installed Apps Permission" ->
                 t("应用列表读取权限", "Installed Apps Access")
-            "Shizuku 权限", "Shizuku Permission" ->
-                t("Shizuku 权限", "Shizuku Permission")
+            "高权限来源", "Privileged Source", "privileged" ->
+                t("高权限来源", "Privileged Source")
             "公共文件访问", "Public Storage Access" ->
                 t("公共文件访问", "Public Storage Access")
             else -> trimmed

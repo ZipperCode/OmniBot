@@ -3,7 +3,6 @@ apply plugin: 'maven-publish'
 
 android {
     compileSdkVersion 37
-    ndkVersion = "28.2.13676358"
     namespace = "com.termux.terminal"
 
     defaultConfig {
@@ -54,6 +53,6 @@ dependencies {
 }
 
 task sourceJar(type: Jar) {
-    from android.sourceSets.main.java.srcDirs
+    from project.extensions.getByName('android').sourceSets.main.java.srcDirs
     archiveClassifier.set("sources")
 }

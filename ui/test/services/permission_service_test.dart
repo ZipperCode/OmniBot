@@ -46,24 +46,24 @@ void main() {
     expect(enPermission.name, 'Built-in workspace');
   });
 
-  test('builds shizuku display permission from current locale', () {
+  test('builds privileged display permission from current locale', () {
     LegacyTextLocalizer.setResolvedLocale(const Locale('zh'));
     final zhPermission = PermissionService.buildDisplayPermissionsForIds(const [
-      kShizukuPermissionId,
+      kPrivilegedPermissionId,
     ]).single;
-    expect(zhPermission.name, 'Shizuku 权限');
+    expect(zhPermission.name, '特权访问');
 
     LegacyTextLocalizer.setResolvedLocale(const Locale('en'));
     final enPermission = PermissionService.buildDisplayPermissionsForIds(const [
-      kShizukuPermissionId,
+      kPrivilegedPermissionId,
     ]).single;
-    expect(enPermission.name, 'Shizuku Permission');
+    expect(enPermission.name, 'Privileged Access');
   });
 
-  test('shizuku stays optional unless explicitly included', () {
+  test('privileged stays optional unless explicitly included', () {
     final defaultSpecs = PermissionRegistry.getPermissions(brand: 'other');
     expect(
-      defaultSpecs.any((item) => item.id == kShizukuPermissionId),
+      defaultSpecs.any((item) => item.id == kPrivilegedPermissionId),
       isFalse,
     );
 
@@ -72,7 +72,7 @@ void main() {
       includeOptionalAdvanced: true,
     );
     expect(
-      optionalSpecs.any((item) => item.id == kShizukuPermissionId),
+      optionalSpecs.any((item) => item.id == kPrivilegedPermissionId),
       isTrue,
     );
   });

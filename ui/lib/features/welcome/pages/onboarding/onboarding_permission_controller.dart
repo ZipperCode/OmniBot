@@ -17,14 +17,15 @@ class OnboardingPermissionController extends ChangeNotifier
   bool _overlay = false;
   bool _installedApps = false;
   bool _publicStorage = false;
-  ShizukuStatusSnapshot _shizukuStatus = ShizukuStatusSnapshot.fallback();
+  PrivilegedStatusSnapshot _privilegedStatus =
+      PrivilegedStatusSnapshot.fallback();
   bool _notificationEnabled = true;
 
   bool get backgroundRunning => _backgroundRunning;
   bool get overlay => _overlay;
   bool get installedApps => _installedApps;
   bool get publicStorage => _publicStorage;
-  ShizukuStatusSnapshot get shizukuStatus => _shizukuStatus;
+  PrivilegedStatusSnapshot get privilegedStatus => _privilegedStatus;
   bool get notificationEnabled => _notificationEnabled;
 
   /// Battery, overlay, and installed-apps are the core three, matching the
@@ -99,7 +100,7 @@ class OnboardingPermissionController extends ChangeNotifier
       );
       await probe(isPublicStorageAccessGranted, (value) => _publicStorage = value);
       try {
-        _shizukuStatus = await getShizukuStatus();
+        _privilegedStatus = await getPrivilegedStatus();
         changed = true;
       } catch (_) {}
       if (changed) _emit();

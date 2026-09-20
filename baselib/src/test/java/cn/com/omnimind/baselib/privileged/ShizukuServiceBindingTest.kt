@@ -1,4 +1,4 @@
-package cn.com.omnimind.baselib.shizuku
+package cn.com.omnimind.baselib.privileged
 
 import kotlinx.coroutines.*
 import org.junit.Assert.*
