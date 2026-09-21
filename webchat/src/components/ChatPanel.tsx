@@ -1,6 +1,7 @@
 import {
   useEffect,
   useRef,
+  useMemo,
   useState,
   type ChangeEvent,
   type FormEvent,
@@ -9,6 +10,7 @@ import {
 import { agentAvatarUrl, isRecord } from "../api";
 import { formatBytes, markdownToHtml, messageContent, messageTime } from "../format";
 import { buildRunTimeline } from "../runTimeline";
+import { buildMessageSummaries } from "../messageSummary";
 import type { Attachment, ChatMessage, Conversation } from "../types";
 import {
   ComposerAttachmentIcon,
@@ -16,6 +18,7 @@ import {
   ComposerStopIcon,
 } from "./ComposerIcons";
 import { Icon } from "./Icon";
+import { MessageSummaryRail } from "./MessageSummaryRail";
 
 interface ChatPanelProps {
   conversation: Conversation | null;
@@ -315,11 +318,13 @@ function toolIcon(card: Record<string, unknown>): "terminal" | "browser" | "sear
 function Message({
   message,
   active = false,
+  anchorId,
   suppressReasoning = false,
   suppressThinkingAvatar = false,
 }: {
   message: ChatMessage;
   active?: boolean;
+  anchorId?: string;
   suppressReasoning?: boolean;
   suppressThinkingAvatar?: boolean;
 }) {
@@ -378,7 +383,7 @@ function Message({
   const text = String(content.text ?? "");
   const reasoningStreaming = active || Boolean(message.isLoading);
   return (
-    <article className={classes}>
+    <article className={classes} id={anchorId}>
       <div className="message-content">
         {reasoning && !suppressReasoning && (
           <details className={`message-reasoning${reasoningStreaming ? " streaming" : ""}`} open={reasoningStreaming}>
@@ -644,7 +649,13 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
   return items;
 }
 
-function AgentRunGroup({ group }: { group: RunGroup }) {
+function AgentRunGroup({
+  group,
+  anchorFor,
+}: {
+  group: RunGroup;
+  anchorFor?: (message: ChatMessage) => string | undefined;
+}) {
   const [expanded, setExpanded] = useState(group.active);
   const elapsed = Math.max(0, Math.round((group.endTime - group.startTime) / 1000));
   const timeLabel = formatRunTime(elapsed);
@@ -657,7 +668,6 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
   useEffect(() => {
     setExpanded(group.active);
   }, [group.active]);
-
   return (
     <div className={`agent-run-group${expanded ? " expanded" : ""}`}>
       <button className="agent-run-header" type="button" aria-expanded={expanded} onClick={() => setExpanded((e) => !e)}>
@@ -672,6 +682,7 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
           <Message
             message={msg}
             active={msg === activeTailMessage}
+            anchorId={anchorFor?.(msg)}
             suppressReasoning={group.hasThinking}
             suppressThinkingAvatar={isDeepThinkingMessage(msg)}
             key={String(msg.id ?? `${messageTime(msg)}-${index}`)}
@@ -682,6 +693,7 @@ function AgentRunGroup({ group }: { group: RunGroup }) {
         <Message
           message={msg}
           active={msg === activeTailMessage}
+          anchorId={anchorFor?.(msg)}
           suppressReasoning={group.hasThinking}
           key={String(msg.id ?? `${messageTime(msg)}-v${index}`)}
         />
@@ -712,6 +724,13 @@ export function ChatPanel({
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const sortedMessages = [...messages].sort((left, right) => messageTime(left) - messageTime(right));
   const normalizedActiveTaskId = activeTaskId?.trim() || null;
+  const summaries = useMemo(() => buildMessageSummaries(messages), [messages]);
+  const anchorByMessage = useMemo(
+    () => new Map(summaries.map((entry) => [entry.message, entry.anchorId])),
+    [summaries],
+  );
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const anchorFor = (message: ChatMessage) => anchorByMessage.get(message);
   const thinkingTaskIds = new Set(
     sortedMessages
       .filter(isDeepThinkingMessage)
@@ -772,6 +791,10 @@ export function ChatPanel({
       void submit();
     }
   }
+  function jumpToAnchor(anchorId: string) {
+    setSummaryOpen(false);
+    document.getElementById(anchorId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   async function addAttachments(event: ChangeEvent<HTMLInputElement>) {
     const files = [...(event.target.files ?? [])];
@@ -822,11 +845,12 @@ export function ChatPanel({
 
       {globalError && <div className="global-error" role="alert">{globalError}</div>}
 
-      <div className="message-list" aria-live="polite" ref={messageListRef}>
+      <div className="message-scroll-region">
+        <div className="message-list" aria-live="polite" ref={messageListRef}>
         {!sortedMessages.length && <EmptyGreeting />}
         {buildGroups(sortedMessages, activeTaskId).map((item, index) => {
           if (item.kind === "run") {
-            return <AgentRunGroup group={item.group} key={`run-${item.group.taskId}`} />;
+            return <AgentRunGroup anchorFor={anchorFor} group={item.group} key={`run-${item.group.taskId}`} />;
           }
           const taskId = agentRunParentTaskId(item.message);
           const isThinking = isDeepThinkingMessage(item.message);
@@ -834,6 +858,7 @@ export function ChatPanel({
             <Message
               message={item.message}
               active={item.message === activeTailMessage}
+              anchorId={anchorByMessage.get(item.message)}
               suppressReasoning={thinkingTaskIds.has(taskId ?? "")}
               suppressThinkingAvatar={Boolean(
                 isThinking
@@ -844,6 +869,13 @@ export function ChatPanel({
             />
           );
         })}
+      </div>
+        <MessageSummaryRail
+          entries={summaries}
+          open={summaryOpen}
+          onToggle={() => setSummaryOpen((current) => !current)}
+          onJump={jumpToAnchor}
+        />
       </div>
 
       <div className="composer-region">
