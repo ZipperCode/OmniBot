@@ -509,12 +509,55 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
 
   @override
   Widget _buildBrowserOverlay(BoxConstraints constraints) {
-    if (!_isBrowserOverlayVisible || _normalSurfaceVisibility <= 0.001) {
+    if (_normalSurfaceVisibility <= 0.001) {
       return const SizedBox.shrink();
     }
     final snapshot = _resolvedBrowserSessionSnapshot;
     if (snapshot == null || !snapshot.available) {
       return const SizedBox.shrink();
+    }
+    if (!_isBrowserOverlayVisible) {
+      return Positioned(
+        right: 18,
+        top: 88,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: const ValueKey<String>('browser-search-floating-ball'),
+            borderRadius: BorderRadius.circular(28),
+            onTap: () {
+              setState(() {
+                _setChatIslandDisplayLayerForMode(
+                  _activeConversationMode,
+                  ChatIslandDisplayLayer.tools,
+                );
+                _isBrowserOverlayVisible = true;
+                _browserOverlayViewSeed += 1;
+              });
+            },
+            child: Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary,
+                shape: BoxShape.circle,
+                boxShadow: const <BoxShadow>[
+                  BoxShadow(
+                    color: Color(0x33000000),
+                    blurRadius: 12,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Icon(
+                Icons.language,
+                color: Theme.of(context).colorScheme.onPrimary,
+                size: 24,
+              ),
+            ),
+          ),
+        ),
+      );
     }
     if (!_isBrowserOverlayInitialized) {
       _ensureBrowserOverlayGeometry(constraints);
@@ -539,20 +582,15 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
                 key: _browserOverlayKey,
                 snapshot: snapshot,
                 onSnapshotChanged: (next) {
-                  if (!mounted) {
-                    return;
-                  }
+                  if (!mounted) return;
                   final browserMode = next == null
                       ? _activeConversationMode
                       : _browserModeForWorkspace(next.workspaceId);
-                  if (browserMode == null) {
-                    return;
-                  }
+                  if (browserMode == null) return;
                   final expectedWorkspaceId = chatConversationWorkspaceId(
                     _modeState(browserMode).currentConversationId,
                   );
-                  final resolved =
-                      next?.matchesWorkspace(expectedWorkspaceId) == true
+                  final resolved = next?.matchesWorkspace(expectedWorkspaceId) == true
                       ? next
                       : null;
                   final runtime = _runtimeForMode(browserMode);
@@ -561,9 +599,7 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
                   } else {
                     _modeState(browserMode).browserSessionSnapshot = resolved;
                   }
-                  if (browserMode != _activeConversationMode) {
-                    return;
-                  }
+                  if (browserMode != _activeConversationMode) return;
                   setState(() {
                     _liveBrowserSessionSnapshot = resolved;
                     if (resolved == null || !resolved.available) {
