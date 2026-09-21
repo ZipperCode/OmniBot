@@ -16,6 +16,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import cn.com.omnimind.bot.agent.tool.search.WebSearchToolDefinitions
 
 object AgentToolDefinitions {
 
@@ -2263,6 +2264,9 @@ object AgentToolDefinitions {
     fun musicTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
         musicToolDefinitions.map { decorateToolDefinition(it, locale) }
 
+    fun webSearchTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
+        WebSearchToolDefinitions.webSearchTools().map { decorateToolDefinition(it, locale) }
+
     fun memoryTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
         memoryToolDefinitions.map { decorateToolDefinition(it, locale) }
 
@@ -2275,7 +2279,8 @@ object AgentToolDefinitions {
         includeVlmTool: Boolean = true,
     ): List<JsonObject> =
         builtinTools(locale, terminalDistribution, includeVlmTool) +
-        scheduleTools(locale) + alarmTools(locale) + calendarTools(locale) + musicTools(locale)
+        scheduleTools(locale) + alarmTools(locale) + calendarTools(locale) + musicTools(locale) +
+        webSearchTools(locale)
 
     fun reservedToolNames(): Set<String> {
         val locale = PromptLocale.EN_US

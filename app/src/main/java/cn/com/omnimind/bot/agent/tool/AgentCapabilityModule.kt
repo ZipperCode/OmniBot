@@ -18,6 +18,7 @@ import cn.com.omnimind.bot.agent.tool.handlers.SystemToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.TerminalToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.VlmToolHandler
+import cn.com.omnimind.bot.agent.tool.search.WebSearchToolHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.serialization.json.JsonObject
 
@@ -70,6 +71,7 @@ class BuiltInAgentCapabilityModule(
         privilegedHandler,
         terminalHandler,
         BrowserToolHandler(helper, workspaceManager),
+        WebSearchToolHandler(),
         ImageGenerationToolHandler(helper, workspaceManager),
         FileToolHandler(helper, workspaceManager),
         SkillsToolHandler(helper, workspaceManager),

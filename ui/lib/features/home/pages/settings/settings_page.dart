@@ -347,6 +347,14 @@ class _SettingsPageState extends State<SettingsPage> {
               GoRouterManager.push('/home/mcp_tools');
             },
           ),
+          _SettingItem(
+            icon: LucideIcons.globe,
+            title: context.trLegacy('联网搜索'),
+            subtitle: context.trLegacy('配置 Tavily / Exa / Firecrawl 的 API Key'),
+            onTap: () {
+              GoRouterManager.push('/home/web_search_key_setting');
+            },
+          ),
         ],
       ),
       _SettingSection(

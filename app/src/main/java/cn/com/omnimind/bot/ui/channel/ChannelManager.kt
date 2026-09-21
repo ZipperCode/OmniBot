@@ -31,6 +31,7 @@ class ChannelManager {
     private var storageUsageChannel: StorageUsageChannel = StorageUsageChannel()
     private var agentRuntimeChannel: AgentRuntimeChannel = AgentRuntimeChannel()
     private var pluginPlatformChannel: PluginPlatformChannel = PluginPlatformChannel()
+    private var webSearchKeyChannel: WebSearchKeyChannel = WebSearchKeyChannel()
     private var omniLinkPluginChannel: OmniLinkPluginChannel = OmniLinkPluginChannel()
     private var accountChannel: AccountChannel = AccountChannel()
     private var voicePlaybackChannel: VoicePlaybackChannel = VoicePlaybackChannel()
@@ -63,6 +64,7 @@ class ChannelManager {
         storageUsageChannel.setChannel(flutterEngine)
         agentRuntimeChannel.setChannel(flutterEngine)
         pluginPlatformChannel.setChannel(flutterEngine)
+        webSearchKeyChannel.setChannel(flutterEngine)
         omniLinkPluginChannel.setChannel(flutterEngine)
         accountChannel.setChannel(flutterEngine)
         // Flutter may configure the engine before Activity.onCreate reaches
@@ -113,6 +115,7 @@ class ChannelManager {
         storageUsageChannel.clear()
         agentRuntimeChannel.clear()
         pluginPlatformChannel.clear()
+        webSearchKeyChannel.clear()
         omniLinkPluginChannel.clear()
         accountChannel.clear()
         voicePlaybackChannel.clear()
