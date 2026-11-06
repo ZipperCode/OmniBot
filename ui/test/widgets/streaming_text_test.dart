@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/widgets/omnibot_markdown_body.dart';
 import 'package:ui/widgets/streaming_text.dart';
-import 'package:ui/widgets/typewriter_text.dart';
 
 void main() {
   setUp(() {
@@ -233,37 +232,6 @@ void main() {
     expect(richText.text.toPlainText(), text);
   });
 
-  testWidgets('TypewriterText advances past emoji without splitting it', (
-    tester,
-  ) async {
-    const text = '前缀📎后缀';
-
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(
-          body: TypewriterText(
-            text: text,
-            style: TextStyle(fontSize: 14),
-            shouldAnimate: true,
-          ),
-        ),
-      ),
-    );
-
-    for (var index = 0; index < text.length + 2; index += 1) {
-      await tester.pump(const Duration(milliseconds: 15));
-      expect(tester.takeException(), isNull);
-    }
-
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-
-    final markdownBody = tester.widget<OmnibotMarkdownBody>(
-      find.byType(OmnibotMarkdownBody),
-    );
-    expect(markdownBody.data, text);
-  });
-
   testWidgets(
     'StreamingText resets animation state when text is replaced by a new snapshot',
     (tester) async {
@@ -411,7 +379,7 @@ void main() {
               ),
             ),
           );
-          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 80));
           expect(tester.takeException(), isNull);
         }
 
@@ -441,7 +409,7 @@ void main() {
     );
   }
 
-  testWidgets('a long live table keeps its last row visible in the widget tree', (
+  testWidgets('a long live table reveals complete rows and eventually its tail', (
     tester,
   ) async {
     final text =
@@ -463,6 +431,20 @@ void main() {
     await tester.pump();
     expect(tester.takeException(), isNull);
     expect(find.byType(Table), findsOneWidget);
+    expect(find.text('行-199'), findsNothing);
+    final first = tester
+        .widget<OmnibotMarkdownBody>(find.byType(OmnibotMarkdownBody))
+        .data;
+    expect(first, endsWith('|'));
+    await tester.pump(const Duration(milliseconds: 80));
+    final next = tester
+        .widget<OmnibotMarkdownBody>(find.byType(OmnibotMarkdownBody))
+        .data;
+    expect(next.length, greaterThan(first.length));
+    expect(next, endsWith('|'));
+    for (var i = 0; i < 40; i++) {
+      await tester.pump(const Duration(milliseconds: 80));
+    }
     expect(find.text('行-199'), findsOneWidget);
   });
 

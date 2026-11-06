@@ -1,4 +1,7 @@
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/models/remote_mcp_server.dart';
@@ -7,7 +10,10 @@ import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/omni_glass_floating_action_button.dart';
+import 'package:ui/widgets/settings_detail_sheet.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class RemoteMcpServersPage extends StatefulWidget {
   const RemoteMcpServersPage({super.key});
@@ -16,7 +22,8 @@ class RemoteMcpServersPage extends StatefulWidget {
   State<RemoteMcpServersPage> createState() => _RemoteMcpServersPageState();
 }
 
-class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
+class _RemoteMcpServersPageState extends State<RemoteMcpServersPage>
+    with FlClashPageLoadMixin {
   bool _loading = true;
   final Set<String> _busyIds = {};
   List<RemoteMcpServer> _servers = [];
@@ -28,16 +35,17 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
   }
 
   Future<void> _loadServers() async {
+    if (!await waitForPageReady() || !mounted) return;
     setState(() => _loading = true);
     try {
       final servers = await RemoteMcpConfigService.listServers();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() {
         _servers = servers;
         _loading = false;
       });
     } on PlatformException catch (e) {
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() => _loading = false);
       showToast(
         e.message ??
@@ -47,7 +55,7 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
         type: ToastType.error,
       );
     } catch (e) {
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() => _loading = false);
       showToast(
         Localizations.localeOf(context).languageCode == 'en'
@@ -134,31 +142,27 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
   }
 
   Future<void> _deleteServer(RemoteMcpServer server) async {
-    final confirmed = await showDialog<bool>(
+    final isEn = Localizations.localeOf(context).languageCode == 'en';
+    final confirmed = await showSettingsDetailSheet<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(
-          Localizations.localeOf(context).languageCode == 'en'
-              ? 'Delete MCP Service'
-              : '删除 MCP 服务',
-        ),
-        content: Text(
-          Localizations.localeOf(context).languageCode == 'en'
-              ? 'Confirm deleting "${server.name}"?'
-              : '确认删除“${server.name}”？',
+      builder: (sheetContext) => SettingsDetailSheet(
+        title: isEn ? 'Delete MCP Service' : '删除 MCP 服务',
+        body: Text(
+          isEn ? 'Confirm deleting "${server.name}"?' : '确认删除“${server.name}”？',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
+            style: settingsDetailSheetActionStyle(sheetContext),
+            onPressed: () => Navigator.of(sheetContext).pop(false),
+            child: Text(isEn ? 'Cancel' : '取消'),
           ),
           TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text(
-              Localizations.localeOf(context).languageCode == 'en'
-                  ? 'Delete'
-                  : '删除',
+            style: settingsDetailSheetActionStyle(
+              sheetContext,
+              foregroundColor: AppColors.alertRed,
             ),
+            onPressed: () => Navigator.of(sheetContext).pop(true),
+            child: Text(isEn ? 'Delete' : '删除'),
           ),
         ],
       ),
@@ -190,14 +194,13 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
   }
 
   Future<void> _showServerEditor({RemoteMcpServer? server}) async {
-    final saved = await showModalBottomSheet<RemoteMcpServer>(
+    final saved = await showOmniGlassBottomSheet<RemoteMcpServer>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: context.isDarkTheme
-          ? context.omniPalette.surfacePrimary
-          : Colors.white,
+      backgroundColor: Colors.transparent,
+      elevation: 0,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (_) => _RemoteMcpServerEditorSheet(server: server),
     );
@@ -249,34 +252,49 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
             : 'MCP 工具',
         primary: true,
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showServerEditor(),
-        child: const Icon(LucideIcons.plus),
+      floatingActionButton: OmniGlassFloatingActionButton(
+        builder: (context, glass) => FloatingActionButton(
+          backgroundColor: glass ? Colors.transparent : palette.accentPrimary,
+          foregroundColor: glass
+              ? palette.textPrimary
+              : Theme.of(context).colorScheme.onPrimary,
+          elevation: glass ? 0 : 2,
+          focusElevation: glass ? 0 : null,
+          hoverElevation: glass ? 0 : null,
+          highlightElevation: glass ? 0 : null,
+          disabledElevation: glass ? 0 : null,
+          onPressed: () => _showServerEditor(),
+          child: const Icon(LucideIcons.plus),
+        ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _servers.isEmpty
-          ? _buildEmpty()
-          : RefreshIndicator(
-              onRefresh: _loadServers,
-              child: ListView(
-                padding: edgeToEdgeScrollPadding(
-                  context,
-                  const EdgeInsets.fromLTRB(18, 12, 18, 24),
-                ),
-                children: [
-                  SettingsSectionTitle(
-                    label: Localizations.localeOf(context).languageCode == 'en'
-                        ? 'Remote Services'
-                        : '远端服务',
+      body: OmniContentWidth(
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _servers.isEmpty
+            ? _buildEmpty()
+            : RefreshIndicator(
+                onRefresh: _loadServers,
+                child: ListView(
+                  padding: edgeToEdgeScrollPadding(
+                    context,
+                    const EdgeInsets.fromLTRB(22, 12, 22, 32),
                   ),
-                  for (int index = 0; index < _servers.length; index++) ...[
-                    _buildServerCard(_servers[index]),
-                    if (index != _servers.length - 1) const Divider(height: 24),
+                  children: [
+                    SettingsSectionTitle(
+                      label:
+                          Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Remote Services'
+                          : '远端服务',
+                    ),
+                    for (int index = 0; index < _servers.length; index++) ...[
+                      _buildServerCard(_servers[index]),
+                      if (index != _servers.length - 1)
+                        const SizedBox(height: 12),
+                    ],
                   ],
-                ],
+                ),
               ),
-            ),
+      ),
     );
   }
 
@@ -286,23 +304,14 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
       padding: edgeToEdgeScrollPadding(context, const EdgeInsets.all(24)),
       children: [
         const SizedBox(height: 120),
-        Icon(
-          LucideIcons.puzzle,
-          size: 48,
-          color: context.isDarkTheme ? palette.textTertiary : AppColors.text50,
-        ),
+        Icon(LucideIcons.puzzle, size: 40, color: palette.textTertiary),
         const SizedBox(height: 12),
         Center(
           child: Text(
             Localizations.localeOf(context).languageCode == 'en'
                 ? 'No remote MCP services'
                 : '暂无远端 MCP 服务',
-            style: TextStyle(
-              fontSize: 16,
-              color: context.isDarkTheme
-                  ? palette.textSecondary
-                  : AppColors.text70,
-            ),
+            style: TextStyle(fontSize: 15, color: palette.textSecondary),
           ),
         ),
       ],
@@ -310,90 +319,114 @@ class _RemoteMcpServersPageState extends State<RemoteMcpServersPage> {
   }
 
   Widget _buildServerCard(RemoteMcpServer server) {
+    final palette = context.omniPalette;
     final busy = _busyIds.contains(server.id);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    server.name,
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
+    return OmniSettingsCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      server.name,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: palette.textPrimary,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    server.endpointUrl,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: context.omniPalette.textSecondary,
+                    const SizedBox(height: 4),
+                    Text(
+                      server.endpointUrl,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: palette.textSecondary,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            Switch(
-              value: server.enabled,
-              onChanged: busy ? null : (value) => _toggleServer(server, value),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            _MetaChip(label: _healthLabel(server.lastHealth)),
-            _MetaChip(
-              label: Localizations.localeOf(context).languageCode == 'en'
-                  ? 'Tools ${server.toolCount}'
-                  : '工具 ${server.toolCount}',
-            ),
-            if ((server.lastError ?? '').isNotEmpty)
+              OmniSettingsSwitch(
+                value: server.enabled,
+                enabled: !busy,
+                onToggle: (value) => _toggleServer(server, value),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _MetaChip(label: _healthLabel(server.lastHealth)),
               _MetaChip(
-                label: server.lastError!,
-                color: AppColors.alertRed.withValues(alpha: 0.08),
-                textColor: AppColors.alertRed,
+                label: Localizations.localeOf(context).languageCode == 'en'
+                    ? 'Tools ${server.toolCount}'
+                    : '工具 ${server.toolCount}',
               ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            TextButton(
-              onPressed: busy ? null : () => _refreshTools(server),
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Refresh tools'
-                    : '刷新工具',
+              if ((server.lastError ?? '').isNotEmpty)
+                _MetaChip(
+                  label: server.lastError!,
+                  color: AppColors.alertRed.withValues(alpha: 0.08),
+                  textColor: AppColors.alertRed,
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 32),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: busy ? null : () => _refreshTools(server),
+                child: Text(
+                  Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Refresh tools'
+                      : '刷新工具',
+                ),
               ),
-            ),
-            TextButton(
-              onPressed: busy ? null : () => _showServerEditor(server: server),
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Edit'
-                    : '编辑',
+              TextButton(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(0, 32),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: busy
+                    ? null
+                    : () => _showServerEditor(server: server),
+                child: Text(
+                  Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Edit'
+                      : '编辑',
+                ),
               ),
-            ),
-            const Spacer(),
-            TextButton(
-              onPressed: busy ? null : () => _deleteServer(server),
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Delete'
-                    : '删除',
+              const Spacer(),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: AppColors.alertRed,
+                  minimumSize: const Size(0, 32),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: busy ? null : () => _deleteServer(server),
+                child: Text(
+                  Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Delete'
+                      : '删除',
+                ),
               ),
-            ),
-          ],
-        ),
-      ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -430,13 +463,15 @@ class _InputField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.omniPalette;
     return TextField(
       controller: controller,
       focusNode: focusNode,
-      decoration: InputDecoration(
+      style: TextStyle(fontSize: 15, color: palette.textPrimary),
+      decoration: omniSettingsInputDecoration(
+        context,
         labelText: label,
         hintText: hint,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -527,71 +562,87 @@ class _RemoteMcpServerEditorSheetState
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 20,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            widget.server == null
-                ? (Localizations.localeOf(context).languageCode == 'en'
-                      ? 'Add MCP Service'
-                      : '添加 MCP 服务')
-                : (Localizations.localeOf(context).languageCode == 'en'
-                      ? 'Edit MCP Service'
-                      : '编辑 MCP 服务'),
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 16),
-          _InputField(
-            controller: _nameController,
-            focusNode: _nameFocusNode,
-            label: Localizations.localeOf(context).languageCode == 'en'
-                ? 'Name'
-                : '名称',
-          ),
-          const SizedBox(height: 12),
-          _InputField(
-            controller: _endpointController,
-            label: 'Endpoint URL',
-            hint: 'https://example.com/mcp',
-          ),
-          const SizedBox(height: 12),
-          _InputField(
-            controller: _tokenController,
-            label: Localizations.localeOf(context).languageCode == 'en'
-                ? 'Bearer Token (Optional)'
-                : 'Bearer Token（可选）',
-          ),
-          const SizedBox(height: 12),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            value: _enabled,
-            onChanged: (value) => setState(() => _enabled = value),
-            title: Text(
-              Localizations.localeOf(context).languageCode == 'en'
-                  ? 'Enabled'
-                  : '启用',
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: OmniGlassSheet(
+        child: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.server == null
+                      ? (Localizations.localeOf(context).languageCode == 'en'
+                            ? 'Add MCP Service'
+                            : '添加 MCP 服务')
+                      : (Localizations.localeOf(context).languageCode == 'en'
+                            ? 'Edit MCP Service'
+                            : '编辑 MCP 服务'),
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _InputField(
+                  controller: _nameController,
+                  focusNode: _nameFocusNode,
+                  label: Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Name'
+                      : '名称',
+                ),
+                const SizedBox(height: 12),
+                _InputField(
+                  controller: _endpointController,
+                  label: 'Endpoint URL',
+                  hint: 'https://example.com/mcp',
+                ),
+                const SizedBox(height: 12),
+                _InputField(
+                  controller: _tokenController,
+                  label: Localizations.localeOf(context).languageCode == 'en'
+                      ? 'Bearer Token (Optional)'
+                      : 'Bearer Token（可选）',
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        Localizations.localeOf(context).languageCode == 'en'
+                            ? 'Enabled'
+                            : '启用',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                          color: context.omniPalette.textPrimary,
+                        ),
+                      ),
+                    ),
+                    OmniSettingsSwitch(
+                      value: _enabled,
+                      onToggle: (value) => setState(() => _enabled = value),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: _submit,
+                    child: Text(
+                      Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Save'
+                          : '保存',
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: _submit,
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Save'
-                    : '保存',
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -610,11 +661,7 @@ class _MetaChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color:
-            color ??
-            (context.isDarkTheme
-                ? palette.surfaceSecondary
-                : AppColors.background),
+        color: color ?? palette.surfaceSecondary,
         borderRadius: BorderRadius.circular(999),
         border: color == null && context.isDarkTheme
             ? Border.all(color: palette.borderSubtle)
@@ -624,9 +671,7 @@ class _MetaChip extends StatelessWidget {
         label,
         style: TextStyle(
           fontSize: 12,
-          color:
-              textColor ??
-              (context.isDarkTheme ? palette.textSecondary : AppColors.text70),
+          color: textColor ?? palette.textSecondary,
         ),
       ),
     );

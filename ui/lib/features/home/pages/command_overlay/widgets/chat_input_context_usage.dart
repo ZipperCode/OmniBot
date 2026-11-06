@@ -20,7 +20,7 @@ class _ContextUsageRing extends StatelessWidget {
         ? const Color(0xFFD65A3A)
         : normalized >= 0.85
         ? const Color(0xFFC69234)
-        : const Color(0xFF5A8DDE);
+        : palette.accentPrimary;
     final trackColor = context.isDarkTheme
         ? Color.lerp(
             palette.surfaceElevated,
@@ -99,6 +99,7 @@ class _ContextUsageRingButtonState extends State<_ContextUsageRingButton> {
     final handle = showOverlayGlassPopup<void>(
       context: anchorContext,
       anchor: anchor,
+      overlapAnchor: false,
       preferBelow: false,
       verticalGap: 8,
       horizontalPlacement: GlassPopupHorizontalPlacement.centerOnAnchor,
@@ -177,8 +178,7 @@ class _ContextUsageGlassTooltipBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    final textColor = isDark ? palette.textPrimary : const Color(0xFF1F2937);
+    final textColor = palette.textPrimary;
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 280),
       child: OmniGlassPanel(

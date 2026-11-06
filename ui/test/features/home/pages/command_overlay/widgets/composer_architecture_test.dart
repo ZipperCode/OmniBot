@@ -10,6 +10,8 @@ void main() {
     const lineBudgets = <String, int>{
       '$widgetRoot/chat_input_area.dart': 550,
       '$widgetRoot/chat_input_area_composer.dart': 700,
+      '$widgetRoot/chat_input_compact_composer.dart': 250,
+      '$widgetRoot/chat_input_compact_actions.dart': 250,
       '$widgetRoot/chat_input_actions.dart': 300,
       '$widgetRoot/chat_input_agent_controls.dart': 500,
       '$widgetRoot/chat_input_agent_menus.dart': 700,
@@ -33,6 +35,8 @@ void main() {
 
     for (final part in const <String>[
       'chat_input_actions.dart',
+      'chat_input_compact_composer.dart',
+      'chat_input_compact_actions.dart',
       'chat_input_agent_controls.dart',
       'chat_input_agent_menus.dart',
       'chat_input_attachments.dart',

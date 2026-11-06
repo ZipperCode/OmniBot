@@ -1,6 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/omni_circle_button.dart';
+import 'package:ui/widgets/omni_glass.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/services/agent_runtime_service.dart';
@@ -12,26 +16,44 @@ import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
-import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
+import 'package:ui/widgets/omni_root_toolbar.dart';
 import 'package:ui/widgets/omni_segmented_slider.dart';
+import 'package:ui/widgets/navigation/open_container.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
-import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 enum _AgentFilter { all, available, unavailable }
 
 class AgentModeSettingPage extends StatefulWidget {
-  const AgentModeSettingPage({super.key});
+  const AgentModeSettingPage({
+    super.key,
+    this.embedded = false,
+    this.active = true,
+  });
+
+  /// A root tab keeps its own title and actions, without a route back button.
+  final bool embedded;
+
+  /// Kept-alive tabs refresh cached catalog/configuration on becoming visible.
+  final bool active;
 
   @override
   State<AgentModeSettingPage> createState() => _AgentModeSettingPageState();
 }
 
-class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
+class _AgentModeSettingPageState extends State<AgentModeSettingPage>
+    with FlClashPageLoadMixin {
   AcpAgentCatalog? _catalog;
   _AgentFilter _filter = _AgentFilter.all;
   String _query = '';
+  final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode();
+  bool _searchVisible = false;
   bool _loading = true;
   bool _refreshing = false;
+  bool _checkingUpdates = false;
+  bool _upgradingAll = false;
   String? _error;
   String? _busyAgentId;
   String? _busyPluginActionKey;
@@ -39,8 +61,9 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   Map<String, AgentWebStatus> _webActionStatuses =
       const <String, AgentWebStatus>{};
   int _catalogRequestId = 0;
-  late Set<String> _preparingAgentIds;
-  StreamSubscription<Set<String>>? _preparationSubscription;
+  late Map<String, AgentPackageOperation> _packageOperations;
+  StreamSubscription<Map<String, AgentPackageOperation>>?
+  _packageOperationSubscription;
   String _sharedModelLabel = '';
   // 远程 PC Bridge 状态：先用缓存同步渲染，后台再刷新，避免一帧加载闪烁。
   bool _remoteBridgeEnabled =
@@ -54,12 +77,17 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   @override
   void initState() {
     super.initState();
-    _preparingAgentIds = AgentRuntimeService.preparingAgentIds;
-    _preparationSubscription = AgentRuntimeService.agentPreparationChanges
-        .listen((agentIds) {
+    _packageOperations = AgentRuntimeService.agentPackageOperations;
+    _packageOperationSubscription = AgentRuntimeService
+        .agentPackageOperationChanges
+        .listen((operations) {
           if (!mounted) return;
-          final completed = _preparingAgentIds.difference(agentIds).isNotEmpty;
-          setState(() => _preparingAgentIds = agentIds);
+          final completed = _packageOperations.keys.any(
+            (id) => !operations.containsKey(id),
+          );
+          // Package operation ownership stays immediate; only its repaint waits.
+          _packageOperations = operations;
+          unawaited(publishPageState(() {}));
           if (completed) unawaited(_load());
         });
     // The native agent/list endpoint returns cached health. Keep route entry
@@ -72,12 +100,40 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   }
 
   @override
+  void didUpdateWidget(covariant AgentModeSettingPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.active) _searchFocusNode.unfocus();
+    if (widget.active && !oldWidget.active) {
+      unawaited(_load());
+      unawaited(_loadPluginActions());
+      unawaited(_loadSharedModel());
+      unawaited(_loadRemoteBridge());
+    }
+  }
+
+  @override
   void dispose() {
-    unawaited(_preparationSubscription?.cancel());
+    unawaited(_packageOperationSubscription?.cancel());
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
-  Future<void> _loadSharedModel() async {
+  void _openSearch() => setState(() => _searchVisible = true);
+
+  void _closeSearch() {
+    _searchFocusNode.unfocus();
+    _searchController.clear();
+    setState(() {
+      _searchVisible = false;
+      _query = '';
+    });
+  }
+
+  Future<void> _loadSharedModel() =>
+      runPageLoad(#sharedModel, _readSharedModel, revalidate: true);
+
+  Future<void> _readSharedModel() async {
     try {
       final catalog = await SceneModelConfigService.getSceneCatalog();
       final agentScene = catalog.firstWhere(
@@ -102,7 +158,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       );
       final provider = agentScene.effectiveProviderProfileName.trim();
       final model = agentScene.effectiveModel.trim();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !pageLoadIsCurrent(#sharedModel)) return;
       setState(() {
         _sharedModelLabel = [
           provider,
@@ -114,10 +170,15 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     }
   }
 
-  Future<void> _loadPluginActions() async {
+  Future<void> _loadPluginActions() =>
+      runPageLoad(#pluginActions, _readPluginActions, revalidate: true);
+
+  Future<void> _readPluginActions() async {
     try {
       final actions = await OmniPluginService.listActions();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !pageLoadIsCurrent(#pluginActions)) {
+        return;
+      }
       setState(() {
         _pluginActions = actions
             .where((action) => action.supportsPlacement('agent_settings'))
@@ -133,17 +194,27 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   /// Probes the managed Web processes linked from the visible plugin actions.
   /// Each probe failure degrades to [AgentWebStatus.unknown], which renders
   /// the tile without a status badge.
-  Future<void> _refreshWebActionStatuses() async {
+  Future<void> _refreshWebActionStatuses() =>
+      runPageLoad(#webActionStatuses, _readWebActionStatuses, revalidate: true);
+
+  Future<void> _readWebActionStatuses() async {
     final actions = _pluginActions
         .where(AgentWebStatusService.supportsLifecycle)
         .toList(growable: false);
     if (actions.isEmpty) return;
     final statuses = await AgentWebStatusService.queryAll(actions);
-    if (!mounted) return;
+    if (!await waitForPageReady() || !pageLoadIsCurrent(#webActionStatuses)) {
+      return;
+    }
     setState(() => _webActionStatuses = statuses);
   }
 
-  Future<void> _load({bool refresh = false}) async {
+  Future<void> _load({bool refresh = false}) => refresh
+      ? _readCatalog(refresh: true)
+      : runPageLoad(#catalog, _readCatalog, revalidate: true);
+
+  Future<void> _readCatalog({bool refresh = false}) async {
+    if (!await waitForPageReady()) return;
     final requestId = ++_catalogRequestId;
     if (refresh) {
       setState(() => _refreshing = true);
@@ -152,7 +223,11 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       final catalog = refresh
           ? await AgentRuntimeService.refreshAgents()
           : await AgentRuntimeService.listAgents();
-      if (!mounted || requestId != _catalogRequestId) return;
+      if (!await waitForPageReady() ||
+          requestId != _catalogRequestId ||
+          !pageLoadIsCurrent(#catalog)) {
+        return;
+      }
       setState(() {
         _catalog = catalog;
         _loading = false;
@@ -160,7 +235,11 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
         _error = null;
       });
     } catch (error) {
-      if (!mounted || requestId != _catalogRequestId) return;
+      if (!await waitForPageReady() ||
+          requestId != _catalogRequestId ||
+          !pageLoadIsCurrent(#catalog)) {
+        return;
+      }
       setState(() {
         _loading = false;
         _refreshing = false;
@@ -172,10 +251,15 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     }
   }
 
-  Future<void> _loadRemoteBridge() async {
+  Future<void> _loadRemoteBridge() =>
+      runPageLoad(#remoteBridge, _readRemoteBridge, revalidate: true);
+
+  Future<void> _readRemoteBridge() async {
     try {
       final config = await AgentRuntimeService.readRemoteBridgeConfig();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !pageLoadIsCurrent(#remoteBridge)) {
+        return;
+      }
       final enabled = config.remoteEnabled;
       setState(() => _remoteBridgeEnabled = enabled);
       await StorageService.setBool(
@@ -185,6 +269,105 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     } catch (error) {
       debugPrint('Load remote bridge failed: $error');
     }
+  }
+
+  Future<void> _checkUpdates() async {
+    if (_checkingUpdates || _packageOperations.isNotEmpty) return;
+    setState(() => _checkingUpdates = true);
+    try {
+      final catalog = await AgentRuntimeService.checkAgentUpdates();
+      if (!mounted) return;
+      setState(() {
+        _catalog = catalog;
+        _error = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _text('检查更新失败，请稍后重试。', 'Update check failed. Try again later.'),
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _checkingUpdates = false);
+    }
+  }
+
+  List<AcpAgentProfile> get _updatableAgents =>
+      (_catalog?.agents ?? const <AcpAgentProfile>[])
+          .where(
+            (agent) =>
+                agent.enabled &&
+                agent.managedAdapter &&
+                agent.installed != false &&
+                agent.packageVersion?.updateAvailable == true,
+          )
+          .toList(growable: false);
+
+  Future<void> _upgradeAll() async {
+    final agents = _updatableAgents;
+    if (agents.isEmpty || _packageOperations.isNotEmpty || _upgradingAll) {
+      return;
+    }
+    final english = _english;
+    final distributionId = _catalog?.distributionId;
+    String text(String zh, String en) => english ? en : zh;
+    String failure(Object? error) => formatAgentRuntimeErrorForUser(
+      error,
+      english: english,
+      fallback: text(
+        '升级未完成，请检查网络后重试。',
+        'Update did not finish. Check your connection and try again.',
+      ),
+    );
+    setState(() => _upgradingAll = true);
+    // Schedule the complete batch before awaiting it; the service owns its
+    // lifetime and serial execution even if this settings page is closed.
+    final results = await Future.wait(
+      agents.map((agent) async {
+        try {
+          final result = await AgentRuntimeService.prepareAgentInBackground(
+            agent.id,
+            force: true,
+            distributionId: distributionId,
+          );
+          final version = _resultVersion(result);
+          final updated =
+              version?.installedVersion != null &&
+              version?.targetVersion != null &&
+              version?.error == null &&
+              version?.updateAvailable == false;
+          final ready = result['ok'] == true;
+          final label = updated
+              ? ready
+                    ? text('已升级', 'Updated')
+                    : text('已升级，启动未完成', 'Updated; startup incomplete')
+              : text('升级未完成', 'Update incomplete');
+          return '${agent.name}：$label${updated ? ' ${version!.installedVersion}' : ''}'
+              '${updated && ready ? '' : '\n${failure(result['error'])}'}';
+        } catch (error) {
+          return '${agent.name}：${text('升级失败', 'Update failed')}\n${failure(error)}';
+        }
+      }),
+    );
+    if (!mounted) return;
+    setState(() => _upgradingAll = false);
+    await _load();
+    if (!mounted) return;
+    await _showActionResult(
+      agents.first,
+      _text('升级结果', 'Update results'),
+      results.join('\n\n'),
+    );
+  }
+
+  AgentPackageVersion? _resultVersion(Map<String, dynamic> result) {
+    final agent = result['agent'];
+    return agent is Map && agent['packageVersion'] is Map
+        ? AgentPackageVersion.fromMap(agent['packageVersion'] as Map)
+        : null;
   }
 
   List<AcpAgentProfile> get _visibleAgents {
@@ -221,7 +404,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
 
   Future<void> _test(AcpAgentProfile agent) async {
     if (_busyAgentId == agent.id ||
-        _preparingAgentIds.contains(agent.id) ||
+        _packageOperations.containsKey(agent.id) ||
         !agent.enabled) {
       return;
     }
@@ -229,13 +412,141 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   }
 
   void _prepare(AcpAgentProfile agent) {
-    if (_preparingAgentIds.contains(agent.id) || !agent.enabled) return;
-    unawaited(_runAgentAction(agent, prepare: true));
+    if (_packageOperations.containsKey(agent.id) || !agent.enabled) return;
+    unawaited(
+      _runAgentAction(
+        agent,
+        prepare: true,
+        upgrade: agent.packageVersion?.updateAvailable == true,
+      ),
+    );
+  }
+
+  Future<void> _uninstall(AcpAgentProfile agent) async {
+    if (!agent.uninstallable ||
+        _packageOperations.containsKey(agent.id) ||
+        _busyAgentId == agent.id) {
+      return;
+    }
+    final distributionId = _catalog?.distributionId;
+    if (distributionId == null || distributionId.isEmpty) {
+      await _showActionResult(
+        agent,
+        _text('无法卸载', 'Could not uninstall'),
+        _text('请刷新 Agent 列表后重试。', 'Refresh the Agent list and try again.'),
+      );
+      return;
+    }
+    final confirmed = await showSettingsDetailSheet<bool>(
+      context: context,
+      builder: (sheetContext) => SettingsDetailSheet(
+        key: ValueKey('agent-uninstall-confirm-${agent.id}'),
+        title: _text('卸载 ${agent.name}？', 'Uninstall ${agent.name}?'),
+        body: Text(
+          _text(
+            '卸载当前终端环境中的程序，保留配置、登录信息和历史记录。',
+            'Uninstall the program from the current terminal environment. Keep configuration, sign-in information, and history.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            key: Key('agent-uninstall-cancel-${agent.id}'),
+            style: settingsDetailSheetActionStyle(sheetContext),
+            onPressed: () => Navigator.of(sheetContext).pop(false),
+            child: Text(_text('取消', 'Cancel')),
+          ),
+          TextButton(
+            key: Key('agent-uninstall-confirm-action-${agent.id}'),
+            style: settingsDetailSheetActionStyle(
+              sheetContext,
+              foregroundColor: Theme.of(sheetContext).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(sheetContext).pop(true),
+            child: Text(_text('卸载', 'Uninstall')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _runUninstall(agent, distributionId);
+  }
+
+  Future<void> _runUninstall(
+    AcpAgentProfile agent,
+    String distributionId,
+  ) async {
+    // The service owns the queued operation after this page is disposed.
+    // A retry stays attached to the originally confirmed distribution.
+    while (mounted) {
+      if (_packageOperations.containsKey(agent.id)) return;
+      var ok = false;
+      Object? failure;
+      try {
+        final result = await AgentRuntimeService.uninstallAgentInBackground(
+          agent.id,
+          distributionId: distributionId,
+        );
+        ok = result['ok'] == true;
+        failure = ok
+            ? null
+            : PlatformException(
+                code: 'agent_uninstall_failed',
+                message: result['error']?.toString(),
+                details: result,
+              );
+      } catch (error) {
+        failure = error;
+      }
+      if (!mounted) return;
+      await _load();
+      if (!mounted) return;
+      final retry = await showSettingsDetailSheet<bool>(
+        context: context,
+        builder: (sheetContext) => SettingsDetailSheet(
+          key: ValueKey('agent-uninstall-result-${agent.id}'),
+          title: ok
+              ? _text('助手已卸载', 'Assistant uninstalled')
+              : _text('卸载未完成', 'Uninstall did not finish'),
+          body: SelectableText(
+            ok
+                ? _text(
+                    '${agent.name} 已卸载。配置、登录信息和历史记录已保留。',
+                    '${agent.name} was uninstalled. Configuration, sign-in information, and history were kept.',
+                  )
+                : formatAgentRuntimeErrorForUser(
+                    failure,
+                    english: _english,
+                    fallback: _text(
+                      '卸载未完成，请重试。',
+                      'Uninstall did not finish. Try again.',
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              key: Key('agent-uninstall-result-close-${agent.id}'),
+              style: settingsDetailSheetActionStyle(sheetContext),
+              onPressed: () => Navigator.of(sheetContext).pop(false),
+              child: Text(_text('关闭', 'Close')),
+            ),
+            if (!ok)
+              TextButton(
+                key: Key('agent-uninstall-retry-${agent.id}'),
+                style: settingsDetailSheetActionStyle(sheetContext),
+                onPressed: () => Navigator.of(sheetContext).pop(true),
+                child: Text(_text('重试', 'Retry')),
+              ),
+          ],
+        ),
+      );
+      if (retry != true || !mounted) return;
+    }
   }
 
   Future<void> _runAgentAction(
     AcpAgentProfile agent, {
     required bool prepare,
+    bool upgrade = false,
   }) async {
     if (!prepare) setState(() => _busyAgentId = agent.id);
     try {
@@ -243,17 +554,33 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
           ? await AgentRuntimeService.prepareAgentInBackground(
               agent.id,
               force: true,
+              distributionId: _catalog?.distributionId,
             )
           : await AgentRuntimeService.testAgent(agent.id);
       if (!mounted) return;
       await _load();
       if (!mounted) return;
-      final ok = result['ok'] == true;
+      final version = _resultVersion(result);
+      final verifiedUpgrade =
+          version?.installedVersion != null &&
+          version?.targetVersion != null &&
+          version?.error == null &&
+          version?.updateAvailable == false;
+      final ok = result['ok'] == true && (!upgrade || verifiedUpgrade);
       final installed =
           result['agent'] is Map &&
           (result['agent'] as Map)['installed'] == true;
       final initializationFailed = prepare && !ok && installed;
-      final title = prepare
+      final title = upgrade
+          ? (ok
+                ? _text('助手升级成功', 'Assistant updated')
+                : verifiedUpgrade
+                ? _text(
+                    '版本已升级，助手未能启动',
+                    'Updated, but the assistant could not start',
+                  )
+                : _text('升级未完成', 'Update incomplete'))
+          : prepare
           ? (ok
                 ? _text('助手安装成功', 'Assistant installed')
                 : initializationFailed
@@ -268,7 +595,17 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       await _showActionResult(
         agent,
         title,
-        ok
+        upgrade && ok
+            ? _text(
+                '已安装 ${version!.installedVersion}。已运行的助手将在下次启动时使用新版本。',
+                'Installed ${version.installedVersion}. Running assistants will use it on their next launch.',
+              )
+            : upgrade && result['ok'] == true && !verifiedUpgrade
+            ? _text(
+                '尚未检测到目标版本，请检查网络后重试。',
+                'The target version was not detected. Check your connection and try again.',
+              )
+            : ok
             ? _text('助手已准备好，可以开始对话。', 'The assistant is ready to chat.')
             : _actionError(
                 result['error'],
@@ -279,7 +616,9 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       if (!mounted) return;
       await _showActionResult(
         agent,
-        prepare
+        upgrade
+            ? _text('升级未完成', 'Update incomplete')
+            : prepare
             ? _text('安装未完成', 'Installation did not finish')
             : _text('助手暂时无法启动', 'Assistant could not start'),
         _actionError(error, installation: prepare),
@@ -326,7 +665,7 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   }
 
   Future<void> _addCustomAgent() async {
-    final result = await showDialog<AcpAgentProfile>(
+    final result = await showOmniGlassCardSheet<AcpAgentProfile>(
       context: context,
       builder: (dialogContext) => _AddCustomAgentDialog(english: _english),
     );
@@ -347,13 +686,29 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
     }
   }
 
-  Future<void> _openAgentConfig(AcpAgentProfile agent) async {
+  Future<Object?> _openAgentConfig(
+    AcpAgentProfile agent,
+    OmniContainerSource source,
+  ) async {
+    if (_packageOperations.containsKey(agent.id)) return null;
+    final extra = {omniContainerExtraKey: source};
+    if (agent.id == 'na-cloud') {
+      await GoRouterManager.pushForResult<Object?>(
+        '/home/na/personal',
+        extra: extra,
+      );
+      if (mounted) await _load();
+      return null;
+    }
+    if (!agent.configurationAvailable) return null;
     final changed = await GoRouterManager.pushForResult<bool>(
       '/home/agent_config/${Uri.encodeComponent(agent.id)}',
+      extra: extra,
     );
     if (changed == true && mounted) {
       await _load();
     }
+    return changed;
   }
 
   String _pluginActionKey(OmniPluginActionItem action) =>
@@ -390,333 +745,292 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
-    final dark = context.isDarkTheme;
-    final card = dark ? palette.surfacePrimary : Colors.white;
     final agents = _visibleAgents;
-    final managed = agents.where((agent) => agent.builtIn).toList();
-    final custom = agents.where((agent) => !agent.builtIn).toList();
-    return Scaffold(
-      backgroundColor: palette.pageBackground,
-      appBar: CommonAppBar(
-        title: _text('Agent 模式', 'Agent mode'),
-        primary: true,
-        actions: [
-          IconButton(
-            tooltip: _text('刷新检测', 'Refresh detection'),
-            onPressed: _refreshing ? null : () => _load(refresh: true),
-            icon: _refreshing
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(LucideIcons.refreshCw),
+    final managed = agents.where((agent) => agent.builtIn).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final custom = agents.where((agent) => !agent.builtIn).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return PopScope(
+      canPop: !widget.active || !_searchVisible,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && widget.active && _searchVisible) _closeSearch();
+      },
+      child: Scaffold(
+        backgroundColor: palette.pageBackground,
+        appBar: OmniRootToolbar(
+          title: 'Agents',
+          primary: true,
+          showBackButton: !widget.embedded,
+          search: OmniRootToolbarSearch(
+            searching: _searchVisible,
+            onSearch: _openSearch,
+            onClose: _closeSearch,
+            controller: _searchController,
+            focusNode: _searchFocusNode,
+            onChanged: (value) => setState(() => _query = value),
+            hintText: _text('搜索 Agent', 'Search Agents'),
+            searchTooltip: _text('搜索 Agent', 'Search Agents'),
+            searchButtonKey: const Key('agent-search-button'),
+            closeButtonKey: const Key('agent-close-search'),
+            fieldKey: const Key('agent-contact-search'),
+            showClearButton: false,
           ),
-          IconButton(
-            tooltip: _text('添加自定义 ACP Agent', 'Add custom ACP Agent'),
-            onPressed: _addCustomAgent,
-            icon: const Icon(LucideIcons.plus),
-          ),
-        ],
-      ),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _error != null && (_catalog?.agents.isEmpty ?? true)
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(_error!, textAlign: TextAlign.center),
-                      const SizedBox(height: 12),
-                      FilledButton(
-                        onPressed: _load,
-                        child: Text(_text('重试', 'Retry')),
-                      ),
-                    ],
-                  ),
-                ),
-              )
-            : ListView(
-                padding: edgeToEdgeScrollPadding(
-                  context,
-                  const EdgeInsets.fromLTRB(18, 12, 18, 28),
-                ),
-                children: [
-                  SettingsSectionTitle(
-                    label: _text('托管 Agent', 'Managed Agents'),
-                    subtitle: _text(
-                      '选择助手并配置模型。安装完成后，可返回聊天页使用；启动失败时可修改配置或重新安装。',
-                      'Choose an assistant and configure its model. Once installed, return to chat to use it. If it cannot start, update its configuration or reinstall it.',
-                    ),
-                  ),
-                  _buildSharedModelSummary(card),
-                  const SizedBox(height: 12),
-                  _buildSearchField(card),
-                  const SizedBox(height: 12),
-                  OmniSegmentedSlider<_AgentFilter>(
-                    value: _filter,
-                    keyPrefix: 'agent-filter',
-                    options: [
-                      OmniSegmentedOption(
-                        value: _AgentFilter.all,
-                        label:
-                            '${_text('全部', 'All')} '
-                            '${_countFor(_AgentFilter.all)}',
-                      ),
-                      OmniSegmentedOption(
-                        value: _AgentFilter.available,
-                        label:
-                            '${_text('可用', 'Available')} '
-                            '${_countFor(_AgentFilter.available)}',
-                      ),
-                      OmniSegmentedOption(
-                        value: _AgentFilter.unavailable,
-                        label:
-                            '${_text('不可用', 'Unavailable')} '
-                            '${_countFor(_AgentFilter.unavailable)}',
-                      ),
-                    ],
-                    onChanged: (value) => setState(() => _filter = value),
-                  ),
-                  if (managed.isNotEmpty) ...[
-                    const SizedBox(height: 20),
-                    _buildSectionLabel(_text('预置 Agent', 'Built-in Agents')),
-                    for (var i = 0; i < managed.length; i++) ...[
-                      _buildAgentTile(managed[i]),
-                      if (i < managed.length - 1) _buildRowDivider(),
-                    ],
-                  ],
-                  if (custom.isNotEmpty) ...[
-                    const SizedBox(height: 24),
-                    _buildSectionLabel(_text('自定义 Agent', 'Custom Agents')),
-                    for (var i = 0; i < custom.length; i++) ...[
-                      _buildAgentTile(custom[i]),
-                      if (i < custom.length - 1) _buildRowDivider(),
-                    ],
-                  ],
-                  if (agents.isEmpty) ...[
-                    const SizedBox(height: 48),
-                    Column(
-                      children: [
-                        Icon(
-                          LucideIcons.searchX,
-                          size: 26,
-                          color: palette.textTertiary,
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          _text('没有匹配的 Agent', 'No matching Agents'),
-                          style: TextStyle(
-                            color: palette.textSecondary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _text(
-                            '换个关键词或筛选条件试试',
-                            'Try a different keyword or filter',
-                          ),
-                          style: TextStyle(
-                            color: palette.textTertiary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                  if (_pluginActions.isNotEmpty) ...[
-                    const SizedBox(height: 24),
-                    _buildSectionLabel(
-                      _text('本地 Web 界面', 'Local Web interfaces'),
-                    ),
-                    for (var i = 0; i < _pluginActions.length; i++) ...[
-                      _buildPluginActionTile(_pluginActions[i]),
-                      if (i < _pluginActions.length - 1) _buildRowDivider(),
-                    ],
-                  ],
-                  // 远程 PC Bridge：全局共享配置入口（仅配置远程 ACP 连接）。
-                  const SizedBox(height: 24),
-                  _buildSectionLabel(_text('远程运行', 'Remote runtime')),
-                  _FlatTile(
-                    leading: Icon(
-                      LucideIcons.monitorSmartphone,
-                      size: 18,
-                      color: palette.accentPrimary,
-                    ),
-                    title: _text('远程 PC Bridge', 'Remote PC Bridge'),
-                    statusColor: _remoteBridgeEnabled
-                        ? const Color(0xFF2EAF67)
-                        : const Color(0xFF98A2B3),
-                    statusLabel: _remoteBridgeEnabled
-                        ? _text('已启用', 'Enabled')
-                        : _text('未启用', 'Not enabled'),
-                    subtitle: _remoteBridgeEnabled
-                        ? _text(
-                            'Agent 聊天使用远程 ACP',
-                            'Agent chat runs on the remote ACP runtime',
-                          )
-                        : _text(
-                            '配置远程 ACP 连接',
-                            'Configure a remote ACP connection',
-                          ),
-                    onTap: () {
-                      GoRouterManager.push('/home/remote_codex_setting');
-                    },
-                  ),
-                ],
-              ),
-      ),
-    );
-  }
-
-  Widget _buildSharedModelSummary(Color card) {
-    final palette = context.omniPalette;
-    final label = _sharedModelLabel.isEmpty
-        ? _text('尚未配置统一模型', 'No shared model configured')
-        : _sharedModelLabel;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(
-        color: card,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        children: [
-          Icon(LucideIcons.bot, size: 18, color: palette.accentPrimary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '${_text('默认模型：', 'Default model: ')}$label',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: palette.textSecondary,
-                fontSize: 13,
-                height: 1.4,
-              ),
+          actions: [
+            IconButton(
+              tooltip: _text('添加自定义 ACP Agent', 'Add custom ACP Agent'),
+              onPressed: _addCustomAgent,
+              icon: const Icon(LucideIcons.plus),
             ),
+          ],
+        ),
+        body: OmniContentWidth(
+          child: SafeArea(
+            top: false,
+            bottom: false,
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null && (_catalog?.agents.isEmpty ?? true)
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(_error!, textAlign: TextAlign.center),
+                          const SizedBox(height: 12),
+                          FilledButton(
+                            onPressed: _load,
+                            child: Text(_text('重试', 'Retry')),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : _buildList(managed: managed, custom: custom),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildList({
+    required List<AcpAgentProfile> managed,
+    required List<AcpAgentProfile> custom,
+  }) {
+    final sections = <Widget>[
+      OmniSegmentedSlider<_AgentFilter>(
+        value: _filter,
+        height: 38 * MediaQuery.textScalerOf(context).scale(12.5) / 12.5,
+        keyPrefix: 'agent-filter',
+        options: [
+          OmniSegmentedOption(
+            value: _AgentFilter.all,
+            label: '${_text('全部', 'All')} ${_countFor(_AgentFilter.all)}',
+          ),
+          OmniSegmentedOption(
+            value: _AgentFilter.available,
+            label:
+                '${_text('可用', 'Available')} ${_countFor(_AgentFilter.available)}',
+          ),
+          OmniSegmentedOption(
+            value: _AgentFilter.unavailable,
+            label:
+                '${_text('不可用', 'Unavailable')} ${_countFor(_AgentFilter.unavailable)}',
           ),
         ],
+        onChanged: (value) => setState(() => _filter = value),
       ),
-    );
-  }
-
-  Widget _buildSearchField(Color card) {
-    final palette = context.omniPalette;
-    return TextField(
-      style: TextStyle(color: palette.textPrimary, fontSize: 14),
-      cursorColor: palette.accentPrimary,
-      decoration: InputDecoration(
-        hintText: _text('搜索 Agent', 'Search Agents'),
-        hintStyle: TextStyle(color: palette.textTertiary, fontSize: 13.5),
-        prefixIcon: Padding(
-          padding: const EdgeInsets.only(left: 14, right: 8),
-          child: Icon(
-            LucideIcons.search,
-            size: 18,
-            color: palette.textTertiary,
+      if (managed.isNotEmpty)
+        _buildContactSection(
+          title: _text('预置 Agent', 'Built-in Agents'),
+          agents: managed,
+        ),
+      if (custom.isNotEmpty)
+        _buildContactSection(
+          title: _text('自定义 Agent', 'Custom Agents'),
+          agents: custom,
+        ),
+      if (managed.isEmpty && custom.isEmpty)
+        OmniSettingsCard(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 32),
+          child: Column(
+            children: [
+              Icon(
+                LucideIcons.searchX,
+                size: 24,
+                color: context.omniPalette.textTertiary,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _text('没有匹配的 Agent', 'No matching Agents'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 15,
+                  color: context.omniPalette.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _text('换个关键词或筛选条件试试', 'Try a different keyword or filter'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.45,
+                  color: context.omniPalette.textTertiary,
+                ),
+              ),
+            ],
           ),
         ),
-        prefixIconConstraints: const BoxConstraints(),
-        filled: true,
-        fillColor: card,
-        isDense: true,
-        contentPadding: const EdgeInsets.symmetric(vertical: 13),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: palette.borderSubtle),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(
-            color: palette.accentPrimary.withValues(alpha: 0.6),
+      if (!_searchVisible) ...[
+        _buildGeneralSettings(),
+        if (_pluginActions.isNotEmpty)
+          OmniSettingsGroup(
+            title: 'Agent WebUI',
+            translateTitle: false,
+            children: [
+              for (final action in _pluginActions)
+                _buildPluginActionTile(action),
+            ],
           ),
-        ),
+        _buildMaintenanceSettings(),
+      ],
+    ];
+    return ListView.separated(
+      key: const PageStorageKey('agent-settings-list'),
+      padding: edgeToEdgeScrollPadding(
+        context,
+        const EdgeInsets.fromLTRB(22, 10, 22, 32),
       ),
-      onChanged: (value) => setState(() => _query = value),
+      itemCount: sections.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 26),
+      itemBuilder: (_, index) => sections[index],
     );
   }
 
-  /// 与设置主页一致的分组小标题。
-  Widget _buildSectionLabel(String label) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-          color: context.omniPalette.textTertiary,
-          fontFamily: 'PingFang SC',
+  Widget _buildContactSection({
+    required String title,
+    required List<AcpAgentProfile> agents,
+  }) => OmniSettingsGroup(
+    title: title,
+    translateTitle: false,
+    dividerIndent: 76,
+    children: [
+      for (var index = 0; index < agents.length; index++)
+        _buildAgentTile(
+          agents[index],
+          first: index == 0,
+          last: index == agents.length - 1,
         ),
-      ),
-    );
-  }
+    ],
+  );
 
-  /// 与设置主页一致的行间隔细分隔线（左侧缩进对齐标题文字）。
-  Widget _buildRowDivider() {
+  Widget _buildGeneralSettings() => OmniSettingsGroup(
+    title: _text('通用配置', 'General'),
+    translateTitle: false,
+    children: [
+      OmniSettingsTile(
+        tileKey: const Key('agent-shared-model'),
+        icon: LucideIcons.bot,
+        title: _text('默认模型', 'Default model'),
+        subtitle: _sharedModelLabel.isEmpty
+            ? _text('尚未配置统一模型', 'No shared model configured')
+            : _sharedModelLabel,
+        translateText: false,
+        onTap: () async {
+          await GoRouterManager.pushForResult<Object?>(
+            '/home/scene_model_setting',
+          );
+          if (mounted) await _loadSharedModel();
+        },
+      ),
+      OmniSettingsTile(
+        tileKey: const Key('agent-remote-bridge'),
+        icon: LucideIcons.monitorSmartphone,
+        title: _text('远程 PC Bridge', 'Remote PC Bridge'),
+        subtitle: _remoteBridgeEnabled
+            ? _text('已启用', 'Enabled')
+            : _text('未启用', 'Not enabled'),
+        translateText: false,
+        onTap: () async {
+          await GoRouterManager.pushForResult<Object?>(
+            '/home/remote_codex_setting',
+          );
+          if (mounted) await _loadRemoteBridge();
+        },
+      ),
+    ],
+  );
+
+  Widget _buildAgentTile(
+    AcpAgentProfile agent, {
+    required bool first,
+    required bool last,
+  }) {
     final palette = context.omniPalette;
-    return Padding(
-      padding: const EdgeInsets.only(left: 30),
-      child: Divider(
-        height: 1,
-        thickness: 1,
-        color: palette.borderSubtle.withValues(
-          alpha: context.isDarkTheme ? 0.5 : 0.78,
-        ),
-      ),
+    final status = _statusPresentation(
+      agent.status,
+      _english,
+      palette.textTertiary,
     );
-  }
-
-  Widget _buildAgentTile(AcpAgentProfile agent) {
-    final palette = context.omniPalette;
-    final status = _statusPresentation(agent.status, _english);
-    final statusColor = agent.enabled ? status.color : const Color(0xFF98A2B3);
+    final statusColor = agent.enabled ? status.color : palette.textTertiary;
     final hasError =
         (agent.lastCheckError ?? '').isNotEmpty && agent.status != 'online';
     final canTest =
         agent.enabled && (agent.status != 'missing' || agent.managedAdapter);
-    final preparing = _preparingAgentIds.contains(agent.id);
-    final busy = agent.id == _busyAgentId || preparing;
+    final operation = _packageOperations[agent.id];
+    final changingPackage = operation != null;
+    final queued = AgentRuntimeService.queuedAgentIds.contains(agent.id);
+    final busy = agent.id == _busyAgentId || changingPackage;
+    final canUninstall =
+        agent.builtIn &&
+        agent.managedAdapter &&
+        agent.uninstallable &&
+        (agent.installed == true ||
+            agent.packageVersion?.installedVersion != null);
     final testLabel = agent.managedAdapter
-        ? agent.installed == true
+        ? agent.packageVersion?.updateAvailable == true
+              ? _text('升级', 'Update')
+              : agent.installed == true ||
+                    agent.packageVersion?.installedVersion != null
               ? _text('重新安装', 'Reinstall')
               : _text('安装', 'Install')
         : _text('重新检测', 'Check again');
     final action = agent.managedAdapter ? _prepare : _test;
-    final capabilitySubtitle = _capabilitySubtitle(agent);
-    return _FlatTile(
+    final needsAttention =
+        agent.status != 'online' ||
+        agent.packageVersion?.updateAvailable == true ||
+        agent.packageVersion?.error != null;
+    Widget buildTile(VoidCallback? onTap) => _AgentContactTile(
       tileKey: Key('agent-config-${agent.id}'),
       leading: AgentBrandIcon(
         agentId: agent.id,
-        size: 18,
+        size: 32,
         fallbackColor: palette.accentPrimary,
       ),
       title: agent.name,
-      statusColor: preparing ? const Color(0xFFE3A52B) : statusColor,
-      statusLabel: preparing
-          ? _text('后台安装中', 'Installing in background')
+      statusColor: changingPackage ? const Color(0xFFE3A52B) : statusColor,
+      statusLabel: changingPackage
+          ? operation == AgentPackageOperation.uninstall
+                ? queued
+                      ? _text('等待卸载', 'Queued for uninstall')
+                      : _text('卸载中', 'Uninstalling')
+                : queued
+                ? _text('等待安装 / 升级', 'Queued')
+                : _text('后台安装 / 升级中', 'Installing / updating')
           : !agent.enabled
           ? _text('已停用', 'Disabled')
           : status.label,
-      subtitle:
-          capabilitySubtitle ??
-          (agent.managedAdapter || agent.id == 'xiaowan-acp'
-              ? null
-              : agent.description.isNotEmpty
-              ? agent.description
-              : ([agent.command, ...agent.arguments]).join(' ')),
-      subtitleMonospace:
-          capabilitySubtitle == null && agent.description.isEmpty,
-      errorText: hasError && !preparing
+      subtitle: !agent.builtIn && agent.description.isNotEmpty
+          ? agent.description
+          : null,
+      detailText:
+          agent.packageVersion?.updateAvailable == true ||
+              agent.packageVersion?.error != null
+          ? _versionSummary(agent)
+          : null,
+      detailIsError: agent.packageVersion?.error != null,
+      errorText: hasError && !changingPackage
           ? _actionError(
               agent.lastCheckError,
               installation: agent.installed == false,
@@ -724,13 +1038,179 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
           : null,
       actionLabel: canTest ? testLabel : null,
       actionKey: Key('agent-check-${agent.id}'),
+      quietAction: !needsAttention,
       onAction: canTest ? () => action(agent) : null,
-      navigationLabel: _text('配置', 'Configure'),
+      secondaryActionLabel: canUninstall ? _text('卸载', 'Uninstall') : null,
+      secondaryActionKey: Key('agent-uninstall-${agent.id}'),
+      onSecondaryAction: canUninstall ? () => _uninstall(agent) : null,
+      navigationLabel: agent.id == 'na-cloud' || agent.configurationAvailable
+          ? _text('配置', 'Configure')
+          : null,
       navigationKey: Key('agent-navigation-${agent.id}'),
       busy: busy,
-      onTap: preparing
-          ? () {}
-          : () => _openAgentConfig(agent),
+      onTap: onTap,
+    );
+    if ((agent.id != 'na-cloud' && !agent.configurationAvailable) || busy) {
+      return buildTile(null);
+    }
+    final rowShape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(
+        top: first ? const Radius.circular(22) : Radius.zero,
+        bottom: last ? const Radius.circular(22) : Radius.zero,
+      ),
+    );
+    return OmniOpenContainer(
+      key: ValueKey('agent-open-${agent.id}'),
+      closedBuilder: (rowContext, open) => Material(
+        color: rowContext.omniPalette.surfacePrimary,
+        shape: rowShape,
+        clipBehavior: Clip.antiAlias,
+        child: buildTile(open),
+      ),
+      onOpen: (source) => _openAgentConfig(agent, source),
+    );
+  }
+
+  String? _versionSummary(AcpAgentProfile agent) {
+    if (!agent.managedAdapter ||
+        (agent.status == 'missing' && agent.installed == false)) {
+      return null;
+    }
+    final version = agent.packageVersion;
+    if (version == null) return _text('版本未检测', 'Version not checked');
+    final current = version.installedVersion;
+    final prefix = current == null ? '' : '$current · ';
+    if (version.error != null) {
+      return '$prefix${version.error == 'local_probe_failed' ? _text('无法读取本地版本', 'Could not read installed version') : _text('检查更新失败，点击重试', 'Update check failed; try again')}';
+    }
+    if (version.updateAvailable) {
+      return '$prefix${_text('有新版本', 'Update available')} ${version.targetVersion}';
+    }
+    if (version.pinned) {
+      final upstream = version.latestVersion;
+      return '$prefix${_text('版本由应用管理', 'Version managed by the app')}'
+          '${upstream != null && upstream != current ? '\n${_text('上游版本', 'Upstream version')} $upstream' : ''}';
+    }
+    if (current == null) {
+      return version.latestVersion == null
+          ? null
+          : '${_text('最新版本', 'Latest')} ${version.latestVersion}';
+    }
+    return version.checkedAt == null
+        ? current
+        : '$current · ${_text('无可用更新', 'No updates')}';
+  }
+
+  Widget _buildMaintenanceSettings() {
+    final times =
+        (_catalog?.agents ?? const <AcpAgentProfile>[])
+            .map((agent) => agent.packageVersion?.checkedAt)
+            .whereType<int>()
+            .toList()
+          ..sort();
+    final checked = times.isEmpty
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(times.last);
+    final timeLabel = checked == null
+        ? _text('尚未检查更新', 'Updates not checked')
+        : '${_text('上次检查', 'Last checked')} ${MaterialLocalizations.of(context).formatShortDate(checked)} '
+              '${TimeOfDay.fromDateTime(checked).format(context)}';
+    return OmniSettingsGroup(
+      title: _text('维护', 'Maintenance'),
+      translateTitle: false,
+      children: [
+        OmniSettingsTile(
+          tileKey: const Key('agent-refresh'),
+          icon: LucideIcons.refreshCw,
+          title: _text('刷新检测', 'Refresh detection'),
+          translateText: false,
+          showChevron: false,
+          trailing: _refreshing ? const _AgentBusyIndicator() : null,
+          onTap:
+              _refreshing || _checkingUpdates || _packageOperations.isNotEmpty
+              ? null
+              : () => _load(refresh: true),
+        ),
+        OmniSettingsTile(
+          tileKey: const Key('agent-check-updates'),
+          icon: LucideIcons.download,
+          title: _checkingUpdates
+              ? _text('正在检查', 'Checking')
+              : _text('检查更新', 'Check updates'),
+          subtitle: timeLabel,
+          translateText: false,
+          showChevron: false,
+          trailing: _checkingUpdates ? const _AgentBusyIndicator() : null,
+          onTap:
+              _checkingUpdates || _refreshing || _packageOperations.isNotEmpty
+              ? null
+              : _checkUpdates,
+        ),
+        if (_updatableAgents.isNotEmpty || _upgradingAll)
+          OmniSettingsTile(
+            tileKey: const Key('agent-upgrade-all'),
+            icon: LucideIcons.arrowUpCircle,
+            title:
+                '${_text('全部升级', 'Update all')} (${_updatableAgents.length})',
+            translateText: false,
+            showChevron: false,
+            trailing: _upgradingAll ? const _AgentBusyIndicator() : null,
+            onTap:
+                _checkingUpdates ||
+                    _packageOperations.isNotEmpty ||
+                    _upgradingAll
+                ? null
+                : _upgradeAll,
+          ),
+        if (_catalog?.agents.any(_hasAgentDetails) == true)
+          OmniSettingsTile(
+            tileKey: const Key('agent-version-details'),
+            icon: LucideIcons.info,
+            title: _text('版本与能力', 'Versions & capabilities'),
+            translateText: false,
+            onTap: _showVersionDetails,
+          ),
+      ],
+    );
+  }
+
+  bool _hasAgentDetails(AcpAgentProfile agent) =>
+      agent.managedAdapter || _capabilitySubtitle(agent) != null;
+
+  void _showVersionDetails() {
+    final agents = (_catalog?.agents ?? const <AcpAgentProfile>[])
+        .where(_hasAgentDetails)
+        .toList();
+    showSettingsDetailSheet<void>(
+      context: context,
+      builder: (context) => SettingsDetailSheet(
+        title: _text('版本与能力', 'Versions & capabilities'),
+        body: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var index = 0; index < agents.length; index++) ...[
+              OmniSettingsTile(
+                title: agents[index].name,
+                subtitle:
+                    _versionSummary(agents[index]) ??
+                    _capabilitySubtitle(agents[index]),
+                bottomNote: _versionSummary(agents[index]) == null
+                    ? null
+                    : _capabilitySubtitle(agents[index]),
+                showChevron: false,
+                translateText: false,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              if (index < agents.length - 1)
+                Divider(
+                  height: 1,
+                  thickness: 0.65,
+                  color: context.omniPalette.borderSubtle,
+                ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -751,32 +1231,44 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage> {
       english: _english,
       fallback: action.description,
     );
-    final statusColor = switch (status) {
-      AgentWebStatus.running => const Color(0xFF2EAF67),
-      AgentWebStatus.starting => const Color(0xFFE3A52B),
-      _ => null,
-    };
     final statusLabel = switch (status) {
       AgentWebStatus.running => _text('运行中', 'Running'),
       AgentWebStatus.starting => _text('启动中', 'Starting'),
       _ => null,
     };
-    return _FlatTile(
+    return OmniSettingsTile(
       tileKey: Key('plugin-action-$key'),
-      leading: Icon(LucideIcons.globe2, size: 18, color: palette.accentPrimary),
+      icon: LucideIcons.globe2,
       title: label,
-      statusColor: statusColor,
-      statusLabel: statusLabel,
       subtitle: description,
-      actionLabel: active ? _text('停止', 'Stop') : _text('打开', 'Open'),
-      actionColor: active ? const Color(0xFFE05252) : null,
-      actionKey: Key(
-        active ? 'plugin-action-stop-$key' : 'plugin-action-button-$key',
-      ),
-      onAction: disabled
-          ? null
-          : () => active ? _stopPluginAction(action) : _invokePluginAction(action),
-      busy: busy,
+      bottomNote: statusLabel,
+      translateText: false,
+      trailing: busy
+          ? const _AgentBusyIndicator()
+          : TextButton(
+              key: Key(
+                active
+                    ? 'plugin-action-stop-$key'
+                    : 'plugin-action-button-$key',
+              ),
+              onPressed: disabled
+                  ? null
+                  : () => active
+                        ? _stopPluginAction(action)
+                        : _invokePluginAction(action),
+              style: TextButton.styleFrom(
+                foregroundColor: active
+                    ? Theme.of(context).colorScheme.error
+                    : palette.accentPrimary,
+                minimumSize: const Size(40, 40),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                textStyle: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              child: Text(active ? _text('停止', 'Stop') : _text('打开', 'Open')),
+            ),
       onTap: disabled ? null : () => _invokePluginAction(action),
     );
   }
@@ -854,11 +1346,12 @@ class _AddCustomAgentDialogState extends State<_AddCustomAgentDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
+    return OmniGlassAlertDialog(
       title: Text(_text('添加自定义 ACP Agent', 'Add custom ACP Agent')),
       content: SizedBox(
         width: 460,
         child: SingleChildScrollView(
+          padding: const EdgeInsets.only(top: 8),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -900,11 +1393,24 @@ class _AddCustomAgentDialogState extends State<_AddCustomAgentDialog> {
                   ),
                 ),
               ),
-              SwitchListTile.adaptive(
-                contentPadding: EdgeInsets.zero,
-                title: Text(_text('启用 Agent', 'Enable Agent')),
-                value: _enabled,
-                onChanged: (value) => setState(() => _enabled = value),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _text('启用 Agent', 'Enable Agent'),
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
+                        color: context.omniPalette.textPrimary,
+                      ),
+                    ),
+                  ),
+                  OmniSettingsSwitch(
+                    value: _enabled,
+                    onToggle: (value) => setState(() => _enabled = value),
+                  ),
+                ],
               ),
             ],
           ),
@@ -921,10 +1427,10 @@ class _AddCustomAgentDialogState extends State<_AddCustomAgentDialog> {
   }
 }
 
-/// 扁平设置行：与设置主页（settings_page）一致的行式排版，
-/// 行首 18px 图标 + 标题 + 状态/副标题，整行可点击。
-class _FlatTile extends StatelessWidget {
-  const _FlatTile({
+/// The contact identity follows the settings group's spacing and typography.
+/// Healthy rows keep maintenance quiet; attention states retain explicit actions.
+class _AgentContactTile extends StatelessWidget {
+  const _AgentContactTile({
     required this.leading,
     required this.title,
     required this.onTap,
@@ -932,12 +1438,16 @@ class _FlatTile extends StatelessWidget {
     this.statusColor,
     this.statusLabel,
     this.subtitle,
-    this.subtitleMonospace = false,
     this.errorText,
+    this.detailText,
+    this.detailIsError = false,
     this.actionLabel,
-    this.actionColor,
     this.actionKey,
     this.onAction,
+    this.quietAction = false,
+    this.secondaryActionLabel,
+    this.secondaryActionKey,
+    this.onSecondaryAction,
     this.navigationLabel,
     this.navigationKey,
     this.busy = false,
@@ -950,12 +1460,16 @@ class _FlatTile extends StatelessWidget {
   final Color? statusColor;
   final String? statusLabel;
   final String? subtitle;
-  final bool subtitleMonospace;
   final String? errorText;
+  final String? detailText;
+  final bool detailIsError;
   final String? actionLabel;
-  final Color? actionColor;
   final Key? actionKey;
   final VoidCallback? onAction;
+  final bool quietAction;
+  final String? secondaryActionLabel;
+  final Key? secondaryActionKey;
+  final VoidCallback? onSecondaryAction;
   final String? navigationLabel;
   final Key? navigationKey;
   final bool busy;
@@ -963,199 +1477,236 @@ class _FlatTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
-    final hasSubtitle = (subtitle ?? '').isNotEmpty;
-    final hasStatus = statusLabel != null && statusColor != null;
+    final showAction = actionLabel != null && onAction != null;
+    final showSecondaryAction = secondaryActionLabel != null && !busy;
+    final details = <Widget>[
+      if ((subtitle ?? '').isNotEmpty)
+        Text(
+          subtitle!,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.45,
+            color: palette.textSecondary,
+          ),
+        ),
+      if ((detailText ?? '').isNotEmpty)
+        Text(
+          detailText!,
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.45,
+            color: detailIsError
+                ? Theme.of(context).colorScheme.error
+                : palette.textSecondary,
+          ),
+        ),
+      if ((errorText ?? '').isNotEmpty)
+        Text(
+          errorText!,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 12,
+            height: 1.45,
+            color: Theme.of(context).colorScheme.error,
+          ),
+        ),
+    ];
+    final maintenanceActions = <Widget>[
+      if (!quietAction && showAction && !busy)
+        _actionButton(
+          key: actionKey,
+          label: actionLabel!,
+          color: palette.accentPrimary,
+          onPressed: onAction,
+        ),
+      if (showSecondaryAction)
+        _actionButton(
+          key: secondaryActionKey,
+          label: secondaryActionLabel!,
+          color: Theme.of(context).colorScheme.error,
+          onPressed: onSecondaryAction,
+        ),
+    ];
     return Material(
       color: Colors.transparent,
       child: InkWell(
         key: tileKey,
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        splashColor: palette.accentPrimary.withValues(alpha: 0.08),
-        highlightColor: Colors.transparent,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(4, 13, 2, 13),
-          child: Row(
-            children: [
-              SizedBox(width: 18, height: 18, child: Center(child: leading)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: palette.textPrimary,
-                        height: 1.5,
-                        fontFamily: 'PingFang SC',
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Use the row's available space, including when this page is in a
+            // split window. Larger text keeps maintenance on its own line.
+            final inlineActions =
+                constraints.maxWidth >= OmniLayoutBreakpoints.medium &&
+                MediaQuery.textScalerOf(context).scale(15) <= 19.5;
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      SizedBox(
+                        key: ValueKey('agent-avatar-$title'),
+                        width: 44,
+                        height: 44,
+                        child: Center(child: leading),
                       ),
-                    ),
-                    if (hasStatus || hasSubtitle) ...[
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          if (hasStatus) ...[
-                            Container(
-                              width: 6,
-                              height: 6,
-                              decoration: BoxDecoration(
-                                color: statusColor,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 5),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                             Text(
-                              statusLabel!,
+                              title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w500,
-                                color: statusColor,
-                                height: 1.55,
-                                fontFamily: 'PingFang SC',
+                                fontSize: 15,
+                                fontWeight: FontWeight.w400,
+                                color: palette.textPrimary,
+                                height: 1.38,
                               ),
                             ),
-                          ],
-                          if (hasSubtitle) ...[
-                            if (hasStatus)
-                              Text(
-                                '  ·  ',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: palette.textTertiary,
-                                  height: 1.55,
-                                ),
-                              ),
-                            Flexible(
-                              child: Text(
-                                subtitle!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: palette.textSecondary,
-                                  height: 1.55,
-                                  fontFamily: subtitleMonospace
-                                      ? 'monospace'
-                                      : 'PingFang SC',
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ],
-                    if ((errorText ?? '').isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        errorText!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Theme.of(context).colorScheme.error,
-                          height: 1.55,
-                          fontFamily: 'PingFang SC',
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(left: 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (busy)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 3),
-                        child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    else if (actionLabel != null && onAction != null)
-                      TextButton(
-                        key: actionKey,
-                        onPressed: onAction,
-                        style: TextButton.styleFrom(
-                          minimumSize: Size.zero,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 3,
-                          ),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 150),
-                          child: Text(
-                            actionLabel!,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: actionColor ?? palette.accentPrimary,
-                              fontFamily: 'PingFang SC',
-                            ),
-                          ),
-                        ),
-                      ),
-                    if ((busy || actionLabel != null) &&
-                        navigationLabel != null)
-                      const SizedBox(height: 3),
-                    if (navigationLabel != null)
-                      InkWell(
-                        key: navigationKey,
-                        onTap: onTap,
-                        borderRadius: BorderRadius.circular(8),
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(4, 3, 0, 3),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                navigationLabel!,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w500,
-                                  color: palette.textSecondary,
-                                  fontFamily: 'PingFang SC',
-                                ),
-                              ),
-                              const SizedBox(width: 3),
-                              Icon(
-                                LucideIcons.chevronRight,
-                                size: 16,
-                                color: palette.textTertiary,
+                            if (statusLabel != null) ...[
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 5,
+                                    height: 5,
+                                    decoration: BoxDecoration(
+                                      color: statusColor,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Expanded(
+                                    child: Text(
+                                      statusLabel!,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        height: 1.45,
+                                        color: palette.textSecondary,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
+                            if (inlineActions && details.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              ...details,
+                            ],
+                          ],
+                        ),
+                      ),
+                      if (inlineActions && maintenanceActions.isNotEmpty) ...[
+                        const SizedBox(width: 16),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            for (
+                              var index = 0;
+                              index < maintenanceActions.length;
+                              index++
+                            ) ...[
+                              if (index > 0) const SizedBox(width: 8),
+                              maintenanceActions[index],
+                            ],
+                          ],
+                        ),
+                      ],
+                      if (busy) ...[
+                        const SizedBox(width: 10),
+                        const SizedBox.square(
+                          dimension: 48,
+                          child: Center(child: _AgentBusyIndicator()),
+                        ),
+                      ] else if (quietAction && showAction)
+                        OmniCircleButton(
+                          key: actionKey,
+                          tooltip: actionLabel!,
+                          onPressed: onAction,
+                          icon: LucideIcons.rotateCw,
+                          size: 40,
+                          tapTargetSize: MaterialTapTargetSize.padded,
+                          foregroundColor: palette.textTertiary,
+                        ),
+                      if (navigationLabel != null)
+                        IconButton(
+                          key: navigationKey,
+                          onPressed: onTap,
+                          tooltip: navigationLabel,
+                          icon: const Icon(LucideIcons.chevronRight, size: 18),
+                          style: IconButton.styleFrom(
+                            foregroundColor: palette.textTertiary,
+                            minimumSize: const Size.square(48),
+                            visualDensity: VisualDensity.standard,
+                            padding: EdgeInsets.zero,
+                            tapTargetSize: MaterialTapTargetSize.padded,
                           ),
                         ),
-                      )
-                    else if (!busy && actionLabel == null)
-                      Icon(
-                        LucideIcons.chevronRight,
-                        size: 18,
-                        color: palette.textTertiary,
+                    ],
+                  ),
+                  if (!inlineActions &&
+                      (details.isNotEmpty || maintenanceActions.isNotEmpty))
+                    Padding(
+                      padding: const EdgeInsets.only(left: 58, top: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ...details,
+                          if (maintenanceActions.isNotEmpty)
+                            Wrap(
+                              spacing: 12,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: maintenanceActions,
+                            ),
+                        ],
                       ),
-                  ],
-                ),
+                    ),
+                ],
               ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
   }
+
+  Widget _actionButton({
+    required String label,
+    required Key? key,
+    required Color color,
+    required VoidCallback? onPressed,
+  }) => TextButton(
+    key: key,
+    onPressed: onPressed,
+    style: TextButton.styleFrom(
+      foregroundColor: color,
+      minimumSize: const Size(48, 48),
+      visualDensity: VisualDensity.standard,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
+    ),
+    child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+  );
+}
+
+class _AgentBusyIndicator extends StatelessWidget {
+  const _AgentBusyIndicator();
+
+  @override
+  Widget build(BuildContext context) => const SizedBox(
+    width: 18,
+    height: 18,
+    child: CircularProgressIndicator(strokeWidth: 2),
+  );
 }
 
 List<String> _nonEmptyLines(String source) {
@@ -1178,7 +1729,11 @@ Map<String, String> _parseEnvironment(String source) {
   return environment;
 }
 
-({String label, Color color}) _statusPresentation(String status, bool english) {
+({String label, Color color}) _statusPresentation(
+  String status,
+  bool english,
+  Color inactiveColor,
+) {
   return switch (status) {
     'online' => (
       label: english ? 'Available' : '可用',
@@ -1186,7 +1741,7 @@ Map<String, String> _parseEnvironment(String source) {
     ),
     'missing' => (
       label: english ? 'Not installed' : '未安装',
-      color: const Color(0xFF98A2B3),
+      color: inactiveColor,
     ),
     'offline' => (
       label: english ? 'Could not start' : '启动失败',

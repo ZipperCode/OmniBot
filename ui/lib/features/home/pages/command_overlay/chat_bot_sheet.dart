@@ -32,6 +32,9 @@ import 'package:ui/constants/openclaw/openclaw_keys.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
 import 'package:ui/theme/theme_context.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
+import 'package:ui/widgets/omni_sheet_motion.dart';
 
 /// 聊天上下文存储的key
 const String kChatContextStorageKey = 'chat_context_for_summary';
@@ -51,6 +54,7 @@ enum ChatBotLaunchScene {
 
 class ChatBotSheet extends StatefulWidget {
   final String? initialMessage;
+  final String agentId;
   final List<Map<String, dynamic>> initialAttachments;
 
   /// 启动场景，用于控制是否加载之前保存的上下文
@@ -60,6 +64,7 @@ class ChatBotSheet extends StatefulWidget {
   const ChatBotSheet({
     super.key,
     this.initialMessage,
+    this.agentId = 'xiaowan-acp',
     this.initialAttachments = const [],
     this.launchScene = ChatBotLaunchScene.normal,
     this.openClawEnabled,
@@ -70,11 +75,12 @@ class ChatBotSheet extends StatefulWidget {
 }
 
 class _ChatBotSheetState extends State<ChatBotSheet>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _messageScrollController = ScrollController();
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
+  late final _sheetElastic = OmniSheetElasticController(this);
   final List<ChatMessageModel> _messages = [];
   final FocusNode _inputFocusNode = FocusNode();
   final GlobalKey<ChatInputAreaState> _chatInputAreaKey =
@@ -88,7 +94,6 @@ class _ChatBotSheetState extends State<ChatBotSheet>
   bool _isPopupVisible = false;
 
   final Map<String, String> _currentAiMessages = {};
-  final Set<String> _expandedAgentRunTaskIds = <String>{};
   bool _autoStickMessageListToLatest = true;
   bool _messageStickToLatestScheduled = false;
   bool _messageListScrollWasUserDriven = false;
@@ -97,11 +102,11 @@ class _ChatBotSheetState extends State<ChatBotSheet>
   String? _currentDispatchTurnId;
   String? _acpSessionId;
   String? _acpPromptId;
-  String? _activeAcpAgentId;
+  String get _activeAcpAgentId => widget.agentId;
   bool _closeRequested = false;
   bool _cancelRequested = false;
   bool _acpCloseStarted = false;
-  StreamSubscription<Map<String, dynamic>>? _acpRuntimeSubscription;
+  ChatAgentEventProjection? _lastAgentEventProjection;
   final ChatConversationRuntimeCoordinator _runtimeCoordinator =
       ChatConversationRuntimeCoordinator.instance;
   static const String _runtimeMode = 'command_overlay';
@@ -176,22 +181,11 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     // 页面关闭回调
     ScreenDialogService.setOnBeforeCloseChatBotDialog(_onDialogClose);
 
-    _acpRuntimeSubscription = AgentRuntimeService.events.listen(
-      _handleIncomingAcpRuntimeEvent,
-    );
     _runtimeCoordinator.ensureInitialized();
-    unawaited(_loadActiveAcpAgentIdentity());
-  }
-
-  Future<void> _loadActiveAcpAgentIdentity() async {
-    try {
-      final status = await AgentRuntimeService.status();
-      final agentId = status.activeAgentId?.trim() ?? '';
-      if (!mounted || agentId.isEmpty) return;
-      setState(() => _activeAcpAgentId = agentId);
-    } catch (error) {
-      debugPrint('加载 ACP Agent 身份失败: $error');
-    }
+    // The shared coordinator is the only native ACP event consumer. Attaching
+    // a sheet observes fresh presentation metadata without replaying an event.
+    _lastAgentEventProjection = _runtimeCoordinator.latestAgentEventProjection;
+    _runtimeCoordinator.addListener(_handleRuntimeCoordinatorChanged);
   }
 
   Future<void> _loadOpenClawConfig() async {
@@ -513,11 +507,15 @@ class _ChatBotSheetState extends State<ChatBotSheet>
         final newId = await ConversationService.createConversation(
           title: title,
           summary: summary,
+          mode: ConversationMode.agent,
+          agentId: widget.agentId,
         );
         if (newId != null) {
           _currentConversationId = newId;
           _currentConversation = ConversationModel(
             id: newId,
+            mode: ConversationMode.agent,
+            agentId: widget.agentId,
             title: title,
             summary: summary,
             status: 0,
@@ -544,6 +542,8 @@ class _ChatBotSheetState extends State<ChatBotSheet>
             _currentConversation ??
             ConversationModel(
               id: _currentConversationId!,
+              mode: ConversationMode.agent,
+              agentId: widget.agentId,
               title: title,
               summary: summary,
               status: 0,
@@ -720,13 +720,13 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     _messageController.removeListener(_handleSlashCommandInput);
     _messageController.dispose();
     _messageScrollController.dispose();
+    _sheetElastic.dispose();
     _sheetController.dispose();
     _inputFocusNode.dispose();
     _openClawBaseUrlController.dispose();
     _openClawTokenController.dispose();
     _openClawUserIdController.dispose();
-    _acpRuntimeSubscription?.cancel();
-    _acpRuntimeSubscription = null;
+    _runtimeCoordinator.removeListener(_handleRuntimeCoordinatorChanged);
     ScreenDialogService.setOnBeforeCloseChatBotDialog(null);
     final conversationId = _currentConversationId;
     if (conversationId != null) {
@@ -760,6 +760,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     if (sessionId != null && sessionId.isNotEmpty) {
       try {
         await AgentRuntimeService.closeSession(
+          agentId: widget.agentId,
           sessionId: sessionId,
           conversationId: conversationId,
         );
@@ -767,7 +768,10 @@ class _ChatBotSheetState extends State<ChatBotSheet>
         _acpCloseStarted = false;
         debugPrint('关闭 ACP 会话失败: $error');
         if (mounted && !_closeRequested) {
-          showToast(formatAgentRuntimeErrorForUser(error), type: ToastType.error);
+          showToast(
+            formatAgentRuntimeErrorForUser(error),
+            type: ToastType.error,
+          );
         }
       }
     }
@@ -779,6 +783,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
   Future<void> _finishAcpCancellationPresentation() async {
     try {
       await AgentRuntimeService.cancelPrompt(
+        agentId: widget.agentId,
         sessionId: _acpSessionId,
         conversationId: _currentConversationId,
         promptId: _acpPromptId,
@@ -923,23 +928,6 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     }
   }
 
-  void _toggleAgentRunGroup(String taskId) {
-    final normalizedTaskId = taskId.trim();
-    if (normalizedTaskId.isEmpty) {
-      return;
-    }
-    setState(() {
-      if (_expandedAgentRunTaskIds.contains(normalizedTaskId)) {
-        _expandedAgentRunTaskIds.remove(normalizedTaskId);
-      } else {
-        _expandedAgentRunTaskIds.add(normalizedTaskId);
-      }
-    });
-    if (_autoStickMessageListToLatest) {
-      _scheduleMessageStickToLatest();
-    }
-  }
-
   void _handleParentScrollHandoff() {
     _autoStickMessageListToLatest = false;
     _messageListScrollWasUserDriven = false;
@@ -971,8 +959,10 @@ class _ChatBotSheetState extends State<ChatBotSheet>
   }
 
   // 悬浮聊天页也复用同一套 linkPreviews 字段，保证两种聊天入口表现一致。
-  void _syncMessageLinkPreviews(String taskId) {
-    final index = _messages.indexWhere((msg) => msg.id == taskId);
+  Future<void> _syncMessageLinkPreviews(String taskId) async {
+    final conversationId = _currentConversationId;
+    final mode = _runtimeMode;
+    var index = _messages.indexWhere((msg) => msg.id == taskId);
     if (index == -1) {
       return;
     }
@@ -987,10 +977,23 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     }
 
     final content = Map<String, dynamic>.from(message.content ?? const {});
-    final nextPreviews = LinkPreviewService.instance.reconcilePreviewMaps(
+    final nextPreviews = await LinkPreviewService.instance.reconcilePreviewMaps(
       text: message.text ?? '',
       existing: content['linkPreviews'],
     );
+    if (nextPreviews == null ||
+        !mounted ||
+        (conversationId != null && _currentConversationId != conversationId) ||
+        _runtimeMode != mode)
+      return;
+    index = _messages.indexWhere((msg) => msg.id == taskId);
+    if (index == -1) return;
+    if (!identical(_messages[index], message)) {
+      // Import/stream updates may replace the display object while native URL parsing runs.
+      // Reconcile against that object's fields so a stale result cannot erase an edit.
+      unawaited(_syncMessageLinkPreviews(taskId));
+      return;
+    }
     final currentPreviews = content['linkPreviews'];
     var didUpdate = false;
     if (!_previewMapListsEqual(currentPreviews, nextPreviews)) {
@@ -999,7 +1002,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       } else {
         content['linkPreviews'] = nextPreviews;
       }
-      _messages[index] = message.copyWith(content: content);
+      setState(() => _messages[index] = message.copyWith(content: content));
       didUpdate = true;
     }
     if (didUpdate &&
@@ -1033,8 +1036,13 @@ class _ChatBotSheetState extends State<ChatBotSheet>
   }
 
   Future<void> _resolveMessageLinkPreview(String taskId, String url) async {
+    final requestedConversationId = _currentConversationId;
+    final mode = _runtimeMode;
     final resolved = await LinkPreviewService.instance.loadPreview(url);
-    if (!mounted) {
+    if (!mounted ||
+        (requestedConversationId != null &&
+            _currentConversationId != requestedConversationId) ||
+        _runtimeMode != mode) {
       return;
     }
 
@@ -1335,16 +1343,6 @@ class _ChatBotSheetState extends State<ChatBotSheet>
         conversationId: conversationId,
         mode: _runtimeMode,
       );
-      var status = await AgentRuntimeService.status();
-      if (!_canContinueAcpTurn(aiMessageId)) return false;
-      if (!status.connected) {
-        status = await AgentRuntimeService.connect();
-      }
-      if (!_canContinueAcpTurn(aiMessageId)) return false;
-      final activeAgentId = status.activeAgentId?.trim() ?? '';
-      if (activeAgentId.isNotEmpty) {
-        _activeAcpAgentId = activeAgentId;
-      }
       final catalog = await SceneModelConfigService.getSceneCatalog();
       final dispatchScene = catalog
           .where((item) => item.sceneId == 'scene.dispatch.model')
@@ -1354,6 +1352,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       // session first so cancellation and late-event attribution have a
       // stable official identity before the potentially long prompt call.
       final sessionResponse = await AgentRuntimeService.newSession(
+        agentId: widget.agentId,
         conversationId: conversationId,
         model: dispatchScene?.effectiveModel.trim(),
         conversationMode: ConversationMode.agent.storageValue,
@@ -1373,11 +1372,18 @@ class _ChatBotSheetState extends State<ChatBotSheet>
         return false;
       }
 
+      _runtimeCoordinator.bindAcpSession(
+        taskId: aiMessageId,
+        conversationId: conversationId,
+        mode: _runtimeMode,
+        sessionId: _acpSessionId!,
+      );
+
       final response = await AgentRuntimeService.promptSession(
         sessionId: _acpSessionId,
         conversationId: conversationId,
         requestId: aiMessageId,
-        agentId: status.activeAgentId,
+        agentId: widget.agentId,
         text: userMessage,
         attachments: attachments,
         model: dispatchScene?.effectiveModel.trim(),
@@ -1390,24 +1396,22 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       final responsePromptId = (response['promptId'] ?? response['turnId'])
           ?.toString()
           .trim();
-      if (conversationId != null) {
-        final result = _runtimeCoordinator.applyAcpPromptResponse(
-          taskId: aiMessageId,
-          conversationId: conversationId,
-          mode: _runtimeMode,
-          sessionId: responseSessionId,
-          turnId: responsePromptId,
-          stopReason:
-              response['stopReason']?.toString() ??
-              response['status']?.toString(),
-          error: response['error']?.toString(),
-          conversation: _currentConversation,
-        );
-        if (result.handled) {
-          _acpSessionId = responseSessionId;
-          _acpPromptId = responsePromptId;
-          _syncAcpRuntimePresentation(conversationId);
-        }
+      final result = _runtimeCoordinator.applyAcpPromptResponse(
+        taskId: aiMessageId,
+        conversationId: conversationId,
+        mode: _runtimeMode,
+        sessionId: responseSessionId,
+        turnId: responsePromptId,
+        stopReason:
+            response['stopReason']?.toString() ??
+            response['status']?.toString(),
+        error: response['error']?.toString(),
+        conversation: _currentConversation,
+      );
+      if (result.handled) {
+        _acpSessionId = responseSessionId;
+        _acpPromptId = responsePromptId;
+        _syncAcpRuntimePresentation(conversationId);
       }
       return true;
     } catch (e) {
@@ -1458,24 +1462,23 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       !_cancelRequested &&
       _currentDispatchTurnId == taskId;
 
-  void _handleIncomingAcpRuntimeEvent(Map<String, dynamic> event) {
-    final conversationId = _asInt(event['conversationId']);
+  void _handleRuntimeCoordinatorChanged() {
+    final projection = _runtimeCoordinator.latestAgentEventProjection;
+    if (identical(projection, _lastAgentEventProjection)) return;
+    _lastAgentEventProjection = projection;
+    final conversationId = projection?.conversationId;
     if (!mounted ||
+        projection == null ||
+        projection.mode != _runtimeMode ||
         _currentDispatchTurnId == null ||
         conversationId == null ||
-        conversationId != _currentConversationId) {
+        conversationId != _currentConversationId ||
+        !projection.result.handled) {
       return;
     }
-    final result = _runtimeCoordinator.applyAgentEvent(
-      conversationId: conversationId,
-      mode: _runtimeMode,
-      event: event,
-      conversation: _currentConversation,
-    );
-    if (!result.handled) {
-      return;
-    }
-    final eventTurnId = result.turnId ?? event['turnId']?.toString().trim();
+    final eventTurnId =
+        projection.result.turnId ??
+        projection.event['turnId']?.toString().trim();
     if (eventTurnId != null && eventTurnId.isNotEmpty) {
       _acpPromptId = eventTurnId;
     }
@@ -1510,12 +1513,6 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     }
   }
 
-  static int? _asInt(dynamic value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '');
-  }
-
   String _latestUserUtterance() {
     for (final message in _messages) {
       if (message.user == 1) {
@@ -1535,6 +1532,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
       if (raw is! List) return const [];
       return raw
           .whereType<Map>()
+          .where((item) => item['historyPayloadOffloaded'] != true)
           .map((item) => item.map((k, v) => MapEntry(k.toString(), v)))
           .where(_attachmentShouldSendToModel)
           .toList();
@@ -1577,6 +1575,7 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     if (raw is! List) return const [];
     return raw
         .whereType<Map>()
+        .where((item) => item['historyPayloadOffloaded'] != true)
         .map((item) => item.map((k, v) => MapEntry(k.toString(), v)))
         .toList();
   }
@@ -1811,9 +1810,29 @@ class _ChatBotSheetState extends State<ChatBotSheet>
     });
   }
 
+  void _resizeSheet(DragUpdateDetails details) {
+    if (!_sheetController.isAttached) return;
+    final height = MediaQuery.sizeOf(context).height;
+    final elasticEnabled =
+        LiquidGlassScope.of(context) &&
+        !MediaQuery.disableAnimationsOf(context);
+    final limit = (height * (1 - 0.85) - MediaQuery.paddingOf(context).top - 14)
+        .clamp(0.0, 100.0);
+    var upward = -(details.primaryDelta ?? 0);
+    if (elasticEnabled && _sheetElastic.pull > 0) {
+      upward -= _sheetElastic.dragBy(upward, limit: limit);
+    }
+    final before = _sheetController.size;
+    final after = (before + upward / height).clamp(0.4, 0.85);
+    _sheetController.jumpTo(after);
+    final excess = upward - (after - before) * height;
+    if (elasticEnabled && excess > 0) {
+      _sheetElastic.dragBy(excess, limit: limit);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final screenHeight = MediaQuery.of(context).size.height;
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final inputAreaHeight = _inputAreaHeight > 0 ? _inputAreaHeight : 72.0;
     final palette = context.omniPalette;
@@ -1850,108 +1869,99 @@ class _ChatBotSheetState extends State<ChatBotSheet>
             Listener(
               behavior: HitTestBehavior.translucent,
               onPointerDown: (event) => _handleOutsideTap(event.position),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: isDark
+              child: OmniSheetElasticSurface(
+                controller: _sheetElastic,
+                keyboardInset: bottomInset,
+                child: OmniGlassSheet(
+                  backgroundColor: isDark
                       ? palette.pageBackground
                       : const Color(0xFFF9FCFF),
                   borderRadius: const BorderRadius.vertical(
                     top: Radius.circular(20),
                   ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: isDark
-                          ? Colors.black.withValues(alpha: 0.28)
-                          : const Color(0x1A000000),
-                      blurRadius: 20,
-                      offset: const Offset(0, -4),
-                    ),
-                  ],
-                ),
-                child: Stack(
-                  children: [
-                    Column(
-                      children: [
-                        // 拖动指示条 - 仅用于拖动整个 sheet 高度
-                        GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onVerticalDragUpdate: (details) {
-                            final delta = details.primaryDelta ?? 0;
-                            final currentSize = _sheetController.size;
-                            // 向上拖动(delta<0)增大size，向下拖动(delta>0)减小size
-                            final newSize =
-                                currentSize - (delta / screenHeight);
-                            _sheetController.jumpTo(newSize.clamp(0.4, 0.95));
-                          },
-                          child: Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
-                            child: Center(
-                              child: Container(
-                                width: 100,
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  color: isDark
-                                      ? palette.borderStrong
-                                      : const Color(0xFFCCCCCC),
-                                  borderRadius: BorderRadius.circular(4),
+                  child: Stack(
+                    children: [
+                      Column(
+                        children: [
+                          // 拖动指示条 - 仅用于拖动整个 sheet 高度
+                          GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onVerticalDragUpdate: _resizeSheet,
+                            onVerticalDragEnd: (details) =>
+                                _sheetElastic.release(
+                                  velocity: -(details.primaryVelocity ?? 0),
+                                ),
+                            onVerticalDragCancel: _sheetElastic.release,
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
+                              child: Center(
+                                child: Container(
+                                  width: 100,
+                                  height: 4,
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? palette.borderStrong
+                                        : const Color(0xFFCCCCCC),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                        // AI 生成标识
-                        const Padding(
-                          padding: EdgeInsets.only(top: 4),
-                          child: Align(
-                            alignment: Alignment.center,
-                            child: AiGeneratedBadge(),
+                          // AI 生成标识
+                          const Padding(
+                            padding: EdgeInsets.only(top: 4),
+                            child: Align(
+                              alignment: Alignment.center,
+                              child: AiGeneratedBadge(),
+                            ),
                           ),
-                        ),
-                        // 消息列表 - 使用 NotificationListener 阻止滚动事件影响 sheet
-                        Expanded(
-                          child: NotificationListener<ScrollNotification>(
-                            onNotification: (notification) {
-                              _handleMessageScrollNotification(notification);
-                              return true; // 阻止滚动事件冒泡到 sheet
-                            },
-                            child: _buildMessageList(),
+                          // 消息列表 - 使用 NotificationListener 阻止滚动事件影响 sheet
+                          Expanded(
+                            child: NotificationListener<ScrollNotification>(
+                              onNotification: (notification) {
+                                _handleMessageScrollNotification(notification);
+                                return true; // 阻止滚动事件冒泡到 sheet
+                              },
+                              child: _buildMessageList(),
+                            ),
                           ),
-                        ),
-                        // 输入框 - 根据 _isInputAreaVisible 控制显示
-                        if (_isInputAreaVisible) _buildInputArea(),
-                        SizedBox(height: bottomInset),
-                      ],
-                    ),
-                    if (_messages.isEmpty &&
-                        homeGreetingSettings.greetingEnabled)
-                      AnimatedPositioned(
-                        duration: const Duration(milliseconds: 280),
-                        curve: Curves.easeInOutCubic,
-                        left: 0,
-                        right: 0,
-                        top: liftEmptyGreeting ? 56 : 116,
-                        child: IgnorePointer(
-                          child: AnimatedAlign(
-                            duration: const Duration(milliseconds: 280),
-                            curve: Curves.easeInOutCubic,
-                            alignment: liftEmptyGreeting
-                                ? Alignment.centerLeft
-                                : Alignment.center,
-                            child: ChatEmptyGreeting(
-                              compact: true,
-                              primaryTextColor: palette.textPrimary,
-                              secondaryTextColor: palette.textSecondary,
-                              accentColor: palette.accentPrimary,
-                              quickPrompts: homeGreetingSettings.quickPrompts,
-                              pinnedQuickPromptIds:
-                                  homeGreetingSettings.pinnedQuickPromptIds,
-                              onQuickPromptSelected: _applyHomeQuickPrompt,
+                          // 输入框 - 根据 _isInputAreaVisible 控制显示
+                          if (_isInputAreaVisible) _buildInputArea(),
+                          SizedBox(height: bottomInset),
+                        ],
+                      ),
+                      if (_messages.isEmpty &&
+                          homeGreetingSettings.greetingEnabled)
+                        AnimatedPositioned(
+                          duration: const Duration(milliseconds: 280),
+                          curve: Curves.easeInOutCubic,
+                          left: 0,
+                          right: 0,
+                          top: liftEmptyGreeting ? 56 : 116,
+                          child: IgnorePointer(
+                            child: AnimatedAlign(
+                              duration: const Duration(milliseconds: 280),
+                              curve: Curves.easeInOutCubic,
+                              alignment: liftEmptyGreeting
+                                  ? Alignment.centerLeft
+                                  : Alignment.center,
+                              child: ChatEmptyGreeting(
+                                compact: true,
+                                primaryTextColor: palette.textPrimary,
+                                secondaryTextColor: palette.textSecondary,
+                                accentColor: palette.accentPrimary,
+                                quickPrompts: homeGreetingSettings.quickPrompts,
+                                pinnedQuickPromptIds:
+                                    homeGreetingSettings.pinnedQuickPromptIds,
+                                onQuickPromptSelected: _applyHomeQuickPrompt,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2050,8 +2060,6 @@ class _ChatBotSheetState extends State<ChatBotSheet>
               key: ValueKey('overlay-agent-run-${group.taskId}'),
               group: group,
               useAcpPresentation: true,
-              expanded: _expandedAgentRunTaskIds.contains(group.taskId),
-              onToggleExpanded: () => _toggleAgentRunGroup(group.taskId),
               onBeforeTaskExecute: _handleBeforeTaskExecute,
               onCancelTask: _onCancelTaskFromCard,
               parentScrollController: _messageScrollController,

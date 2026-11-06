@@ -23,6 +23,7 @@ data class McpFileRecord(
     val createdAt: Long,
     @Volatile var downloadToken: String,
     @Volatile var tokenExpiresAt: Long,
+    val sensitive: Boolean = false,
 )
 
 object McpFileInbox {
@@ -32,7 +33,7 @@ object McpFileInbox {
     private val lock = Any()
     private val records = ConcurrentHashMap<String, McpFileRecord>()
 
-    fun storeFromUri(context: Context, uri: Uri, mimeTypeHint: String? = null): McpFileRecord? {
+    fun storeFromUri(context: Context, uri: Uri, mimeTypeHint: String? = null, sensitive: Boolean = false, checkActive: () -> Unit = {}): McpFileRecord? {
         val resolver = context.contentResolver
         val now = System.currentTimeMillis()
         val meta = queryMeta(resolver = resolver, uri = uri)
@@ -48,7 +49,7 @@ object McpFileInbox {
 
         val fileId = UUID.randomUUID().toString()
         val targetFile = File(dir, "${fileId}_$fileName")
-        val sizeBytes = copyUriToFile(context, uri, targetFile)
+        val sizeBytes = copyUriToFile(context, uri, targetFile, sensitive, checkActive)
             ?: run {
                 if (targetFile.exists()) targetFile.delete()
                 return null
@@ -63,6 +64,7 @@ object McpFileInbox {
             createdAt = now,
             downloadToken = "",
             tokenExpiresAt = 0L,
+            sensitive = sensitive,
         )
 
         synchronized(lock) {
@@ -70,7 +72,7 @@ object McpFileInbox {
             cleanupLocked()
         }
 
-        OmniLog.i(TAG, "Stored file ${record.fileName} (${record.sizeBytes} bytes) as ${record.id}")
+        if (!sensitive) OmniLog.i(TAG, "Stored file ${record.fileName} (${record.sizeBytes} bytes) as ${record.id}")
         return record
     }
 
@@ -123,21 +125,30 @@ object McpFileInbox {
     private fun removeLocked(fileId: String): Boolean {
         val record = records.remove(fileId) ?: return false
         runCatching { File(record.path).delete() }
-        OmniLog.i(TAG, "Removed file ${record.fileName} (${record.id})")
+        if (!record.sensitive) OmniLog.i(TAG, "Removed file ${record.fileName} (${record.id})")
         return true
     }
 
-    private fun copyUriToFile(context: Context, uri: Uri, target: File): Long? {
+    private fun copyUriToFile(context: Context, uri: Uri, target: File, sensitive: Boolean, checkActive: () -> Unit): Long? {
         return try {
             val input = context.contentResolver.openInputStream(uri) ?: return null
             input.use { source ->
                 target.outputStream().use { output ->
-                    source.copyTo(output)
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        checkActive()
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                    }
                 }
             }
             target.length()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            target.delete()
+            throw e
         } catch (e: Exception) {
-            OmniLog.e(TAG, "Failed to copy uri to file: ${e.message}")
+            if (!sensitive) OmniLog.e(TAG, "Failed to copy uri to file: ${e.message}")
             null
         }
     }
@@ -155,6 +166,10 @@ object McpFileInbox {
     }
 
     private fun queryMeta(resolver: android.content.ContentResolver, uri: Uri): FileMeta {
+        if (uri.scheme == "file") {
+            val file = File(requireNotNull(uri.path))
+            return FileMeta(file.name, file.length())
+        }
         var displayName: String? = null
         var sizeBytes: Long? = null
         val cursor = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)

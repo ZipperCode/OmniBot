@@ -225,6 +225,16 @@ class OmniPluginPlatform(
         OmniPluginSession(toolDefinitions = definitions, toolHandlers = handlers)
     }
 
+    /** Declarative catalog only: do not open a session or create execution handlers. */
+    suspend fun listToolDefinitions(): List<OmniPluginToolDefinition> = mutex.withLock {
+        ensureInitialized()
+        activePlugins.flatMap { (pluginId, active) ->
+            active.contribution.toolGroups.flatMap { group ->
+                group.definitions.map { it.copy(ownerPluginId = pluginId) }
+            }
+        }
+    }
+
     suspend fun listActionDefinitions(): List<OmniPluginActionDefinition> = mutex.withLock {
         ensureInitialized()
         activePlugins.flatMap { (pluginId, active) ->

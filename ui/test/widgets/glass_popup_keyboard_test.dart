@@ -29,10 +29,7 @@ void main() {
     );
     await show(0);
     await tester.pumpAndSettle();
-    expect(
-      tester.getRect(find.byKey(const ValueKey('card'))).bottom,
-      lessThan(700),
-    );
+    expect(tester.getRect(find.byKey(const ValueKey('card'))).bottom, 728);
     await show(300);
     await tester.pumpAndSettle();
     expect(

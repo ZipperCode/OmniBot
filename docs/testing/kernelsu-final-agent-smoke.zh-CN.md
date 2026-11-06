@@ -1,5 +1,7 @@
 # KernelSU 终版构建 Agent 端到端冒烟验证记录
 
+> 历史记录：2026-11-06 已采用上游 0.7.0.4 的 Root/Shizuku 实现。本文保留旧版设备证据，不代表新版真机验收通过。
+
 状态：终版构建 Agent 端到端只读冒烟验证通过。
 验证负责人：Device Execution Lane
 目标设备：`b5a43b69` (Xiaomi 2211133C, Android 16 / API 36)

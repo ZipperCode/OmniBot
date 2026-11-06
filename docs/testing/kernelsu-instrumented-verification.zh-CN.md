@@ -1,5 +1,7 @@
 # KernelSU 原生 instrumentation 验证
 
+> 历史记录：2026-11-06 已采用上游 0.7.0.4 的 Root/Shizuku 实现，旧版 instrumentation 已移除。本文保留旧版设备证据，不代表新版真机验收通过。
+
 ## 范围
 
 - 目标设备：`b5a43b69`。

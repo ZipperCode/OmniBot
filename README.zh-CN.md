@@ -41,6 +41,7 @@ OmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Age
 
 - **工具生态扩展**：Skills、Alpine 环境、浏览器、MCP、安卓系统级工具等。
 - **系统级能力**：支持定时任务、闹钟提醒、日历创建/查询/修改、音频播放控制。
+- **个人上下文**：无需 root，按授权查询日历、联系人、通知、应用使用情况、位置、媒体文件、文档、短信与通话记录，并支持日程和联系人管理。
 - **记忆系统**：支持短期与长期记忆嵌入。
 - **生产力工具**：支持读写文件、浏览工作区、调用浏览器、调用终端。
 
@@ -76,6 +77,22 @@ OmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Age
 一般情况下，应用启动时会自动初始化 Alpine 环境，你也可以在这里自行管理环境。
 
 <h2 id="use-cases">使用场景</h2>
+
+### 个人上下文
+
+在“设置 → 应用权限授权 → 个人上下文”逐项开启。AI 使用共享的设备工具按需查询，查询结果可能发送给当前配置的模型，不会自动建立长期记忆。日历与通讯录的读取、写入分别授权；后台查询位置还需单独选择“始终允许”。大致位置及仅选定照片也可使用。
+
+通知访问与接收小万消息通知的开关独立。授权后观察到的通知在本地保留最多 7 天、10000 条，排除系统备份，可手动清空；无法恢复授权前已消失的通知或系统遮蔽的内容。撤销授权后停止记录和查询，聊天记录不受影响。
+
+文件查询先返回元数据，读取内容时才导入已有文件收件箱。可通过系统选择器授权文件或文件夹，并在同一入口撤销。短信和通话记录仅支持读取，能否授权取决于安装器和系统限制；不会申请默认短信、电话或助理身份。本功能不需要 Shizuku、root 或无障碍，也不读取其他应用的私有数据库。
+
+设备 MCP 与内置 Agent 共用工具定义和执行服务。`context_capabilities` 返回真实授权状态；缺少权限不会自动弹窗或终止普通聊天。联系人修改使用查询返回的 `rawContactId` 和 `version`，只修改选定账户记录；日历查询支持 `offset` 分页，全天日程使用 UTC 日期和不含结束日的区间。
+
+### 可选 Root 与设备控制
+
+直接 Root 默认关闭。在“设置 → 应用权限授权 → 扩展能力”开启 **Root 高级能力**，主动向设备的 Root 管理器申请授权。授权有效时优先使用直接 Root；关闭后停止其命令与持久 shell。Shizuku 仍作为独立的可选后端使用。
+
+Agent 可查询和修改支持的系统开关、显示与声音设置，管理应用权限、执行诊断和高权限 shell。状态修改与 shell 命令继续通过 ACP 客户端逐次确认；设备状态读回后才报告修改成功，ROM 不支持的接口明确返回错误。工具约定和兼容范围见 [Android 高权限操作](docs/android-privileged-actions.md)。
 
 ### Skills
 
@@ -125,8 +142,8 @@ npx @thuocean/codex-bridge
 
 ### 环境要求
 
-- Flutter SDK `3.9.2+`
-- JDK `11+`
+- Flutter SDK `3.47.2+`
+- JDK `17+`
 - Node.js `20.19+` 或 `22.12+`、pnpm `10.28.0`（用于 WebUI 开发）
 
 ### 获取代码
@@ -190,8 +207,11 @@ Android 构建会自动处理 WebUI：Gradle 使用锁文件安装依赖、执�
 
 ### 构建并安装
 
-Release APK 默认使用 `OMNIBOT_UPDATE_WORKER_URL` 作为 GUI VLM 代理地址，
-并从更新 Worker 获取 Gelab 线路；Gelab 的上游 Key 只保存在 Worker。
+安卓版本通过 `OMNIBOT_UPDATE_WORKER_URL` 访问网站后端，统一完成更新检查、
+匿名统计、云服务门禁和官方视觉模型代理配置。默认地址为
+`https://omnibot.omnimind.com.cn`，上游代理 Key 只保存在后端。
+设置 → 关于小万 → 我要反馈使用同一网站表单，支持选择附件和可选联系方式；
+迁移与发布配置见[集成说明](docs/website-backend-migration.md)。
 Debug APK 统一使用 `LLMTHU_API_BASE`、`LLMTHU_API_KEY` 和
 `LLMTHU_MODEL` 配置的 OpenAI-compatible LLM API，覆盖普通 LLM、上下文压缩
 和 `scene.vlm.operation.primary`。
@@ -237,7 +257,7 @@ OpenOmniBot/
 <table align="center">
   <tr>
     <td align="center">
-      <img src="https://omni.1775885.xyz/community/wechat-qr" alt="WeChat Group" width="220"/><br/>
+      <img src="https://omnibot.omnimind.com.cn/community/wechat-qr" alt="WeChat Group" width="220"/><br/>
       <b>WeChat Group</b><br/>
       <a href="https://discord.gg/WnBvBXgykD">加入 Discord 社区</a>
     </td>

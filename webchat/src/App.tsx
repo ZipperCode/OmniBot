@@ -7,9 +7,13 @@ import { Icon } from "./components/Icon";
 import { LoginView } from "./components/LoginView";
 import {
   createConversationDraft,
+  conversationAgentId,
+  normalizeConversationMode,
+  canRunConversation,
   isPersistedConversation,
 } from "./conversationDraft";
 import { appendConversationNavigation } from "./conversationNavigation";
+import { isNaConversation, isRetiredAgentConversation, withoutNaHistory } from "./conversationVisibility";
 import { conversationKey } from "./format";
 import { useRealtime } from "./hooks/useRealtime";
 import { reconcileCodexMessages } from "./messageReconciliation";
@@ -40,16 +44,14 @@ const MOBILE_SECTION_ICON = {
   workspace: "workspace",
   browser: "browser",
 } as const;
-const CONVERSATION_MODES = new Set<ConversationMode>(["normal", "codex", "chat_only"]);
-
-function normalizeConversationMode(mode: string | undefined): ConversationMode {
-  return CONVERSATION_MODES.has(mode as ConversationMode)
-    ? mode as ConversationMode
-    : "normal";
-}
+const UNSUPPORTED_CONVERSATION_MESSAGE = "此会话类型仅支持查看历史，请新建对话。";
+const MISSING_AGENT_MESSAGE = "此对话没有可用的助手归属。历史记录仍可查看，请新建对话。";
+const RETIRED_AGENT_MESSAGE = "此助手已停止支持。历史记录仍可查看，请新建其他助手的对话。";
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error ?? "请求失败");
+  const message = error instanceof Error ? error.message : String(error ?? "请求失败");
+  if (message.includes("agent_identity_required:")) return MISSING_AGENT_MESSAGE;
+  return message.includes("agent_retired:") ? RETIRED_AGENT_MESSAGE : message;
 }
 
 function initialToken(): string {
@@ -69,10 +71,12 @@ export default function App() {
   const [globalError, setGlobalError] = useState("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
+  const [retiredAgentIds, setRetiredAgentIds] = useState<string[]>([]);
   const [archivedConversations, setArchivedConversations] = useState<Conversation[]>([]);
   const [archivedLoading, setArchivedLoading] = useState(false);
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatViewRevision, setChatViewRevision] = useState(0);
   const [sending, setSending] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeRenderTaskId, setActiveRenderTaskId] = useState<string | null>(null);
@@ -98,6 +102,7 @@ export default function App() {
   const workspacePathRef = useRef("");
   const toastTimerRef = useRef<number | null>(null);
   const autoLoginToken = useRef(initialToken());
+  const historyVisibilityRevision = useRef(0);
 
   function showError(error: unknown) {
     setGlobalError(errorMessage(error));
@@ -159,11 +164,13 @@ export default function App() {
 
   async function loadMessages(conversation = selectedRef.current) {
     if (!conversation || !isPersistedConversation(conversation)) return;
+    const visibility = historyVisibilityRevision.current;
     try {
       const payload = await request<ChatMessage[]>(`/conversations/${conversation.id}/messages`, {
-        query: { mode: conversation.mode ?? "normal" },
+        query: conversation.mode ? { mode: conversation.mode } : undefined,
       });
-      if (conversationKey(conversation) === conversationKey(selectedRef.current)) {
+      if ((!isNaConversation(conversation) || visibility === historyVisibilityRevision.current)
+          && conversationKey(conversation) === conversationKey(selectedRef.current)) {
         const incoming = Array.isArray(payload) ? payload : [];
         setMessages((current) => (
           normalizeConversationMode(conversation.mode) === "codex"
@@ -177,9 +184,11 @@ export default function App() {
   }
 
   async function loadConversations(preserveSelection = true) {
+    const visibility = historyVisibilityRevision.current;
     const payload = await request<Conversation[]>("/conversations", {
       query: { includeArchived: false },
     });
+    if (visibility !== historyVisibilityRevision.current) return;
     const previousKey = preserveSelection ? conversationKey(selectedRef.current) : null;
     const nextConversations = (Array.isArray(payload) ? payload : [])
       .filter((item) => !item.isArchived)
@@ -210,11 +219,13 @@ export default function App() {
   }
 
   async function loadArchivedConversations(reportError = true) {
+    const visibility = historyVisibilityRevision.current;
     setArchivedLoading(true);
     try {
       const payload = await request<Conversation[]>("/conversations", {
         query: { includeArchived: true, archivedOnly: true },
       });
+      if (visibility !== historyVisibilityRevision.current) return;
       setArchivedConversations(
         (Array.isArray(payload) ? payload : [])
           .filter((item) => item.isArchived)
@@ -253,8 +264,13 @@ export default function App() {
       workspacePathRef.current = rootPath;
       setWorkspacePath(rootPath);
       setBrowserSnapshot(bootstrap?.browser ?? null);
+      const retiredIds = Array.isArray(bootstrap?.retiredAgentIds)
+        ? bootstrap.retiredAgentIds.filter((id): id is string => typeof id === "string")
+        : [];
+      setRetiredAgentIds(retiredIds);
       setAgentProfiles(
-        Array.isArray(bootstrap?.agentProfiles) ? bootstrap.agentProfiles : [],
+        (Array.isArray(bootstrap?.agentProfiles) ? bootstrap.agentProfiles : [])
+          .filter((profile) => !retiredIds.includes(profile.id)),
       );
       setAuthenticated(true);
 
@@ -352,6 +368,13 @@ export default function App() {
   }
 
   async function sendMessage(text: string, attachments: Attachment[]): Promise<boolean> {
+    if (isRetiredAgentConversation(selectedRef.current, retiredAgentIds)
+      || (selectedRef.current && (!conversationAgentId(selectedRef.current) || !canRunConversation(selectedRef.current)))) {
+      return false;
+    }
+    const visibility = historyVisibilityRevision.current;
+    const accountScoped = isNaConversation(selectedRef.current);
+    const visibilityChanged = () => accountScoped && visibility !== historyVisibilityRevision.current;
     setGlobalError("");
     setSending(true);
     let conversationCreatedForSend: Conversation | null = null;
@@ -366,10 +389,10 @@ export default function App() {
         return true;
       }
 
-      let conversation = selectedRef.current;
+      let conversation = selectedRef.current ?? createConversationDraft("normal");
       if (!isPersistedConversation(conversation)) {
         const draftMode = normalizeConversationMode(conversation?.mode);
-        const draftAgentId = conversation?.agentId?.trim() || undefined;
+        const draftAgentId = conversationAgentId(conversation);
         conversation = await request<Conversation>("/conversations", {
           method: "POST",
           body: {
@@ -378,6 +401,7 @@ export default function App() {
             agentId: draftAgentId,
           },
         });
+        if (visibilityChanged()) return false;
         conversation = {
           ...conversation,
           mode: draftMode,
@@ -420,10 +444,11 @@ export default function App() {
           userMessage: text,
           userMessageCreatedAt,
           conversationMode,
-          agentId: conversation.agentId,
+          agentId: conversationAgentId(conversation),
           attachments,
         },
       });
+      if (visibilityChanged()) return false;
       if (result?.conversation) {
         const updatedConversation = {
           ...result.conversation,
@@ -446,6 +471,7 @@ export default function App() {
       void loadConversations(true).catch(showError);
       return true;
     } catch (error) {
+      if (visibilityChanged()) return false;
       showError(error);
       setActiveTaskId(null);
       setActiveRenderTaskId(null);
@@ -462,8 +488,10 @@ export default function App() {
             `/conversations/${createdConversation.id}/messages`,
             { query: { mode: createdConversation.mode ?? "normal" } },
           );
+          if (visibilityChanged()) return false;
           if (!persistedMessages.length) {
             await request(`/conversations/${createdConversation.id}`, { method: "DELETE" });
+            if (visibilityChanged()) return false;
             if (
               Number(selectedRef.current?.id ?? 0) ===
               Number(createdConversation.id)
@@ -488,7 +516,7 @@ export default function App() {
       }
       return false;
     } finally {
-      setSending(false);
+      if (!visibilityChanged()) setSending(false);
     }
   }
 
@@ -568,6 +596,25 @@ export default function App() {
   }
 
   function handleRealtimeEvent(eventName: RealtimeEventName, data: RealtimeEventData) {
+    if (eventName === "conversation_updated" && data.reason === "na_history_owner_changed") {
+      historyVisibilityRevision.current += 1;
+      setConversations(withoutNaHistory);
+      setArchivedConversations(withoutNaHistory);
+      if (isNaConversation(selectedRef.current)) {
+        selectedRef.current = null;
+        setSelectedConversation(null);
+        setMessages([]);
+        setChatViewRevision((revision) => revision + 1);
+        setSending(false);
+        setGlobalError("");
+        setActiveTaskId(null);
+        setActiveRenderTaskId(null);
+        setClarifyTaskId(null);
+      }
+      void loadConversations(true).catch(showError);
+      void loadArchivedConversations(false);
+      return;
+    }
     if (["conversation_created", "conversation_updated", "conversation_deleted"].includes(eventName)) {
       void loadConversations(true).catch(showError);
       void loadArchivedConversations(false);
@@ -576,7 +623,7 @@ export default function App() {
     if (eventName === "messages_replaced" && sameSelectedConversation(data)) {
       const incoming = Array.isArray(data.messages) ? data.messages : [];
       const mode = normalizeConversationMode(
-        String(data.conversationMode ?? data.mode ?? selectedRef.current?.mode ?? "normal"),
+        String(data.conversationMode ?? data.mode ?? selectedRef.current?.mode ?? ""),
       );
       setMessages((current) => (
         mode === "codex"
@@ -754,7 +801,15 @@ export default function App() {
           onDelete={(conversation) => deleteConversation(conversation)}
         />
         <ChatPanel
+          key={chatViewRevision}
           conversation={selectedConversation}
+          unavailableMessage={isRetiredAgentConversation(selectedConversation, retiredAgentIds)
+            ? RETIRED_AGENT_MESSAGE
+            : selectedConversation && !canRunConversation(selectedConversation)
+            ? UNSUPPORTED_CONVERSATION_MESSAGE
+            : selectedConversation && !conversationAgentId(selectedConversation)
+            ? MISSING_AGENT_MESSAGE
+            : undefined}
           messages={messages}
           globalError={globalError}
           sending={sending}

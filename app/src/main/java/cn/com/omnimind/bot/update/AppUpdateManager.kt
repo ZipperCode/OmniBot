@@ -274,7 +274,7 @@ object AppUpdateManager {
             return ExternalApkInstallResult(
                 success = false,
                 status = ExternalApkInstaller.STATUS_INSTALL_FAILED,
-                message = "当前没有可安装的新版本。"
+                message = context.getString(cn.com.omnimind.bot.R.string.update_no_version_available)
             )
         }
 
@@ -610,9 +610,9 @@ object AppUpdateManager {
     }
 
     /**
-     * Anonymous, per-install statistics sent to the update worker so the admin
-     * console can chart device models, OS versions and daily active checks via
-     * Cloudflare Analytics Engine. Contains no account or hardware identifiers;
+     * Anonymous, per-install statistics sent to the website backend so the admin
+     * console can chart device models, OS versions and daily active checks.
+     * Contains no account or hardware identifiers;
      * the install id is a random UUID generated on first use.
      */
     private fun buildDeviceStatsParams(context: Context): Map<String, String> {

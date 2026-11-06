@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_svg/flutter_svg.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/ai_generated_badge.dart';
+import 'package:ui/widgets/omni_circle_button.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
 
 /// 通用 AppBar 组件
 ///
@@ -71,7 +73,7 @@ class CommonAppBar extends StatelessWidget implements PreferredSizeWidget {
     this.leadingWidth,
     this.backIconColor,
     this.titleStyle,
-    this.height = 44,
+    this.height = 64,
     this.backgroundColor,
     this.primary = false,
     this.centerTitle = true,
@@ -91,63 +93,59 @@ class CommonAppBar extends StatelessWidget implements PreferredSizeWidget {
         leading ??
         (showLeading
             ? Center(
-                child: GestureDetector(
-                  onTap: onBackPressed ?? () => GoRouterManager.pop(),
-                  child: SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: SvgPicture.asset(
-                      'assets/common/chevron_left.svg',
-                      width: 24,
-                      height: 24,
-                      colorFilter: ColorFilter.mode(
-                        resolvedBackIconColor,
-                        BlendMode.srcIn,
-                      ),
-                    ),
-                  ),
+                child: OmniCircleButton(
+                  icon: LucideIcons.chevronLeft,
+                  tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+                  onPressed: onBackPressed ?? () => GoRouterManager.pop(),
+                  foregroundColor: resolvedBackIconColor,
+                  size: height < 56 ? 36 : 40,
                 ),
               )
             : null);
 
     final resolvedActions = actions ?? (trailing == null ? null : [trailing!]);
 
-    return AppBar(
-      primary: primary,
-      automaticallyImplyLeading: false,
-      toolbarHeight: height,
-      backgroundColor: resolvedBackgroundColor,
-      elevation: 0,
-      scrolledUnderElevation: 0,
-      surfaceTintColor: resolvedBackgroundColor,
-      shadowColor: Colors.transparent,
-      leadingWidth: resolvedLeading == null ? leadingWidth : leadingWidth ?? 56,
-      leading: resolvedLeading,
-      centerTitle: centerTitle,
-      title:
-          titleWidget ??
-          (title == null
-              ? null
-              : Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      context.trLegacy(title!),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          titleStyle ??
-                          TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
-                            color: palette.textPrimary,
-                            fontFamily: 'SF Pro',
-                          ),
-                    ),
-                    if (showAiBadge) const AiGeneratedBadge(),
-                  ],
-                )),
-      actions: resolvedActions,
+    return OmniContentWidth(
+      child: AppBar(
+        // Elastic controls may paint below the toolbar while being pulled.
+        clipBehavior: Clip.none,
+        primary: primary,
+        automaticallyImplyLeading: false,
+        toolbarHeight: height,
+        backgroundColor: resolvedBackgroundColor,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        surfaceTintColor: resolvedBackgroundColor,
+        shadowColor: Colors.transparent,
+        leadingWidth: resolvedLeading == null
+            ? leadingWidth
+            : leadingWidth ?? 72,
+        leading: resolvedLeading,
+        centerTitle: centerTitle,
+        title:
+            titleWidget ??
+            (title == null
+                ? null
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        context.trLegacy(title!),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            titleStyle ??
+                            TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                              color: palette.textPrimary,
+                            ),
+                      ),
+                      if (showAiBadge) const AiGeneratedBadge(),
+                    ],
+                  )),
+        actions: resolvedActions,
+      ),
     );
   }
 }

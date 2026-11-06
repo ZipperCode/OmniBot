@@ -49,6 +49,9 @@ class OmniPluginHost private constructor(context: Context) {
         )
     }
 
+    suspend fun listToolDefinitions(): List<OmniPluginToolDefinition> =
+        PluginDiscoveryToolHandler.definitions() + platform.listToolDefinitions()
+
     suspend fun listActions(): List<OmniPluginActionDefinition> {
         return platform.listActionDefinitions()
     }

@@ -7,10 +7,16 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
 import cn.com.omnimind.baselib.permission.PermissionRequest
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
+import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
 import cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
@@ -18,6 +24,7 @@ import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalLaunchHelper
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalRuntime
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalInstallService
 import cn.com.omnimind.bot.termux.TermuxCommandRunner
 import cn.com.omnimind.bot.util.AssistsUtil
 import cn.com.omnimind.bot.workspace.PublicStorageAccess
@@ -39,7 +46,40 @@ class SpecialPermissionManager(private val context: Context) {
     }
     private val embeddedTerminalSetupManager = EmbeddedTerminalSetupManager(context)
     private val embeddedTerminalAutoStartManager = EmbeddedTerminalAutoStartManager(context)
-    private val privilegedCapabilityManager = PrivilegedCapabilityManager.get(context)
+    private val shizukuCapabilityManager = ShizukuCapabilityManager.get(context)
+
+    private var rootSettingsScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    fun closeRootSettings() {
+        rootSettingsScope.cancel()
+        rootSettingsScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    }
+
+    fun getRootStatus(result: MethodChannel.Result) {
+        result.success(PrivilegedCapabilityManager.get(context).rootStatus().toMap())
+    }
+
+    fun setRootEnabled(call: MethodCall, result: MethodChannel.Result) {
+        val enabled = call.argument<Boolean>("enabled")
+        if (enabled == null) { result.error("INVALID_ARGUMENT", "enabled must be a boolean", null); return }
+        rootSettingsAction(result) { PrivilegedCapabilityManager.get(context).setRootEnabled(enabled).toMap() }
+    }
+
+    fun requestRootAccess(result: MethodChannel.Result) {
+        rootSettingsAction(result) { PrivilegedCapabilityManager.get(context).requestRootAccess().toMap() }
+    }
+
+    private fun rootSettingsAction(result: MethodChannel.Result, action: suspend () -> Map<String, Any>) {
+        rootSettingsScope.launch {
+            try {
+                result.success(withContext(Dispatchers.IO) { action() })
+            } catch (_: CancellationException) {
+                result.success(PrivilegedCapabilityManager.get(context).rootStatus().toMap())
+            } catch (error: Exception) {
+                result.error("ROOT_ACCESS_FAILED", "Could not update root access.", null)
+            }
+        }
+    }
 
     fun isIgnoringBatteryOptimizations(result: MethodChannel.Result) {
         try {
@@ -179,37 +219,72 @@ class SpecialPermissionManager(private val context: Context) {
         }
     }
 
-    fun getPrivilegedStatus(result: MethodChannel.Result) {
-        runCatching { privilegedCapabilityManager.getStatus().toMap() }
-            .onSuccess(result::success)
-            .onFailure { result.error("READ_FAILED", "Failed to read privileged status.", it.message) }
+    fun isShizukuInstalled(result: MethodChannel.Result) {
+        try {
+            result.success(shizukuCapabilityManager.isShizukuInstalled())
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "Error checking Shizuku installation", e)
+            result.error("CHECK_FAILED", "Failed to check Shizuku installation.", e.message)
+        }
     }
 
-    fun setPrivilegedSource(call: MethodCall, result: MethodChannel.Result) {
+    fun isShizukuRunning(result: MethodChannel.Result) {
+        try {
+            result.success(shizukuCapabilityManager.getStatus().running)
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "Error checking Shizuku running status", e)
+            result.error("CHECK_FAILED", "Failed to check Shizuku running status.", e.message)
+        }
+    }
+
+    fun openShizukuDownloadOrApp(result: MethodChannel.Result) {
+        try {
+            result.success(shizukuCapabilityManager.openShizukuDownloadOrApp())
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "Error opening Shizuku app or website", e)
+            result.error("INTENT_FAILED", "Failed to open Shizuku app or website.", e.message)
+        }
+    }
+
+    fun requestShizukuPermission(result: MethodChannel.Result) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val source = call.argument<String>("source") ?: throw IllegalArgumentException("source is required")
-                val status = privilegedCapabilityManager.setSource(source)
-                withContext(Dispatchers.Main) { result.success(status.toMap()) }
+                val status = shizukuCapabilityManager.requestPermission()
+                withContext(Dispatchers.Main) {
+                    result.success(status.toMap())
+                }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { result.error("INVALID_SOURCE", e.message, null) }
+                OmniLog.e(TAG, "Error requesting Shizuku permission", e)
+                withContext(Dispatchers.Main) {
+                    result.error("REQUEST_FAILED", "Failed to request Shizuku permission.", e.message)
+                }
             }
         }
     }
 
-    fun authorizePrivilegedSource(result: MethodChannel.Result) {
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val status = privilegedCapabilityManager.authorize()
-                withContext(Dispatchers.Main) { result.success(status.toMap()) }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) { result.error("AUTHORIZE_FAILED", e.message, null) }
-            }
+    fun getShizukuStatus(result: MethodChannel.Result) {
+        try {
+            result.success(shizukuCapabilityManager.getStatus().toMap())
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "Error reading Shizuku status", e)
+            result.error("READ_FAILED", "Failed to read Shizuku status.", e.message)
         }
     }
 
-    fun openPrivilegedSourceApp(result: MethodChannel.Result) {
-        result.success(privilegedCapabilityManager.openSelectedSourceApp())
+    fun runShizukuHealthCheck(result: MethodChannel.Result) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val payload = shizukuCapabilityManager.runHealthCheck()
+                withContext(Dispatchers.Main) {
+                    result.success(payload)
+                }
+            } catch (e: Exception) {
+                OmniLog.e(TAG, "Error running Shizuku health check", e)
+                withContext(Dispatchers.Main) {
+                    result.error("HEALTH_CHECK_FAILED", "Failed to run Shizuku health check.", e.message)
+                }
+            }
+        }
     }
 
     fun isTermuxInstalled(result: MethodChannel.Result) {
@@ -283,16 +358,26 @@ class SpecialPermissionManager(private val context: Context) {
         }
     }
 
+    fun openNotificationSettings(result: MethodChannel.Result) {
+        try {
+            context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            result.success(null)
+        } catch (error: Exception) {
+            OmniLog.e(TAG, "Could not open app notification settings", error)
+            result.error("INTENT_FAILED", "Could not open notification settings.", error.message)
+        }
+    }
+
     fun isNotificationPermissionGranted(result: MethodChannel.Result) {
         try {
-            val granted = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                true
-            } else {
-                ContextCompat.checkSelfPermission(
+            val granted = NotificationManagerCompat.from(context).areNotificationsEnabled() &&
+                (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.POST_NOTIFICATIONS
-                ) == PackageManager.PERMISSION_GRANTED
-            }
+                ) == PackageManager.PERMISSION_GRANTED)
             result.success(granted)
         } catch (e: Exception) {
             OmniLog.e(TAG, "Error checking notification permission", e)
@@ -307,7 +392,7 @@ class SpecialPermissionManager(private val context: Context) {
     fun requestNotificationPermission(result: MethodChannel.Result) {
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-                result.success(true)
+                result.success(NotificationManagerCompat.from(context).areNotificationsEnabled())
                 return
             }
             CoroutineScope(Dispatchers.Default).launch {
@@ -317,7 +402,10 @@ class SpecialPermissionManager(private val context: Context) {
                 context,
                 arrayOf(Manifest.permission.POST_NOTIFICATIONS)
             ) {
-                result.success(it[Manifest.permission.POST_NOTIFICATIONS] == true)
+                val granted = it[Manifest.permission.POST_NOTIFICATIONS] == true &&
+                    NotificationManagerCompat.from(context).areNotificationsEnabled()
+                if (granted) EmbeddedTerminalInstallService.refresh(context)
+                result.success(granted)
             }
         } catch (e: Exception) {
             OmniLog.e(TAG, "Error requesting notification permission", e)
@@ -326,6 +414,27 @@ class SpecialPermissionManager(private val context: Context) {
                 "Failed to request notification permission.",
                 e.message
             )
+        }
+    }
+
+    fun isLocalNetworkPermissionGranted(result: MethodChannel.Result) {
+        result.success(LocalNetworkPermission.isGranted(context))
+    }
+
+    fun getLocalNetworkPermissionStatus(result: MethodChannel.Result) {
+        result.success(mapOf(
+            "required" to (Build.VERSION.SDK_INT >= 37),
+            "granted" to LocalNetworkPermission.isGranted(context),
+        ))
+    }
+
+    fun requestLocalNetworkPermission(result: MethodChannel.Result) {
+        rootSettingsScope.launch {
+            try {
+                result.success(LocalNetworkPermission.request(context))
+            } catch (error: Exception) {
+                result.error("LOCAL_NETWORK_PERMISSION_FAILED", error.message, null)
+            }
         }
     }
 

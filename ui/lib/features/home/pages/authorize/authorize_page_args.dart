@@ -1,7 +1,7 @@
 const String kAccessibilityPermissionId = 'accessibility';
 const String kOverlayPermissionId = 'overlay';
 const String kInstalledAppsPermissionId = 'installed_apps';
-const String kPrivilegedPermissionId = 'privileged';
+const String kShizukuPermissionId = 'shizuku';
 const String kWorkspaceStoragePermissionId = 'workspace_storage';
 const String kPublicStoragePermissionId = 'public_storage';
 
@@ -14,7 +14,7 @@ const Set<String> _executionPermissionIds = <String>{
   kAccessibilityPermissionId,
   kOverlayPermissionId,
   kInstalledAppsPermissionId,
-  kPrivilegedPermissionId,
+  kShizukuPermissionId,
   kWorkspaceStoragePermissionId,
   kPublicStoragePermissionId,
 };
@@ -28,10 +28,8 @@ const Map<String, String> _executionPermissionAliases = <String, String>{
   'Overlay': kOverlayPermissionId,
   '应用列表读取权限': kInstalledAppsPermissionId,
   'Installed Apps Access': kInstalledAppsPermissionId,
-  '特权访问': kPrivilegedPermissionId,
-  '特权访问权限': kPrivilegedPermissionId,
-  'Privileged Access': kPrivilegedPermissionId,
-  'Privileged Permission': kPrivilegedPermissionId,
+  'Shizuku 权限': kShizukuPermissionId,
+  'Shizuku Permission': kShizukuPermissionId,
   '内置 workspace': kWorkspaceStoragePermissionId,
   'Built-in workspace': kWorkspaceStoragePermissionId,
   '公共文件访问': kPublicStoragePermissionId,

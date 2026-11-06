@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -12,6 +13,10 @@ import 'package:ui/theme/app_theme.dart';
 import 'package:ui/theme/app_theme_controller.dart';
 import 'package:ui/theme/app_theme_mode.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
+import 'package:ui/widgets/settings_ui.dart';
+import 'package:ui/widgets/omni_slider.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
+import 'package:ui/theme/liquid_glass_controller.dart';
 
 class _SvgTestAssetBundle extends CachingAssetBundle {
   static final Uint8List _svgBytes = Uint8List.fromList(
@@ -64,6 +69,146 @@ void main() {
     );
   }
 
+  Future<void> scrollTo(
+    WidgetTester tester,
+    Finder target,
+    double delta,
+  ) async {
+    await tester.scrollUntilVisible(
+      target,
+      delta,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'liquid glass starts at ultra and persists quality and enable choices',
+    (tester) async {
+      await tester.pumpWidget(buildTestApp(const BackgroundSettingPage()));
+      await tester.pumpAndSettle();
+      final toggle = find.byKey(
+        const ValueKey('appearance-liquid-glass-switch'),
+      );
+      final quality = find.byKey(
+        const ValueKey('appearance-liquid-glass-quality'),
+      );
+      expect(tester.widget<OmniSettingsSwitch>(toggle).value, isTrue);
+      expect(
+        tester
+            .widget<OmniSettingsDropdown<LiquidGlassQuality>>(
+              find.byType(OmniSettingsDropdown<LiquidGlassQuality>),
+            )
+            .value,
+        LiquidGlassQuality.ultra,
+      );
+      await tester.ensureVisible(quality);
+      await tester.pumpAndSettle();
+      await tester.tap(quality);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Standard').last);
+      await tester.pumpAndSettle();
+      expect(
+        StorageService.getString(LiquidGlassController.qualityKey),
+        'standard',
+      );
+      await tester.ensureVisible(toggle);
+      await tester.pumpAndSettle();
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      expect(tester.widget<OmniSettingsSwitch>(toggle).value, isFalse);
+      expect(StorageService.getBool(LiquidGlassController.enabledKey), isFalse);
+      expect(
+        tester
+            .widget<OmniSettingsDropdown<LiquidGlassQuality>>(
+              find.byType(OmniSettingsDropdown<LiquidGlassQuality>),
+            )
+            .onChanged,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'large text uses reachable appearance choices on a narrow screen',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        buildTestApp(
+          const MediaQuery(
+            data: MediaQueryData(
+              size: Size(320, 800),
+              textScaler: TextScaler.linear(1.5),
+            ),
+            child: BackgroundSettingPage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('appearance-theme-dropdown')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('appearance-language-dropdown')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('theme-mode-slider')), findsNothing);
+      final quality = find.byKey(
+        const ValueKey('appearance-liquid-glass-quality'),
+      );
+      await tester.ensureVisible(quality);
+      await tester.pumpAndSettle();
+      expect(quality.hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'periodic pet refresh does not invalidate a slow in-flight read',
+    (tester) async {
+      const channel = MethodChannel('cn.com.omnimind.bot/overlay');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final firstState = Completer<Map<String, dynamic>>();
+      var reads = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method != 'getPetOverlayState') return null;
+        reads += 1;
+        return firstState.future;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      await tester.pumpWidget(buildTestApp(const BackgroundSettingPage()));
+      await tester.pumpAndSettle();
+      expect(reads, 1);
+      final card = find.byKey(const ValueKey('appearance-pet-card'));
+      await scrollTo(tester, card, 500);
+      final header = find
+          .descendant(of: card, matching: find.byType(InkWell))
+          .first;
+      await tester.ensureVisible(header);
+      await tester.pumpAndSettle();
+      await tester.tap(header);
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 5));
+      expect(reads, 1);
+      firstState.complete({'selectedId': 'builtin:xiaowan'});
+      await tester.pumpAndSettle();
+      expect(
+        reads,
+        1,
+        reason: 'the periodic tick must not queue a replacement read',
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   testWidgets('supports auto-saving appearance updates from the preview', (
     tester,
   ) async {
@@ -83,16 +228,15 @@ void main() {
 
     expect(find.text('外观设置'), findsOneWidget);
     expect(find.byKey(const ValueKey('theme-mode-slider')), findsOneWidget);
-    expect(find.byType(AppBackgroundPreview), findsOneWidget);
-    expect(find.textContaining('聊天 ·'), findsOneWidget);
+    expect(
+      find.byType(AppBackgroundPreview),
+      findsNothing,
+      reason: 'offscreen preview must not be laid out on entry',
+    );
     expect(find.byKey(const ValueKey('background-save-button')), findsNothing);
     expect(find.byKey(const ValueKey('background-reset-button')), findsNothing);
     expect(find.byKey(const ValueKey('background-source-none')), findsNothing);
-    expect(find.byKey(const ValueKey('appearance-pet-card')), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.byKey(const ValueKey('theme-mode-slider'))).dy,
-      lessThan(tester.getTopLeft(find.byType(AppBackgroundPreview)).dy),
-    );
+    expect(find.byKey(const ValueKey('appearance-pet-card')), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('theme-mode-option-dark')));
     await tester.pumpAndSettle();
@@ -101,7 +245,7 @@ void main() {
     final workspacePreviewChip = find.byKey(
       const ValueKey('background-preview-kind-workspace'),
     );
-    await tester.ensureVisible(workspacePreviewChip);
+    await scrollTo(tester, workspacePreviewChip, 350);
     await tester.tap(workspacePreviewChip, warnIfMissed: false);
     await tester.pumpAndSettle();
 
@@ -110,7 +254,7 @@ void main() {
     final remoteSourceChip = find.byKey(
       const ValueKey('background-source-remote'),
     );
-    await tester.ensureVisible(remoteSourceChip);
+    await scrollTo(tester, remoteSourceChip, -350);
     await tester.tap(remoteSourceChip);
     await tester.pumpAndSettle();
 
@@ -119,6 +263,11 @@ void main() {
       findsOneWidget,
     );
 
+    await scrollTo(
+      tester,
+      find.byKey(const ValueKey('appearance-text-color-field')),
+      350,
+    );
     await tester.enterText(
       find.byKey(const ValueKey('appearance-text-color-field')),
       '#1D3E7B',
@@ -135,7 +284,7 @@ void main() {
     final backgroundSwitch = find.byKey(
       const ValueKey('appearance-background-enable-switch'),
     );
-    await tester.ensureVisible(backgroundSwitch);
+    await scrollTo(tester, backgroundSwitch, -350);
     await tester.tap(backgroundSwitch);
     await tester.pump(const Duration(milliseconds: 260));
     await tester.pumpAndSettle();
@@ -160,6 +309,11 @@ void main() {
 
     await tester.pumpWidget(buildTestApp(const BackgroundSettingPage()));
 
+    await scrollTo(
+      tester,
+      find.byKey(const ValueKey('appearance-text-color-field')),
+      350,
+    );
     await tester.enterText(
       find.byKey(const ValueKey('appearance-text-color-field')),
       '#1D3E7B',
@@ -174,5 +328,44 @@ void main() {
       AppBackgroundTextColorMode.custom,
     );
     expect(AppBackgroundService.current.chatTextHexColor, '#1D3E7B');
+  });
+
+  testWidgets('appearance value tracks retain ranges and save live updates', (
+    tester,
+  ) async {
+    await tester.pumpWidget(buildTestApp(const BackgroundSettingPage()));
+    await tester.pumpAndSettle();
+    final blur = find.byKey(
+      const ValueKey('appearance-background-blur-slider'),
+    );
+    await scrollTo(tester, blur, 350);
+    final blurWidget = tester.widget<OmniSlider>(blur);
+    expect((blurWidget.min, blurWidget.max), (0, 24));
+    expect(
+      tester
+          .widget<OmniSlider>(
+            find.byKey(const ValueKey('appearance-overlay-intensity-slider')),
+          )
+          .max,
+      0.55,
+    );
+    final brightness = tester.widget<OmniSlider>(
+      find.byKey(const ValueKey('appearance-overlay-brightness-slider')),
+    );
+    expect((brightness.min, brightness.max), (0.5, 1.5));
+    final size = tester.widget<OmniSlider>(
+      find.byKey(const ValueKey('appearance-chat-text-size-slider')),
+    );
+    expect((size.min, size.max), (12, 22));
+
+    final rect = tester.getRect(blur);
+    await tester.tapAt(
+      Offset(rect.left + 2 + (rect.width - 4) * 0.75, rect.center.dy),
+    );
+    await tester.pump(const Duration(milliseconds: 260));
+    await tester.pumpAndSettle();
+    expect(AppBackgroundService.current.blurSigma, closeTo(18, 0.0001));
+    expect(tester.widget<OmniSlider>(blur).value, closeTo(18, 0.0001));
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }

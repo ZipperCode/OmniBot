@@ -6,6 +6,9 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/omni_circle_button.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_svg/flutter_svg.dart';
@@ -17,14 +20,18 @@ import 'package:ui/services/app_background_service.dart';
 import 'package:ui/services/overlay_service.dart';
 import 'package:ui/services/pet_package_service.dart';
 import 'package:ui/services/storage_service.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
+import 'package:ui/theme/liquid_glass_controller.dart';
 import 'package:ui/widgets/omni_segmented_slider.dart';
-import 'package:ui/widgets/settings_section_title.dart';
-import 'package:ui/widgets/theme_mode_setting_card.dart';
+import 'package:ui/widgets/omni_slider.dart';
+import 'package:ui/widgets/settings_ui.dart';
+import 'package:ui/theme/app_theme_controller.dart';
+import 'package:ui/theme/app_theme_mode.dart';
 
 const bool _showPetAppearanceSettings = true;
 
@@ -99,7 +106,8 @@ class BackgroundSettingPage extends StatefulWidget {
   State<BackgroundSettingPage> createState() => _BackgroundSettingPageState();
 }
 
-class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
+class _BackgroundSettingPageState extends State<BackgroundSettingPage>
+    with FlClashPageLoadMixin {
   final TextEditingController _remoteUrlController = TextEditingController();
   final TextEditingController _textColorController = TextEditingController();
 
@@ -262,9 +270,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
 
   Future<void> _pickLocalImage() async {
     try {
-      final file = await FilePicker.pickFile(
-        type: FileType.image,
-      );
+      final file = await FilePicker.pickFile(type: FileType.image);
       if (file == null) {
         return;
       }
@@ -502,51 +508,266 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     return Scaffold(
       backgroundColor: palette.pageBackground,
       appBar: CommonAppBar(title: context.l10n.appearanceTitle, primary: true),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: SingleChildScrollView(
-          padding: edgeToEdgeScrollPadding(
-            context,
-            const EdgeInsets.fromLTRB(16, 12, 16, 24),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(left: 4, bottom: 12),
+      body: OmniContentWidth(
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: ListView.builder(
+            scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+            padding: edgeToEdgeScrollPadding(
+              context,
+              const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            ),
+            itemCount: _showPetAppearanceSettings ? 6 : 5,
+            itemBuilder: (context, index) => switch (index) {
+              0 => _buildInterfaceSettings(),
+              1 => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 28, 18, 16),
+                    child: Text(
+                      context.l10n.appearanceBackgroundSource,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        color: palette.textTertiary,
+                        height: 1.35,
+                      ),
+                    ),
+                  ),
+                  _buildBackgroundSection(
+                    child: _buildSourceCard(),
+                    first: true,
+                  ),
+                ],
+              ),
+              2 => _buildBackgroundSection(child: _buildPreviewCard()),
+              3 => _buildBackgroundSection(
+                child: _buildAdjustCard(),
+                last: true,
+              ),
+              4 => Padding(
+                padding: const EdgeInsets.fromLTRB(6, 8, 6, 0),
                 child: Text(
                   context.trLegacy(_autoSaveHint),
                   style: TextStyle(
                     fontSize: 12,
-                    color: palette.textSecondary,
-                    fontWeight: FontWeight.w500,
+                    color: palette.textTertiary,
+                    height: 1.45,
                   ),
                 ),
               ),
-              const ThemeModeSettingCard(),
-              const SizedBox(height: 18),
-              _buildLanguageSettingCard(),
-              const SizedBox(height: 18),
-              SettingsSectionTitle(
-                label: context.l10n.appearanceBackgroundSource,
+              _ => Padding(
+                padding: const EdgeInsets.only(top: 28),
+                child: _buildPetCard(),
               ),
-              _buildSourceCard(),
-              const SizedBox(height: 18),
-              SettingsSectionTitle(label: context.l10n.appearancePreview),
-              _buildPreviewCard(),
-              const SizedBox(height: 18),
-              SettingsSectionTitle(label: context.l10n.appearanceAdjustments),
-              _buildAdjustCard(),
-              if (_showPetAppearanceSettings) ...[
-                const SizedBox(height: 18),
-                SettingsSectionTitle(label: '宠物'),
-                _buildPetCard(),
-              ],
-            ],
+            },
           ),
         ),
       ),
+    );
+  }
+
+  // Build the long background form in visible sections while retaining one
+  // continuous grouped surface and the page's existing state owner.
+  Widget _buildBackgroundSection({
+    required Widget child,
+    bool first = false,
+    bool last = false,
+  }) {
+    final palette = context.omniPalette;
+    return Material(
+      color: palette.surfacePrimary,
+      borderRadius: BorderRadius.vertical(
+        top: first ? const Radius.circular(22) : Radius.zero,
+        bottom: last ? const Radius.circular(22) : Radius.zero,
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          if (!first)
+            Divider(
+              height: 1,
+              thickness: 0.65,
+              indent: 18,
+              endIndent: 18,
+              color: palette.borderSubtle.withValues(
+                alpha: context.isDarkTheme ? 0.55 : 0.75,
+              ),
+            ),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInterfaceSettings() {
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    return Consumer(
+      builder: (context, ref, _) {
+        final glass = ref.watch(liquidGlassSettingsProvider);
+        final notifier = ref.read(liquidGlassSettingsProvider.notifier);
+        return OmniSettingsGroup(
+          title: english ? 'Interface' : '界面',
+          children: [
+            _buildThemeSettingCard(),
+            _buildLanguageSettingCard(),
+            OmniSettingsTile(
+              icon: LucideIcons.droplets,
+              title: english ? 'Liquid glass' : '液态玻璃',
+              subtitle: english
+                  ? 'Translucent surfaces with flowing light'
+                  : '通透的表面与流动的光影',
+              translateText: false,
+              onTap: () => notifier.setEnabled(!glass.enabled),
+              trailing: OmniSettingsSwitch(
+                key: const ValueKey('appearance-liquid-glass-switch'),
+                value: glass.enabled,
+                onToggle: notifier.setEnabled,
+              ),
+            ),
+            OmniSettingsTile(
+              icon: LucideIcons.sparkles,
+              title: english ? 'Effect quality' : '效果质量',
+              translateText: false,
+              trailing: OmniSettingsDropdown<LiquidGlassQuality>(
+                dropdownKey: const ValueKey('appearance-liquid-glass-quality'),
+                value: glass.quality,
+                options: [
+                  OmniSettingsOption(
+                    value: LiquidGlassQuality.standard,
+                    label: english ? 'Standard' : '标准',
+                  ),
+                  OmniSettingsOption(
+                    value: LiquidGlassQuality.ultra,
+                    label: english ? 'Ultra' : '极致',
+                  ),
+                ],
+                onChanged: glass.enabled
+                    ? (value) {
+                        if (value != null) notifier.setQuality(value);
+                      }
+                    : null,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildThemeSettingCard() => Consumer(
+    builder: (context, ref, _) {
+      final mode = ref.watch(appThemeModeProvider);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          OmniSettingsTile(
+            icon: LucideIcons.sunMoon,
+            title: context.l10n.themeModeTitle,
+            subtitle: context.l10n.themeModeSubtitle,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                if (constraints.maxWidth <
+                    290 * MediaQuery.textScalerOf(context).scale(1)) {
+                  return Align(
+                    alignment: Alignment.centerLeft,
+                    child: OmniSettingsDropdown<AppThemeMode>(
+                      dropdownKey: const ValueKey('appearance-theme-dropdown'),
+                      value: mode,
+                      options: [
+                        OmniSettingsOption(
+                          value: AppThemeMode.system,
+                          label: context.l10n.themeModeSystem,
+                        ),
+                        OmniSettingsOption(
+                          value: AppThemeMode.light,
+                          label: context.l10n.themeModeLight,
+                        ),
+                        OmniSettingsOption(
+                          value: AppThemeMode.dark,
+                          label: context.l10n.themeModeDark,
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) {
+                          ref
+                              .read(appThemeModeProvider.notifier)
+                              .setThemeMode(value);
+                        }
+                      },
+                    ),
+                  );
+                }
+                return OmniSegmentedSlider<AppThemeMode>(
+                  key: const ValueKey('theme-mode-slider'),
+                  value: mode,
+                  keyPrefix: 'theme-mode-option',
+                  options: [
+                    OmniSegmentedOption(
+                      value: AppThemeMode.system,
+                      label: context.l10n.themeModeSystem,
+                      icon: LucideIcons.sunMoon,
+                      id: 'system',
+                    ),
+                    OmniSegmentedOption(
+                      value: AppThemeMode.light,
+                      label: context.l10n.themeModeLight,
+                      icon: LucideIcons.sun,
+                      id: 'light',
+                    ),
+                    OmniSegmentedOption(
+                      value: AppThemeMode.dark,
+                      label: context.l10n.themeModeDark,
+                      icon: LucideIcons.moon,
+                      id: 'dark',
+                    ),
+                  ],
+                  onChanged: (value) => ref
+                      .read(appThemeModeProvider.notifier)
+                      .setThemeMode(value),
+                );
+              },
+            ),
+          ),
+        ],
+      );
+    },
+  );
+
+  Widget _buildChoicePill({
+    required Key key,
+    required String label,
+    required bool selected,
+    required VoidCallback onSelected,
+  }) {
+    final palette = context.omniPalette;
+    return ChoiceChip(
+      key: key,
+      label: Text(label),
+      selected: selected,
+      showCheckmark: false,
+      backgroundColor: palette.surfaceSecondary,
+      selectedColor: palette.accentPrimary.withValues(
+        alpha: context.isDarkTheme ? 0.22 : 0.12,
+      ),
+      side: BorderSide(
+        color: selected
+            ? palette.accentPrimary.withValues(alpha: 0.6)
+            : palette.borderSubtle.withValues(alpha: 0.7),
+        width: 0.75,
+      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      labelStyle: TextStyle(
+        fontSize: 12.5,
+        fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+        color: selected ? palette.accentPrimary : palette.textSecondary,
+      ),
+      onSelected: (_) => onSelected(),
     );
   }
 
@@ -562,31 +783,37 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
               final label = kind == BackgroundPreviewKind.chat
                   ? context.l10n.appearancePreviewChat
                   : context.l10n.appearancePreviewWorkspace;
-              return ChoiceChip(
+              return _buildChoicePill(
                 key: ValueKey('background-preview-kind-${kind.name}'),
-                label: Text(label),
+                label: label,
                 selected: selected,
-                onSelected: (_) {
+                onSelected: () {
                   setState(() => _previewKind = kind);
                 },
               );
             }).toList(),
           ),
           const SizedBox(height: 12),
-          AppBackgroundPreview(
-            config: _previewConfig,
-            kind: _previewKind,
-            visualProfile: _draftVisualProfile,
-            showDragHint: true,
-            onViewportChanged: (offset, imageScale) {
-              _applyDraftConfig(
-                _draftConfig.copyWith(
-                  focalX: offset.dx,
-                  focalY: offset.dy,
-                  imageScale: imageScale,
-                ),
-              );
-            },
+          // The miniature is a fixed-scale canvas; its own chat-size control
+          // scales the preview without enlarging its fixed-height bubbles.
+          MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.noScaling),
+            child: AppBackgroundPreview(
+              config: _previewConfig,
+              kind: _previewKind,
+              visualProfile: _draftVisualProfile,
+              showDragHint: true,
+              onViewportChanged: (offset, imageScale) {
+                _applyDraftConfig(
+                  _draftConfig.copyWith(
+                    focalX: offset.dx,
+                    focalY: offset.dy,
+                    imageScale: imageScale,
+                  ),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -600,40 +827,77 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SettingsSectionTitle(
-              label: context.l10n.languageTitle,
+            OmniSettingsTile(
+              icon: LucideIcons.languages,
+              title: context.l10n.languageTitle,
               subtitle: context.l10n.languageSubtitle,
-              bottomPadding: 10,
             ),
-            OmniSegmentedSlider<AppLanguageMode>(
-              key: const ValueKey('language-mode-slider'),
-              value: mode,
-              keyPrefix: 'language-mode-option',
-              options: [
-                OmniSegmentedOption<AppLanguageMode>(
-                  value: AppLanguageMode.system,
-                  label: context.l10n.languageFollowSystem,
-                  icon: LucideIcons.smartphone,
-                  id: 'system',
-                ),
-                OmniSegmentedOption<AppLanguageMode>(
-                  value: AppLanguageMode.zhHans,
-                  label: context.l10n.languageZhHans,
-                  icon: LucideIcons.languages,
-                  id: 'zhHans',
-                ),
-                OmniSegmentedOption<AppLanguageMode>(
-                  value: AppLanguageMode.en,
-                  label: context.l10n.languageEnglish,
-                  icon: LucideIcons.languages,
-                  id: 'en',
-                ),
-              ],
-              onChanged: (nextMode) {
-                ref
-                    .read(appLanguageModeProvider.notifier)
-                    .setLanguageMode(nextMode);
-              },
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth <
+                      290 * MediaQuery.textScalerOf(context).scale(1)) {
+                    return Align(
+                      alignment: Alignment.centerLeft,
+                      child: OmniSettingsDropdown<AppLanguageMode>(
+                        dropdownKey: const ValueKey(
+                          'appearance-language-dropdown',
+                        ),
+                        value: mode,
+                        options: [
+                          OmniSettingsOption(
+                            value: AppLanguageMode.system,
+                            label: context.l10n.languageFollowSystem,
+                          ),
+                          OmniSettingsOption(
+                            value: AppLanguageMode.zhHans,
+                            label: context.l10n.languageZhHans,
+                          ),
+                          OmniSettingsOption(
+                            value: AppLanguageMode.en,
+                            label: context.l10n.languageEnglish,
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            ref
+                                .read(appLanguageModeProvider.notifier)
+                                .setLanguageMode(value);
+                          }
+                        },
+                      ),
+                    );
+                  }
+                  return OmniSegmentedSlider<AppLanguageMode>(
+                    key: const ValueKey('language-mode-slider'),
+                    value: mode,
+                    keyPrefix: 'language-mode-option',
+                    options: [
+                      OmniSegmentedOption<AppLanguageMode>(
+                        value: AppLanguageMode.system,
+                        label: context.l10n.languageFollowSystem,
+                        id: 'system',
+                      ),
+                      OmniSegmentedOption<AppLanguageMode>(
+                        value: AppLanguageMode.zhHans,
+                        label: context.l10n.languageZhHans,
+                        id: 'zhHans',
+                      ),
+                      OmniSegmentedOption<AppLanguageMode>(
+                        value: AppLanguageMode.en,
+                        label: context.l10n.languageEnglish,
+                        id: 'en',
+                      ),
+                    ],
+                    onChanged: (nextMode) {
+                      ref
+                          .read(appLanguageModeProvider.notifier)
+                          .setLanguageMode(nextMode);
+                    },
+                  );
+                },
+              ),
             ),
           ],
         );
@@ -649,44 +913,70 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SwitchListTile.adaptive(
+          InkWell(
             key: const ValueKey('appearance-background-enable-switch'),
-            contentPadding: EdgeInsets.zero,
-            secondary: _buildGlobalSettingLeadingIcon(icon: LucideIcons.image),
-            title: Text(
-              context.l10n.appearanceEnableBackground,
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: palette.textPrimary,
+            borderRadius: BorderRadius.circular(10),
+            onTap: () {
+              _applyDraftConfig(
+                _draftConfig.copyWith(enabled: !_draftConfig.enabled),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  _buildGlobalSettingLeadingIcon(icon: LucideIcons.image),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          context.l10n.appearanceEnableBackground,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: palette.textPrimary,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          context.l10n.appearanceEnableBackgroundSubtitle,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: palette.textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  OmniSettingsSwitch(
+                    value: _draftConfig.enabled,
+                    onToggle: (value) {
+                      _applyDraftConfig(_draftConfig.copyWith(enabled: value));
+                    },
+                  ),
+                ],
               ),
             ),
-            subtitle: Text(
-              context.l10n.appearanceEnableBackgroundSubtitle,
-              style: TextStyle(fontSize: 12, color: palette.textSecondary),
-            ),
-            value: _draftConfig.enabled,
-            onChanged: (value) {
-              _applyDraftConfig(_draftConfig.copyWith(enabled: value));
-            },
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: [
-              ChoiceChip(
+              _buildChoicePill(
                 key: const ValueKey('background-source-local'),
-                label: Text(context.l10n.appearanceSourceLocal),
+                label: context.l10n.appearanceSourceLocal,
                 selected: sourceType == AppBackgroundSourceType.local,
-                onSelected: (_) =>
-                    _setSourceType(AppBackgroundSourceType.local),
+                onSelected: () => _setSourceType(AppBackgroundSourceType.local),
               ),
-              ChoiceChip(
+              _buildChoicePill(
                 key: const ValueKey('background-source-remote'),
-                label: Text(context.l10n.appearanceSourceRemote),
+                label: context.l10n.appearanceSourceRemote,
                 selected: sourceType == AppBackgroundSourceType.remote,
-                onSelected: (_) =>
+                onSelected: () =>
                     _setSourceType(AppBackgroundSourceType.remote),
               ),
             ],
@@ -705,7 +995,16 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             OutlinedButton.icon(
               key: const ValueKey('background-pick-local-image'),
               onPressed: _pickLocalImage,
-              icon: const Icon(LucideIcons.images),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: palette.accentPrimary,
+                side: BorderSide(
+                  color: palette.accentPrimary.withValues(alpha: 0.45),
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              icon: const Icon(LucideIcons.images, size: 17),
               label: Text(
                 localPath.isEmpty
                     ? context.l10n.appearancePickImage
@@ -718,10 +1017,11 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             TextField(
               key: const ValueKey('background-remote-url-field'),
               controller: _remoteUrlController,
-              decoration: InputDecoration(
+              style: TextStyle(fontSize: 13.5, color: palette.textPrimary),
+              decoration: omniSettingsInputDecoration(
+                context,
                 labelText: context.l10n.appearanceRemoteImageUrl,
                 hintText: context.l10n.appearanceRemoteImageUrlHint,
-                border: OutlineInputBorder(),
                 errorText: _remoteUrlErrorText,
               ),
             ),
@@ -738,6 +1038,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSliderRow(
+            sliderKey: const ValueKey('appearance-background-blur-slider'),
             label: context.l10n.appearanceBackgroundBlur,
             subtitle: context.l10n.appearanceBackgroundBlurSubtitle,
             value: _draftConfig.blurSigma,
@@ -748,6 +1049,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             },
           ),
           _buildSliderRow(
+            sliderKey: const ValueKey('appearance-overlay-intensity-slider'),
             label: context.l10n.appearanceOverlayIntensity,
             subtitle: context.l10n.appearanceOverlayIntensitySubtitle,
             value: _draftConfig.frostOpacity,
@@ -758,6 +1060,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             },
           ),
           _buildSliderRow(
+            sliderKey: const ValueKey('appearance-overlay-brightness-slider'),
             label: context.l10n.appearanceOverlayBrightness,
             subtitle: context.l10n.appearanceOverlayBrightnessSubtitle,
             value: _draftConfig.brightness,
@@ -768,6 +1071,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             },
           ),
           _buildSliderRow(
+            sliderKey: const ValueKey('appearance-chat-text-size-slider'),
             label: context.l10n.appearanceChatTextSize,
             subtitle: context.l10n.appearanceChatTextSizeSubtitle,
             value: _draftConfig.chatTextSize,
@@ -803,7 +1107,10 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     );
   }
 
-  Future<void> _loadPetSettings() async {
+  Future<void> _loadPetSettings({bool revalidate = false}) =>
+      runPageLoad(#appearancePets, _readPetSettings, revalidate: revalidate);
+
+  Future<void> _readPetSettings() async {
     final nativeState = await OverlayService.getPetOverlayState();
     final nativeSelectedPath = nativeState['selectedPath']?.toString() ?? '';
     final workspaceRoot =
@@ -825,7 +1132,9 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
       workspaceRoot: workspaceRoot,
       selectedPath: selectedPath,
     );
-    if (!mounted) return;
+    if (!await waitForPageReady() || !pageLoadIsCurrent(#appearancePets)) {
+      return;
+    }
     setState(() {
       _petsDirectoryPath = petsDirectoryPath;
       _selectedPetId = _resolveSelectedPetId(
@@ -933,9 +1242,8 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     }
     final customOptions = dedupedDiscovered.values.toList()
       ..sort((left, right) {
-        final timeCompare = _petSortTimestamp(
-          left,
-        ).compareTo(_petSortTimestamp(right));
+        final timeCompare = _petSortTimestamp(left)
+            .compareTo(_petSortTimestamp(right));
         if (timeCompare != 0) {
           return timeCompare;
         }
@@ -1947,15 +2255,16 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
   }
 
   String _baseNameWithoutExtension(File file) {
-    return _displayFileNameForPetImage(
-      file,
-    ).replaceAll(RegExp(r'\.[^.]+$'), '').trim();
+    return _displayFileNameForPetImage(file)
+        .replaceAll(RegExp(r'\.[^.]+$'), '')
+        .trim();
   }
 
   String _pathBaseName(String path) {
-    final segments = _normalizePath(
-      path,
-    ).split('/').where((segment) => segment.isNotEmpty).toList();
+    final segments = _normalizePath(path)
+        .split('/')
+        .where((segment) => segment.isNotEmpty)
+        .toList();
     return segments.isEmpty ? '' : segments.last;
   }
 
@@ -2023,8 +2332,8 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
         archiveBytes: bytes,
         petsRootPath: _petsDirectoryPath,
       );
-      await _loadPetSettings();
-      if (!mounted) return;
+      await _loadPetSettings(revalidate: true);
+      if (!await waitForPageReady() || !mounted) return;
       final installedPath = _normalizePath(installed.spritesheetFile.path);
       _OverlayPetOption? installedOption;
       for (final option in _petOptions) {
@@ -2056,8 +2365,8 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
   }
 
   Future<void> _refreshPetOptions() async {
-    await _loadPetSettings();
-    if (!mounted) return;
+    await _loadPetSettings(revalidate: true);
+    if (!await waitForPageReady() || !mounted) return;
     final selectedOption = _petOptions.firstWhere(
       (option) => option.id == _selectedPetId,
       orElse: () => _petOptions.first,
@@ -2115,84 +2424,81 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     );
     return DecoratedBox(
       key: const ValueKey('appearance-pet-card'),
-      decoration: BoxDecoration(
-        color: palette.surfacePrimary,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: palette.borderSubtle),
-      ),
-      child: Column(
-        children: [
-          InkWell(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
-            onTap: () {
-              final willExpand = !_petExpanded;
-              setState(() => _petExpanded = willExpand);
-              if (willExpand) {
-                unawaited(_loadPetSettings());
-              }
-            },
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 14, 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          context.trLegacy('宠物'),
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: palette.textPrimary,
+      decoration: omniSettingsSurfaceDecoration(context),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(16),
+        child: Column(
+          children: [
+            InkWell(
+              onTap: () {
+                final willExpand = !_petExpanded;
+                setState(() => _petExpanded = willExpand);
+                if (willExpand) {
+                  unawaited(_loadPetSettings());
+                }
+              },
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 14, 14),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            context.trLegacy('宠物'),
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: palette.textPrimary,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${context.trLegacy('已选')}：${selectedOption.name}',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: palette.textSecondary,
+                          const SizedBox(height: 3),
+                          Text(
+                            '${context.trLegacy('已选')}：${selectedOption.name}',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: palette.textSecondary,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Tooltip(
-                    message: context.trLegacy('刷新'),
-                    child: IconButton(
+                    const SizedBox(width: 8),
+                    OmniCircleButton(
+                      tooltip: context.trLegacy('刷新'),
                       onPressed: _petBusy ? null : _refreshPetOptions,
-                      icon: const Icon(LucideIcons.refreshCw),
-                      color: palette.textSecondary,
+                      icon: LucideIcons.refreshCw,
+                      foregroundColor: palette.textSecondary,
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    _petExpanded
-                        ? LucideIcons.chevronUp
-                        : LucideIcons.chevronDown,
-                    color: palette.textSecondary,
-                  ),
-                ],
+                    const SizedBox(width: 2),
+                    Icon(
+                      _petExpanded
+                          ? LucideIcons.chevronUp
+                          : LucideIcons.chevronDown,
+                      size: 18,
+                      color: palette.textTertiary,
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-          AnimatedCrossFade(
-            firstChild: const SizedBox.shrink(),
-            secondChild: Column(
-              children: [
-                Divider(height: 1, color: palette.borderSubtle),
-                _buildPetImportTile(),
-                ..._petOptions.map(_buildPetOptionTile),
-              ],
+            AnimatedCrossFade(
+              firstChild: const SizedBox.shrink(),
+              secondChild: Column(
+                children: [
+                  Divider(height: 1, color: palette.borderSubtle),
+                  _buildPetImportTile(),
+                  ..._petOptions.map(_buildPetOptionTile),
+                ],
+              ),
+              crossFadeState: _petExpanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 180),
             ),
-            crossFadeState: _petExpanded
-                ? CrossFadeState.showSecond
-                : CrossFadeState.showFirst,
-            duration: const Duration(milliseconds: 180),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -2345,6 +2651,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
   }
 
   Widget _buildSliderRow({
+    required Key sliderKey,
     required String label,
     required String subtitle,
     required double value,
@@ -2354,25 +2661,44 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     String Function(double value)? valueFormatter,
   }) {
     final palette = context.omniPalette;
+    String formatValue(double value) =>
+        valueFormatter?.call(value) ?? value.toStringAsFixed(2);
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Text(
-                context.trLegacy(label),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: palette.textPrimary,
+              Expanded(
+                child: Text(
+                  context.trLegacy(label),
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: palette.textPrimary,
+                  ),
                 ),
               ),
-              const Spacer(),
-              Text(
-                valueFormatter?.call(value) ?? value.toStringAsFixed(2),
-                style: TextStyle(fontSize: 12, color: palette.textSecondary),
+              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: palette.surfaceSecondary,
+                  borderRadius: BorderRadius.circular(1000),
+                ),
+                child: Text(
+                  formatValue(value),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: palette.textSecondary,
+                    fontFeatures: const [ui.FontFeature.tabularFigures()],
+                  ),
+                ),
               ),
             ],
           ),
@@ -2381,7 +2707,16 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
             context.trLegacy(subtitle),
             style: TextStyle(fontSize: 12, color: palette.textSecondary),
           ),
-          Slider(value: value, min: min, max: max, onChanged: onChanged),
+          const SizedBox(height: 8),
+          OmniSlider(
+            key: sliderKey,
+            value: value,
+            min: min,
+            max: max,
+            onChanged: onChanged,
+            semanticLabel: context.trLegacy(label),
+            semanticFormatterCallback: formatValue,
+          ),
         ],
       ),
     );
@@ -2399,7 +2734,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
           context.l10n.appearanceTextColorTitle,
           style: TextStyle(
             fontSize: 14,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w500,
             color: palette.textPrimary,
           ),
         ),
@@ -2412,14 +2747,15 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
         Wrap(
           spacing: 10,
           runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            ChoiceChip(
+            _buildChoicePill(
               key: const ValueKey('appearance-text-color-auto'),
-              label: Text(context.l10n.appearanceTextColorAuto),
+              label: context.l10n.appearanceTextColorAuto,
               selected:
                   _draftConfig.chatTextColorMode ==
                   AppBackgroundTextColorMode.auto,
-              onSelected: (_) {
+              onSelected: () {
                 _textColorController.text = '';
                 _applyDraftConfig(
                   _draftConfig.copyWith(
@@ -2448,26 +2784,17 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
                 borderRadius: BorderRadius.circular(999),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 160),
-                  width: 34,
-                  height: 34,
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
                     color: preset.color,
                     shape: BoxShape.circle,
                     border: Border.all(
                       color: selected
-                          ? (context.isDarkTheme
-                                ? palette.accentPrimary
-                                : AppColors.primaryBlue)
+                          ? palette.accentPrimary
                           : palette.borderStrong,
-                      width: selected ? 3 : 1.5,
+                      width: selected ? 2.5 : 1.2,
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.06),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
                   ),
                 ),
               );
@@ -2478,10 +2805,11 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
         TextField(
           key: const ValueKey('appearance-text-color-field'),
           controller: _textColorController,
-          decoration: InputDecoration(
+          style: TextStyle(fontSize: 13.5, color: palette.textPrimary),
+          decoration: omniSettingsInputDecoration(
+            context,
             labelText: context.l10n.appearanceCustomColorLabel,
             hintText: context.l10n.appearanceCustomColorHint,
-            border: const OutlineInputBorder(),
             errorText: _textColorErrorText,
           ),
         ),
@@ -2490,7 +2818,7 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
   }
 
   Widget _buildCard({required Widget child}) {
-    return SizedBox(width: double.infinity, child: child);
+    return Padding(padding: const EdgeInsets.all(18), child: child);
   }
 
   void _scheduleDraftVisualProfileRefresh() {
@@ -2516,10 +2844,11 @@ class _BackgroundSettingPageState extends State<BackgroundSettingPage> {
     int token,
     AppBackgroundConfig previewConfig,
   ) async {
+    if (!await waitForPageReady() || token != _previewProfileToken) return;
     final analyzed = await AppBackgroundService.analyzeVisualProfile(
       previewConfig,
     );
-    if (!mounted || token != _previewProfileToken) {
+    if (!await waitForPageReady() || token != _previewProfileToken) {
       return;
     }
     setState(() {

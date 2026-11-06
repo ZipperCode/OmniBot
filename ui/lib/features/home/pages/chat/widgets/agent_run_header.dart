@@ -123,12 +123,11 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
         ? palette.textTertiary
         : (widget.expanded ? palette.textSecondary : palette.textTertiary);
     final textStyle = TextStyle(
-      fontSize: 11,
-      fontWeight: FontWeight.w600,
+      fontSize: 14,
+      fontWeight: FontWeight.w500,
       letterSpacing: 0,
       height: 1.2,
       color: labelColor,
-      fontFamily: 'PingFang SC',
     );
 
     final Widget labelWidget = running
@@ -137,6 +136,8 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
             child: Text(
               label,
               key: const ValueKey('acp-processing-label'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: textStyle,
             ),
           )
@@ -219,9 +220,12 @@ class _AgentRunHeaderState extends State<AgentRunHeader> {
             borderRadius: BorderRadius.circular(10),
             splashFactory: NoSplash.splashFactory,
             overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
-              child: content,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 44),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
+                child: content,
+              ),
             ),
           ),
         ),

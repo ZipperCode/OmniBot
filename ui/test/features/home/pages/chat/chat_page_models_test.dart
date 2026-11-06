@@ -43,6 +43,46 @@ void main() {
     });
 
     test(
+      'history cursor follows its conversation through snapshot updates',
+      () {
+        final first = coordinator.ensureRuntime(
+          conversationId: 1,
+          mode: kChatRuntimeModeAgent,
+        )..historyPage = (hasMore: true, nextOffset: 37);
+        final second = coordinator.ensureRuntime(
+          conversationId: 2,
+          mode: kChatRuntimeModeAgent,
+        )..historyPage = (hasMore: false, nextOffset: 4);
+
+        coordinator.replaceConversationSnapshot(
+          conversationId: 1,
+          mode: kChatRuntimeModeAgent,
+          messages: [ChatMessageModel.userMessage('new live item', id: 'new')],
+        );
+
+        expect(
+          coordinator.ensureRuntime(
+            conversationId: 1,
+            mode: kChatRuntimeModeAgent,
+          ),
+          same(first),
+        );
+        expect(first.historyPage, (hasMore: true, nextOffset: 37));
+        expect(second.historyPage, (hasMore: false, nextOffset: 4));
+        coordinator.discardConversationRuntime(
+          conversationId: 1,
+          mode: kChatRuntimeModeAgent,
+        );
+        expect(
+          coordinator
+              .ensureRuntime(conversationId: 1, mode: kChatRuntimeModeAgent)
+              .historyPage,
+          isNull,
+        );
+      },
+    );
+
+    test(
       'when preserveLiveStreamingState=true the snapshot keeps reducer '
       'push state intact (regression: codex output mid-turn auto-collapse)',
       () {
@@ -376,6 +416,23 @@ void main() {
 
     tearDown(() {
       list.dispose();
+    });
+
+    test('Na run status transition invalidates timeline shape with identical message IDs', () {
+      list.add(ChatMessageModel.assistantMessage('same text', id: 'same-id').copyWith(
+        streamMeta: {'parentTaskId': 'remote-turn', 'naRunStatus': 'running', 'isFinal': true},
+      ));
+      final revision = list.structureRevision;
+      final notifier = list.listenableAt(0);
+      list[0] = list[0].copyWith(content: {'text': 'same text continues'});
+      expect(list.structureRevision, revision);
+      for (final status in ['completed', 'failed', 'cancelled']) {
+        final previousRevision = list.structureRevision;
+        list[0] = list[0].copyWith(streamMeta: {...?list[0].streamMeta, 'naRunStatus': status});
+        expect(list.structureRevision, previousRevision + 1);
+        expect(list.lastMutationKind, ChatMessageListMutationKind.structure);
+        expect(list.listenableAt(0), same(notifier));
+      }
     });
 
     test('insert triggers list-level notifyListeners', () {

@@ -57,6 +57,7 @@ class OnboardingFooter extends StatelessWidget {
     required this.onNext,
     required this.onJumpToPage,
     this.primaryAction,
+    this.navigationKey = const ValueKey('tutorial-pagination-navigation'),
   });
 
   final TutorialPage currentPage;
@@ -68,6 +69,8 @@ class OnboardingFooter extends StatelessWidget {
   final VoidCallback? onNext;
   final void Function(TutorialPage page) onJumpToPage;
   final Widget? primaryAction;
+
+  final Key navigationKey;
 
   @override
   Widget build(BuildContext context) {
@@ -102,7 +105,7 @@ class OnboardingFooter extends StatelessWidget {
     final currentIndex = tutorialNavigationPages.indexOf(currentPage);
 
     return SizedBox(
-      key: const ValueKey('tutorial-pagination-navigation'),
+      key: navigationKey,
       height: 58,
       child: Row(
         children: [

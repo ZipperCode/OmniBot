@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:ui/theme/theme_context.dart';
 
-/// 可定制的渐变按钮组件
+/// Legacy button API rendered with the app's solid action surface.
 class GradientButton extends StatelessWidget {
   /// 按钮文字
   final String text;
@@ -16,15 +17,6 @@ class GradientButton extends StatelessWidget {
 
   /// 文字样式，如果不提供则使用默认样式
   final TextStyle? textStyle;
-
-  /// 渐变色列表
-  final List<Color> gradientColors;
-
-  /// 渐变开始位置
-  final Alignment gradientBegin;
-
-  /// 渐变结束位置
-  final Alignment gradientEnd;
 
   /// 圆角半径
   final double borderRadius;
@@ -45,10 +37,7 @@ class GradientButton extends StatelessWidget {
     this.width = 166,
     this.height = 44,
     this.textStyle,
-    this.gradientColors = const [Color(0xFF1930D9), Color(0xFF2DA5F0)],
-    this.gradientBegin = const Alignment(0.14, -1.09),
-    this.gradientEnd = const Alignment(1.10, 1.26),
-    this.borderRadius = 8,
+    this.borderRadius = 14,
     this.enabled = true,
     this.trailingIcon,
     this.iconSpacing = 4,
@@ -56,21 +45,17 @@ class GradientButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.omniPalette;
+    final active = enabled && onTap != null;
+    final fill = active ? palette.accentPrimary : palette.surfaceElevated;
+    final foreground = active
+        ? Theme.of(context).colorScheme.onPrimary
+        : palette.textTertiary;
     return Material(
-      color: Colors.transparent, // 保持透明，不遮盖渐变
+      color: Colors.transparent,
       child: Ink(
         decoration: ShapeDecoration(
-          gradient: enabled
-              ? LinearGradient(
-                  begin: gradientBegin,
-                  end: gradientEnd,
-                  colors: gradientColors,
-                )
-              : LinearGradient(
-                  begin: gradientBegin,
-                  end: gradientEnd,
-                  colors: [Colors.grey.shade400, Colors.grey.shade300],
-                ),
+          color: fill,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.all(Radius.circular(borderRadius)),
           ),
@@ -94,10 +79,9 @@ class GradientButton extends StatelessWidget {
                     textAlign: TextAlign.center,
                     style:
                         textStyle ??
-                        const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontFamily: 'PingFang SC',
+                        TextStyle(
+                          color: foreground,
+                          fontSize: 15,
                           fontWeight: FontWeight.w500,
                           height: 1.5,
                           letterSpacing: 0.5,
@@ -106,7 +90,10 @@ class GradientButton extends StatelessWidget {
                 ),
                 if (trailingIcon != null) ...[
                   SizedBox(width: iconSpacing),
-                  trailingIcon!,
+                  IconTheme(
+                    data: IconThemeData(color: foreground),
+                    child: trailingIcon!,
+                  ),
                 ],
               ],
             ),

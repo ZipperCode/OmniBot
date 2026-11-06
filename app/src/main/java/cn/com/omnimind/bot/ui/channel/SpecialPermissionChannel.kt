@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.ui.channel
 
 import cn.com.omnimind.bot.manager.SpecialPermissionManager
+import cn.com.omnimind.bot.agent.personal.PersonalContextPermissionActions
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
 import android.annotation.SuppressLint
 import android.content.Context
@@ -19,9 +20,13 @@ class SpecialPermissionChannel {
     private var eventChannel: EventChannel? = null
     private var eventSink: EventChannel.EventSink? = null
     private var embeddedTerminalInitListener: ((Map<String, Any?>) -> Unit)? = null
+    private var personalContextActions: PersonalContextPermissionActions? = null
 
     fun onCreate(context: Context) {
+        specialPermissionManager?.closeRootSettings()
         specialPermissionManager = SpecialPermissionManager(context)
+        personalContextActions?.close()
+        personalContextActions = PersonalContextPermissionActions(context)
     }
 
     fun setChannel(flutterEngine: FlutterEngine) {
@@ -51,6 +56,7 @@ class SpecialPermissionChannel {
             EmbeddedTerminalInitCoordinator.addListener(it)
         }
         methodChannel?.setMethodCallHandler { call, result ->
+                if (personalContextActions?.handle(call, result) == true) return@setMethodCallHandler
                 when (call.method) {
                     "isIgnoringBatteryOptimizations" -> specialPermissionManager!!.isIgnoringBatteryOptimizations(
                         result
@@ -90,10 +96,27 @@ class SpecialPermissionChannel {
                     "openAutoStartSettings" -> specialPermissionManager!!.openAutoStartSettings(
                         result
                     )
-                    "getPrivilegedStatus" -> specialPermissionManager!!.getPrivilegedStatus(result)
-                    "setPrivilegedSource" -> specialPermissionManager!!.setPrivilegedSource(call, result)
-                    "authorizePrivilegedSource" -> specialPermissionManager!!.authorizePrivilegedSource(result)
-                    "openPrivilegedSourceApp" -> specialPermissionManager!!.openPrivilegedSourceApp(result)
+                    "isShizukuInstalled" -> specialPermissionManager!!.isShizukuInstalled(
+                        result
+                    )
+                    "isShizukuRunning" -> specialPermissionManager!!.isShizukuRunning(
+                        result
+                    )
+                    "openShizukuDownloadOrApp" -> specialPermissionManager!!.openShizukuDownloadOrApp(
+                        result
+                    )
+                    "requestShizukuPermission" -> specialPermissionManager!!.requestShizukuPermission(
+                        result
+                    )
+                    "getRootStatus" -> specialPermissionManager!!.getRootStatus(result)
+                    "setRootEnabled" -> specialPermissionManager!!.setRootEnabled(call, result)
+                    "requestRootAccess" -> specialPermissionManager!!.requestRootAccess(result)
+                    "getShizukuStatus" -> specialPermissionManager!!.getShizukuStatus(
+                        result
+                    )
+                    "runShizukuHealthCheck" -> specialPermissionManager!!.runShizukuHealthCheck(
+                        result
+                    )
                     "isTermuxInstalled" -> specialPermissionManager!!.isTermuxInstalled(
                         result
                     )
@@ -106,10 +129,18 @@ class SpecialPermissionChannel {
                     )
                     "openAppDetailsSettings" -> specialPermissionManager!!
                         .openAppDetailsSettings(result)
+                    "openNotificationSettings" -> specialPermissionManager!!
+                        .openNotificationSettings(result)
                     "isNotificationPermissionGranted" -> specialPermissionManager!!
                         .isNotificationPermissionGranted(result)
                     "requestNotificationPermission" -> specialPermissionManager!!
                         .requestNotificationPermission(result)
+                    "isLocalNetworkPermissionGranted" -> specialPermissionManager!!
+                        .isLocalNetworkPermissionGranted(result)
+                    "getLocalNetworkPermissionStatus" -> specialPermissionManager!!
+                        .getLocalNetworkPermissionStatus(result)
+                    "requestLocalNetworkPermission" -> specialPermissionManager!!
+                        .requestLocalNetworkPermission(result)
                     "isWorkspaceStorageAccessGranted" -> specialPermissionManager!!
                         .isWorkspaceStorageAccessGranted(result)
                     "openWorkspaceStorageSettings" -> specialPermissionManager!!
@@ -176,6 +207,9 @@ class SpecialPermissionChannel {
     }
 
     fun clear() {
+        specialPermissionManager?.closeRootSettings()
+        personalContextActions?.close()
+        personalContextActions = null
         embeddedTerminalInitListener?.let {
             EmbeddedTerminalInitCoordinator.removeListener(it)
         }

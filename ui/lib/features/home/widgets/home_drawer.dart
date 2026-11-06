@@ -2,7 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show setEquals, visibleForTesting;
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
@@ -11,8 +15,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
+import 'package:ui/features/home/widgets/conversation_context_menu.dart';
 import 'package:ui/features/home/widgets/conversation_slidable.dart';
 import 'package:ui/features/home/widgets/home_drawer_search_field.dart';
+import 'package:ui/features/home/widgets/home_conversation_tile_content.dart';
+import 'package:ui/features/home/widgets/home_conversation_avatar_colors.dart';
+import 'package:ui/features/home/widgets/home_search_header.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_message_model.dart';
@@ -20,27 +28,45 @@ import 'package:ui/models/conversation_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/models/scheduled_task.dart';
 import 'package:ui/services/agent_web_action_presenter.dart';
+import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/agent_web_status_service.dart';
+import 'package:ui/services/app_update_service.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
 import 'package:ui/services/omni_plugin_service.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
+import 'package:ui/services/overlay_service.dart';
+import 'package:ui/services/permission_registry.dart';
+import 'package:ui/services/permission_service.dart';
+import 'package:ui/features/home/pages/authorize/authorize_page_args.dart';
+import 'package:ui/features/home/pages/chat/widgets/pet_overlay_permission_sheet.dart';
 import 'package:ui/services/scheduled_task_storage_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/cache_util.dart';
-import 'package:ui/utils/popup_menu_anchor_position.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_brand_icon.dart';
+import 'package:ui/widgets/installation_notification_permission_button.dart';
+import 'package:ui/widgets/app_update_dialog.dart';
+import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/flclash/search_header.dart';
+import 'package:ui/widgets/glass_popup.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/omni_glass_floating_action_button.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 part 'home_drawer_actions.dart';
 part 'home_drawer_conversation_list.dart';
 part 'home_drawer_header_footer.dart';
+part 'home_drawer_home.dart';
 part 'home_drawer_image_previews.dart';
 part 'home_drawer_models.dart';
+part 'home_drawer_pet.dart';
 part 'home_drawer_search.dart';
+part 'home_drawer_selection.dart';
 
 const String _kDrawerMemoryIconSvg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" '
@@ -108,6 +134,11 @@ class HomeDrawer extends ConsumerStatefulWidget {
     this.onThreadTargetSelected,
     this.onSearchFocusChanged,
     this.searchFieldKey,
+    this.deferInitialLoad = false,
+    this.homePage = false,
+    this.conversationSidebar = false,
+    this.selectedThreadTarget,
+    this.active = true,
   });
 
   final int? memoryCount;
@@ -118,20 +149,38 @@ class HomeDrawer extends ConsumerStatefulWidget {
   final ValueChanged<bool>? onSearchFocusChanged;
   final GlobalKey? searchFieldKey;
 
+  /// A Scaffold drawer is unmounted whenever it is closed, so this state is
+  /// created again on every open, on the first frame of the slide. When true
+  /// it renders the in-memory snapshot and leaves the refresh to the host's
+  /// [HomeDrawerState.reloadAfterSettle], instead of loading mid-animation.
+  final bool deferInitialLoad;
+
+  /// Presents the existing conversation owner as the app's full-screen home.
+  /// Search, history mutations and running-session status remain shared.
+  final bool homePage;
+
+  /// Reuses the modern home surface inside a narrow conversation pane.
+  /// It starts with all Agents so opening a Codex/Na conversation does not
+  /// hide it behind the standalone home's remembered default category.
+  final bool conversationSidebar;
+
+  /// Presentation selection supplied by the conversation host; never owns
+  /// or changes the current ACP session.
+  final ConversationThreadTarget? selectedThreadTarget;
+
+  /// Kept-alive home tabs refresh their catalog when selected again.
+  final bool active;
+
   @override
   ConsumerState<HomeDrawer> createState() => HomeDrawerState();
 }
 
-class HomeDrawerState extends ConsumerState<HomeDrawer> {
-  static const double _conversationActionIconSize = 18;
+class HomeDrawerState extends ConsumerState<HomeDrawer>
+    with FlClashPageLoadMixin {
   static const Duration _searchDebounceDuration = Duration(milliseconds: 220);
   static const Duration _sectionToggleDuration = Duration(milliseconds: 260);
   static const Duration _imagePreviewStripTransitionDuration = Duration(
     milliseconds: 180,
-  );
-  static const BorderRadius _drawerTrailingActionRadius = BorderRadius.only(
-    topRight: Radius.circular(4),
-    bottomRight: Radius.circular(4),
   );
   static bool _hasConversationSnapshotCache = false;
   static List<ConversationModel> _conversationSnapshotCache =
@@ -157,7 +206,13 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
   final Map<String, Set<String>> _conversationImagePreviewFailures =
       <String, Set<String>>{};
   final Map<String, bool> _expandedConversationSections = <String, bool>{};
+  Map<String, int> _homeAvatarColorIndices = const {};
   final Set<String> _busyConversationKeys = <String>{};
+  final Set<String> _selectedConversationKeys = <String>{};
+  bool _isSelectingConversations = false;
+  bool _isBatchConversationActionRunning = false;
+  bool _refreshConversationsAfterBatch = false;
+  String? _selectionFeedback;
   final TextEditingController _titleEditingController = TextEditingController();
   final FocusNode _titleEditingFocusNode = FocusNode();
   List<ConversationModel> _allConversations = <ConversationModel>[];
@@ -165,10 +220,22 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       <_ConversationSearchResult>[];
   bool isLoadingConversations = true;
   bool _isSearching = false;
+  bool _homeSearchVisible = false;
+  final _homeMenuRevision = ValueNotifier<int>(0);
+  bool _isPetOverlayOpening = false;
+  bool _isPetOverlayShowing = false;
+  List<OmniPluginActionItem> _homeMenuWebQuickActions = const [];
+  int _webQuickActionsRequest = 0;
+  _HomeConversationFilter _homeFilter = _HomeConversationFilter.xiaowan;
+  AcpAgentCatalog? _homeAgentCatalog;
+  bool _homeRouteWasCurrent = false;
+  AppLifecycleListener? _homeAppLifecycleListener;
+  int _homeCatalogRequest = 0;
   int _conversationLoadGeneration = 0;
   int _searchGeneration = 0;
   Timer? _searchDebounceTimer;
   String? _editingThreadKey;
+  String? _activeContextMenuThreadKey;
   List<ScheduledTask> _scheduledTasks = <ScheduledTask>[];
   // 分组结果缓存：_allConversations/_scheduledTasks 只会被整体替换（不会原地
   // 修改），因此按列表 identity 判断是否需要重算，避免每次 build 重复
@@ -192,7 +259,19 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
   @override
   void initState() {
     super.initState();
+    if (widget.conversationSidebar) _homeFilter = _HomeConversationFilter.all;
+    if (widget.homePage) {
+      unawaited(AppUpdateService.initialize());
+      unawaited(_syncPetOverlayState());
+      _homeAppLifecycleListener = AppLifecycleListener(
+        onResume: () {
+          unawaited(AppUpdateService.refreshIfNeeded());
+          unawaited(_syncPetOverlayState());
+        },
+      );
+    }
     _runtimeCoordinator.ensureInitialized();
+    _activeConversationIds = _runtimeCoordinator.activeAgentConversationIds;
     _runtimeCoordinator.addListener(_handleRuntimeCoordinatorChanged);
     _searchController.addListener(_handleSearchQueryChanged);
     _searchFocusNode.addListener(_handleSearchFocusChanged);
@@ -201,7 +280,26 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _restoreDrawerSnapshotCache();
     _conversationListChangedSubscription = AssistsMessageService
         .conversationListChangedStream
-        .listen((_) {
+        .listen((event) {
+          if (event['reason'] == 'na_history_owner_changed') {
+            setState(() {
+              _selectedConversationKeys.removeAll(
+                _allConversations
+                    .where((row) => row.agentId == 'na-cloud')
+                    .map((row) => row.threadKey),
+              );
+              _allConversations = _allConversations
+                  .where((row) => row.agentId != 'na-cloud')
+                  .toList();
+              _searchGeneration++;
+              _searchResults = _searchResults
+                  .where((result) => result.conversation.agentId != 'na-cloud')
+                  .toList();
+              _conversationSearchCache.clear();
+              _reconcileConversationSelection();
+            });
+            _syncConversationSnapshotCache();
+          }
           unawaited(_loadConversations());
         });
     _sidebarPolicyChangedSubscription = ConversationService
@@ -212,13 +310,45 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _scheduledTasksChangedSubscription = ScheduledTaskStorageService
         .scheduledTasksChangedStream
         .listen(_handleScheduledTasksChanged);
+    // Without a snapshot there is nothing to show; load at once. The host's
+    // open callback runs before this state exists (Scaffold builds the drawer
+    // on the next frame), so the deferred refresh is scheduled here.
+    if (widget.deferInitialLoad &&
+        HomeDrawerState._hasConversationSnapshotCache) {
+      isLoadingConversations = false;
+      reloadAfterSettle();
+      return;
+    }
     _loadConversations();
     unawaited(_loadWebQuickActions());
   }
 
   @override
+  void didUpdateWidget(covariant HomeDrawer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.homePage && widget.active && !oldWidget.active) {
+      unawaited(_loadHomeAgentCatalog());
+      unawaited(_syncPetOverlayState());
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!widget.homePage) return;
+    final isCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (isCurrent && !_homeRouteWasCurrent) {
+      unawaited(_loadHomeAgentCatalog());
+    }
+    _homeRouteWasCurrent = isCurrent;
+  }
+
+  @override
   void dispose() {
+    _homeMenuRevision.dispose();
+    _homeAppLifecycleListener?.dispose();
     _searchDebounceTimer?.cancel();
+    _settledReloadTimer?.cancel();
     _conversationListChangedSubscription?.cancel();
     _sidebarPolicyChangedSubscription?.cancel();
     _scheduledTasksChangedSubscription?.cancel();
@@ -239,11 +369,19 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     super.dispose();
   }
 
+  /// Conversation ids that show the running dot, as of the last rebuild.
+  Set<int> _activeConversationIds = const <int>{};
+
   void _handleRuntimeCoordinatorChanged() {
     if (!mounted) return;
-    // Runtime state is already canonical; rebuilding is enough. Do not reload
-    // the conversation list or derive a second event state in the drawer.
-    setState(() {});
+    // The coordinator notifies on every streamed snapshot of every runtime
+    // (dozens per second while a reply streams). The drawer reads only which
+    // conversations are running, so rebuild when that set changes; an
+    // unconditional setState rebuilt the whole list per token, including
+    // during the drawer's open and close animations.
+    final active = _runtimeCoordinator.activeAgentConversationIds;
+    if (setEquals(active, _activeConversationIds)) return;
+    setState(() => _activeConversationIds = active);
   }
 
   void _handleScheduledTasksChanged(List<ScheduledTask> tasks) {
@@ -263,35 +401,86 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     unawaited(_loadWebQuickActions());
   }
 
-  Future<void> _loadWebQuickActions() async {
+  /// Settle time of the Material drawer (`_kBaseSettleDuration`, 246 ms) with
+  /// a margin, so a refresh never lands inside the open animation.
+  static const Duration drawerSettleDelay = Duration(milliseconds: 320);
+  Timer? _settledReloadTimer;
+
+  /// Refreshes once the open animation has finished. The list already shows
+  /// the in-memory snapshot, so nothing is lost by waiting; refreshing during
+  /// the slide rebuilt every visible row mid-animation and started the
+  /// image-preview history reads, which dropped frames on every open.
+  void reloadAfterSettle() {
+    _settledReloadTimer?.cancel();
+    _settledReloadTimer = Timer(drawerSettleDelay, () {
+      if (mounted) reloadConversations();
+    });
+  }
+
+  /// A drawer closed before it settled must not refresh during its close.
+  void cancelSettledReload() {
+    _settledReloadTimer?.cancel();
+    _settledReloadTimer = null;
+  }
+
+  Future<void> _loadWebQuickActions() =>
+      runPageLoad(#homePluginActions, _readWebQuickActions, revalidate: true);
+
+  Future<List<OmniPluginActionItem>> _queryWebQuickActions() async {
+    final actions = await OmniPluginService.listActions();
+    return actions
+        .where(
+          (action) =>
+              action.supportsPlacement('home_drawer_quick_launch') &&
+              (action.presentation['agentId']?.toString().trim().isNotEmpty ??
+                  false),
+        )
+        .toList(growable: false)
+      ..sort((left, right) {
+        final order = left.quickLaunchOrder.compareTo(right.quickLaunchOrder);
+        return order != 0
+            ? order
+            : left.displayName.compareTo(right.displayName);
+      });
+  }
+
+  /// The open popup owns this snapshot. Its parent route is intentionally not
+  /// current while the menu is visible, so only the parent's cache publication
+  /// waits for that route to settle; the menu's registry read cannot use it.
+  Future<void> _refreshHomeMenuWebQuickActions() async {
+    _homeMenuWebQuickActions = _webQuickActions;
+    final request = ++_webQuickActionsRequest;
+    List<OmniPluginActionItem> actions;
     try {
-      final actions = await OmniPluginService.listActions();
-      if (!mounted) return;
-      final quickActions =
-          actions
-              .where(
-                (action) =>
-                    action.supportsPlacement('home_drawer_quick_launch') &&
-                    (action.presentation['agentId']
-                            ?.toString()
-                            .trim()
-                            .isNotEmpty ??
-                        false),
-              )
-              .toList(growable: false)
-            ..sort((left, right) {
-              final order = left.quickLaunchOrder.compareTo(
-                right.quickLaunchOrder,
-              );
-              return order != 0
-                  ? order
-                  : left.displayName.compareTo(right.displayName);
-            });
+      actions = await _queryWebQuickActions();
+    } catch (error) {
+      debugPrint('[HomeDrawer] failed to load menu Web quick actions: $error');
+      actions = const [];
+    }
+    if (!mounted || request != _webQuickActionsRequest) return;
+    _homeMenuWebQuickActions = actions;
+    _homeMenuRevision.value++;
+    if (!await waitForPageReady() || request != _webQuickActionsRequest) return;
+    setState(() => _webQuickActions = actions);
+  }
+
+  Future<void> _readWebQuickActions() async {
+    final request = ++_webQuickActionsRequest;
+    try {
+      final quickActions = await _queryWebQuickActions();
+      if (!await waitForPageReady() ||
+          request != _webQuickActionsRequest ||
+          !pageLoadIsCurrent(#homePluginActions)) {
+        return;
+      }
       setState(() => _webQuickActions = quickActions);
       unawaited(_refreshWebQuickActionStatuses());
     } catch (error) {
       debugPrint('[HomeDrawer] failed to load Web quick actions: $error');
-      if (mounted && _webQuickActions.isNotEmpty) {
+      if (await waitForPageReady() &&
+          request == _webQuickActionsRequest &&
+          pageLoadIsCurrent(#homePluginActions) &&
+          _webQuickActions.isNotEmpty) {
         setState(() => _webQuickActions = const <OmniPluginActionItem>[]);
       }
     }
@@ -299,7 +488,13 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
 
   /// Probes the managed Web processes behind the quick launch chips so a
   /// running service is visibly marked and offers a stop affordance.
-  Future<void> _refreshWebQuickActionStatuses() async {
+  Future<void> _refreshWebQuickActionStatuses() => runPageLoad(
+    #homeWebStatus,
+    _readWebQuickActionStatuses,
+    revalidate: true,
+  );
+
+  Future<void> _readWebQuickActionStatuses() async {
     final actions = _webQuickActions
         .where(AgentWebStatusService.supportsLifecycle)
         .toList(growable: false);
@@ -312,7 +507,7 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
       return;
     }
     final statuses = await AgentWebStatusService.queryAll(actions);
-    if (!mounted) return;
+    if (!await waitForPageReady() || !pageLoadIsCurrent(#homeWebStatus)) return;
     setState(() => _webQuickActionStatuses = statuses);
   }
 
@@ -351,8 +546,37 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
     _searchFocusNode.unfocus();
   }
 
+  /// The chat host resolves sidebar dismissal before workspace navigation,
+  /// so two PopScopes never consume the same back action independently.
+  bool handleBackIfNeeded() {
+    if (!widget.active) return false;
+    if (_isSelectingConversations) {
+      _exitConversationSelection();
+      return true;
+    }
+    if (_homeSearchVisible) {
+      _closeHomeSearch();
+      return true;
+    }
+    return false;
+  }
+
+  /// Rebuilds of this drawer, for the frame-budget tests.
+  @visibleForTesting
+  static int debugBuildCount = 0;
+
   @override
   Widget build(BuildContext context) {
+    assert(() {
+      debugBuildCount++;
+      return true;
+    }());
+    if (widget.homePage) {
+      return OmniContentWidth(
+        key: const ValueKey('home-content-column'),
+        child: _buildHomePage(),
+      );
+    }
     final backgroundColor = _drawerBackgroundColor;
     final content = ColoredBox(
       color: backgroundColor,
@@ -362,7 +586,6 @@ class HomeDrawerState extends ConsumerState<HomeDrawer> {
           children: [
             const SizedBox(height: 16),
             Expanded(child: _buildConversationSection()),
-            if (_webQuickActions.isNotEmpty) _buildWebQuickLaunchBar(),
             _buildFooterShortcutBar(),
             // Aligns this row's bottom edge with the chat composer's bottom
             // edge (both sit this far above the shared SafeArea bottom).

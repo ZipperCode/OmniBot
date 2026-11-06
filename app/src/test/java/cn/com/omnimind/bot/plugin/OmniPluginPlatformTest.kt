@@ -19,6 +19,21 @@ import org.junit.Test
 class OmniPluginPlatformTest {
 
     @Test
+    fun `catalog includes only active tools without opening handlers`() = runBlocking {
+        val provider = RecordingProvider("com.omnimind.catalog", "catalog_tool")
+        val platform = platform(provider)
+        assertTrue(platform.listToolDefinitions().isEmpty())
+        platform.install(provider.descriptor.id)
+        val handlersCreated = provider.handlerCreateCount
+        val definition = platform.listToolDefinitions().single()
+        assertEquals("catalog_tool", definition.name)
+        assertEquals(provider.descriptor.id, definition.ownerPluginId)
+        assertEquals(handlersCreated, provider.handlerCreateCount)
+        platform.setEnabled(provider.descriptor.id, false)
+        assertTrue(platform.listToolDefinitions().isEmpty())
+    }
+
+    @Test
     fun `empty platform preserves an empty plugin session`() = runBlocking {
         val platform = platform()
 
@@ -466,6 +481,7 @@ class OmniPluginPlatformTest {
         var enableCount = 0
         var disableCount = 0
         var handlerDisposeCount = 0
+        var handlerCreateCount = 0
         val lifecycleEvents = mutableListOf<String>()
 
         fun recoverInstall() {
@@ -527,6 +543,7 @@ class OmniPluginPlatformTest {
                                     )
                                 ),
                                 handlerFactory = {
+                                    handlerCreateCount += 1
                                     RecordingHandler(setOf(toolName)) {
                                         handlerDisposeCount += 1
                                     }

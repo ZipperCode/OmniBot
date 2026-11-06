@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/omni_segmented_slider.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/my/pages/account/account_lifecycle_sheets.dart';
@@ -10,6 +12,7 @@ import 'package:ui/widgets/app_update_dialog.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 String formatWeeklyQuotaResetCountdown(DateTime now, {required bool english}) {
   final startOfToday = DateTime(now.year, now.month, now.day);
@@ -25,17 +28,23 @@ class AccountPage extends StatefulWidget {
   const AccountPage({super.key})
     : authOnly = false,
       onAuthenticated = null,
-      showAuthHeading = true;
+      showAuthHeading = true,
+      fitAuthContent = false;
 
   const AccountPage.authOnly({
     super.key,
     this.onAuthenticated,
     this.showAuthHeading = true,
+    this.fitAuthContent = false,
   }) : authOnly = true;
 
   final bool authOnly;
   final VoidCallback? onAuthenticated;
   final bool showAuthHeading;
+
+  /// Lets an enclosing sheet size to the active form. The sheet owns safe-area
+  /// and keyboard insets; full-page destinations keep their paged layout.
+  final bool fitAuthContent;
 
   @override
   State<AccountPage> createState() => _AccountPageState();
@@ -109,6 +118,13 @@ class _AccountPageState extends State<AccountPage> {
           // unavailable state so the page can offer an explicit retry.
         }
       }
+      if (!mounted) return;
+      // Local credentials remain authoritative when the account server is
+      // unavailable. Keep sign-out reachable without retaining a stale overview.
+      setState(() {
+        _session = session;
+        _overview = null;
+      });
       AccountOverview? overview;
       if (session.configured &&
           session.signedIn &&
@@ -117,7 +133,6 @@ class _AccountPageState extends State<AccountPage> {
       }
       if (!mounted) return;
       setState(() {
-        _session = session;
         _overview = overview;
       });
     } on PlatformException catch (error) {
@@ -902,11 +917,20 @@ class _AccountPageState extends State<AccountPage> {
       case 'too_many_requests':
         return _text('操作太频繁，请稍后再试', 'Too many attempts. Try again later.');
       case 'verification_unavailable':
-        return _text('验证码服务暂时不可用，请稍后重试', 'Verification service is temporarily unavailable.');
+        return _text(
+          '验证码服务暂时不可用，请稍后重试',
+          'Verification service is temporarily unavailable.',
+        );
       case 'account_service_unavailable':
-        return _text('账号服务暂时不可用，请稍后重试', 'Account service is temporarily unavailable.');
+        return _text(
+          '账号服务暂时不可用，请稍后重试',
+          'Account service is temporarily unavailable.',
+        );
       case 'ACCOUNT_FEATURE_UNAVAILABLE':
-        return _text('当前账号服务版本不支持注册，请稍后重试', 'This account service does not support registration yet.');
+        return _text(
+          '当前账号服务版本不支持注册，请稍后重试',
+          'This account service does not support registration yet.',
+        );
       case 'current_password_invalid':
         return _text('当前密码不正确', 'The current password is incorrect');
       case 'password_reuse':
@@ -951,7 +975,10 @@ class _AccountPageState extends State<AccountPage> {
     final palette = context.omniPalette;
     final content = Stack(
       children: [
-        Positioned.fill(child: _buildBody()),
+        if (widget.fitAuthContent)
+          _buildBody()
+        else
+          Positioned.fill(child: _buildBody()),
         if (_busy)
           Positioned.fill(
             child: ColoredBox(
@@ -974,12 +1001,17 @@ class _AccountPageState extends State<AccountPage> {
         title: _text('账号与 AI 服务', 'Account & AI service'),
         primary: true,
       ),
-      body: content,
+      body: OmniContentWidth(child: content),
     );
   }
 
   Widget _buildBody() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_loading) {
+      return SizedBox(
+        height: widget.fitAuthContent ? 280 : null,
+        child: const Center(child: CircularProgressIndicator()),
+      );
+    }
     final session = _session;
     if (session == null) return _buildErrorState();
     if (!session.configured) return _buildNotConfigured();
@@ -989,7 +1021,8 @@ class _AccountPageState extends State<AccountPage> {
     if (!session.cloudServiceAccessAllowed) {
       return _buildCloudServiceBlocked(session);
     }
-    if (!session.signedIn || _overview == null) return _buildAuthForm();
+    if (!session.signedIn) return _buildAuthForm();
+    if (_overview == null) return _buildErrorState();
     if (widget.authOnly) return _buildAuthenticatedAuthState(_overview!);
     return _buildSignedIn(_overview!);
   }
@@ -997,6 +1030,7 @@ class _AccountPageState extends State<AccountPage> {
   Widget _buildAuthenticatedAuthState(AccountOverview overview) {
     final palette = context.omniPalette;
     return Center(
+      heightFactor: widget.fitAuthContent ? 1 : null,
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -1035,7 +1069,8 @@ class _AccountPageState extends State<AccountPage> {
 
   Widget _buildErrorState() {
     return Center(
-      child: Padding(
+      heightFactor: widget.fitAuthContent ? 1 : null,
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1046,6 +1081,15 @@ class _AccountPageState extends State<AccountPage> {
               onPressed: _loadAccount,
               child: Text(_text('重试', 'Retry')),
             ),
+            if (_session?.signedIn == true) ...[
+              const SizedBox(height: 8),
+              TextButton.icon(
+                key: const ValueKey('account-error-logout-action'),
+                onPressed: _busy ? null : _logout,
+                icon: const Icon(LucideIcons.logOut, size: 18),
+                label: Text(_text('退出当前设备', 'Sign out on this device')),
+              ),
+            ],
           ],
         ),
       ),
@@ -1057,26 +1101,28 @@ class _AccountPageState extends State<AccountPage> {
       top: false,
       bottom: false,
       child: ListView(
+        shrinkWrap: widget.fitAuthContent,
         padding: edgeToEdgeScrollPadding(
           context,
-          const EdgeInsets.fromLTRB(18, 10, 18, 28),
+          const EdgeInsets.fromLTRB(16, 12, 16, 28),
         ),
         children: [
           SettingsSectionTitle(label: _text('账号', 'Account')),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          OmniSettingsCard(
+            padding: const EdgeInsets.all(18),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Icon(
                   LucideIcons.cloudOff,
-                  size: 28,
+                  size: 26,
                   color: context.omniPalette.textSecondary,
                 ),
                 const SizedBox(height: 14),
                 Text(
                   _text('账号服务尚未配置', 'Account service is not configured'),
-                  style: Theme.of(context).textTheme.titleLarge,
+                  style: Theme.of(context).textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -1084,7 +1130,10 @@ class _AccountPageState extends State<AccountPage> {
                     '当前安装包没有设置 OMNIBOT_BASE_URL。配置品牌域名并重新构建后即可登录。',
                     'This build has no OMNIBOT_BASE_URL. Configure the public service domain and rebuild.',
                   ),
-                  style: TextStyle(color: context.omniPalette.textSecondary),
+                  style: TextStyle(
+                    color: context.omniPalette.textSecondary,
+                    height: 1.5,
+                  ),
                 ),
               ],
             ),
@@ -1099,20 +1148,21 @@ class _AccountPageState extends State<AccountPage> {
       top: false,
       bottom: false,
       child: ListView(
+        shrinkWrap: widget.fitAuthContent,
         padding: edgeToEdgeScrollPadding(
           context,
-          const EdgeInsets.fromLTRB(18, 10, 18, 28),
+          const EdgeInsets.fromLTRB(16, 12, 16, 28),
         ),
         children: [
           SettingsSectionTitle(label: _text('账号', 'Account')),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          OmniSettingsCard(
+            padding: const EdgeInsets.all(18),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Icon(
                   LucideIcons.lockKeyhole,
-                  size: 28,
+                  size: 26,
                   color: context.omniPalette.textSecondary,
                 ),
                 const SizedBox(height: 14),
@@ -1121,7 +1171,8 @@ class _AccountPageState extends State<AccountPage> {
                     '登录凭证暂时无法读取',
                     'Sign-in credentials are temporarily unavailable',
                   ),
-                  style: Theme.of(context).textTheme.titleLarge,
+                  style: Theme.of(context).textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -1129,9 +1180,12 @@ class _AccountPageState extends State<AccountPage> {
                     '系统安全存储正在恢复，当前不会把你当作已退出登录。请稍后重试，必要时重启应用。',
                     'The secure storage is recovering. You are not being signed out. Try again shortly, or restart the app if needed.',
                   ),
-                  style: TextStyle(color: context.omniPalette.textSecondary),
+                  style: TextStyle(
+                    color: context.omniPalette.textSecondary,
+                    height: 1.5,
+                  ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 18),
                 FilledButton.icon(
                   key: const ValueKey('account-credential-storage-retry'),
                   onPressed: _loading ? null : _loadAccount,
@@ -1168,9 +1222,10 @@ class _AccountPageState extends State<AccountPage> {
       bottom: false,
       child: ListView(
         key: const ValueKey('account-cloud-service-version-gate'),
+        shrinkWrap: widget.fitAuthContent,
         padding: edgeToEdgeScrollPadding(
           context,
-          const EdgeInsets.fromLTRB(18, 10, 18, 28),
+          const EdgeInsets.fromLTRB(16, 12, 16, 28),
         ),
         children: [
           SettingsSectionTitle(
@@ -1178,14 +1233,14 @@ class _AccountPageState extends State<AccountPage> {
                 ? _text('需要升级', 'Update required')
                 : _text('需要检查更新', 'Update check required'),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+          OmniSettingsCard(
+            padding: const EdgeInsets.all(18),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Icon(
                   LucideIcons.cloudOff,
-                  size: 28,
+                  size: 26,
                   color: context.omniPalette.textSecondary,
                 ),
                 const SizedBox(height: 14),
@@ -1206,9 +1261,12 @@ class _AccountPageState extends State<AccountPage> {
                     '账号注册、登录与官方 AI 已停用；返回后仍可继续使用自己的 API Key（BYOK）。',
                     'Account sign-up, sign-in, and official AI are disabled. You can go back and keep using your own API key (BYOK).',
                   ),
-                  style: TextStyle(color: context.omniPalette.textSecondary),
+                  style: TextStyle(
+                    color: context.omniPalette.textSecondary,
+                    height: 1.5,
+                  ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 18),
                 FilledButton.icon(
                   key: const ValueKey('account-required-update-action'),
                   onPressed: _busy ? null : _checkRequiredUpdate,
@@ -1267,9 +1325,14 @@ class _AccountPageState extends State<AccountPage> {
       top: false,
       bottom: false,
       child: Column(
+        mainAxisSize: widget.fitAuthContent
+            ? MainAxisSize.min
+            : MainAxisSize.max,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(18, 10, 18, 0),
+            padding: widget.fitAuthContent
+                ? const EdgeInsets.fromLTRB(20, 12, 20, 0)
+                : const EdgeInsets.fromLTRB(18, 10, 18, 0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -1292,22 +1355,28 @@ class _AccountPageState extends State<AccountPage> {
               ],
             ),
           ),
-          const SizedBox(key: Key('account-auth-content-gap'), height: 12),
-          Expanded(
+          SizedBox(
+            key: const Key('account-auth-content-gap'),
+            height: widget.fitAuthContent ? 16 : 12,
+          ),
+          Flexible(
+            fit: widget.fitAuthContent ? FlexFit.loose : FlexFit.tight,
             child: Listener(
               onPointerDown: _onAuthPointerDown,
               onPointerMove: _onAuthPointerMove,
               onPointerUp: _onAuthPointerUp,
               onPointerCancel: _onAuthPointerCancel,
-              child: PageView(
-                key: const Key('account-auth-page-view'),
-                controller: _authPageController,
-                onPageChanged: _onAuthPageChanged,
-                children: [
-                  _buildAuthPage(register: false),
-                  _buildAuthPage(register: true),
-                ],
-              ),
+              child: widget.fitAuthContent
+                  ? _buildAuthPage(register: _registerMode)
+                  : PageView(
+                      key: const Key('account-auth-page-view'),
+                      controller: _authPageController,
+                      onPageChanged: _onAuthPageChanged,
+                      children: [
+                        _buildAuthPage(register: false),
+                        _buildAuthPage(register: true),
+                      ],
+                    ),
             ),
           ),
         ],
@@ -1329,10 +1398,13 @@ class _AccountPageState extends State<AccountPage> {
         key: PageStorageKey(
           register ? 'account-register-page' : 'account-login-page',
         ),
-        padding: edgeToEdgeScrollPadding(
-          context,
-          const EdgeInsets.fromLTRB(18, 8, 18, 28),
-        ),
+        shrinkWrap: widget.fitAuthContent,
+        padding: widget.fitAuthContent
+            ? const EdgeInsets.fromLTRB(20, 0, 20, 16)
+            : edgeToEdgeScrollPadding(
+                context,
+                const EdgeInsets.fromLTRB(18, 8, 18, 28),
+              ),
         children: [
           TextFormField(
             key: ValueKey(
@@ -1437,7 +1509,7 @@ class _AccountPageState extends State<AccountPage> {
             const SizedBox(height: 14),
             _errorBanner(_error!),
           ],
-          const SizedBox(height: 22),
+          SizedBox(height: widget.fitAuthContent ? 16 : 22),
           FilledButton(
             key: ValueKey(
               register
@@ -1537,121 +1609,24 @@ class _AccountPageState extends State<AccountPage> {
     _authSwipeDelta = Offset.zero;
   }
 
-  Widget _authModeSelector() {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    return Container(
-      key: const Key('account-auth-mode-selector'),
-      height: 40,
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: isDark ? palette.segmentTrack : palette.surfacePrimary,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: palette.borderSubtle),
+  Widget _authModeSelector() => OmniSegmentedSlider<bool>(
+    key: const Key('account-auth-mode-selector'),
+    keyPrefix: 'account-auth-mode',
+    value: _registerMode,
+    options: [
+      OmniSegmentedOption(
+        value: false,
+        label: _text('登录', 'Sign in'),
+        id: 'login',
       ),
-      child: Stack(
-        children: [
-          AnimatedAlign(
-            key: const Key('account-auth-mode-thumb-align'),
-            duration: const Duration(milliseconds: 280),
-            curve: Curves.easeOutCubic,
-            alignment: _registerMode
-                ? Alignment.centerRight
-                : Alignment.centerLeft,
-            child: FractionallySizedBox(
-              widthFactor: 0.5,
-              child: Container(
-                key: const Key('account-auth-mode-thumb'),
-                margin: const EdgeInsets.symmetric(horizontal: 1),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(999),
-                  gradient: isDark
-                      ? LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            Color.lerp(
-                              palette.surfaceElevated,
-                              palette.accentPrimary,
-                              0.18,
-                            )!,
-                            Color.lerp(
-                              palette.surfaceSecondary,
-                              palette.accentPrimary,
-                              0.30,
-                            )!,
-                          ],
-                        )
-                      : const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [Color(0xFF2DA5F0), Color(0xFF1930D9)],
-                        ),
-                  boxShadow: isDark
-                      ? null
-                      : const [
-                          BoxShadow(
-                            color: Color(0x1F1930D9),
-                            blurRadius: 10,
-                            offset: Offset(0, 4),
-                          ),
-                        ],
-                  border: isDark
-                      ? Border.all(color: palette.borderSubtle)
-                      : null,
-                ),
-              ),
-            ),
-          ),
-          Row(
-            children: [
-              _authModeButton(_text('登录', 'Sign in'), false),
-              _authModeButton(_text('注册', 'Register'), true),
-            ],
-          ),
-        ],
+      OmniSegmentedOption(
+        value: true,
+        label: _text('注册', 'Register'),
+        id: 'register',
       ),
-    );
-  }
-
-  Widget _authModeButton(String label, bool register) {
-    final palette = context.omniPalette;
-    final selected = _registerMode == register;
-    return Expanded(
-      child: Semantics(
-        button: true,
-        selected: selected,
-        child: GestureDetector(
-          key: ValueKey(
-            register ? 'account-auth-mode-register' : 'account-auth-mode-login',
-          ),
-          behavior: HitTestBehavior.opaque,
-          onTap: () => _selectAuthMode(register),
-          child: Center(
-            child: AnimatedScale(
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOutCubic,
-              scale: selected ? 1 : 0.97,
-              child: AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                style: TextStyle(
-                  color: selected
-                      ? (context.isDarkTheme
-                            ? palette.textPrimary
-                            : Colors.white)
-                      : palette.textSecondary,
-                  fontSize: 13,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                ),
-                child: Text(label),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+    ],
+    onChanged: _selectAuthMode,
+  );
 
   Widget _buildSignedIn(AccountOverview overview) {
     final settings = overview.settings;
@@ -1677,62 +1652,70 @@ class _AccountPageState extends State<AccountPage> {
         child: ListView(
           padding: edgeToEdgeScrollPadding(
             context,
-            const EdgeInsets.fromLTRB(18, 10, 18, 28),
+            const EdgeInsets.fromLTRB(16, 12, 16, 28),
           ),
           children: [
-            SettingsSectionTitle(label: _text('账号', 'Account')),
-            _summaryRow(
-              icon: LucideIcons.userRound,
-              title: overview.user.email,
-              subtitle: _text(
-                '已验证 · 当前设备已登录',
-                'Verified · signed in on this device',
-              ),
+            OmniSettingsGroup(
+              title: _text('账号', 'Account'),
+              translateTitle: false,
+              dividerIndent: 46,
+              children: [
+                _summaryRow(
+                  icon: LucideIcons.userRound,
+                  title: overview.user.email,
+                  subtitle: _text(
+                    '已验证 · 当前设备已登录',
+                    'Verified · signed in on this device',
+                  ),
+                ),
+                _summaryRow(
+                  icon: LucideIcons.coins,
+                  title: _text('平台额度', 'Platform quota'),
+                  subtitle: quotaSubtitle,
+                  trailing: settings.platformAvailable
+                      ? _platformQuotaValue(platformQuota)
+                      : null,
+                ),
+              ],
             ),
-            _sectionDivider(),
-            _summaryRow(
-              icon: LucideIcons.coins,
-              title: _text('平台额度', 'Platform quota'),
-              subtitle: quotaSubtitle,
-              trailing: settings.platformAvailable
-                  ? _platformQuotaValue(platformQuota)
-                  : null,
-            ),
-            const SizedBox(height: 24),
-            SettingsSectionTitle(label: _text('账号管理', 'Account management')),
-            _accountAction(
-              key: const ValueKey('account-usage-action'),
-              icon: LucideIcons.chartNoAxesColumnIncreasing,
-              title: _text('最近平台用量', 'Recent platform usage'),
-              onTap: _showPlatformUsage,
-            ),
-            _sectionDivider(),
-            _accountAction(
-              key: const ValueKey('account-sessions-action'),
-              icon: LucideIcons.smartphone,
-              title: _text('登录设备', 'Signed-in devices'),
-              onTap: _showSessions,
-            ),
-            _sectionDivider(),
-            _accountAction(
-              key: const ValueKey('change-password-action'),
-              icon: LucideIcons.shieldCheck,
-              title: _text('修改密码', 'Change password'),
-              onTap: _showChangePasswordDialog,
-            ),
-            _sectionDivider(),
-            _accountAction(
-              key: const ValueKey('delete-account-action'),
-              icon: LucideIcons.trash2,
-              title: _text('删除账号', 'Delete account'),
-              destructive: true,
-              onTap: _showDeleteAccountFlow,
+            const SizedBox(height: 22),
+            OmniSettingsGroup(
+              title: _text('账号管理', 'Account management'),
+              translateTitle: false,
+              dividerIndent: 46,
+              children: [
+                _accountAction(
+                  key: const ValueKey('account-usage-action'),
+                  icon: LucideIcons.chartNoAxesColumnIncreasing,
+                  title: _text('最近平台用量', 'Recent platform usage'),
+                  onTap: _showPlatformUsage,
+                ),
+                _accountAction(
+                  key: const ValueKey('account-sessions-action'),
+                  icon: LucideIcons.smartphone,
+                  title: _text('登录设备', 'Signed-in devices'),
+                  onTap: _showSessions,
+                ),
+                _accountAction(
+                  key: const ValueKey('change-password-action'),
+                  icon: LucideIcons.shieldCheck,
+                  title: _text('修改密码', 'Change password'),
+                  onTap: _showChangePasswordDialog,
+                ),
+                _accountAction(
+                  key: const ValueKey('delete-account-action'),
+                  icon: LucideIcons.trash2,
+                  title: _text('删除账号', 'Delete account'),
+                  destructive: true,
+                  onTap: _showDeleteAccountFlow,
+                ),
+              ],
             ),
             if (_error != null) ...[
               const SizedBox(height: 14),
               _errorBanner(_error!),
             ],
-            const SizedBox(height: 24),
+            const SizedBox(height: 22),
             TextButton.icon(
               onPressed: _busy ? null : _logout,
               style: TextButton.styleFrom(
@@ -1821,12 +1804,16 @@ class _AccountPageState extends State<AccountPage> {
   }) {
     final palette = context.omniPalette;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 14, 2, 14),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Icon(icon, size: 20, color: palette.textPrimary),
-          const SizedBox(width: 10),
+          Icon(
+            icon,
+            size: 19,
+            color: palette.textPrimary.withValues(alpha: 0.78),
+          ),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1834,23 +1821,21 @@ class _AccountPageState extends State<AccountPage> {
                 Text(
                   title,
                   style: TextStyle(
-                    fontSize: 14,
+                    fontSize: 14.5,
                     fontWeight: FontWeight.w500,
                     color: palette.textPrimary,
-                    height: 1.5,
-                    fontFamily: 'PingFang SC',
+                    height: 1.38,
                   ),
                 ),
                 if (subtitle != null && subtitle.isNotEmpty) ...[
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 2.5),
                   Text(
                     subtitle,
                     style: TextStyle(
                       color: palette.textSecondary,
-                      fontSize: 11,
+                      fontSize: 12,
                       fontWeight: FontWeight.w400,
-                      height: 1.55,
-                      fontFamily: 'PingFang SC',
+                      height: 1.45,
                     ),
                   ),
                 ],
@@ -1859,19 +1844,6 @@ class _AccountPageState extends State<AccountPage> {
           ),
           if (trailing != null) ...[const SizedBox(width: 12), trailing],
         ],
-      ),
-    );
-  }
-
-  Widget _sectionDivider({double left = 34}) {
-    return Padding(
-      padding: EdgeInsets.only(left: left),
-      child: Divider(
-        height: 1,
-        thickness: 1,
-        color: context.omniPalette.borderSubtle.withValues(
-          alpha: context.isDarkTheme ? 0.5 : 0.78,
-        ),
       ),
     );
   }
@@ -1887,33 +1859,35 @@ class _AccountPageState extends State<AccountPage> {
     final color = destructive
         ? Theme.of(context).colorScheme.error
         : palette.textPrimary;
+    final iconColor = destructive
+        ? Theme.of(context).colorScheme.error
+        : palette.textPrimary.withValues(alpha: 0.78);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         key: key,
         onTap: _busy ? null : onTap,
-        borderRadius: BorderRadius.circular(14),
-        splashColor: palette.accentPrimary.withValues(alpha: 0.08),
-        highlightColor: Colors.transparent,
+        splashColor: palette.accentPrimary.withValues(alpha: 0.06),
+        highlightColor: palette.accentPrimary.withValues(alpha: 0.03),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(4, 14, 2, 14),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
-              Icon(icon, size: 20, color: color),
-              const SizedBox(width: 10),
+              Icon(icon, size: 19, color: iconColor),
+              const SizedBox(width: 12),
               Expanded(
                 child: Text(
                   title,
                   style: TextStyle(
                     color: color,
-                    fontSize: 14,
+                    fontSize: 14.5,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
               ),
               Icon(
                 LucideIcons.chevronRight,
-                size: 18,
+                size: 16,
                 color: palette.textTertiary,
               ),
             ],
@@ -1927,15 +1901,22 @@ class _AccountPageState extends State<AccountPage> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.red.withValues(alpha: 0.08),
+        color: Theme.of(context).colorScheme.error.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
         children: [
-          const Icon(LucideIcons.circleAlert, color: Colors.red, size: 20),
+          Icon(
+            LucideIcons.circleAlert,
+            color: Theme.of(context).colorScheme.error,
+            size: 20,
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(message, style: const TextStyle(color: Colors.red)),
+            child: Text(
+              message,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
           ),
         ],
       ),

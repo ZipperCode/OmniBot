@@ -135,17 +135,7 @@ class MemoryCard extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: palette.surfacePrimary,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(
-            color: palette.shadowColor.withValues(
-              alpha: context.isDarkTheme ? 0.34 : 0.10,
-            ),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-            spreadRadius: 0,
-          ),
-        ],
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: palette.borderSubtle),
       ),
       child:
@@ -185,7 +175,7 @@ class MemoryCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontSize: AppTextStyles.fontSizeH3,
+                        fontSize: 15,
                         fontWeight: AppTextStyles.fontWeightMedium,
                         height: 1.125,
                         letterSpacing: AppTextStyles.letterSpacingWide,
@@ -199,7 +189,7 @@ class MemoryCard extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: AppTextStyles.fontSizeMain,
+                          fontSize: 15,
                           fontWeight: AppTextStyles.fontWeightRegular,
                           height: AppTextStyles.lineHeightH2,
                           letterSpacing: AppTextStyles.letterSpacingWide,
@@ -235,13 +225,13 @@ class MemoryCard extends StatelessWidget {
                                   width: 18,
                                   height: 18,
                                   decoration: BoxDecoration(
-                                    color: Colors.grey[300],
+                                    color: palette.surfaceSecondary,
                                     borderRadius: BorderRadius.circular(2),
                                   ),
                                   child: Icon(
                                     Icons.apps,
                                     size: 12,
-                                    color: Colors.grey[600],
+                                    color: palette.textTertiary,
                                   ),
                                 );
                               },
@@ -249,7 +239,11 @@ class MemoryCard extends StatelessWidget {
                           ),
                           const SizedBox(width: 8),
                         ] else ...[
-                          Icon(Icons.apps, size: 18, color: Colors.grey[600]),
+                          Icon(
+                            Icons.apps,
+                            size: 18,
+                            color: palette.textTertiary,
+                          ),
                           const SizedBox(width: 8),
                         ],
                         // 时间
@@ -276,9 +270,7 @@ class MemoryCard extends StatelessWidget {
                   child: Container(
                     width: 85,
                     height: 98,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.withOpacity(0.5),
-                    ),
+                    decoration: BoxDecoration(color: palette.surfaceSecondary),
                     child: ImageUtil.buildImage(imagePath!),
                   ),
                 ),

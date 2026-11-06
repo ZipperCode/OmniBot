@@ -1,9 +1,18 @@
 package cn.com.omnimind.bot.agent
 
+import cn.com.omnimind.bot.agent.runtime.NaRuntimeFailure
+import cn.com.omnimind.bot.agent.runtime.naRuntimeFailureKinds
+import cn.com.omnimind.bot.agent.runtime.naRuntimeFailureMessage
+import cn.com.omnimind.bot.agent.runtime.naRuntimeFailurePhases
 import com.agentclientprotocol.protocol.JsonRpcException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+
+/** An installed Harness failed its host-owned version/compatibility check. */
+internal class AgentRuntimeUpgradeRequiredException(agentName: String) : IllegalStateException(
+    "$agentName runtime needs an upgrade. Open Agent mode settings and update or reinstall it.",
+)
 
 /**
  * Converts known provider and transport failures into user-facing messages
@@ -26,13 +35,18 @@ internal object AgentRuntimeErrorSupport {
     const val PROVIDER_TOOL_CALL_INCOMPLETE = "provider_tool_call_incomplete"
     const val HARNESS_PREPARATION_IN_PROGRESS = "harness_preparation_in_progress"
     const val HARNESS_PROFILE_MISSING = "harness_profile_missing"
+    const val HARNESS_UPGRADE_REQUIRED = "harness_upgrade_required"
+    const val AGENT_IDENTITY_REQUIRED = "agent_identity_required"
+    const val AGENT_OWNER_CONFLICT = "agent_owner_conflict"
 
     private const val CERTIFICATE_ERROR_MESSAGE =
         "Provider 的 HTTPS 证书校验失败。请先在系统设置中开启自动日期和时间并确认当前时间正确；" +
             "如果时间正确，请检查 Provider 的证书链。应用不会关闭证书校验。"
 
     fun userFacingMessage(error: Throwable): String? {
-        return when (failureKind(error)) {
+        val kind = failureKind(error)
+        if (kind in naRuntimeFailureKinds) return naRuntimeFailureMessage(kind!!)
+        return when (kind) {
             PROVIDER_QUOTA_EXCEEDED ->
                 "模型服务商额度不足，请检查账户余额或配额后再试。"
             PROVIDER_RATE_LIMITED ->
@@ -66,13 +80,25 @@ internal object AgentRuntimeErrorSupport {
             HARNESS_PROFILE_MISSING ->
                 "当前 Harness 的官方 ACP profile 尚未安装。请在 Agent 设置中点击“安装/准备 Harness”，" +
                     "完成后再重试；应用不会用私有脚本替代 Harness 自己的插件工作流。"
+            HARNESS_UPGRADE_REQUIRED ->
+                "当前助手运行环境需要升级，请在助手设置中升级或重新安装。"
+            AGENT_IDENTITY_REQUIRED ->
+                "此对话没有可用的助手归属。历史记录仍可查看，请新建对话。"
+            AGENT_OWNER_CONFLICT ->
+                "请求的助手与会话归属不一致，请打开对应会话或新建对话。"
             else -> null
         }
     }
 
     fun failureKind(error: Throwable): String? {
+        generateSequence(error) { it.cause }.take(16)
+            .filterIsInstance<NaRuntimeFailure>()
+            .firstOrNull { it.failureKind in naRuntimeFailureKinds }
+            ?.let { return it.failureKind }
         providerResponseFailureKind(error)?.let { return it }
         return when {
+            errorMessages(error).any { it.contains("agent_identity_required:") } -> AGENT_IDENTITY_REQUIRED
+            errorMessages(error).any { it.contains("agent_owner_conflict:") } -> AGENT_OWNER_CONFLICT
             isCertificateValidationFailure(error) -> PROVIDER_TLS_CERTIFICATE_FAILURE
             isAuthenticationFailure(error) -> PROVIDER_AUTHENTICATION_FAILED
             isProviderNotBound(error) -> PROVIDER_NOT_BOUND
@@ -84,6 +110,8 @@ internal object AgentRuntimeErrorSupport {
             isIncompleteToolCall(error) -> PROVIDER_TOOL_CALL_INCOMPLETE
             isHarnessPreparationInProgress(error) -> HARNESS_PREPARATION_IN_PROGRESS
             isHarnessProfileMissing(error) -> HARNESS_PROFILE_MISSING
+            generateSequence(error) { it.cause }.any { it is AgentRuntimeUpgradeRequiredException } ->
+                HARNESS_UPGRADE_REQUIRED
             else -> null
         }
     }
@@ -96,13 +124,46 @@ internal object AgentRuntimeErrorSupport {
             kind?.let { JsonObject(mapOf("failureKind" to JsonPrimitive(it))) })
     }
 
-    private val knownFailureKinds = setOf(
+    private val knownFailureKinds = naRuntimeFailureKinds + setOf(
         PROVIDER_QUOTA_EXCEEDED, PROVIDER_RATE_LIMITED, PROVIDER_REQUEST_LIMITED,
         PROVIDER_AUTHENTICATION_FAILED, PROVIDER_SERVICE_UNAVAILABLE, PROVIDER_REQUEST_REJECTED,
         PROVIDER_MODEL_UNAVAILABLE, PROVIDER_TLS_CERTIFICATE_FAILURE, PROVIDER_NOT_BOUND,
         PROVIDER_UNAVAILABLE, PROVIDER_STREAM_INTERRUPTED, PROVIDER_STREAM_IDLE_TIMEOUT,
         PROVIDER_REQUEST_TIMEOUT, PROVIDER_TOOL_CALL_INCOMPLETE,
-        HARNESS_PREPARATION_IN_PROGRESS, HARNESS_PROFILE_MISSING,
+        HARNESS_PREPARATION_IN_PROGRESS, HARNESS_PROFILE_MISSING, HARNESS_UPGRADE_REQUIRED,
+        AGENT_IDENTITY_REQUIRED, AGENT_OWNER_CONFLICT,
+    )
+
+    /** No arbitrary messages, request arguments, URLs or credentials enter the journal. */
+    fun boundaryFailureDetails(method: String, error: Throwable): Map<String, Any> = buildMap {
+        put("method", method.takeIf { it in diagnosticMethods } ?: "other")
+        put("exceptionType", error.javaClass.name)
+        error.cause?.let { put("causeType", it.javaClass.name) }
+        failureKind(error)?.let { put("failureKind", it) }
+        val causes = generateSequence(error) { it.cause }.take(16).toList()
+        causes.filterIsInstance<NaRuntimeFailure>().firstOrNull()?.let { failure ->
+            failure.phase?.takeIf { it in naRuntimeFailurePhases }?.let { put("phase", it) }
+            failure.statusCode?.takeIf { it in 100..599 }?.let { put("httpStatus", it) }
+        }
+        val callSites = causes.asSequence().flatMap { it.stackTrace.asSequence() }
+            .filter { it.className.startsWith("cn.com.omnimind.bot.") }
+            .map { "${it.className}.${it.methodName}:${it.lineNumber}" }
+            .distinct().take(6).joinToString(" <- ")
+        if (callSites.isNotEmpty()) put("callSites", callSites)
+    }
+
+    private val diagnosticMethods = setOf(
+        "status", "disconnect", "initialize", "authenticate", "logout", "model/list",
+        "collaborationMode/list", "config/read", "agent/list", "agent/refresh",
+        "agent/checkUpdates", "agent/save", "agent/delete", "agent/test", "agent/prepare",
+        "agent/uninstall", "agent/config/read", "agent/config/write", "agent/config/rollback",
+        "config/na/personal", "config/remote/read", "config/remote/write", "config/remote/test",
+        "config/remote/fs/list", "config/remote/fs/read", "config/remote/fs/write",
+        "config/remote/fs/move", "config/remote/fs/delete", "providers/list", "providers/set",
+        "providers/disable", "session/new", "session/load", "session/resume", "session/read",
+        "session/list", "session/fork", "session/close", "session/delete", "session/set_mode",
+        "session/set_config_option", "session/archive", "session/unarchive", "session/name/set",
+        "session/prompt", "session/cancel", "\$/cancel_request", "review/start", "notifyAcpExtension",
     )
 
     private fun providerResponseFailureKind(error: Throwable): String? {
@@ -125,12 +186,15 @@ internal object AgentRuntimeErrorSupport {
                         val root = Json.parseToJsonElement(cause.responseBody.orEmpty()) as? JsonObject
                         val detail = root?.get("error") as? JsonObject
                         (detail?.get("code") as? JsonPrimitive)?.content
+                            ?: (detail?.get("type") as? JsonPrimitive)?.content
+                            ?: (root?.get("code") as? JsonPrimitive)?.content
                     }.getOrNull()
                 }
                 else -> continue
             }
             when (code?.lowercase()) {
-                "insufficient_quota", "quota_exceeded", "quota_exhausted" -> return PROVIDER_QUOTA_EXCEEDED
+                "insufficient_quota", "quota_exceeded", "quota_exhausted",
+                "insufficient_balance", "billing_hard_limit_reached" -> return PROVIDER_QUOTA_EXCEEDED
                 "rate_limit_exceeded", "rate_limit_error" -> return PROVIDER_RATE_LIMITED
                 "authentication_error", "invalid_api_key" -> return PROVIDER_AUTHENTICATION_FAILED
                 "model_not_found" -> return PROVIDER_MODEL_UNAVAILABLE
@@ -238,8 +302,7 @@ internal object AgentRuntimeErrorSupport {
     private fun isHarnessProfileMissing(error: Throwable): Boolean =
         errorMessages(error).any {
             it.contains("profile \"acp\" does not exist") ||
-                it.contains("profile 'acp' does not exist") ||
-                it.contains("create it with 'dsh plugin --profile acp add")
+                it.contains("profile 'acp' does not exist")
         }
 
     private fun isCertificateValidationFailure(error: Throwable): Boolean {

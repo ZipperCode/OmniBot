@@ -2,17 +2,29 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_switch/flutter_switch.dart';
+import 'package:ui/widgets/settings_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/my/pages/about/about_page.dart';
+import 'package:ui/features/my/pages/feedback/feedback_page.dart';
+import 'package:ui/features/my/router_config.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/services/app_update_service.dart';
+import 'package:ui/services/storage_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const deviceChannel = MethodChannel('device_info');
   const updateChannel = MethodChannel('cn.com.omnimind.bot/app_update');
+  const accountChannel = MethodChannel('cn.com.omnimind.bot/account');
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    await StorageService.init();
+  });
 
   tearDown(() async {
     AppUpdateService.betaOptInNotifier.value = false;
@@ -23,6 +35,8 @@ void main() {
         .setMockMethodCallHandler(deviceChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(updateChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(accountChannel, null);
   });
 
   testWidgets('renders version and update hint from services', (tester) async {
@@ -86,7 +100,7 @@ void main() {
     expect(find.text('加入 beta 测试'), findsOneWidget);
     expect(find.text('安装包下载源'), findsOneWidget);
     expect(find.textContaining('同意我们的隐私政策'), findsOneWidget);
-    expect(find.text('Cloudflare R2'), findsWidgets);
+    expect(find.text('小万官网'), findsWidgets);
     expect(find.textContaining('发现新版本'), findsOneWidget);
     expect(find.text('查看新版本'), findsOneWidget);
 
@@ -97,7 +111,7 @@ void main() {
     await tester.tap(downloadSourceDropdown);
     await tester.pumpAndSettle();
 
-    expect(find.text('通过更新 Worker 分发'), findsOneWidget);
+    expect(find.text('通过小万官网分发'), findsOneWidget);
     expect(find.text('官方 Release'), findsOneWidget);
   });
 
@@ -138,7 +152,9 @@ void main() {
     );
     await tester.pump();
 
-    final betaSwitch = tester.widget<FlutterSwitch>(find.byType(FlutterSwitch));
+    final betaSwitch = tester.widget<OmniSettingsSwitch>(
+      find.byType(OmniSettingsSwitch),
+    );
     expect(betaSwitch.value, isTrue);
     expect(betaSwitch.duration, Duration.zero);
 
@@ -146,7 +162,9 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('does not render always-up-to-date hint on page', (tester) async {
+  testWidgets('hides up-to-date hint and opens the in-app feedback form', (
+    tester,
+  ) async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(deviceChannel, (call) async {
           if (call.method == 'getAppVersion') {
@@ -178,12 +196,26 @@ void main() {
           return null;
         });
 
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(accountChannel, (call) async => '');
+    final router = GoRouter(
+      navigatorKey: GoRouterManager.rootNavigatorKey,
+      initialLocation: '/my/about',
+      routes: myRoutes
+          .where(
+            (route) =>
+                route.path == '/my/about' || route.path == '/my/feedback',
+          )
+          .toList(),
+    );
+    addTearDown(router.dispose);
+
     await tester.pumpWidget(
-      const MaterialApp(
-        locale: Locale('zh'),
+      MaterialApp.router(
+        routerConfig: router,
+        locale: const Locale('zh'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: AboutPage(),
       ),
     );
     await tester.pumpAndSettle();
@@ -193,5 +225,20 @@ void main() {
     expect(find.text('检查更新'), findsOneWidget);
     expect(find.text('请求日志'), findsOneWidget);
     expect(find.text('使用手册'), findsOneWidget);
+    expect(find.text('我要反馈'), findsOneWidget);
+
+    final feedbackButton = find.text('我要反馈');
+    await tester.ensureVisible(feedbackButton);
+    await tester.tap(feedbackButton);
+    await tester.pumpAndSettle();
+    expect(router.state.uri.path, '/my/feedback');
+    expect(find.byType(FeedbackPage), findsOneWidget);
+    expect(find.byKey(const ValueKey('feedback-title')), findsOneWidget);
+    expect(router.canPop(), isTrue);
+
+    router.pop();
+    await tester.pumpAndSettle();
+    expect(router.state.uri.path, '/my/about');
+    expect(find.byType(AboutPage), findsOneWidget);
   });
 }

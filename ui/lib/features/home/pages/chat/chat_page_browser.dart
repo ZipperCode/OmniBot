@@ -8,120 +8,6 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
   static const double _kBrowserOverlayHorizontalMargin = 16;
   static const double _kBrowserOverlayTopMargin = 64;
   static const double _kBrowserOverlayBottomMargin = 16;
-  static const double _kDrawerSwipeThreshold = 36;
-
-  bool _maybeOpenDrawerFromPageSwipe() {
-    if (!mounted ||
-        // 锚点面板展开时整页处于"点击空白收起"的模态态，此时的滑动不应
-        // 被当成呼出抽屉的手势（否则从左往右轻滑一小段就会误开 home_drawer）。
-        _messageAnchorExpanded ||
-        _activeSurfaceMode != ChatSurfaceMode.normal ||
-        _isHdPadLandscapeForMediaQuery(MediaQuery.of(context))) {
-      return false;
-    }
-    final horizontalDelta = _pageHorizontalDragDelta;
-    if (horizontalDelta < _kDrawerSwipeThreshold) {
-      return false;
-    }
-    if (horizontalDelta.abs() <= _pageVerticalDragDelta.abs() * 1.2) {
-      return false;
-    }
-    final scaffoldState = _scaffoldKey.currentState;
-    if (scaffoldState == null || scaffoldState.isDrawerOpen) {
-      return false;
-    }
-    _dismissChatInputFocus();
-    scaffoldState.openDrawer();
-    return true;
-  }
-
-  @override
-  void _handlePagePointerDown(PointerDownEvent event) {
-    if (_activeSurfaceMode != ChatSurfaceMode.normal) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    // 锚点面板展开时不追踪整页滑动，滑动只用于操作锚点/收起面板，不呼出抽屉。
-    if (_messageAnchorExpanded) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    if (_isBrowserOverlayVisible &&
-        _isPointerInside(_browserOverlayKey, event.position)) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    if (_isPointerInside(_inputAreaKey, event.position)) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    if ((_showModelMentionPanel ||
-            _showSlashCommandPanel ||
-            _openClawPanelExpanded) &&
-        (_isPointerInside(_openClawPanelKey, event.position) ||
-            _isPointerInside(_slashCommandStripKey, event.position))) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    _pageGesturePointerId = event.pointer;
-    _pageHorizontalDragDelta = 0;
-    _pageVerticalDragDelta = 0;
-  }
-
-  @override
-  void _handlePagePointerMove(PointerMoveEvent event) {
-    if (event.pointer != _pageGesturePointerId ||
-        _activeSurfaceMode != ChatSurfaceMode.normal) {
-      return;
-    }
-    if (ToolCardDetailGestureGate.containsPointer(event.pointer) ||
-        ChatDrawerGestureGate.containsPointer(event.pointer)) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    _pageHorizontalDragDelta += event.delta.dx;
-    _pageVerticalDragDelta += event.delta.dy;
-  }
-
-  @override
-  void _handlePagePointerUp(PointerUpEvent event) {
-    if (event.pointer != _pageGesturePointerId) {
-      return;
-    }
-    if (ToolCardDetailGestureGate.containsPointer(event.pointer) ||
-        ChatDrawerGestureGate.containsPointer(event.pointer)) {
-      _pageGesturePointerId = null;
-      _pageHorizontalDragDelta = 0;
-      _pageVerticalDragDelta = 0;
-      return;
-    }
-    _maybeOpenDrawerFromPageSwipe();
-    _pageGesturePointerId = null;
-    _pageHorizontalDragDelta = 0;
-    _pageVerticalDragDelta = 0;
-  }
-
-  @override
-  void _handlePagePointerCancel(PointerCancelEvent event) {
-    if (event.pointer != _pageGesturePointerId) {
-      return;
-    }
-    _pageGesturePointerId = null;
-    _pageHorizontalDragDelta = 0;
-    _pageVerticalDragDelta = 0;
-  }
 
   @override
   String _browserSnapshotSignature(ChatBrowserSessionSnapshot? snapshot) {
@@ -590,7 +476,8 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
                   final expectedWorkspaceId = chatConversationWorkspaceId(
                     _modeState(browserMode).currentConversationId,
                   );
-                  final resolved = next?.matchesWorkspace(expectedWorkspaceId) == true
+                  final resolved =
+                      next?.matchesWorkspace(expectedWorkspaceId) == true
                       ? next
                       : null;
                   final runtime = _runtimeForMode(browserMode);

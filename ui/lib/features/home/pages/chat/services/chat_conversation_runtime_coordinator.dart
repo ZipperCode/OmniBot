@@ -1,23 +1,20 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
-import 'package:ui/models/chat_link_preview.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/agent_event_reducer.dart';
+import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/agent_identity.dart';
 import 'package:ui/services/agent_message_kinds.dart';
-import 'package:ui/services/agent_tool_call_parser.dart';
 import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/conversation_service.dart';
-import 'package:ui/services/link_preview_service.dart';
 import 'package:ui/services/voice_playback_coordinator.dart';
+import 'package:ui/services/na_history_sync_service.dart';
 import 'package:ui/services/agent_stream_meta.dart';
-import 'package:ui/services/agent_diff_parser.dart';
 
 part 'chat_runtime_internal_support.dart';
 part 'chat_runtime_state.dart';
@@ -27,7 +24,7 @@ part 'chat_runtime_external_message_support.dart';
 part 'chat_runtime_message_support.dart';
 part 'chat_runtime_streaming_support.dart';
 part 'chat_runtime_thinking_support.dart';
-part 'chat_runtime_tool_support.dart';
+part 'chat_runtime_agent_event_support.dart';
 
 const String kChatRuntimeModeNormal = 'normal';
 const String kChatRuntimeModeOpenClaw = 'openclaw';
@@ -49,6 +46,7 @@ class _PendingPersistenceRequest {
     this.generateSummary = false,
     this.markComplete = false,
     this.persistMessages = false,
+    this.preserveActivityTime = false,
   });
 
   final int conversationId;
@@ -57,6 +55,7 @@ class _PendingPersistenceRequest {
   final bool generateSummary;
   final bool markComplete;
   final bool persistMessages;
+  final bool preserveActivityTime;
 }
 
 class ChatConversationRuntimeCoordinator extends ChangeNotifier {
@@ -79,8 +78,16 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   // never finish after a newer one and move durable history backwards.
   final Map<String, Future<void>> _persistenceTails = <String, Future<void>>{};
   final Set<String> _ephemeralRuntimeKeys = <String>{};
+  final Set<int> _hiddenNaHistoryViews = <int>{};
 
   bool _initialized = false;
+  ChatAgentEventProjection? _latestAgentEventProjection;
+
+  /// Presentation of the last event already consumed by the shared reducer.
+  /// Views observe this through the existing ChangeNotifier; they never own
+  /// the ACP subscription or reduce an event a second time.
+  ChatAgentEventProjection? get latestAgentEventProjection =>
+      _latestAgentEventProjection;
 
   bool get _isEnglish => LegacyTextLocalizer.isEnglish;
 
@@ -89,12 +96,20 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
   void ensureInitialized() {
     if (_initialized) return;
     _initialized = true;
+    NaHistorySyncService.instance.initialize();
     unawaited(VoicePlaybackCoordinator.instance.ensureInitialized());
 
     AssistsMessageService.initialize();
+    AssistsMessageService.conversationListChangedStream.listen((event) {
+      if (event['reason'] == 'na_history_owner_changed')
+        discardNaHistoryViews();
+    });
     AssistsMessageService.addOnExternalUserMessageAppendedCallback(
       _handleExternalUserMessageAppended,
     );
+    // The coordinator outlives Home and Chat routes. Returning to the list
+    // must not stop projection/persistence of an already admitted ACP turn.
+    AgentRuntimeService.events.listen(_handleAgentRuntimeEvent);
   }
 
   ChatConversationRuntimeState? runtimeFor({
@@ -102,6 +117,35 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     required String mode,
   }) {
     return _runtimes[_runtimeKey(conversationId: conversationId, mode: mode)];
+  }
+
+  /// Evict display caches, never durable messages. Pending ACP responses lose
+  /// their local view binding; logging back in reloads the native Conversation.
+  void discardNaHistoryViews() {
+    final views = _runtimes.values
+        .where(
+          (runtime) =>
+              runtime.conversation?.agentId == 'na-cloud' ||
+              (runtime.activeAcpSessionId?.startsWith('na:') ?? false) ||
+              runtime.knownAcpSessionIds.any((id) => id.startsWith('na:')),
+        )
+        .toList();
+    for (final runtime in views) {
+      _hiddenNaHistoryViews.add(runtime.conversationId);
+      runtime.persistenceGeneration++;
+      discardConversationRuntime(
+        conversationId: runtime.conversationId,
+        mode: runtime.mode,
+      );
+    }
+  }
+
+  // Only a fresh native Conversation load may readmit an evicted local view.
+  // Streaming events and delayed snapshots cannot make it visible again.
+  void restoreNaHistoryView(ConversationModel conversation) {
+    if (conversation.agentId == 'na-cloud') {
+      _hiddenNaHistoryViews.remove(conversation.id);
+    }
   }
 
   /// Conversation ids with live work in the shared ACP projection.
@@ -152,6 +196,16 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           runtime.lastAgentTurnId == normalizedTurnId ||
           runtime.activeAcpTurnId == normalizedTurnId) {
         return mode;
+      }
+    }
+    // Restored session metadata is a fallback. A cached mode must never
+    // shadow the mode that currently owns the official session or turn.
+    if (normalizedSessionId.isNotEmpty) {
+      for (final runtime in _runtimes.values) {
+        if (runtime.conversationId == conversationId &&
+            runtime.knownAcpSessionIds.contains(normalizedSessionId)) {
+          return runtime.mode;
+        }
       }
     }
     return null;
@@ -564,7 +618,35 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     String mode = kChatRuntimeModeAgent,
     ConversationModel? conversation,
   }) {
+    final result = _applyAgentEvent(
+      conversationId: conversationId,
+      event: event,
+      mode: mode,
+      conversation: conversation,
+    );
+    if (result.handled) notifyListeners();
+    return result;
+  }
+
+  AgentReduceResult _applyAgentEvent({
+    required int conversationId,
+    required Map<String, dynamic> event,
+    required String mode,
+    ConversationModel? conversation,
+  }) {
     ensureInitialized();
+    if (_hiddenNaHistoryViews.contains(conversationId)) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
+    final incomingSession = acpEventSessionId(event);
+    if (incomingSession?.startsWith('na:') == true &&
+        AssistsMessageService.hasNaHistoryOwnerSnapshot &&
+        (AssistsMessageService.visibleNaOwnerPrefix == null ||
+            !incomingSession!.startsWith(
+              AssistsMessageService.visibleNaOwnerPrefix!,
+            ))) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
     final runtime = ensureRuntime(
       conversationId: conversationId,
       mode: mode,
@@ -640,7 +722,6 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           );
         }
       }
-      notifyListeners();
       if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
         schedulePersistRuntimeConversation(
           conversationId: conversationId,
@@ -1021,6 +1102,8 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     _runtimes.clear();
     _taskBindings.clear();
     _ephemeralRuntimeKeys.clear();
+    _hiddenNaHistoryViews.clear();
+    _latestAgentEventProjection = null;
   }
 
   void clearConversationRuntimeSession({

@@ -1,15 +1,17 @@
 import 'package:file_picker/file_picker.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/device_service.dart';
 import 'package:ui/services/special_permission.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class AlarmSettingPage extends StatefulWidget {
   const AlarmSettingPage({super.key});
@@ -18,7 +20,8 @@ class AlarmSettingPage extends StatefulWidget {
   State<AlarmSettingPage> createState() => _AlarmSettingPageState();
 }
 
-class _AlarmSettingPageState extends State<AlarmSettingPage> {
+class _AlarmSettingPageState extends State<AlarmSettingPage>
+    with FlClashPageLoadMixin {
   static const String _sourceDefault = 'default';
   static const String _sourceLocalMp3 = 'local_mp3';
   static const String _sourceRemoteMp3 = 'remote_mp3_url';
@@ -43,8 +46,9 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
   }
 
   Future<void> _loadAlarmSettings() async {
+    if (!await waitForPageReady() || !mounted) return;
     final payload = await AssistsMessageService.getAlarmSettings();
-    if (!mounted) return;
+    if (!await waitForPageReady() || !mounted) return;
 
     setState(() {
       _source = (payload['source'] ?? _sourceDefault).toString();
@@ -152,72 +156,85 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
         title: context.l10n.settingsAlarmTitle,
         primary: true,
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SettingsSectionTitle(
-                      label: context.l10n.alarmRingtoneSource,
-                    ),
-                    _buildSourceCard(),
-                    if (_source == _sourceLocalMp3) ...[
-                      const SizedBox(height: 18),
-                      SettingsSectionTitle(label: context.l10n.alarmLocalFile),
-                      _buildLocalFileCard(),
-                    ],
-                    if (_source == _sourceRemoteMp3) ...[
-                      const SizedBox(height: 18),
-                      SettingsSectionTitle(label: context.trLegacy('远程地址')),
-                      _buildRemoteUrlCard(),
-                    ],
-                    const Spacer(),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton(
-                        onPressed: _saving ? null : _saveSettings,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: context.isDarkTheme
-                              ? palette.accentPrimary
-                              : AppColors.primaryBlue,
-                          foregroundColor: context.isDarkTheme
-                              ? Theme.of(context).colorScheme.onPrimary
-                              : Colors.white,
-                          minimumSize: const Size.fromHeight(48),
-                        ),
-                        child: Text(
-                          _saving
-                              ? context.trLegacy('保存中...')
-                              : context.trLegacy('保存'),
+      body: OmniContentWidth(
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(22, 12, 22, 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: ListView(
+                          padding: EdgeInsets.zero,
+                          children: [
+                            SettingsSectionTitle(
+                              label: context.l10n.alarmRingtoneSource,
+                            ),
+                            _buildSourceCard(),
+                            if (_source == _sourceLocalMp3) ...[
+                              const SizedBox(height: 20),
+                              SettingsSectionTitle(
+                                label: context.l10n.alarmLocalFile,
+                              ),
+                              _buildLocalFileCard(),
+                            ],
+                            if (_source == _sourceRemoteMp3) ...[
+                              const SizedBox(height: 20),
+                              SettingsSectionTitle(
+                                label: context.trLegacy('远程地址'),
+                              ),
+                              _buildRemoteUrlCard(),
+                            ],
+                          ],
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: _saving ? null : _saveSettings,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: palette.accentPrimary,
+                            foregroundColor: Theme.of(context)
+                                .colorScheme
+                                .onPrimary,
+                            minimumSize: const Size.fromHeight(48),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          child: Text(
+                            _saving
+                                ? context.trLegacy('保存中...')
+                                : context.trLegacy('保存'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
+      ),
     );
   }
 
   Widget _buildSourceCard() {
-    return Column(
+    return OmniSettingsGroup(
+      dividerIndent: 48,
       children: [
         _buildSourceTile(
           value: _sourceDefault,
           title: context.l10n.alarmSystemDefault,
           subtitle: context.l10n.alarmSystemDefaultDesc,
         ),
-        const Divider(height: 1),
         _buildSourceTile(
           value: _sourceLocalMp3,
           title: context.l10n.alarmLocalMp3,
           subtitle: context.l10n.alarmLocalMp3Desc,
         ),
-        const Divider(height: 1),
         _buildSourceTile(
           value: _sourceRemoteMp3,
           title: context.l10n.alarmMp3Url,
@@ -234,6 +251,7 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
   }) {
     final palette = context.omniPalette;
     final isSelected = _source == value;
+    final activeColor = palette.accentPrimary;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -242,26 +260,27 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
             _source = value;
           });
         },
-        borderRadius: BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Radio<String>(
-                value: value,
-                groupValue: _source,
-                activeColor: context.isDarkTheme
-                    ? palette.accentPrimary
-                    : AppColors.primaryBlue,
-                onChanged: (next) {
-                  if (next == null) return;
-                  setState(() {
-                    _source = next;
-                  });
-                },
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: Radio<String>(
+                  value: value,
+                  groupValue: _source,
+                  activeColor: activeColor,
+                  onChanged: (next) {
+                    if (next == null) return;
+                    setState(() {
+                      _source = next;
+                    });
+                  },
+                ),
               ),
-              const SizedBox(width: 2),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -269,11 +288,9 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
                     Text(
                       title,
                       style: TextStyle(
-                        fontSize: 14,
+                        fontSize: 14.5,
                         fontWeight: FontWeight.w500,
-                        color: context.isDarkTheme
-                            ? palette.textPrimary
-                            : AppColors.text,
+                        color: palette.textPrimary,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -281,25 +298,15 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
                       subtitle,
                       style: TextStyle(
                         fontSize: 12,
-                        color: context.isDarkTheme
-                            ? palette.textSecondary
-                            : AppColors.text70,
+                        color: palette.textSecondary,
+                        height: 1.45,
                       ),
                     ),
                   ],
                 ),
               ),
               if (isSelected)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Icon(
-                    LucideIcons.check,
-                    size: 16,
-                    color: context.isDarkTheme
-                        ? palette.accentPrimary
-                        : AppColors.primaryBlue,
-                  ),
-                ),
+                Icon(LucideIcons.check, size: 16, color: activeColor),
             ],
           ),
         ),
@@ -313,8 +320,7 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
         ? context.trLegacy('未选择文件')
         : _localPath;
 
-    return SizedBox(
-      width: double.infinity,
+    return OmniSettingsCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -323,35 +329,34 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w500,
-              color: context.isDarkTheme ? palette.textPrimary : AppColors.text,
+              color: palette.textPrimary,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Text(
             displayPath,
             style: TextStyle(
               fontSize: 12,
-              color: context.isDarkTheme
-                  ? palette.textSecondary
-                  : AppColors.text70,
+              color: palette.textSecondary,
+              height: 1.45,
             ),
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 10),
-          OutlinedButton(
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
             onPressed: _pickLocalMp3,
+            icon: const Icon(LucideIcons.folderOpen, size: 16),
             style: OutlinedButton.styleFrom(
-              foregroundColor: context.isDarkTheme
-                  ? palette.accentPrimary
-                  : AppColors.primaryBlue,
+              foregroundColor: palette.accentPrimary,
               side: BorderSide(
-                color: context.isDarkTheme
-                    ? palette.accentPrimary
-                    : AppColors.primaryBlue,
+                color: palette.accentPrimary.withValues(alpha: 0.45),
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
               ),
             ),
-            child: Text(context.l10n.alarmSelectMp3),
+            label: Text(context.l10n.alarmSelectMp3),
           ),
         ],
       ),
@@ -360,8 +365,7 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
 
   Widget _buildRemoteUrlCard() {
     final palette = context.omniPalette;
-    return SizedBox(
-      width: double.infinity,
+    return OmniSettingsCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -370,16 +374,16 @@ class _AlarmSettingPageState extends State<AlarmSettingPage> {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w500,
-              color: context.isDarkTheme ? palette.textPrimary : AppColors.text,
+              color: palette.textPrimary,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           TextField(
             controller: _remoteUrlController,
-            decoration: const InputDecoration(
+            style: TextStyle(fontSize: 13.5, color: palette.textPrimary),
+            decoration: omniSettingsInputDecoration(
+              context,
               hintText: 'https://example.com/alarm.mp3',
-              border: OutlineInputBorder(),
-              isDense: true,
             ),
           ),
         ],

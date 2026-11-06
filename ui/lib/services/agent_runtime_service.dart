@@ -98,13 +98,6 @@ class AgentRuntimeStatus {
   );
 }
 
-String agentModelSourceKey(AgentRuntimeStatus status) {
-  if (status.runtime == 'remote' || status.remoteEnabled) {
-    return 'remote';
-  }
-  return 'local-${status.activeAgentId ?? 'agent'}';
-}
-
 bool isAgentCancellationSuccessful(Map<String, dynamic> response) {
   return response['ok'] == true ||
       response['cancelled'] == true ||
@@ -116,6 +109,22 @@ bool isAgentCancellationSuccessful(Map<String, dynamic> response) {
 /// instead of exposing adapter stack traces or waiting for a raw error string
 /// to render in the chat.
 const _agentUserErrors = <String, ({String zh, String en})>{
+  'agentIdentityRequired': (
+    zh: '此对话没有可用的助手归属。历史记录仍可查看，请新建对话。',
+    en: 'This conversation has no assistant owner. You can view its history or start a new conversation.',
+  ),
+  'agentOwnerConflict': (
+    zh: '助手与此对话的归属不一致，请返回原对话或新建对话。',
+    en: 'The assistant does not match this conversation. Return to the original conversation or start a new one.',
+  ),
+  'harnessUpgradeRequired': (
+    zh: '当前助手运行环境需要升级，请在助手设置中升级或重新安装。',
+    en: 'This assistant runtime needs an upgrade. Update or reinstall it in Agent settings.',
+  ),
+  'agentRetired': (
+    zh: '此助手已停止支持。历史记录仍可查看，请新建其他助手的对话。',
+    en: 'This assistant is no longer supported. You can view its history or start a new conversation with another assistant.',
+  ),
   'modelRequired': (
     zh: '请先在模型设置中选择一个可用模型，再启动助手。',
     en: 'Choose an available model in model settings, then start the assistant.',
@@ -147,6 +156,30 @@ const _agentUserErrors = <String, ({String zh, String en})>{
   'installBusy': (
     zh: '已有助手正在安装，请等待完成后再试。',
     en: 'Another assistant is being installed. Try again when it finishes.',
+  ),
+  'packageBusy': (
+    zh: '助手正在安装或卸载，请等待完成后再试。',
+    en: 'An assistant is being installed or uninstalled. Try again when it finishes.',
+  ),
+  'uninstallFailed': (
+    zh: '卸载未完成，请重试。',
+    en: 'Uninstall did not finish. Try again.',
+  ),
+  'uninstallExternalInstallation': (
+    zh: '检测到其他安装或无法安全移除的文件，请在终端中检查该助手的安装位置。',
+    en: 'Another installation or files that could not be safely removed remain. Check the assistant\'s installation in the terminal.',
+  ),
+  'uninstallInvalidRequest': (
+    zh: '卸载请求无效，请刷新助手列表后重试。',
+    en: 'The uninstall request is invalid. Refresh the assistant list and try again.',
+  ),
+  'uninstallDistributionChanged': (
+    zh: '终端环境已切换，请刷新助手列表后重试。',
+    en: 'The terminal environment changed. Refresh the assistant list and try again.',
+  ),
+  'uninstallTerminalUnavailable': (
+    zh: '终端环境不可用，请恢复终端环境后重试卸载。',
+    en: 'The terminal environment is unavailable. Restore it before trying to uninstall again.',
   ),
   'incompatible': (
     zh: '当前模型连接不适用于这个助手，请更换模型连接或助手。',
@@ -180,6 +213,54 @@ const _agentUserErrors = <String, ({String zh, String en})>{
     zh: '模型服务商拒绝了本次请求，请检查模型及请求配置。',
     en: 'The model provider rejected this request. Check the model and request configuration.',
   ),
+  'naConnectionFailed': (
+    zh: '无法连接 Na 服务，请检查网络后重试。',
+    en: 'Could not connect to Na. Check your connection and try again.',
+  ),
+  'naRequestTimeout': (
+    zh: '连接 Na 服务超时，请稍后重试。',
+    en: 'The connection to Na timed out. Try again shortly.',
+  ),
+  'naCertificate': (
+    zh: 'Na 安全连接验证失败，请检查网络和设备时间。',
+    en: 'Could not verify the secure connection to Na. Check your network and device time.',
+  ),
+  'naAuthentication': (
+    zh: 'Na 连接验证已失效，请重新登录或检查连接设置。',
+    en: 'The Na connection is no longer authenticated. Sign in again or check the connection settings.',
+  ),
+  'naPermission': (
+    zh: '当前账号没有此 Na 操作的权限，请检查账号授权。',
+    en: 'Your account does not have permission for this Na action. Check its authorization.',
+  ),
+  'naConnectionChanged': (
+    zh: 'Na 连接已变化，请重新打开此对话。',
+    en: 'The Na connection changed. Reopen this conversation.',
+  ),
+  'naOwnerConflict': (
+    zh: '此 Na 对话属于其他账号或连接，请切回原账号或新建对话。',
+    en: 'This Na conversation belongs to another account or connection. Switch back or start a new conversation.',
+  ),
+  'naServiceUnavailable': (
+    zh: 'Na 服务暂时不可用，请稍后重试。',
+    en: 'Na is temporarily unavailable. Try again later.',
+  ),
+  'naRateLimited': (
+    zh: 'Na 请求过于频繁，请稍后重试。',
+    en: 'Na is rate limiting requests. Try again later.',
+  ),
+  'naRequestRejected': (
+    zh: 'Na 未接受此请求，请重新打开对话后重试。',
+    en: 'Na did not accept this request. Reopen the conversation and try again.',
+  ),
+  'naResponseInvalid': (
+    zh: 'Na 返回了无法识别的响应，请稍后重试。',
+    en: 'Na returned an invalid response. Try again later.',
+  ),
+  'naAdmissionUnconfirmed': (
+    zh: '尚未确认 Na 是否已受理，请重新打开对话查看状态。',
+    en: 'It is not yet confirmed whether Na accepted this request. Reopen the conversation to check its status.',
+  ),
   'unknown': (
     zh: '助手暂时无法完成操作，请重试。',
     en: 'The assistant could not complete this action. Please try again.',
@@ -206,6 +287,56 @@ String formatAgentRuntimeErrorForUser(
     return english ? message.en : message.zh;
   }
 
+  if (failureKind == 'agent_identity_required' ||
+      raw.contains('agent_identity_required:'))
+    return text('agentIdentityRequired');
+  if (failureKind == 'agent_owner_conflict' ||
+      raw.contains('agent_owner_conflict:'))
+    return text('agentOwnerConflict');
+  if (failureKind == 'harness_upgrade_required' ||
+      raw.contains('runtime needs an upgrade')) {
+    return text('harnessUpgradeRequired');
+  }
+  if (failureKind == 'agent_retired' || raw.contains('agent_retired:')) {
+    return text('agentRetired');
+  }
+
+  // Na connection failures belong to the cloud service, not the model Provider.
+  final naError = switch (failureKind) {
+    'na_connection_failed' => 'naConnectionFailed',
+    'na_request_timeout' => 'naRequestTimeout',
+    'na_tls_certificate_failure' => 'naCertificate',
+    'na_authentication_required' => 'naAuthentication',
+    'na_permission_denied' => 'naPermission',
+    'na_connection_changed' => 'naConnectionChanged',
+    'na_owner_conflict' => 'naOwnerConflict',
+    'na_service_unavailable' => 'naServiceUnavailable',
+    'na_rate_limited' => 'naRateLimited',
+    'na_request_rejected' => 'naRequestRejected',
+    'na_response_invalid' => 'naResponseInvalid',
+    'na_admission_unconfirmed' => 'naAdmissionUnconfirmed',
+    _ => null,
+  };
+  if (naError != null) return text(naError);
+
+  // Package maintenance errors belong to the host, not a model request. Use
+  // their structured kind before inspecting diagnostics such as "timeout".
+  final packageError = switch (failureKind) {
+    'agent_uninstall_failed' => 'uninstallFailed',
+    'agent_uninstall_external_installation' => 'uninstallExternalInstallation',
+    'agent_uninstall_invalid_request' => 'uninstallInvalidRequest',
+    'agent_uninstall_distribution_changed' => 'uninstallDistributionChanged',
+    'agent_uninstall_terminal_unavailable' => 'uninstallTerminalUnavailable',
+    'agent_package_operation_in_progress' => 'packageBusy',
+    _ => null,
+  };
+  if (packageError != null) {
+    return text(packageError);
+  }
+  if (raw.contains('agent package operation is already running')) {
+    return text('packageBusy');
+  }
+
   // Errors may already have been formatted before durable projection.
   // Preserve only these exact app-owned messages, never arbitrary payloads.
   for (final message in _agentUserErrors.values) {
@@ -219,17 +350,24 @@ String formatAgentRuntimeErrorForUser(
     r'(?:chat completion stream|responses|anthropic) request failed\((\d{3})\)',
   ).firstMatch(raw);
   final httpStatus = int.tryParse(httpMatch?.group(1) ?? '');
-  if (failureKind == 'provider_service_unavailable') return text('serviceUnavailable');
-  if (failureKind == 'provider_request_rejected') return text('requestRejected');
+  if (failureKind == 'provider_service_unavailable')
+    return text('serviceUnavailable');
+  if (failureKind == 'provider_request_rejected')
+    return text('requestRejected');
   if (failureKind == 'provider_quota_exceeded') return text('quota');
   if (failureKind == 'provider_rate_limited') return text('rateLimit');
   if (failureKind == 'provider_request_limited') return text('requestLimited');
   if (httpStatus == 401) return text('credentials');
   if (httpStatus == 429) {
-    if (raw.contains('insufficient_quota') || raw.contains('quota_exceeded') ||
-        raw.contains('quota exhausted') || raw.contains('quota_exhausted') ||
-        raw.contains('额度不足') || raw.contains('余额不足')) return text('quota');
-    if (raw.contains('rate_limit_exceeded') || raw.contains('rate_limit_error')) {
+    if (raw.contains('insufficient_quota') ||
+        raw.contains('quota_exceeded') ||
+        raw.contains('quota exhausted') ||
+        raw.contains('quota_exhausted') ||
+        raw.contains('额度不足') ||
+        raw.contains('余额不足'))
+      return text('quota');
+    if (raw.contains('rate_limit_exceeded') ||
+        raw.contains('rate_limit_error')) {
       return text('rateLimit');
     }
     return text('requestLimited');
@@ -554,6 +692,37 @@ String _normalizeAcpConfigKey(String key) {
   return key.toLowerCase().replaceAll(RegExp(r'[_-]'), '');
 }
 
+class AgentPackageVersion {
+  const AgentPackageVersion({
+    this.installedVersion,
+    this.latestVersion,
+    this.targetVersion,
+    this.checkedAt,
+    this.error,
+    this.pinned = false,
+    this.updateAvailable = false,
+  });
+
+  final String? installedVersion;
+  final String? latestVersion;
+  final String? targetVersion;
+  final int? checkedAt;
+  final String? error;
+  final bool pinned;
+  final bool updateAvailable;
+
+  factory AgentPackageVersion.fromMap(Map<dynamic, dynamic> map) =>
+      AgentPackageVersion(
+        installedVersion: _stringOrNull(map['installedVersion']),
+        latestVersion: _stringOrNull(map['latestVersion']),
+        targetVersion: _stringOrNull(map['targetVersion']),
+        checkedAt: _intOrNull(map['checkedAt']),
+        error: _stringOrNull(map['error']),
+        pinned: map['pinned'] == true,
+        updateAvailable: map['updateAvailable'] == true,
+      );
+}
+
 class AcpAgentProfile {
   const AcpAgentProfile({
     required this.id,
@@ -565,7 +734,6 @@ class AcpAgentProfile {
     this.enabled = true,
     this.builtIn = false,
     this.source = 'custom',
-    this.selected = false,
     this.installed,
     this.status = 'unchecked',
     this.lastCheckError,
@@ -574,7 +742,10 @@ class AcpAgentProfile {
     this.capabilities = const <String, dynamic>{},
     this.discoveryCommand,
     this.managedAdapter = false,
-  });
+    this.uninstallable = false,
+    this.packageVersion,
+    bool? configurationAvailable,
+  }) : configurationAvailable = configurationAvailable ?? id != 'na-cloud';
 
   final String id;
   final String name;
@@ -585,7 +756,6 @@ class AcpAgentProfile {
   final bool enabled;
   final bool builtIn;
   final String source;
-  final bool selected;
   final bool? installed;
   final String status;
   final String? lastCheckError;
@@ -594,6 +764,12 @@ class AcpAgentProfile {
   final Map<String, dynamic> capabilities;
   final String? discoveryCommand;
   final bool managedAdapter;
+  final bool uninstallable;
+  final AgentPackageVersion? packageVersion;
+
+  /// Native build policy owns whether this Agent exposes a configuration page.
+  /// Na is account managed unless the native develop flavor opts in.
+  final bool configurationAvailable;
 
   factory AcpAgentProfile.fromMap(Map<dynamic, dynamic> map) {
     final rawArguments = map['arguments'];
@@ -617,7 +793,6 @@ class AcpAgentProfile {
       enabled: map['enabled'] != false,
       builtIn: map['builtIn'] == true,
       source: _stringOrNull(map['source']) ?? 'custom',
-      selected: map['selected'] == true,
       installed: _boolOrNull(map['installed']),
       status: _stringOrNull(map['status']) ?? 'unchecked',
       lastCheckError: _stringOrNull(map['lastCheckError']),
@@ -627,6 +802,13 @@ class AcpAgentProfile {
           _normalizeMap(map['capabilities']) ?? const <String, dynamic>{},
       discoveryCommand: _stringOrNull(map['discoveryCommand']),
       managedAdapter: map['managedAdapter'] == true,
+      uninstallable: map['uninstallable'] == true,
+      packageVersion: map['packageVersion'] is Map
+          ? AgentPackageVersion.fromMap(map['packageVersion'] as Map)
+          : null,
+      configurationAvailable: map['configurationAvailable'] is bool
+          ? map['configurationAvailable'] as bool
+          : null,
     );
   }
 
@@ -643,49 +825,40 @@ class AcpAgentProfile {
 
 class AcpAgentCatalog {
   const AcpAgentCatalog({
-    required this.selectedAgentId,
     required this.agents,
-    this.runtimeStatus,
+    this.distributionId,
+    this.retiredAgentIds = const <String>{},
   });
 
-  final String selectedAgentId;
   final List<AcpAgentProfile> agents;
+  final String? distributionId;
+  final Set<String> retiredAgentIds;
 
-  /// A switch response may carry the status snapshot captured immediately
-  /// after ACP initialization. Keeping it with the catalog avoids a second
-  /// status/connect IPC round-trip on the hot path.
-  final AgentRuntimeStatus? runtimeStatus;
-
-  AcpAgentProfile? get selectedAgent {
-    for (final agent in agents) {
-      if (agent.id == selectedAgentId) return agent;
-    }
-    return agents.isEmpty ? null : agents.first;
-  }
+  bool isRetired(String? agentId) => retiredAgentIds.contains(agentId?.trim());
 
   factory AcpAgentCatalog.fromMap(Map<dynamic, dynamic>? map) {
     final source = map ?? const <dynamic, dynamic>{};
     final rawAgents = source['agents'];
+    final retiredAgentIds = (source['retiredAgentIds'] as List? ?? const [])
+        .whereType<String>()
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet();
     final agents = <AcpAgentProfile>[];
     final seenIdentities = <String>{};
     if (rawAgents is List) {
       for (final rawAgent in rawAgents.whereType<Map>()) {
         final agent = AcpAgentProfile.fromMap(rawAgent);
-        if (agent.id.isEmpty) continue;
+        if (agent.id.isEmpty || retiredAgentIds.contains(agent.id)) continue;
         if (seenIdentities.add(_agentCatalogIdentity(agent))) {
           agents.add(agent);
         }
       }
     }
     return AcpAgentCatalog(
-      selectedAgentId:
-          _stringOrNull(source['selectedAgentId']) ??
-          (agents.isEmpty ? '' : agents.first.id),
       agents: agents,
-      runtimeStatus:
-          source.containsKey('connected') || source.containsKey('ready')
-          ? AgentRuntimeStatus.fromMap(source)
-          : null,
+      retiredAgentIds: retiredAgentIds,
+      distributionId: _stringOrNull(source['distributionId']),
     );
   }
 }
@@ -700,7 +873,6 @@ String _agentCatalogIdentity(AcpAgentProfile agent) {
 }
 
 String? selectAgentRequestModel({
-  required AgentRuntimeStatus status,
   required String? overrideModel,
   required String? activeModel,
   required bool activeModelSourceMatches,
@@ -778,7 +950,6 @@ class CodexRemoteBridgeConfig {
     this.remoteBridgeToken = '',
     this.remoteCwd = '',
     this.remoteConfigured = false,
-    this.runtime,
   });
 
   final bool remoteEnabled;
@@ -786,7 +957,6 @@ class CodexRemoteBridgeConfig {
   final String remoteBridgeToken;
   final String remoteCwd;
   final bool remoteConfigured;
-  final String? runtime;
 
   factory CodexRemoteBridgeConfig.fromMap(Map<dynamic, dynamic>? map) {
     final source = map ?? const <dynamic, dynamic>{};
@@ -796,7 +966,6 @@ class CodexRemoteBridgeConfig {
       remoteBridgeToken: _stringOrNull(source['remoteBridgeToken']) ?? '',
       remoteCwd: _stringOrNull(source['remoteCwd']) ?? '',
       remoteConfigured: source['remoteConfigured'] == true,
-      runtime: _stringOrNull(source['runtime']),
     );
   }
 }
@@ -833,6 +1002,7 @@ class CodexRemoteDirectoryList {
     this.parent,
     this.cwd,
     this.home,
+    this.workspaceOwner,
     this.error,
     this.entries = const <CodexRemoteDirectoryEntry>[],
   });
@@ -842,6 +1012,7 @@ class CodexRemoteDirectoryList {
   final String? parent;
   final String? cwd;
   final String? home;
+  final String? workspaceOwner;
   final String? error;
   final List<CodexRemoteDirectoryEntry> entries;
 
@@ -854,6 +1025,7 @@ class CodexRemoteDirectoryList {
       parent: _stringOrNull(source['parent']),
       cwd: _stringOrNull(source['cwd']),
       home: _stringOrNull(source['home']),
+      workspaceOwner: _stringOrNull(source['workspaceOwner']),
       error: _stringOrNull(source['error']),
       entries: rawEntries is List
           ? rawEntries
@@ -931,6 +1103,35 @@ class CodexRemoteFilePayload {
   }
 }
 
+enum AgentPackageOperation { install, uninstall }
+
+typedef _AgentPackageTask = ({
+  AgentPackageOperation operation,
+  String? distributionId,
+  bool force,
+  Future<Map<String, dynamic>> future,
+});
+
+/// Response attributed to one captured Na account and service endpoint.
+class NaPersonalResponse {
+  const NaPersonalResponse({required this.owner, required this.data});
+  final String owner;
+  final Map<String, dynamic> data;
+
+  factory NaPersonalResponse.fromMap(Map<String, dynamic> value) {
+    final owner = value['owner'];
+    if (owner is! String || owner.isEmpty) {
+      throw StateError('Na 返回了无效的连接归属。');
+    }
+    final raw = value['data'];
+    if (raw is! Map) throw StateError('Na 返回了无效的资源。');
+    return NaPersonalResponse(
+      owner: owner,
+      data: Map<String, dynamic>.from(raw),
+    );
+  }
+}
+
 class AgentRuntimeService {
   AgentRuntimeService._();
 
@@ -943,10 +1144,14 @@ class AgentRuntimeService {
 
   static final StreamController<Map<String, dynamic>> _eventController =
       StreamController<Map<String, dynamic>>.broadcast();
-  static final Map<String, Future<Map<String, dynamic>>>
-  _agentPreparationTasks = <String, Future<Map<String, dynamic>>>{};
+  static final Map<String, _AgentPackageTask> _agentPackageTasks = {};
+  static Future<void>? _packageOperationQueue;
+  static final Set<String> _queuedAgentIds = <String>{};
   static final StreamController<Set<String>> _agentPreparationController =
       StreamController<Set<String>>.broadcast();
+  static final StreamController<Map<String, AgentPackageOperation>>
+  _agentPackageOperationController =
+      StreamController<Map<String, AgentPackageOperation>>.broadcast();
   static StreamSubscription<dynamic>? _nativeEventSubscription;
 
   static Stream<Map<String, dynamic>> get events {
@@ -954,39 +1159,118 @@ class AgentRuntimeService {
     return _eventController.stream;
   }
 
-  /// Harness preparation can spend minutes downloading npm/native packages.
-  /// Keep the operation owned by the service instead of a settings page so it
-  /// continues when that page is popped and a rebuilt page can recover the
-  /// in-flight state without starting the same installation again.
-  static Set<String> get preparingAgentIds =>
-      Set<String>.unmodifiable(_agentPreparationTasks.keys);
+  /// Package operations belong to this service so leaving a settings page
+  /// cannot interrupt them or start the same operation a second time.
+  static Map<String, AgentPackageOperation> get agentPackageOperations =>
+      Map<String, AgentPackageOperation>.unmodifiable(
+        _agentPackageTasks.map((id, task) => MapEntry(id, task.operation)),
+      );
+
+  static Stream<Map<String, AgentPackageOperation>>
+  get agentPackageOperationChanges => _agentPackageOperationController.stream;
+
+  /// Compatibility projection for callers interested only in installation.
+  static Set<String> get preparingAgentIds => Set<String>.unmodifiable(
+    _agentPackageTasks.entries
+        .where(
+          (entry) => entry.value.operation == AgentPackageOperation.install,
+        )
+        .map((entry) => entry.key),
+  );
+
+  static Set<String> get queuedAgentIds =>
+      Set<String>.unmodifiable(_queuedAgentIds);
 
   static Stream<Set<String>> get agentPreparationChanges =>
       _agentPreparationController.stream;
 
-  static Future<AgentRuntimeStatus> status() async {
-    final result = await _invokeMap('status');
-    return AgentRuntimeStatus.fromMap(result);
+  static String _requiredAgentId(String agentId) {
+    final normalized = agentId.trim();
+    if (normalized.isEmpty)
+      throw ArgumentError('agent_identity_required: agentId');
+    return normalized;
   }
 
-  static Future<AgentRuntimeStatus> connect() async {
-    final result = await _invokeMap('connect');
-    return AgentRuntimeStatus.fromMap(result);
-  }
-
-  static Future<AgentRuntimeStatus> disconnect() async {
-    final result = await _invokeMap('disconnect');
-    return AgentRuntimeStatus.fromMap(result);
-  }
-
-  /// Returns the already negotiated ACP AgentInfo. The native host performs
-  /// the wire handshake once per transport; callers must not create a second
-  /// session just to initialize a shared ACP client.
-  static Future<Map<String, dynamic>> initialize({String? agentId}) {
-    return _invokeMap('initialize', {
-      if (agentId != null && agentId.trim().isNotEmpty)
-        'agentId': agentId.trim(),
+  /// Bounded Na resource bridge. Only status may discover a fresh owner;
+  /// native validates every operation against that captured connection.
+  static Future<NaPersonalResponse> requestNaPersonal({
+    required String operation,
+    String? owner,
+    String? id,
+    Map<String, dynamic> payload = const {},
+  }) async {
+    if (operation.trim().isEmpty ||
+        (operation != 'status' && (owner == null || owner.isEmpty))) {
+      throw ArgumentError(
+        'Na resource operation requires its connection owner',
+      );
+    }
+    final result = await _invokeMap('config/na/personal', {
+      'agentId': 'na-cloud',
+      'operation': operation,
+      if (owner != null) 'owner': owner,
+      if (id != null) 'id': id,
+      'payload': payload,
     });
+    final response = NaPersonalResponse.fromMap(result);
+    if (owner != null && response.owner != owner) {
+      throw StateError('Na 连接已更改，请重新载入连接。');
+    }
+    return response;
+  }
+
+  /// Pure IANA calendar conversion; never connects or starts an Agent turn.
+  static Future<Map<String, dynamic>> requestNaLocalTime({
+    String? localTime,
+    String? at,
+    required String timezone,
+  }) => _invokeMap('config/na/local-time', {
+    'agentId': 'na-cloud',
+    if (localTime != null) 'localTime': localTime,
+    if (at != null) 'at': at,
+    'timezone': timezone,
+  });
+
+  /// Local device delivery preferences; private connector/project keys never
+  /// enter this API. Native captures the same Na account/endpoint owner.
+  static Future<NaPersonalResponse> requestNaNotifications({
+    String? owner,
+    bool? enabled,
+  }) async {
+    if (enabled != null && (owner == null || owner.isEmpty)) {
+      throw ArgumentError('Na notification changes require their connection owner');
+    }
+    final response = NaPersonalResponse.fromMap(await _invokeMap('config/na/notifications', {
+      'agentId': 'na-cloud',
+      'operation': enabled == null ? 'read' : 'write',
+      if (owner != null) 'owner': owner,
+      if (enabled != null) 'enabled': enabled,
+    }));
+    if (owner != null && response.owner != owner) {
+      throw StateError('Na 连接已更改，请重新载入通知设置。');
+    }
+    return response;
+  }
+
+  static Future<AgentRuntimeStatus> status({required String agentId}) async {
+    final result = await _invokeMap('status', {
+      'agentId': _requiredAgentId(agentId),
+    });
+    return AgentRuntimeStatus.fromMap(result);
+  }
+
+  static Future<AgentRuntimeStatus> disconnect({
+    required String agentId,
+  }) async {
+    final result = await _invokeMap('disconnect', {
+      'agentId': _requiredAgentId(agentId),
+    });
+    return AgentRuntimeStatus.fromMap(result);
+  }
+
+  /// Initializes the explicitly owned ACP transport without creating a session.
+  static Future<Map<String, dynamic>> initialize({required String agentId}) {
+    return _invokeMap('initialize', {'agentId': _requiredAgentId(agentId)});
   }
 
   static Future<AcpAgentCatalog> listAgents() async {
@@ -997,10 +1281,8 @@ class AgentRuntimeService {
     return AcpAgentCatalog.fromMap(await _invokeMap('agent/refresh'));
   }
 
-  static Future<AcpAgentCatalog> selectAgent(String agentId) async {
-    return AcpAgentCatalog.fromMap(
-      await _invokeMap('agent/select', {'agentId': agentId.trim()}),
-    );
+  static Future<AcpAgentCatalog> checkAgentUpdates() async {
+    return AcpAgentCatalog.fromMap(await _invokeMap('agent/checkUpdates'));
   }
 
   static Future<AcpAgentCatalog> saveAgent(AcpAgentProfile agent) async {
@@ -1025,45 +1307,134 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> prepareAgent(
     String agentId, {
     bool force = false,
+    String? distributionId,
   }) {
     return _invokeMap('agent/prepare', {
       'agentId': agentId.trim(),
       if (force) 'force': true,
+      if (distributionId != null) 'distributionId': distributionId,
     });
   }
 
   static Future<Map<String, dynamic>> prepareAgentInBackground(
     String agentId, {
     bool force = false,
+    String? distributionId,
+  }) => _queueAgentPackageOperation(
+    agentId,
+    operation: AgentPackageOperation.install,
+    force: force,
+    distributionId: distributionId,
+  );
+
+  static Future<Map<String, dynamic>> uninstallAgent(
+    String agentId, {
+    required String distributionId,
   }) {
     final normalizedId = agentId.trim();
-    final existing = _agentPreparationTasks[normalizedId];
-    if (existing != null) return existing;
+    final normalizedDistribution = distributionId.trim();
+    if (normalizedId.isEmpty || normalizedDistribution.isEmpty) {
+      return Future.error(
+        ArgumentError('Uninstall requires an agent and terminal distribution.'),
+      );
+    }
+    return _invokeMap('agent/uninstall', {
+      'agentId': normalizedId,
+      'distributionId': normalizedDistribution,
+    });
+  }
 
-    final task = prepareAgent(normalizedId, force: force);
-    _agentPreparationTasks[normalizedId] = task;
-    _emitAgentPreparationState();
+  static Future<Map<String, dynamic>> uninstallAgentInBackground(
+    String agentId, {
+    required String distributionId,
+  }) => _queueAgentPackageOperation(
+    agentId,
+    operation: AgentPackageOperation.uninstall,
+    distributionId: distributionId,
+  );
+
+  static Future<Map<String, dynamic>> _queueAgentPackageOperation(
+    String agentId, {
+    required AgentPackageOperation operation,
+    required String? distributionId,
+    bool force = false,
+  }) {
+    final normalizedId = agentId.trim();
+    final normalizedDistribution = distributionId?.trim();
+    if (normalizedId.isEmpty || normalizedDistribution == '') {
+      return Future.error(
+        ArgumentError('Package operations require non-empty identities.'),
+      );
+    }
+    final existing = _agentPackageTasks[normalizedId];
+    if (existing != null) {
+      if (existing.operation == operation &&
+          existing.distributionId == normalizedDistribution &&
+          existing.force == force) {
+        return existing.future;
+      }
+      return Future.error(
+        StateError(
+          'Agent package operation is already running for $normalizedId.',
+        ),
+      );
+    }
+
+    _queuedAgentIds.add(normalizedId);
+    // Installs and uninstalls share the same npm prefix and must not overlap.
+    Future<Map<String, dynamic>> run() {
+      _queuedAgentIds.remove(normalizedId);
+      _emitAgentPackageOperationState();
+      return switch (operation) {
+        AgentPackageOperation.install => prepareAgent(
+          normalizedId,
+          force: force,
+          distributionId: normalizedDistribution,
+        ),
+        AgentPackageOperation.uninstall => uninstallAgent(
+          normalizedId,
+          distributionId: normalizedDistribution!,
+        ),
+      };
+    }
+
+    final task =
+        _packageOperationQueue?.then((_) => run()) ?? Future.microtask(run);
+    _packageOperationQueue = task.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    _agentPackageTasks[normalizedId] = (
+      operation: operation,
+      distributionId: normalizedDistribution,
+      force: force,
+      future: task,
+    );
+    _emitAgentPackageOperationState();
     unawaited(
       task.then<void>(
-        (_) => _finishAgentPreparation(normalizedId, task),
-        onError: (Object _, StackTrace __) {
-          _finishAgentPreparation(normalizedId, task);
+        (_) => _finishAgentPackageOperation(normalizedId, task),
+        onError: (Object _, StackTrace _) {
+          _finishAgentPackageOperation(normalizedId, task);
         },
       ),
     );
     return task;
   }
 
-  static void _finishAgentPreparation(
+  static void _finishAgentPackageOperation(
     String agentId,
     Future<Map<String, dynamic>> task,
   ) {
-    if (!identical(_agentPreparationTasks[agentId], task)) return;
-    _agentPreparationTasks.remove(agentId);
-    _emitAgentPreparationState();
+    if (!identical(_agentPackageTasks[agentId]?.future, task)) return;
+    _agentPackageTasks.remove(agentId);
+    _queuedAgentIds.remove(agentId);
+    if (_agentPackageTasks.isEmpty) _packageOperationQueue = null;
+    _emitAgentPackageOperationState();
   }
 
-  static void _emitAgentPreparationState() {
+  static void _emitAgentPackageOperationState() {
+    _agentPackageOperationController.add(agentPackageOperations);
     _agentPreparationController.add(preparingAgentIds);
   }
 
@@ -1073,21 +1444,19 @@ class AgentRuntimeService {
 
   static Future<Map<String, dynamic>> writeAgentConfig(
     String agentId, {
+    String? connectionMode,
     String? baseUrl,
     String? model,
     String? apiKey,
-    String? reasoningEffort,
-    String? permissionMode,
     String? content,
     int? expectedRevision,
   }) {
     return _invokeMap('agent/config/write', {
       'agentId': agentId.trim(),
+      if (connectionMode != null) 'connectionMode': connectionMode,
       if (baseUrl != null) 'baseUrl': baseUrl,
       if (model != null) 'model': model,
       if (apiKey != null) 'apiKey': apiKey,
-      if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
-      if (permissionMode != null) 'permissionMode': permissionMode,
       if (content != null) 'content': content,
       if (expectedRevision != null) 'expectedRevision': expectedRevision,
     });
@@ -1110,6 +1479,7 @@ class AgentRuntimeService {
   // native compatibility adapter and are not exposed as a Dart service API.
   static Future<Map<String, dynamic>> newSession({
     int? conversationId,
+    String? agentId,
     String? cwd,
     String? model,
     String? effort,
@@ -1119,6 +1489,8 @@ class AgentRuntimeService {
   }) {
     return _invokeMap('session/new', {
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
       if (model != null && model.trim().isNotEmpty) 'model': model.trim(),
       if (effort != null && effort.trim().isNotEmpty) 'effort': effort.trim(),
@@ -1141,6 +1513,7 @@ class AgentRuntimeService {
   static Future<String> ensureSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? cwd,
     String? model,
     String? effort,
@@ -1153,6 +1526,7 @@ class AgentRuntimeService {
 
     final response = await newSession(
       conversationId: conversationId,
+      agentId: agentId,
       cwd: cwd,
       model: model,
       effort: effort,
@@ -1219,6 +1593,7 @@ class AgentRuntimeService {
     bool includeHistory = true,
     bool refreshConfig = false,
     String? conversationMode,
+    String? historyCursor,
   }) {
     return _invokeMap('session/load', {
       if (sessionId != null) 'sessionId': sessionId,
@@ -1226,19 +1601,29 @@ class AgentRuntimeService {
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
       'includeHistory': includeHistory,
+      if (historyCursor != null) 'historyCursor': historyCursor,
       if (refreshConfig) 'refreshConfig': true,
       if (conversationMode != null && conversationMode.trim().isNotEmpty)
         'conversationMode': conversationMode.trim(),
     });
   }
 
+  static Future<void> setNaHistorySyncEnabled(bool enabled) async {
+    await _invokeMap('config/na/historySync', {
+      'agentId': 'na-cloud',
+      'enabled': enabled,
+    });
+  }
+
   static Future<Map<String, dynamic>> listSessions({
+    required String agentId,
     int? limit,
     String? cursor,
     String? cwd,
     List<String> additionalDirectories = const <String>[],
   }) {
     return _invokeMap('session/list', {
+      'agentId': _requiredAgentId(agentId),
       if (limit != null) 'limit': limit,
       if (cursor != null && cursor.trim().isNotEmpty) 'cursor': cursor.trim(),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
@@ -1253,6 +1638,7 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> forkSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? cwd,
     String? conversationMode,
     List<String> additionalDirectories = const <String>[],
@@ -1261,6 +1647,7 @@ class AgentRuntimeService {
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'sessionId': sessionId.trim(),
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
       if (conversationMode != null && conversationMode.trim().isNotEmpty)
         'conversationMode': conversationMode.trim(),
@@ -1269,8 +1656,10 @@ class AgentRuntimeService {
     });
   }
 
-  static Future<Map<String, dynamic>> listLoadedSessions() {
-    return _invokeMap('session/list');
+  static Future<Map<String, dynamic>> listLoadedSessions({
+    required String agentId,
+  }) {
+    return _invokeMap('session/list', {'agentId': _requiredAgentId(agentId)});
   }
 
   /// Close releases the live ACP Session without archiving or deleting the
@@ -1278,11 +1667,14 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> closeSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
   }) {
     return _invokeMap('session/close', {
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'sessionId': sessionId.trim(),
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null && agentId.trim().isNotEmpty)
+        'agentId': agentId.trim(),
     });
   }
 
@@ -1291,59 +1683,81 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> deleteSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
   }) {
     return _invokeMap('session/delete', {
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'sessionId': sessionId.trim(),
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
     });
   }
 
   static Future<Map<String, dynamic>> setSessionMode({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     required String modeId,
   }) {
     return _invokeMap('session/set_mode', {
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'sessionId': sessionId.trim(),
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
       'modeId': modeId.trim(),
     });
   }
 
   static Future<Map<String, dynamic>> authenticateAgent({
+    required String agentId,
     required String methodId,
     Map<String, dynamic>? meta,
   }) {
     return _invokeMap('authenticate', {
+      'agentId': _requiredAgentId(agentId),
       'methodId': methodId.trim(),
       if (meta != null) '_meta': meta,
     });
   }
 
   static Future<Map<String, dynamic>> logoutAgent({
+    required String agentId,
     Map<String, dynamic>? meta,
   }) {
-    return _invokeMap('logout', {if (meta != null) '_meta': meta});
+    return _invokeMap('logout', {
+      'agentId': _requiredAgentId(agentId),
+      if (meta != null) '_meta': meta,
+    });
   }
 
   static Future<Map<String, dynamic>> listAgentProviders({
+    required String agentId,
     Map<String, dynamic>? meta,
   }) {
-    return _invokeMap('providers/list', {if (meta != null) '_meta': meta});
+    return _invokeMap('providers/list', {
+      'agentId': _requiredAgentId(agentId),
+      if (meta != null) '_meta': meta,
+    });
   }
 
   static Future<Map<String, dynamic>> setAgentProvider(
-    Map<String, dynamic> params,
-  ) {
-    return _invokeMap('providers/set', params);
+    Map<String, dynamic> params, {
+    required String agentId,
+  }) {
+    return _invokeMap('providers/set', {
+      ...params,
+      'agentId': _requiredAgentId(agentId),
+    });
   }
 
   static Future<Map<String, dynamic>> disableAgentProvider(
-    Map<String, dynamic> params,
-  ) {
-    return _invokeMap('providers/disable', params);
+    Map<String, dynamic> params, {
+    required String agentId,
+  }) {
+    return _invokeMap('providers/disable', {
+      ...params,
+      'agentId': _requiredAgentId(agentId),
+    });
   }
 
   /// Calls an ACP implementation extension without introducing a second
@@ -1352,9 +1766,13 @@ class AgentRuntimeService {
   /// boundary so a typo cannot silently become a legacy RPC.
   static Future<Map<String, dynamic>> callAcpExtension({
     required String method,
+    required String agentId,
     Map<String, dynamic> params = const <String, dynamic>{},
   }) {
-    return _invokeMap(_validateAcpExtensionMethod(method), params);
+    return _invokeMap(_validateAcpExtensionMethod(method), {
+      'agentId': _requiredAgentId(agentId),
+      'params': params,
+    });
   }
 
   /// Sends a client-to-agent ACP extension notification. Notifications do
@@ -1362,52 +1780,62 @@ class AgentRuntimeService {
   /// extension on the same transport as every other ACP operation.
   static Future<Map<String, dynamic>> notifyAcpExtension({
     required String method,
+    required String agentId,
     Object? params,
   }) {
     return _invokeMap('notifyAcpExtension', {
+      'agentId': _requiredAgentId(agentId),
       'method': _validateAcpExtensionMethod(method),
-      if (params != null) 'params': params,
+      'params': params,
     });
   }
 
   /// Preserves non-object extension results such as arrays and scalar values.
   static Future<dynamic> callAcpExtensionValue({
     required String method,
+    required String agentId,
     Object? params,
   }) {
     return _invokeValue(_validateAcpExtensionMethod(method), {
-      if (params != null) 'params': params,
+      'agentId': _requiredAgentId(agentId),
+      'params': params,
     });
   }
 
   static Future<Map<String, dynamic>> archiveSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
   }) {
     return _invokeMap('session/archive', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
     });
   }
 
   static Future<Map<String, dynamic>> unarchiveSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
   }) {
     return _invokeMap('session/unarchive', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
     });
   }
 
   static Future<Map<String, dynamic>> setSessionName({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     required String name,
   }) {
     return _invokeMap('session/name/set', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
       'name': name,
     });
   }
@@ -1416,6 +1844,7 @@ class AgentRuntimeService {
     String? sessionId,
     int? conversationId,
     String? requestId,
+    String? userMessageId,
     String? agentId,
     required String text,
     List<Map<String, dynamic>> attachments = const [],
@@ -1434,6 +1863,8 @@ class AgentRuntimeService {
       if (conversationId != null) 'conversationId': conversationId,
       if (requestId != null && requestId.trim().isNotEmpty)
         'requestId': requestId.trim(),
+      if (userMessageId != null && userMessageId.trim().isNotEmpty)
+        'userMessageId': userMessageId.trim(),
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
@@ -1457,11 +1888,13 @@ class AgentRuntimeService {
       if (failureKind is String && response['error'] is String) {
         return <String, dynamic>{
           ...response,
-          'error': formatAgentRuntimeErrorForUser(PlatformException(
-            code: 'AGENT_RUNTIME_CALL_FAILED',
-            message: response['error'] as String,
-            details: <String, dynamic>{'failureKind': failureKind},
-          )),
+          'error': formatAgentRuntimeErrorForUser(
+            PlatformException(
+              code: 'AGENT_RUNTIME_CALL_FAILED',
+              message: response['error'] as String,
+              details: <String, dynamic>{'failureKind': failureKind},
+            ),
+          ),
         };
       }
       return response;
@@ -1471,12 +1904,14 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> cancelPrompt({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? promptId,
     String? runId,
   }) {
     return _invokeMap('session/cancel', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
       if (promptId != null) 'promptId': promptId,
       if (runId != null && runId.trim().isNotEmpty) 'runId': runId.trim(),
     });
@@ -1501,6 +1936,7 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> reviewSession({
     String? sessionId,
     int? conversationId,
+    String? agentId,
     String? cwd,
     Map<String, dynamic>? target,
     String? approvalPolicy,
@@ -1513,6 +1949,7 @@ class AgentRuntimeService {
     return _invokeMap('review/start', {
       if (sessionId != null) 'sessionId': sessionId,
       if (conversationId != null) 'conversationId': conversationId,
+      if (agentId != null) 'agentId': _requiredAgentId(agentId),
       if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
       'target': target ?? <String, dynamic>{'type': 'uncommittedChanges'},
       if (approvalPolicy != null && approvalPolicy.trim().isNotEmpty)
@@ -1527,50 +1964,20 @@ class AgentRuntimeService {
     });
   }
 
-  @Deprecated('Use reviewSession')
-  static Future<Map<String, dynamic>> startReview({
-    String? threadId,
-    int? conversationId,
-    String? cwd,
-    Map<String, dynamic>? target,
-    String? approvalPolicy,
-    String? approvalsReviewer,
-    Map<String, dynamic>? sandboxPolicy,
-    String? model,
-    String? effort,
-    String? collaborationMode,
+  static Future<Map<String, dynamic>> listModels({required String agentId}) {
+    return _invokeMap('model/list', {'agentId': _requiredAgentId(agentId)});
+  }
+
+  static Future<Map<String, dynamic>> listCollaborationModes({
+    required String agentId,
   }) {
-    return _invokeMap('review/start', {
-      if (threadId != null) 'threadId': threadId,
-      if (conversationId != null) 'conversationId': conversationId,
-      if (cwd != null && cwd.trim().isNotEmpty) 'cwd': cwd.trim(),
-      'target': target ?? <String, dynamic>{'type': 'uncommittedChanges'},
-      if (approvalPolicy != null && approvalPolicy.trim().isNotEmpty)
-        'approvalPolicy': approvalPolicy.trim(),
-      if (approvalsReviewer != null && approvalsReviewer.trim().isNotEmpty)
-        'approvalsReviewer': approvalsReviewer.trim(),
-      if (sandboxPolicy != null) 'sandboxPolicy': sandboxPolicy,
-      if (model != null && model.trim().isNotEmpty) 'model': model.trim(),
-      if (effort != null && effort.trim().isNotEmpty) 'effort': effort.trim(),
-      if (collaborationMode != null && collaborationMode.trim().isNotEmpty)
-        'collaborationMode': collaborationMode.trim(),
+    return _invokeMap('collaborationMode/list', {
+      'agentId': _requiredAgentId(agentId),
     });
   }
 
-  static Future<Map<String, dynamic>> listModels() {
-    return _invokeMap('model/list');
-  }
-
-  static Future<Map<String, dynamic>> listModelsForStatus(
-    AgentRuntimeStatus status,
-  ) => listModels();
-
-  static Future<Map<String, dynamic>> listCollaborationModes() {
-    return _invokeMap('collaborationMode/list');
-  }
-
-  static Future<Map<String, dynamic>> readConfig() {
-    return _invokeMap('config/read');
+  static Future<Map<String, dynamic>> readConfig({required String agentId}) {
+    return _invokeMap('config/read', {'agentId': _requiredAgentId(agentId)});
   }
 
   static Future<Map<String, dynamic>> setSessionConfigOption({
@@ -1586,22 +1993,6 @@ class AgentRuntimeService {
       if (conversationId != null) 'conversationId': conversationId,
       if (agentId != null && agentId.trim().isNotEmpty)
         'agentId': agentId.trim(),
-      'configId': configId.trim(),
-      'value': value,
-    });
-  }
-
-  @Deprecated('Use setSessionConfigOption')
-  static Future<Map<String, dynamic>> setConfigOption({
-    String? threadId,
-    int? conversationId,
-    required String configId,
-    required dynamic value,
-  }) {
-    return _invokeMap('session/set_config_option', {
-      if (threadId != null && threadId.trim().isNotEmpty)
-        'threadId': threadId.trim(),
-      if (conversationId != null) 'conversationId': conversationId,
       'configId': configId.trim(),
       'value': value,
     });
@@ -1640,12 +2031,16 @@ class AgentRuntimeService {
   }
 
   static Future<CodexRemoteDirectoryList> listRemoteDirectories({
+    String? agentId,
+    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
     String? path,
   }) async {
     final result = await _invokeMap('config/remote/fs/list', {
+      if (agentId != null) 'agentId': agentId,
+      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -1657,12 +2052,18 @@ class AgentRuntimeService {
   }
 
   static Future<CodexRemoteFilePayload> readRemoteFile({
+    String? agentId,
+    String? sessionId,
+    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
     required String path,
   }) async {
     final result = await _invokeMap('config/remote/fs/read', {
+      if (agentId != null) 'agentId': agentId,
+      if (sessionId != null) 'sessionId': sessionId,
+      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -1674,6 +2075,9 @@ class AgentRuntimeService {
   }
 
   static Future<Map<String, dynamic>> writeRemoteFile({
+    String? agentId,
+    String? sessionId,
+    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -1681,6 +2085,9 @@ class AgentRuntimeService {
     required String content,
   }) {
     return _invokeMap('config/remote/fs/write', {
+      if (agentId != null) 'agentId': agentId,
+      if (sessionId != null) 'sessionId': sessionId,
+      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -1692,6 +2099,8 @@ class AgentRuntimeService {
   }
 
   static Future<Map<String, dynamic>> deleteRemotePath({
+    String? agentId,
+    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -1699,6 +2108,8 @@ class AgentRuntimeService {
     bool recursive = false,
   }) {
     return _invokeMap('config/remote/fs/delete', {
+      if (agentId != null) 'agentId': agentId,
+      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -1710,6 +2121,8 @@ class AgentRuntimeService {
   }
 
   static Future<Map<String, dynamic>> moveRemotePath({
+    String? agentId,
+    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -1717,6 +2130,8 @@ class AgentRuntimeService {
     required String destinationPath,
   }) {
     return _invokeMap('config/remote/fs/move', {
+      if (agentId != null) 'agentId': agentId,
+      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -1727,18 +2142,26 @@ class AgentRuntimeService {
     });
   }
 
-  static Future<Map<String, dynamic>> readAccount() {
-    return _invokeMap('account/read');
+  static Future<Map<String, dynamic>> readAccount({required String agentId}) {
+    return _invokeMap('account/read', {'agentId': _requiredAgentId(agentId)});
   }
 
   static Future<Map<String, dynamic>> startLogin({
+    required String agentId,
     CodexLoginType type = CodexLoginType.chatgpt,
   }) {
-    return _invokeMap('account/login/start', {'type': type.payloadValue});
+    return _invokeMap('account/login/start', {
+      'agentId': _requiredAgentId(agentId),
+      'type': type.payloadValue,
+    });
   }
 
-  static Future<Map<String, dynamic>> cancelLogin({String? loginId}) {
+  static Future<Map<String, dynamic>> cancelLogin({
+    required String agentId,
+    String? loginId,
+  }) {
     return _invokeMap('account/login/cancel', {
+      'agentId': _requiredAgentId(agentId),
       if (loginId != null && loginId.trim().isNotEmpty)
         'loginId': loginId.trim(),
     });

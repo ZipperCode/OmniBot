@@ -46,24 +46,24 @@ void main() {
     expect(enPermission.name, 'Built-in workspace');
   });
 
-  test('builds privileged display permission from current locale', () {
+  test('builds shizuku display permission from current locale', () {
     LegacyTextLocalizer.setResolvedLocale(const Locale('zh'));
     final zhPermission = PermissionService.buildDisplayPermissionsForIds(const [
-      kPrivilegedPermissionId,
+      kShizukuPermissionId,
     ]).single;
-    expect(zhPermission.name, '特权访问');
+    expect(zhPermission.name, 'Shizuku 权限');
 
     LegacyTextLocalizer.setResolvedLocale(const Locale('en'));
     final enPermission = PermissionService.buildDisplayPermissionsForIds(const [
-      kPrivilegedPermissionId,
+      kShizukuPermissionId,
     ]).single;
-    expect(enPermission.name, 'Privileged Access');
+    expect(enPermission.name, 'Shizuku Permission');
   });
 
-  test('privileged stays optional unless explicitly included', () {
+  test('shizuku stays optional unless explicitly included', () {
     final defaultSpecs = PermissionRegistry.getPermissions(brand: 'other');
     expect(
-      defaultSpecs.any((item) => item.id == kPrivilegedPermissionId),
+      defaultSpecs.any((item) => item.id == kShizukuPermissionId),
       isFalse,
     );
 
@@ -72,8 +72,30 @@ void main() {
       includeOptionalAdvanced: true,
     );
     expect(
-      optionalSpecs.any((item) => item.id == kPrivilegedPermissionId),
+      optionalSpecs.any((item) => item.id == kShizukuPermissionId),
       isTrue,
+    );
+  });
+
+  test('local network permission is optional for ordinary chat', () {
+    expect(
+      PermissionRegistry.getPermissions(brand: 'other')
+          .any((item) => item.id == 'local_network'),
+      isFalse,
+    );
+    final localNetwork = PermissionRegistry.getPermissions(
+      brand: 'other',
+      includeOptionalAdvanced: true,
+    ).singleWhere((item) => item.id == 'local_network');
+    expect(localNetwork.openMethod, 'requestLocalNetworkPermission');
+    expect(localNetwork.checkMethod, 'isLocalNetworkPermissionGranted');
+    expect(
+      PermissionRegistry.getPermissionsByLevel(
+        brand: 'other',
+        level: PermissionLevel.fullExecution,
+        includeOptionalAdvanced: true,
+      ).any((item) => item.id == 'local_network'),
+      isFalse,
     );
   });
 }

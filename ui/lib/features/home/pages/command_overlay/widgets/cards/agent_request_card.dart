@@ -7,6 +7,7 @@ import 'package:ui/services/conversation_history_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 String? _requestAgentId(Map<String, dynamic> cardData) {
   final value = cardData['agentId']?.toString().trim() ?? '';
@@ -779,7 +780,7 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
     }
     if (field.options.isNotEmpty) {
       final selected = _formValues[field.name]?.toString();
-      return DropdownButtonFormField<String>(
+      return OmniSettingsDropdown<String?>(
         value: field.options.contains(selected) ? selected : null,
         decoration: InputDecoration(
           labelText: label,
@@ -787,10 +788,10 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
           border: const OutlineInputBorder(),
           isDense: true,
         ),
-        items: field.options
+        options: field.options
             .map(
               (option) =>
-                  DropdownMenuItem<String>(value: option, child: Text(option)),
+                  OmniSettingsOption<String?>(value: option, label: option),
             )
             .toList(growable: false),
         onChanged: _isSubmitting
@@ -1051,7 +1052,7 @@ class _RequestFooter extends StatelessWidget {
               disabledBackgroundColor: context.isDarkTheme
                   ? palette.surfaceElevated
                   : const Color(0xFFE2E5E9),
-              foregroundColor: Colors.white,
+              foregroundColor: Theme.of(context).colorScheme.onPrimary,
               disabledForegroundColor: palette.textTertiary,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(18),

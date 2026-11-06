@@ -7,9 +7,17 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool generateSummary = false,
     bool markComplete = false,
     bool persistMessages = false,
+    bool preserveActivityTime = false,
     bool allowEphemeralPersistence = false,
     bool allowHistoryRemoval = false,
+    List<String>? removedMessageIds,
   }) async {
+    if (allowHistoryRemoval && removedMessageIds == null) {
+      throw ArgumentError('History removal requires explicit message IDs');
+    }
+    final removals = removedMessageIds == null
+        ? null
+        : List<String>.unmodifiable(removedMessageIds);
     _cancelPendingPersistence(conversationId: conversationId, mode: mode);
     if (isEphemeralRuntime(conversationId: conversationId, mode: mode) &&
         !allowEphemeralPersistence) {
@@ -32,7 +40,9 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
             generateSummary: generateSummary,
             markComplete: markComplete,
             persistMessages: persistMessages,
+            preserveActivityTime: preserveActivityTime,
             allowHistoryRemoval: allowHistoryRemoval,
+            removedMessageIds: removals,
           ),
         );
     _persistenceTails[key] = operation;
@@ -60,7 +70,9 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool generateSummary = false,
     bool markComplete = false,
     bool persistMessages = false,
+    bool preserveActivityTime = false,
     bool allowHistoryRemoval = false,
+    List<String>? removedMessageIds,
   }) async {
     final runtime =
         expectedRuntime ??
@@ -74,12 +86,17 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     }
     final persistenceGeneration = runtime.persistenceGeneration;
     _flushRuntimeStreamingText(runtime);
-    // Completion/disposal may observe an empty projection. It is not a user
-    // instruction to erase committed history. Only explicit replacement owns clear.
-    if (runtime.messages.isEmpty && !(persistMessages && allowHistoryRemoval))
+    // Completion/disposal may observe an empty projection. Explicit item removal
+    // is the only write that can still be meaningful with no remaining messages.
+    if (runtime.messages.isEmpty && !(persistMessages && allowHistoryRemoval)) {
       return;
+    }
 
-    var snapshotMessages = List<ChatMessageModel>.from(runtime.messages);
+    final removalIds = Set<String>.of(removedMessageIds ?? const []);
+    List<ChatMessageModel> captureMessages() => runtime.messages
+        .where((message) => !removalIds.contains(message.id))
+        .toList();
+    var snapshotMessages = captureMessages();
     final snapshotConversation = runtime.conversation;
     final conversationMode = _conversationModeFromRuntimeMode(
       mode,
@@ -130,7 +147,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       summary: summary ?? baseConversation.summary,
       lastMessage: lastMessage,
       messageCount: messageCount,
-      updatedAt: now,
+      updatedAt: preserveActivityTime ? baseConversation.updatedAt : now,
     );
 
     await ConversationService.updateConversation(
@@ -141,10 +158,13 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       // Metadata I/O can overlap streamed chunks and PromptResponse. Capture
       // message content at the write boundary, not before that await. Keep the
       // admitted snapshot if this runtime was replaced/reset in the meantime.
-      if (identical(runtimeFor(conversationId: conversationId, mode: mode), runtime) &&
+      if (identical(
+            runtimeFor(conversationId: conversationId, mode: mode),
+            runtime,
+          ) &&
           runtime.persistenceGeneration == persistenceGeneration) {
         _flushRuntimeStreamingText(runtime);
-        snapshotMessages = List<ChatMessageModel>.from(runtime.messages);
+        snapshotMessages = captureMessages();
       }
       // replaceConversationMessages is echoed back to Flutter as
       // messages_replaced. The runtime already owns this exact snapshot; if
@@ -156,6 +176,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
         snapshotMessages,
         mode: conversationMode,
         allowHistoryRemoval: allowHistoryRemoval,
+        removedMessageIds: removedMessageIds,
       );
     }
     // A page switch may dispose this runtime while the durable write is
@@ -169,6 +190,18 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
         runtime.persistenceGeneration == persistenceGeneration;
     if (isCurrentRuntime) {
       runtime.conversation = updatedConversation;
+      if (persistMessages &&
+          allowHistoryRemoval &&
+          removedMessageIds?.isNotEmpty == true) {
+        _replaceRuntimeMessagesIfChanged(runtime, captureMessages());
+        // Deleted rows shift every OFFSET cursor. Start a bounded rescan after
+        // the native write commits; the shared history merge keeps loaded IDs
+        // and admits only newly reached older items. Visible item counts cannot
+        // tell how many filtered storage rows belonged to the previous cursor.
+        runtime.historyPageRevision += 1;
+        runtime.historyPage = (hasMore: true, nextOffset: 0);
+        _notifyRuntimeListeners();
+      }
     }
     if (markComplete && isCurrentRuntime) {
       await ConversationService.completeConversation(
@@ -184,6 +217,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool generateSummary = false,
     bool markComplete = false,
     bool persistMessages = false,
+    bool preserveActivityTime = false,
     Duration delay = const Duration(milliseconds: 350),
   }) {
     final key = _runtimeKey(conversationId: conversationId, mode: mode);
@@ -212,6 +246,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
               generateSummary: request.generateSummary,
               markComplete: request.markComplete,
               persistMessages: request.persistMessages,
+              preserveActivityTime: request.preserveActivityTime,
             ),
           );
         });
@@ -222,6 +257,8 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       generateSummary: nextGenerateSummary,
       markComplete: nextMarkComplete,
       persistMessages: nextPersistMessages,
+      preserveActivityTime:
+          preserveActivityTime && (previous?.preserveActivityTime ?? true),
     );
   }
 
@@ -244,6 +281,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       generateSummary: request.generateSummary,
       markComplete: request.markComplete,
       persistMessages: request.persistMessages,
+      preserveActivityTime: request.preserveActivityTime,
     );
   }
 
@@ -258,6 +296,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
         generateSummary: request.generateSummary,
         markComplete: request.markComplete,
         persistMessages: request.persistMessages,
+        preserveActivityTime: request.preserveActivityTime,
       );
     }
     // A timer is not the only source of persistence. ACP deltas and lifecycle

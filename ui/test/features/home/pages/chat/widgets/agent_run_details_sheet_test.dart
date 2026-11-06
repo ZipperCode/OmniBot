@@ -1,0 +1,422 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
+import 'package:ui/features/home/pages/chat/widgets/agent_run_details_sheet.dart';
+import 'package:ui/features/home/pages/command_overlay/widgets/cards/artifact_card.dart';
+import 'package:ui/l10n/generated/app_localizations.dart';
+import 'package:ui/l10n/legacy_text_localizer.dart';
+import 'package:ui/models/chat_message_model.dart';
+import 'package:ui/theme/app_theme.dart';
+import 'package:ui/theme/omni_theme_palette.dart';
+import 'package:ui/widgets/streaming_text.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
+
+void main() {
+  setUp(() => LegacyTextLocalizer.setResolvedLocale(const Locale('zh')));
+  Future<ValueNotifier<AgentRunTimelineGroup>> openSheet(
+    WidgetTester tester, {
+    AgentRunTimelineGroup? group,
+    bool dark = false,
+    bool glass = false,
+    double width = 390,
+  }) async {
+    tester.view.physicalSize = Size(width, 858);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final notifier = ValueNotifier(group ?? _group());
+    addTearDown(notifier.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: dark ? AppTheme.darkTheme : AppTheme.lightTheme,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        locale: const Locale('zh'),
+        builder: (context, child) =>
+            LiquidGlassScope(enabled: glass, child: child!),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () =>
+                  showAgentRunDetailsSheet(context: context, group: notifier),
+              child: const Text('打开过程'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开过程'));
+    await tester.pumpAndSettle();
+    return notifier;
+  }
+
+  for (final dark in [false, true]) {
+    testWidgets(
+      'compact timeline matches half sheet in ${dark ? 'dark' : 'light'}',
+      (tester) async {
+        await openSheet(tester, dark: dark, width: 320);
+        final sheet = find.byKey(
+          const ValueKey('agent-run-details-sheet-turn-1'),
+        );
+        final size = tester.getSize(sheet);
+        expect(size.height, inInclusiveRange(858 * 0.48, 858 * 0.57));
+        final surface = tester.widget<OmniGlassSheet>(sheet);
+        expect(
+          surface.backgroundColor,
+          dark
+              ? OmniThemePalette.dark.pageBackground
+              : OmniThemePalette.light.pageBackground,
+        );
+        expect(
+          find.byKey(const ValueKey('agent-run-details-title')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('agent-run-details-close')),
+          findsNothing,
+        );
+        expect(find.text('最终结论'), findsNothing);
+        expect(find.byType(StreamingText), findsNothing);
+        final thinking = find.byKey(
+          const ValueKey('agent-run-details-row-thought-1'),
+        );
+        final tool = find.byKey(const ValueKey('agent-run-details-row-tool-1'));
+        final update = find.byKey(
+          const ValueKey('agent-run-details-row-progress-1'),
+        );
+        expect(tester.getSize(thinking).height, greaterThanOrEqualTo(48));
+        expect(
+          tester.getTopLeft(thinking).dy,
+          lessThan(tester.getTopLeft(tool).dy),
+        );
+        expect(
+          tester.getTopLeft(tool).dy,
+          lessThan(tester.getTopLeft(update).dy),
+        );
+        expect(tester.takeException(), isNull);
+        await _tapOutsideSheet(tester);
+        await tester.pumpAndSettle();
+        expect(sheet, findsNothing);
+      },
+    );
+  }
+
+  testWidgets(
+    'tool selection reuses one sheet and follows the same item identity',
+    (tester) async {
+      final group = await openSheet(tester);
+      final sheet = find.byKey(
+        const ValueKey('agent-run-details-sheet-turn-1'),
+      );
+      final initialRect = tester.getRect(sheet);
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-details-row-tool-1')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(tester.getRect(sheet), initialRect);
+      expect(find.text('命令'), findsOneWidget);
+      expect(find.text('输出'), findsOneWidget);
+      expect(find.textContaining('git status --short'), findsOneWidget);
+      expect(find.textContaining('original output'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('agent-run-details-item-tool-1')),
+        findsOneWidget,
+      );
+
+      // A late content refresh updates the same selected message. No ids are
+      // generated by the sheet, and it never changes the turn's owning state.
+      group.value = _group(output: 'refreshed output');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('refreshed output'), findsOneWidget);
+      expect(find.textContaining('original output'), findsNothing);
+      expect(group.value.taskId, 'turn-1');
+      expect(group.value.status, AgentRunStatus.finished);
+
+      await tester.tap(find.byKey(const ValueKey('agent-run-details-back')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('agent-run-details-title')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('agent-run-details-close')),
+        findsNothing,
+      );
+      expect(tester.getRect(sheet), initialRect);
+      await tester.tap(
+        find.byKey(const ValueKey('agent-run-details-row-thought-1')),
+      );
+      await tester.pumpAndSettle();
+      final text = tester.widget<StreamingText>(find.byType(StreamingText));
+      expect(text.fullText, '已有的思考内容');
+      expect(text.isFinal, isTrue);
+      expect(text.selectable, isTrue);
+      await _tapOutsideSheet(tester);
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final selectedId in [null, 'tool-1', 'thought-1']) {
+    testWidgets(
+      'outside tap closes the whole sheet from ${selectedId ?? 'timeline'}',
+      (tester) async {
+        await openSheet(tester);
+        if (selectedId != null) {
+          await tester.tap(
+            find.byKey(ValueKey('agent-run-details-row-$selectedId')),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('agent-run-details-back')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('agent-run-details-title')),
+            findsOneWidget,
+          );
+        }
+        expect(
+          find.byKey(const ValueKey('agent-run-details-close')),
+          findsNothing,
+        );
+        await _tapOutsideSheet(tester);
+        await tester.pumpAndSettle();
+        expect(find.byType(AgentRunDetailsSheet), findsNothing);
+        expect(find.byType(BottomSheet), findsNothing);
+        expect(find.text('打开过程'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('timeline retains its scroll position after selected detail', (
+    tester,
+  ) async {
+    await openSheet(tester, group: _group(extraTools: 18));
+    final timeline = find.byKey(
+      const ValueKey('agent-run-details-timeline-turn-1'),
+    );
+    final list = tester.widget<ListView>(timeline);
+    list.controller!.jumpTo(420);
+    await tester.pumpAndSettle();
+    final initialOffset = list.controller!.offset;
+    final row = find.byKey(const ValueKey('agent-run-details-row-extra-5'));
+    await tester.ensureVisible(row);
+    await tester.pumpAndSettle();
+    final selectedOffset = list.controller!.offset;
+    expect(selectedOffset, greaterThan(0));
+    expect(initialOffset, greaterThan(0));
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('agent-run-details-back')));
+    await tester.pumpAndSettle();
+    final restored = tester.widget<ListView>(timeline);
+    expect(restored.controller!.offset, closeTo(selectedOffset, 0.1));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'tool status does not infer success from a finished or cancelled turn',
+    (tester) async {
+      final group = await openSheet(tester);
+      for (final outerStatus in [
+        AgentRunStatus.finished,
+        AgentRunStatus.cancelled,
+      ]) {
+        group.value = _group(status: outerStatus, toolStatus: 'error');
+        await tester.pumpAndSettle();
+        var icon = tester.widget<Icon>(
+          find.byKey(const ValueKey('agent-run-details-status-tool-1')),
+        );
+        expect(icon.icon, LucideIcons.circleX);
+        group.value = _group(status: outerStatus, toolStatus: 'interrupted');
+        await tester.pumpAndSettle();
+        icon = tester.widget<Icon>(
+          find.byKey(const ValueKey('agent-run-details-status-tool-1')),
+        );
+        expect(icon.icon, LucideIcons.circleMinus);
+        group.value = _group(status: outerStatus, toolStatus: 'pending');
+        await tester.pumpAndSettle();
+        icon = tester.widget<Icon>(
+          find.byKey(const ValueKey('agent-run-details-status-tool-1')),
+        );
+        expect(icon.icon, LucideIcons.clock);
+      }
+    },
+  );
+
+  testWidgets('drag handle grows the sheet and downward drag dismisses it', (
+    tester,
+  ) async {
+    await openSheet(tester);
+    final sheet = find.byKey(const ValueKey('agent-run-details-sheet-turn-1'));
+    final handle = find.byKey(const ValueKey('agent-run-details-drag-handle'));
+    final initialHeight = tester.getSize(sheet).height;
+    await tester.drag(handle, const Offset(0, -250));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(sheet).height, greaterThan(initialHeight + 200));
+    await tester.drag(handle, const Offset(0, 600));
+    await tester.pumpAndSettle();
+    expect(sheet, findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'glass detail handle stretches past its extent and springs back',
+    (tester) async {
+      await openSheet(tester, glass: true);
+      final sheet = find.byKey(
+        const ValueKey('agent-run-details-sheet-turn-1'),
+      );
+      final handle = find.byKey(
+        const ValueKey('agent-run-details-drag-handle'),
+      );
+      final drag = await tester.startGesture(tester.getCenter(handle));
+      await drag.moveBy(const Offset(0, -350));
+      await tester.pump();
+      final beforeOverdrag = tester.getTopLeft(sheet).dy;
+      await drag.moveBy(const Offset(0, -60));
+      await tester.pump();
+      final stretched = tester.getTopLeft(sheet).dy;
+      expect(stretched, lessThan(beforeOverdrag));
+      final heldHeight = tester.getSize(sheet).height;
+      await drag.moveBy(const Offset(0, 20));
+      await tester.pump();
+      expect(tester.getSize(sheet).height, closeTo(heldHeight, 0.1));
+      expect(tester.getTopLeft(sheet).dy, greaterThan(stretched));
+      await drag.up();
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(sheet).dy, greaterThan(beforeOverdrag));
+      expect(
+        find.byKey(const ValueKey('agent-run-details-row-tool-1')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('thinking detail exposes its complete historical record', (
+    tester,
+  ) async {
+    await openSheet(tester, group: _group(offloadedThinking: true));
+    await tester.tap(
+      find.byKey(const ValueKey('agent-run-details-row-thought-1')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('完整思考记录'), findsOneWidget);
+    final artifact = tester.widget<ArtifactCard>(find.byType(ArtifactCard));
+    expect(artifact.artifact['androidPath'], '/workspace/thinking.json');
+    expect(artifact.artifact['previewKind'], 'file');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('tool detail exposes its complete historical record action', (
+    tester,
+  ) async {
+    await openSheet(tester, group: _group(offloadedTool: true));
+    await tester.tap(
+      find.byKey(const ValueKey('agent-run-details-row-tool-1')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(OutlinedButton, '完整工具记录'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+Future<void> _tapOutsideSheet(WidgetTester tester) async {
+  final sheet = find.byKey(const ValueKey('agent-run-details-sheet-turn-1'));
+  await tester.tapAt(Offset(20, tester.getTopLeft(sheet).dy - 20));
+}
+
+AgentRunTimelineGroup _group({
+  String output = 'original output',
+  String toolStatus = 'success',
+  AgentRunStatus status = AgentRunStatus.finished,
+  int extraTools = 0,
+  bool offloadedThinking = false,
+  bool offloadedTool = false,
+}) {
+  ChatMessageModel tool(String id) => ChatMessageModel.cardMessage({
+    'type': 'agent_tool_summary',
+    'toolType': 'terminal',
+    'toolName': 'exec',
+    'toolTitle': '运行命令',
+    'status': toolStatus,
+    'command': 'git status --short',
+    'argsJson': '{"command":"git status --short"}',
+    'result': output,
+    'output': output,
+    'cardId': id,
+    'toolCallId': id,
+    'taskId': 'turn-1',
+    if (offloadedTool)
+      'artifacts': [
+        {
+          'title': '完整工具记录',
+          'androidPath': '/workspace/tool.json',
+          'mimeType': 'application/json',
+          'historyPayloadOffloaded': true,
+        },
+      ],
+  }, id: id);
+  return AgentRunTimelineGroup(
+    taskId: 'turn-1',
+    status: status,
+    agentId: 'claude-code-acp',
+    startedAt: DateTime(2026, 10, 20, 12),
+    finishedAt: DateTime(2026, 10, 20, 12, 0, 10),
+    segmentsOldestFirst: [
+      AgentRunTimelineSegment.process([
+        ChatMessageModel(
+          id: 'thought-1',
+          type: 2,
+          user: 3,
+          content: {
+            'id': 'thought-1',
+            'cardData': {
+              'type': 'deep_thinking',
+              'thinkingContent': '已有的思考内容',
+              'stage': 4,
+              'taskID': 'turn-1',
+              'cardId': 'thought-1',
+            },
+            if (offloadedThinking) ...{
+              'historyPayloadOffloaded': true,
+              'attachments': [
+                {
+                  'title': '完整思考记录',
+                  'androidPath': '/workspace/thinking.json',
+                  'mimeType': 'application/json',
+                  'historyPayloadOffloaded': true,
+                },
+              ],
+            },
+          },
+        ),
+        tool('tool-1'),
+        for (var i = 0; i < extraTools; i++) tool('extra-$i'),
+      ]),
+      AgentRunTimelineSegment.visible(
+        ChatMessageModel(
+          id: 'progress-1',
+          type: 1,
+          user: 2,
+          content: const {'text': '保留的过程说明'},
+        ),
+      ),
+      AgentRunTimelineSegment.visible(
+        ChatMessageModel(
+          id: 'answer-1',
+          type: 1,
+          user: 2,
+          content: const {'text': '最终结论'},
+        ),
+      ),
+    ],
+  );
+}

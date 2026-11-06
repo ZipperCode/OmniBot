@@ -1,13 +1,15 @@
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:ui/features/home/widgets/home_drawer_search_field.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/models/omni_plugin_item.dart';
 import 'package:ui/services/omni_plugin_service.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class PluginMarketPage extends StatefulWidget {
   const PluginMarketPage({super.key});
@@ -16,7 +18,8 @@ class PluginMarketPage extends StatefulWidget {
   State<PluginMarketPage> createState() => _PluginMarketPageState();
 }
 
-class _PluginMarketPageState extends State<PluginMarketPage> {
+class _PluginMarketPageState extends State<PluginMarketPage>
+    with FlClashPageLoadMixin {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   List<OmniPluginItem> _plugins = const <OmniPluginItem>[];
@@ -58,10 +61,11 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
   }
 
   Future<void> _loadPlugins() async {
-    if (mounted) setState(() => _loading = true);
+    if (!await waitForPageReady() || !mounted) return;
+    if (await waitForPageReady() && mounted) setState(() => _loading = true);
     try {
       final plugins = await OmniPluginService.listPlugins();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() {
         _plugins = plugins
             .where((plugin) => !plugin.hidden)
@@ -69,7 +73,7 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
         _loading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() => _loading = false);
       showToast(context.l10n.pluginLoadFailed, type: ToastType.error);
     }
@@ -89,85 +93,77 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
     return Scaffold(
-      backgroundColor: context.isDarkTheme
-          ? palette.pageBackground
-          : AppColors.background,
+      backgroundColor: palette.pageBackground,
       appBar: CommonAppBar(
         title: context.l10n.pluginMarketTitle,
         primary: true,
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SafeArea(
-              top: false,
-              bottom: false,
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
-                    child: HomeDrawerSearchField(
-                      controller: _searchController,
-                      focusNode: _searchFocusNode,
-                      isSearching: false,
-                      textColor: context.isDarkTheme
-                          ? palette.textPrimary
-                          : AppColors.text,
-                      hintText: context.l10n.pluginSearchHint,
+      body: OmniContentWidth(
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : SafeArea(
+                top: false,
+                bottom: false,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                      child: OmniSettingsSearchField(
+                        controller: _searchController,
+                        focusNode: _searchFocusNode,
+                        hintText: context.l10n.pluginSearchHint,
+                      ),
                     ),
-                  ),
-                  Expanded(
-                    child: RefreshIndicator(
-                      onRefresh: _loadPlugins,
-                      child: _buildContent(_visiblePlugins),
+                    Expanded(
+                      child: RefreshIndicator(
+                        onRefresh: _loadPlugins,
+                        child: _buildContent(_visiblePlugins),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
+      ),
     );
   }
 
   Widget _buildContent(List<OmniPluginItem> visiblePlugins) {
     if (_plugins.isEmpty) {
       return _buildStateList(
-        icon: Icons.extension_outlined,
+        icon: LucideIcons.puzzle,
         title: context.l10n.pluginMarketEmpty,
         description: context.l10n.pluginMarketEmptyDesc,
       );
     }
     if (visiblePlugins.isEmpty) {
       return _buildStateList(
-        icon: Icons.search_off_rounded,
+        icon: LucideIcons.searchX,
         title: context.l10n.pluginSearchEmpty,
       );
     }
 
-    final palette = context.omniPalette;
-    return ListView.separated(
+    return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: edgeToEdgeScrollPadding(
         context,
-        const EdgeInsets.fromLTRB(18, 4, 18, 24),
+        const EdgeInsets.fromLTRB(16, 6, 16, 28),
       ),
-      itemCount: visiblePlugins.length,
-      separatorBuilder: (context, index) => Padding(
-        padding: const EdgeInsets.only(left: 64),
-        child: Divider(
-          height: 1,
-          thickness: 1,
-          color: palette.borderSubtle.withValues(
-            alpha: context.isDarkTheme ? 0.5 : 0.78,
-          ),
+      children: [
+        OmniSettingsGroup(
+          dividerIndent: 64,
+          children: [
+            for (final plugin in visiblePlugins) _buildPluginTile(plugin),
+          ],
         ),
-      ),
-      itemBuilder: (context, index) => _buildPluginTile(visiblePlugins[index]),
+      ],
     );
   }
 
   Widget _buildPluginTile(OmniPluginItem plugin) {
     final palette = context.omniPalette;
     final status = _statusLabel(plugin);
-    final statusColor = plugin.installed && plugin.enabled
+    final isEnabled = plugin.installed && plugin.enabled;
+    final statusColor = isEnabled
         ? palette.accentPrimary
         : palette.textTertiary;
 
@@ -175,25 +171,24 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _openPlugin(plugin),
-        borderRadius: BorderRadius.circular(12),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(4, 14, 2, 14),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
               Container(
-                width: 44,
-                height: 44,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
-                  color: palette.accentPrimary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(12),
+                  color: palette.surfaceSecondary,
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(
-                  Icons.extension_rounded,
-                  size: 23,
-                  color: palette.accentPrimary,
+                  LucideIcons.puzzle,
+                  size: 18,
+                  color: palette.textPrimary.withValues(alpha: 0.78),
                 ),
               ),
-              const SizedBox(width: 14),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -204,10 +199,9 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: palette.textPrimary,
-                        fontSize: 14,
+                        fontSize: 15,
                         fontWeight: FontWeight.w500,
-                        height: 1.45,
-                        fontFamily: 'PingFang SC',
+                        height: 1.38,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -217,9 +211,8 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: palette.textSecondary,
-                        fontSize: 11,
-                        height: 1.5,
-                        fontFamily: 'PingFang SC',
+                        fontSize: 12,
+                        height: 1.45,
                       ),
                     ),
                     const SizedBox(height: 4),
@@ -236,28 +229,38 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
                         color: palette.textTertiary,
                         fontSize: 11,
                         height: 1.4,
-                        fontFamily: 'PingFang SC',
                       ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+              Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (isEnabled) ...[
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                  ],
                   Text(
                     status,
                     style: TextStyle(
                       color: statusColor,
-                      fontSize: 11,
+                      fontSize: 12,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(width: 4),
                   Icon(
-                    Icons.chevron_right_rounded,
-                    size: 20,
+                    LucideIcons.chevronRight,
+                    size: 16,
                     color: palette.textTertiary,
                   ),
                 ],
@@ -288,19 +291,13 @@ class _PluginMarketPageState extends State<PluginMarketPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  icon,
-                  size: 48,
-                  color: context.isDarkTheme
-                      ? palette.textTertiary
-                      : AppColors.text50,
-                ),
+                Icon(icon, size: 40, color: palette.textTertiary),
                 const SizedBox(height: 12),
                 Text(
                   title,
                   style: TextStyle(
                     color: palette.textPrimary,
-                    fontSize: 16,
+                    fontSize: 15,
                     fontWeight: FontWeight.w500,
                   ),
                 ),

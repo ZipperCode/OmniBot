@@ -1,6 +1,8 @@
 package cn.com.omnimind.bot.agent.runtime
 
 import cn.com.omnimind.baselib.llm.ProviderModelOption
+import cn.com.omnimind.baselib.llm.ModelProviderProfile
+import cn.com.omnimind.baselib.llm.ChatGptOAuthProvider
 import cn.com.omnimind.baselib.llm.DeepSeekProvider
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
@@ -16,6 +18,12 @@ import com.google.gson.JsonParser
  * values into the official runtime surface. It does not define another
  * protocol or another agent implementation.
  */
+internal enum class AgentProviderAuthentication {
+    API_KEY,
+    /** A process-scoped local grant; upstream OAuth tokens stay in the host. */
+    HOST_MANAGED,
+}
+
 internal data class AgentProviderCredentials(
     val baseUrl: String,
     val apiKey: String,
@@ -24,7 +32,11 @@ internal data class AgentProviderCredentials(
     val protocolType: String = "openai_compatible",
     /** First-party Responses endpoints understand Codex's namespace tools. */
     val supportsNamespaceTools: Boolean = false,
-)
+    val authentication: AgentProviderAuthentication = AgentProviderAuthentication.API_KEY,
+) {
+    val isHostManaged: Boolean
+        get() = authentication == AgentProviderAuthentication.HOST_MANAGED
+}
 
 /**
  * Provider settings are shared by every Harness. Normalize them once at the
@@ -36,6 +48,21 @@ internal fun AgentProviderCredentials.normalized(): AgentProviderCredentials {
     require(normalizedBaseUrl.isNotEmpty()) { "Provider base URL is empty." }
     require(!normalizedBaseUrl.any(Char::isWhitespace)) {
         "Provider base URL contains whitespace."
+    }
+    if (isHostManaged) {
+        val endpoint = runCatching { java.net.URI(normalizedBaseUrl) }.getOrNull()
+        require(endpoint != null && endpoint.scheme == "http" && endpoint.host == "127.0.0.1" &&
+            endpoint.port in 1..65535 && endpoint.rawUserInfo == null &&
+            endpoint.rawQuery == null && endpoint.rawFragment == null) {
+            "Host-managed Provider requires its local relay endpoint."
+        }
+        require(OpenAiWireApi.isResponses(wireApi) &&
+            protocolType.trim().lowercase() == "openai_compatible") {
+            "Host-managed Provider requires the Responses protocol."
+        }
+        require(apiKey.isNotBlank() && customHeaders.isEmpty()) {
+            "Host-managed Provider requires its local grant without header overrides."
+        }
     }
     val normalizedHeaders = ProviderCustomHeaderUtils
         .sanitizeCustomHeaders(customHeaders)
@@ -54,13 +81,15 @@ internal data class AgentProviderMappingInput(
     val provider: AgentProviderCredentials?,
     val model: String?,
     val harnessAdapter: AcpHarnessAdapter = AcpHarnessAdapters.standard,
-    val deepSeekConfig: DeepSeekHarnessConfig = DeepSeekHarnessConfig(),
-    val rawHarnessConfig: String? = null,
-)
+    /** Selected Provider metadata for offline settings; never a launch credential. */
+    val providerProfile: ModelProviderProfile? = null,
+) {
+    val usesHostManagedProvider: Boolean
+        get() = provider?.isHostManaged == true || ChatGptOAuthProvider.isOAuth(providerProfile?.sourceType)
+}
 
 internal data class AgentProviderMapping(
     val environment: Map<String, String> = emptyMap(),
-    val deepSeekConfig: DeepSeekHarnessConfig? = null,
     val codexModel: String? = null,
     val codexWireApi: String? = null,
     val codexBaseUrl: String? = null,
@@ -121,6 +150,7 @@ private val PROVIDER_OWNED_ENVIRONMENT_KEYS = setOf(
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "DEEPSEEK_API_KEY",
+    // Retired Harness keys remain blocked when old profile overrides are loaded.
     "OMNIBOT_DSH_API_KEY",
     "DEEPSEEK_BASE_URL",
     "DSH_MODEL",
@@ -132,6 +162,16 @@ private val PROVIDER_OWNED_ENVIRONMENT_KEYS = setOf(
     "KIMI_MODEL_CAPABILITIES",
     "KIMI_MODEL_THINKING_EFFORT",
     "KIMI_CODE_CUSTOM_HEADERS",
+    "PI_CODING_AGENT_DIR",
+    "OMNIBOT_PI_MODELS_PATH",
+    "OMNIBOT_PI_MODEL",
+    "OMNIBOT_PI_API_KEY",
+    "OMNIBOT_PI_HEADERS",
+    "OMNIBOT_PI_SKILL_PATHS",
+    "OMNIBOT_PI_PROVIDER_ID",
+    "OMNIBOT_PI_PROVIDER_REVISION",
+    "OMNIBOT_PI_PROVIDER_API",
+    "OMNIBOT_PI_PROVIDER_BASE_URL",
 )
 private const val PROVIDER_HEADER_ENV_PREFIX = "OMNIBOT_PROVIDER_HEADER_"
 
@@ -159,15 +199,18 @@ internal interface AgentConfigAdapter {
 
 internal object AgentConfigAdapterRegistry {
     private val adaptersById: Map<String, AgentConfigAdapter> = mapOf(
-        "deepseek-harness" to DeepSeekHarnessConfigAdapter,
         "codex" to CodexConfigAdapter,
         "claude-code" to ClaudeCodeConfigAdapter,
         "kimi-code" to KimiCodeConfigAdapter,
+        "pi" to PiConfigAdapter,
         "open-code" to OpenCodeConfigAdapter,
     )
 
+    fun supportsHostManagedResponses(adapter: AcpHarnessAdapter): Boolean =
+        adapter.supportsHostManagedResponses && adapter.configAdapterId in adaptersById
+
     fun map(input: AgentProviderMappingInput): AgentProviderMapping {
-        val normalizedInput = input.normalized()
+        val normalizedInput = input.normalized(forLaunch = true)
         return adapterFor(normalizedInput)
             ?.map(normalizedInput)
             ?: AgentProviderMapping()
@@ -202,7 +245,7 @@ internal object AgentConfigAdapterRegistry {
         providerModels: List<ProviderModelOption>,
         existingConfig: String,
     ): List<AgentConfigWrite> {
-        val normalizedInput = input.normalized()
+        val normalizedInput = input.normalized(forLaunch = true)
         return adapterFor(normalizedInput)
         ?.launchConfigWrites(
             input = normalizedInput,
@@ -221,25 +264,22 @@ internal object AgentConfigAdapterRegistry {
     }
 }
 
-private fun AgentProviderMappingInput.normalized(): AgentProviderMappingInput = copy(
-    provider = provider?.normalized(),
-    model = model?.trim()?.takeIf { it.isNotEmpty() },
-)
-
-internal fun syncAgentProviderCredentials(
-    config: DeepSeekHarnessConfig,
-    sharedProvider: AgentProviderCredentials?,
-    sharedModel: String? = null
-): DeepSeekHarnessConfig {
-    val normalizedProvider = sharedProvider?.normalized()
-    return config.copy(
-        baseUrl = normalizedProvider?.baseUrl ?: config.baseUrl,
-        apiKey = normalizedProvider?.apiKey ?: config.apiKey,
-        model = when {
-            sharedModel != null -> sharedModel.trim()
-            normalizedProvider != null -> ""
-            else -> config.model
+private fun AgentProviderMappingInput.normalized(forLaunch: Boolean = false): AgentProviderMappingInput {
+    val normalizedProvider = provider?.normalized()
+    if (forLaunch && usesHostManagedProvider) {
+        require(AgentConfigAdapterRegistry.supportsHostManagedResponses(harnessAdapter)) {
+            "This ACP Agent does not support the host-managed Responses Provider."
         }
+        require(normalizedProvider?.isHostManaged == true) {
+            "Host-managed Provider launch requires an active local grant."
+        }
+    }
+    require(!usesHostManagedProvider || normalizedProvider == null || normalizedProvider.isHostManaged) {
+        "Host-managed Provider cannot use API-key configuration."
+    }
+    return copy(
+        provider = normalizedProvider,
+        model = model?.trim()?.takeIf { it.isNotEmpty() },
     )
 }
 

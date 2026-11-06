@@ -50,14 +50,14 @@ class PermissionService {
             ? 'Allow agent to read/write files in public storage'
             : '允许 agent 读取和操作安卓公共存储中的文件与文件夹',
       ),
-      kPrivilegedPermissionId => _PermissionDisplaySpec(
-        id: kPrivilegedPermissionId,
+      kShizukuPermissionId => _PermissionDisplaySpec(
+        id: kShizukuPermissionId,
         iconPath: 'assets/welcome/permission_installed_apps.svg',
         iconWidth: 32,
         iconHeight: 32,
         name: LegacyTextLocalizer.isEnglish
-            ? 'Privileged Access'
-            : '特权访问',
+            ? 'Shizuku Permission'
+            : 'Shizuku 权限',
         description: LegacyTextLocalizer.isEnglish
             ? 'Optional advanced system actions for the agent'
             : '可选的高级系统能力，用于扩展 agent 的系统级操作边界',
@@ -280,14 +280,14 @@ class PermissionService {
           onAuthorize: openPublicStorageSettings,
           checkAuthorization: isPublicStorageAccessGranted,
         );
-      case kPrivilegedPermissionId:
+      case kShizukuPermissionId:
         return _buildDisplayPermissionData(
           spec,
           onAuthorize: () async {
-            await ensurePrivilegedPermission(context);
+            await ensureShizukuPermission(context);
           },
           checkAuthorization: () async {
-            final status = await getPrivilegedStatus();
+            final status = await getShizukuStatus();
             return status.isGranted;
           },
         );
@@ -337,14 +337,14 @@ class PermissionService {
               onAuthorize: () async {},
               checkAuthorization: () async => false,
             ),
-            kPrivilegedPermissionId => PermissionData(
-              id: kPrivilegedPermissionId,
+            kShizukuPermissionId => PermissionData(
+              id: kShizukuPermissionId,
               iconPath: 'assets/welcome/permission_installed_apps.svg',
               iconWidth: 32,
               iconHeight: 32,
               name: LegacyTextLocalizer.isEnglish
-                  ? 'Privileged Access'
-                  : '特权访问',
+                  ? 'Shizuku Permission'
+                  : 'Shizuku 权限',
               description: LegacyTextLocalizer.isEnglish
                   ? 'Optional advanced system actions for the agent'
                   : '可选的高级系统能力，用于扩展 agent 的系统级操作边界',

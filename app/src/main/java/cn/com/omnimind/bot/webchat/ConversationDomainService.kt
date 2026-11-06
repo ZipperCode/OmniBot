@@ -1,25 +1,38 @@
 package cn.com.omnimind.bot.webchat
 
 import android.content.Context
+import cn.com.omnimind.bot.agent.ChatConversationPreferences
+import cn.com.omnimind.bot.agent.ConversationUiActions
+import cn.com.omnimind.bot.agent.visibleConversationPage
+import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import cn.com.omnimind.baselib.database.Conversation
+import cn.com.omnimind.baselib.database.ConversationActivityRow
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.bot.agent.AgentConversationContextCompactor
 import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentConversationHistorySupport
+import cn.com.omnimind.bot.agent.AgentConversationModePolicy
 import cn.com.omnimind.bot.agent.AgentModelOverride
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore
+import cn.com.omnimind.bot.agent.runtime.NaConversationAccess
+import cn.com.omnimind.bot.agent.runtime.NA_AGENT_ID
+import cn.com.omnimind.bot.agent.runtime.REMOTE_CODEX_AGENT_ID
 
 private const val WEB_CONVERSATION_TITLE_LIMIT = 20
+
+internal data class VisibleConversationActivity(
+    val createdAt: Long,
+    val isNa: Boolean,
+)
 
 /**
  * Resolves the immutable Harness owner of one durable conversation.
  *
  * The conversation binding is authoritative. A session binding can recover
- * older ACP conversations that predate it, while the original storage mode is
- * the final migration signal. A canonical Agent row without either binding
- * must resolve deterministically to the default Harness; otherwise whichever
- * Harness happens to be selected in the UI can steal the conversation.
+ * older ACP conversations that predate it. Explicit Xiaowan product modes
+ * retain their identity; other unbound history stays unbound for display.
+ * Request admission requires an owner rather than relabeling that history.
  */
 internal fun resolveConversationHarnessOwner(
     storedMode: String?,
@@ -31,9 +44,7 @@ internal fun resolveConversationHarnessOwner(
     val sessionOwner = sessionAgentId?.trim()?.takeIf { it.isNotEmpty() }
     if (sessionOwner != null) return sessionOwner
     return when (storedMode?.trim()?.lowercase()) {
-        "", "agent", "normal", "acp", "coding" ->
-            AcpAgentProfileStore.DEFAULT_AGENT_ID
-        "codex" -> AcpAgentProfileStore.CODEX_AGENT_ID
+        "normal", "chat_only" -> AcpAgentProfileStore.XIAOWAN_AGENT_ID
         else -> null
     }
 }
@@ -61,6 +72,10 @@ class ConversationDomainService(
     private val acpAgentProfileStore by lazy {
         AcpAgentProfileStore(context)
     }
+    private val naAccess by lazy { NaConversationAccess(context) }
+
+    internal suspend fun canReadConversation(conversationId: Long): Boolean =
+        naAccess.canRead(conversationId)
 
     private companion object {
         const val AGENT_MODE_STORAGE_VALUE = "agent"
@@ -74,6 +89,8 @@ class ConversationDomainService(
             "coding"
         )
     }
+
+    fun retiredAgentIds(): List<String> = acpAgentProfileStore.retiredAgentIds.toList()
 
     fun listWebAgentProfiles(): List<Map<String, Any?>> {
         return acpAgentProfileStore.list().map { profile ->
@@ -89,24 +106,31 @@ class ConversationDomainService(
 
     suspend fun listConversationPayloads(
         includeArchived: Boolean = true,
-        archivedOnly: Boolean = false
+        archivedOnly: Boolean = false,
+        offset: Int = 0,
+        limit: Int = Int.MAX_VALUE,
+        mode: String? = null,
+        excludeHidden: Boolean = false,
     ): List<Map<String, Any?>> {
-        val conversations = when {
-            archivedOnly -> DatabaseHelper.getArchivedConversations()
-            includeArchived -> DatabaseHelper.getAllConversations()
-            else -> DatabaseHelper.getUnarchivedConversations()
-        }
-        val agentConversationIds = conversations
-            .filter { isAgentMode(it.mode) }
-            .map { it.id }
-        val agentBindings = DatabaseHelper.getAgentSessionBindingsByConversationIds(
-            agentConversationIds
+        val hidden = if (excludeHidden) ChatConversationPreferences(context).hiddenIds() else emptySet()
+        val owner = naAccess.captureOwner()
+        val agentBindingByConversationId = mutableMapOf<Long, cn.com.omnimind.baselib.database.AgentSessionBinding>()
+        val conversations = visibleConversationPage(
+            offset, limit, true,
+            visible = { row: Conversation -> (!isAgentMode(row.mode) || row.id !in hidden) &&
+                naAccess.canReadStored(row.id, agentBindingByConversationId[row.id]?.threadId, owner) },
+            readPage = { start, count ->
+                val rows = DatabaseHelper.getConversationDisplayPage(
+                    start, count, includeArchived, archivedOnly, mode?.let(::normalizeConversationMode),
+                )
+                DatabaseHelper.getAgentSessionBindingsByConversationIds(rows.filter { hasAcpOwner(it.mode) }.map { it.id })
+                    .forEach { agentBindingByConversationId[it.conversationId] = it }
+                rows
+            },
         )
-        val agentBindingByConversationId =
-            agentBindings.associateBy { binding -> binding.conversationId }
-        return conversations.map { conversation ->
+        val payloads = conversations.map { conversation ->
             val agentBinding = agentBindingByConversationId[conversation.id]
-            val agentId = if (isAgentMode(conversation.mode)) {
+            val agentId = if (hasAcpOwner(conversation.mode)) {
                 resolveConversationHarnessOwner(
                     storedMode = conversation.mode,
                     sessionAgentId = agentBinding?.let { binding ->
@@ -124,6 +148,43 @@ class ConversationDomainService(
                 agentId = agentId
             )
         }
+        // Room page reads suspend. A switch while a later page is loaded
+        // must also fence the Na rows already projected earlier in this page.
+        return if (owner == naAccess.captureOwner()) payloads else payloads.filter { payload ->
+            val id = (payload["id"] as Number).toLong()
+            payload["agentId"] != NA_AGENT_ID &&
+                NaConversationAccess.sessionOwner(agentBindingByConversationId[id]?.threadId) == null &&
+                acpAgentProfileStore.naOwnerForConversation(id) == null
+        }
+    }
+
+    /** Same hidden/account policy as history, without constructing history payloads. */
+    internal suspend fun listConversationActivity(
+        since: Long,
+        until: Long,
+    ): List<VisibleConversationActivity> {
+        val hidden = ChatConversationPreferences(context).hiddenIds()
+        val owner = naAccess.captureOwner()
+        val rows = DatabaseHelper.getConversationActivityRows(since, until)
+        val visible = rows.mapNotNull { row ->
+            val threadId = row.threadId.takeIf { isAgentMode(row.mode) }
+            if ((isAgentMode(row.mode) && row.id in hidden) ||
+                !naAccess.canReadStored(row.id, threadId, owner)) return@mapNotNull null
+            VisibleConversationActivity(row.createdAt, isNaActivity(row, threadId))
+        }
+        // A suspended Room read must not publish a previous account's counts.
+        return if (owner == naAccess.captureOwner()) visible else visible.filterNot { it.isNa }
+    }
+
+    private fun isNaActivity(row: ConversationActivityRow, threadId: String?): Boolean {
+        val agentId = if (isAgentMode(row.mode)) resolveConversationHarnessOwner(
+            storedMode = row.mode,
+            sessionAgentId = threadId?.let(acpAgentProfileStore::agentIdForSession),
+            conversationAgentId = acpAgentProfileStore.agentIdForConversation(row.id),
+        ) else null
+        return agentId == NA_AGENT_ID ||
+            NaConversationAccess.sessionOwner(threadId) != null ||
+            acpAgentProfileStore.naOwnerForConversation(row.id) != null
     }
 
     suspend fun archiveConversationsUpdatedBefore(cutoff: Long): Int {
@@ -138,13 +199,15 @@ class ConversationDomainService(
     }
 
     suspend fun getConversationPayload(conversationId: Long): Map<String, Any?>? {
+        val owner = naAccess.captureOwner()
+        if (!naAccess.canRead(conversationId, owner)) return null
         val conversation = DatabaseHelper.getConversationById(conversationId) ?: return null
-        val agentBinding = if (isAgentMode(conversation.mode)) {
+        val agentBinding = if (hasAcpOwner(conversation.mode)) {
             DatabaseHelper.getAgentSessionBindingByConversationId(conversation.id)
         } else {
             null
         }
-        val agentId = if (isAgentMode(conversation.mode)) {
+        val agentId = if (hasAcpOwner(conversation.mode)) {
             resolveConversationHarnessOwner(
                 storedMode = conversation.mode,
                 sessionAgentId = agentBinding?.let { binding ->
@@ -156,6 +219,7 @@ class ConversationDomainService(
         } else {
             null
         }
+        if (!naAccess.canRead(conversationId, owner)) return null
         return conversationToPayload(
             conversation,
             agentCwd = agentBinding?.cwd,
@@ -170,18 +234,31 @@ class ConversationDomainService(
         parentConversationId: Long? = null,
         parentConversationMode: String? = null,
         scheduledTaskId: String? = null,
-        agentId: String? = null
+        agentId: String? = null,
+        archived: Boolean = false,
+        expectedNaOwner: String? = null,
     ): Map<String, Any?> {
         val now = System.currentTimeMillis()
         val normalizedMode = normalizeConversationMode(mode)
         val resolvedAgentId = validateRequestedAgentId(
-            conversationMode = normalizedMode,
+            conversationMode = mode,
             requestedAgentId = agentId
         )
+        val naOwner = if (resolvedAgentId == NA_AGENT_ID) {
+            val owner = requireNotNull(naAccess.captureOwner()) { "请先登录账号再创建云端会话。" }
+            require(expectedNaOwner == null || expectedNaOwner == owner) {
+                "agent_owner_conflict: Cloud account changed before creating the conversation."
+            }
+            owner
+        } else {
+            require(expectedNaOwner == null) { "A cloud account owner is only valid for Na conversations." }
+            null
+        }
         val conversation = Conversation(
             id = 0,
             title = title.ifBlank { "新对话" },
             mode = normalizedMode,
+            isArchived = archived,
             parentConversationId = parentConversationId?.takeIf { it > 0L },
             parentConversationMode = parentConversationMode
                 ?.let(::normalizeConversationMode)
@@ -199,16 +276,20 @@ class ConversationDomainService(
         resolvedAgentId?.let {
             acpAgentProfileStore.bindConversation(inserted.id, it)
         }
+        naOwner?.let { acpAgentProfileStore.bindNaConversationOwner(inserted.id, it) }
+        check(naAccess.canRead(inserted.id, naOwner)) { "账号已切换，请重新创建会话。" }
         val payload = conversationToPayload(inserted, agentId = resolvedAgentId)
         publishConversationEvent("conversation_created", inserted, resolvedAgentId)
         return payload
     }
 
     suspend fun updateConversationFromPayload(
-        conversationMap: Map<String, Any?>
+        conversationMap: Map<String, Any?>,
+        preserveLatestMetadata: Boolean = false,
     ): Map<String, Any?> {
         val conversationId = conversationMap.readLong("id")
             ?: throw IllegalArgumentException("conversation.id is invalid")
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val incomingContextSummary = conversationMap["contextSummary"]?.toString()?.trim()
@@ -265,15 +346,27 @@ class ConversationDomainService(
             createdAt = conversationMap.readLong("createdAt") ?: existing.createdAt,
             updatedAt = System.currentTimeMillis()
         )
-        DatabaseHelper.updateConversation(updated)
-        publishConversationEvent("conversation_updated", updated)
-        return conversationToPayload(updated)
+        DatabaseHelper.updateConversation(updated, preserveLatestMetadata)
+        val committed = DatabaseHelper.getConversationById(conversationId) ?: updated
+        publishConversationEvent("conversation_updated", committed)
+        return conversationToPayload(committed)
     }
+
+    suspend fun manageFromUi(action: String, conversationId: Long, mode: String?, title: String = ""): Boolean =
+        ConversationUiActions(
+            preferences = ChatConversationPreferences(context),
+            acp = { method, args -> AgentRuntimeManager.getInstance(context).handleMethod(method, args) },
+            get = ::getConversationPayload,
+            archive = { id, archived -> setConversationArchived(id, archived) },
+            delete = ::deleteConversation,
+            rename = { id, name -> updateConversationTitle(id, name) },
+        ).execute(action, conversationId, mode, title)
 
     suspend fun updateConversationTitle(
         conversationId: Long,
         newTitle: String
     ): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val updated = existing.copy(
@@ -289,6 +382,7 @@ class ConversationDomainService(
         conversationId: Long,
         firstUserMessage: String?
     ): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val nextTitle = deriveWebConversationTitle(firstUserMessage)
@@ -312,6 +406,7 @@ class ConversationDomainService(
         conversationId: Long,
         promptTokenThreshold: Int
     ): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         DatabaseHelper.updateConversationPromptThreshold(conversationId, promptTokenThreshold)
         val updated = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
@@ -323,6 +418,7 @@ class ConversationDomainService(
         conversationId: Long,
         archived: Boolean
     ): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val updated = existing.copy(
@@ -335,6 +431,7 @@ class ConversationDomainService(
     }
 
     suspend fun completeConversation(conversationId: Long): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: throw IllegalArgumentException("Conversation not found")
         val updated = existing.copy(
@@ -347,6 +444,7 @@ class ConversationDomainService(
     }
 
     suspend fun deleteConversation(conversationId: Long) {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val existing = DatabaseHelper.getConversationById(conversationId)
             ?: return
         historyRepository.deleteConversation(conversationId)
@@ -383,11 +481,11 @@ class ConversationDomainService(
         conversationMode: String,
         finalizeInterruptedEntries: Boolean = true
     ): List<Map<String, Any?>> {
-        return historyRepository.listConversationMessages(
+        return naAccess.read(conversationId) { historyRepository.listConversationMessages(
             conversationId = conversationId,
             conversationMode = normalizeConversationMode(conversationMode),
             finalizeInterruptedEntries = finalizeInterruptedEntries
-        )
+        ) }
     }
 
     suspend fun listConversationMessagesPaged(
@@ -396,27 +494,30 @@ class ConversationDomainService(
         limit: Int,
         offset: Int
     ): Map<String, Any?> {
-        val (messages, hasMore) = historyRepository.listConversationMessagesPaged(
+        val page = naAccess.read(conversationId) { historyRepository.listConversationMessagesPaged(
             conversationId = conversationId,
             conversationMode = normalizeConversationMode(conversationMode),
             limit = limit,
             offset = offset
-        )
-        return mapOf("messages" to messages, "hasMore" to hasMore)
+        ) }
+        return mapOf("messages" to page.messages, "hasMore" to page.hasMore, "nextOffset" to page.nextOffset)
     }
 
     suspend fun replaceConversationMessages(
         conversationId: Long,
         conversationMode: String,
         messages: List<Map<String, Any?>>,
-        allowHistoryRemoval: Boolean = false
+        allowHistoryRemoval: Boolean = false,
+        removedMessageIds: List<String>? = null,
     ) {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
         historyRepository.replaceThreadMessagesFromUiSnapshot(
             conversationId = conversationId,
             conversationMode = normalizedMode,
             messages = messages,
-            allowHistoryRemoval = allowHistoryRemoval
+            allowHistoryRemoval = allowHistoryRemoval,
+            removedMessageIds = removedMessageIds,
         )
         publishMessagesReplaced(conversationId, normalizedMode)
     }
@@ -429,6 +530,7 @@ class ConversationDomainService(
         attachments: List<Map<String, Any?>> = emptyList(),
         createdAt: Long = System.currentTimeMillis()
     ) {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
         historyRepository.upsertUserMessage(
             conversationId = conversationId,
@@ -460,6 +562,7 @@ class ConversationDomainService(
         cardData: Map<String, Any?>,
         createdAt: Long
     ) {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
         historyRepository.upsertUiCard(
             conversationId = conversationId,
@@ -477,6 +580,7 @@ class ConversationDomainService(
         modelOverride: AgentModelOverride?,
         reasoningEffort: String? = null
     ): Map<String, Any?> {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
         val compactor = AgentConversationContextCompactor(
             historyRepository = historyRepository,
@@ -504,6 +608,7 @@ class ConversationDomainService(
         conversationId: Long,
         conversationMode: String
     ) {
+        check(naAccess.canRead(conversationId)) { "请登录此云端会话所属的账号。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
         historyRepository.clearConversationMessages(
             conversationId = conversationId,
@@ -519,7 +624,7 @@ class ConversationDomainService(
     ): Map<String, Any?> {
         val normalizedMode = normalizeConversationMode(conversation.mode)
         val resolvedAgentId = agentId
-            ?: if (normalizedMode == AGENT_MODE_STORAGE_VALUE) {
+            ?: if (hasAcpOwner(normalizedMode)) {
                 resolveConversationHarnessOwner(
                     storedMode = conversation.mode,
                     sessionAgentId = null,
@@ -572,20 +677,30 @@ class ConversationDomainService(
         return mode?.trim()?.lowercase() in AGENT_MODE_STORAGE_ALIASES
     }
 
-    private fun validateRequestedAgentId(
+    private fun hasAcpOwner(mode: String?): Boolean = isAgentMode(mode) ||
+        AgentConversationModePolicy.isChatOnlyMode(mode) || AgentConversationModePolicy.isSubagentMode(mode)
+
+    internal fun validateRequestedAgentId(
         conversationMode: String,
         requestedAgentId: String?
     ): String? {
-        val normalizedAgentId = requestedAgentId?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return null
-        require(isAgentMode(conversationMode)) {
-            "agentId is only supported for Agent conversations."
+        val normalizedMode = normalizeConversationMode(conversationMode)
+        if (!hasAcpOwner(normalizedMode)) {
+            require(requestedAgentId.isNullOrBlank()) { "agentId is only supported for ACP conversations." }
+            return null
         }
-        if (normalizeConversationMode(conversationMode) == "normal") {
-            require(normalizedAgentId == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
-                "Xiaowan conversations cannot switch Harness; create a new conversation."
-            }
-        }
+        val resolution = AgentConversationModePolicy.resolveHarness(
+            conversationMode = if (AgentConversationModePolicy.isNormalMode(conversationMode)) conversationMode else normalizedMode,
+            requestedAgentId = requestedAgentId,
+            conversationAgentId = null,
+            sessionAgentId = null,
+            xiaowanAgentId = AcpAgentProfileStore.XIAOWAN_AGENT_ID,
+        )
+        require(!resolution.hasConflict) { "agent_owner_conflict: This product mode belongs to Xiaowan." }
+        val normalizedAgentId = resolution.agentId
+        // A remote ACP endpoint is an explicit owner, not the current bridge switch.
+        if (normalizedAgentId == REMOTE_CODEX_AGENT_ID) return normalizedAgentId
+        acpAgentProfileStore.requireSupportedAgent(normalizedAgentId)
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == normalizedAgentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $normalizedAgentId")
         require(profile.enabled) { "ACP agent ${profile.name} is disabled." }
@@ -597,15 +712,20 @@ class ConversationDomainService(
         conversationMode: String,
         reason: String = "messages_replaced"
     ) {
-        val messages = listConversationMessages(conversationId, conversationMode)
-        RealtimeHub.publish(
+        val owner = naAccess.captureOwner()
+        RealtimeHub.publishSnapshot(
             "messages_replaced",
+            isVisible = { naAccess.canRead(conversationId, owner) },
+        ) {
             mapOf(
                 "conversationId" to conversationId,
                 "mode" to conversationMode,
-                "messages" to messages
+                "messages" to historyRepository.listConversationMessages(
+                    conversationId = conversationId,
+                    conversationMode = normalizeConversationMode(conversationMode),
+                )
             )
-        )
+        }
         FlutterChatSyncBridge.dispatchConversationMessagesChanged(
             conversationId = conversationId,
             mode = conversationMode,

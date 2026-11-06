@@ -1,26 +1,35 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/glass_popup.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/services/builtin_official_provider_catalog.dart';
+import 'package:ui/services/chatgpt_oauth_service.dart';
 import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/model_provider_config_service.dart';
 import 'package:ui/services/model_vendor_catalog.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
-import 'package:ui/utils/popup_menu_anchor_position.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/omni_circle_button.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:ui/widgets/provider_vendor_icon.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
+
+import 'chatgpt_account_section.dart';
 
 const double _kProviderSwitchPopupMaxHeight = 320;
 const double _kProviderTypePopupMinWidth = 200;
 const double _kProviderTypePopupHorizontalMargin = 16;
-const double _kProviderTypePopupTextFontSize = 13;
 
 enum _ProviderModelSource { manual, remote }
 
@@ -52,6 +61,15 @@ class _SelectionOption {
 }
 
 const List<_ProviderTypeOption> _kProviderTypeOptions = <_ProviderTypeOption>[
+  _ProviderTypeOption(
+    value: ChatGptOAuthService.sourceType,
+    label: 'ChatGPT',
+    sourceType: ChatGptOAuthService.sourceType,
+    baseUrl: ChatGptOAuthService.baseUrl,
+    providerName: 'ChatGPT',
+    protocolType: 'openai_compatible',
+    wireApi: 'responses',
+  ),
   _ProviderTypeOption(
     value: 'deepseek',
     label: 'DeepSeek',
@@ -154,7 +172,8 @@ class ModelProviderSettingPage extends StatefulWidget {
       _ModelProviderSettingPageState();
 }
 
-class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
+class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
+    with FlClashPageLoadMixin {
   static List<ModelProviderProfileSummary> _byokProfiles(
     List<ModelProviderProfileSummary> profiles,
   ) => profiles
@@ -167,6 +186,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   final FocusNode _nameFocusNode = FocusNode();
   final FocusNode _baseUrlFocusNode = FocusNode();
   final FocusNode _apiKeyFocusNode = FocusNode();
+  final _wireApiContentKey = GlobalKey();
 
   static const Duration _autoSaveDebounce = Duration(milliseconds: 600);
   static const Duration _modelGroupToggleDuration = Duration(milliseconds: 240);
@@ -185,6 +205,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   bool _isSavingProfile = false;
   bool _saveQueued = false;
   bool _isSwitchingProfile = false;
+  bool _isSelectingProviderType = false;
   bool _apiKeyDirty = false;
   bool _customHeadersDirty = false;
   String _selectedSourceType = BuiltinOfficialProviderCatalog.customKey;
@@ -225,18 +246,17 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
             entry.nameFocusNode.hasFocus || entry.valueFocusNode.hasFocus,
       );
 
-  bool get _isDarkTheme => context.isDarkTheme;
   Color get _pageBackground => context.omniPalette.pageBackground;
-  Color get _cardColor =>
-      _isDarkTheme ? context.omniPalette.surfacePrimary : Colors.white;
-  Color get _primaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textPrimary : AppColors.text;
-  Color get _secondaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textSecondary : AppColors.text70;
-  Color get _tertiaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textTertiary : AppColors.text50;
+  Color get _cardColor => context.omniPalette.surfacePrimary;
+  Color get _primaryTextColor => context.omniPalette.textPrimary;
+  Color get _secondaryTextColor => context.omniPalette.textSecondary;
+  Color get _tertiaryTextColor => context.omniPalette.textTertiary;
+
+  bool get _isChatGptProvider =>
+      _selectedSourceType == ChatGptOAuthService.sourceType;
 
   String get _selectedProviderValue {
+    if (_isChatGptProvider) return ChatGptOAuthService.sourceType;
     final officialProvider = BuiltinOfficialProviderCatalog.findByKey(
       _selectedSourceType,
     );
@@ -272,8 +292,8 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     double maxWidth,
   ) {
     final style = TextStyle(
-      fontSize: _kProviderTypePopupTextFontSize,
-      fontWeight: FontWeight.w500,
+      fontSize: OmniMenuStyle.labelStyle.fontSize,
+      fontWeight: OmniMenuStyle.labelStyle.fontWeight,
       fontFamily: 'PingFang SC',
     );
     final textDirection = Directionality.of(context);
@@ -286,7 +306,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
       )..layout();
       longestLabelWidth = math.max(longestLabelWidth, painter.width);
     }
-    const popupHorizontalPadding = 20.0;
+    const popupHorizontalPadding = 24.0;
     const tileHorizontalPadding = 24.0;
     const selectedCheckWidth = 20.0;
     const popupSafetyPadding = 12.0;
@@ -356,9 +376,8 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     }
     final entries = groups.entries.toList()
       ..sort((a, b) {
-        final orderCompare = ModelVendorCatalog.orderOf(
-          a.key,
-        ).compareTo(ModelVendorCatalog.orderOf(b.key));
+        final orderCompare = ModelVendorCatalog.orderOf(a.key)
+            .compareTo(ModelVendorCatalog.orderOf(b.key));
         if (orderCompare != 0) return orderCompare;
         return a.key.compareTo(b.key);
       });
@@ -489,7 +508,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
 
   void _scheduleAutoSave() {
     _autoSaveTimer?.cancel();
-    if (!_shouldAutoSaveDraft) {
+    if (_isSelectingProviderType || !_shouldAutoSaveDraft) {
       return;
     }
     _autoSaveTimer = Timer(_autoSaveDebounce, () {
@@ -544,6 +563,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   }
 
   Future<bool> _persistProfileDraft() async {
+    if (_isSelectingProviderType) return false;
     final current = _currentProfile;
     if (current == null || current.readOnly) {
       return true;
@@ -596,8 +616,10 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
           id: current.id,
           name: nextName.isEmpty ? current.name : nextName,
           baseUrl: rawBaseUrl,
-          apiKey: _apiKeyDirty ? nextApiKey : null,
-          customHeaders: _customHeadersDirty ? nextCustomHeaders : null,
+          apiKey: !_isChatGptProvider && _apiKeyDirty ? nextApiKey : null,
+          customHeaders: !_isChatGptProvider && _customHeadersDirty
+              ? nextCustomHeaders
+              : null,
           sourceType: _selectedSourceType,
           protocolType: _selectedProtocolType,
           wireApi: _selectedWireApi,
@@ -626,11 +648,18 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     return true;
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData() =>
+      runPageLoad(#providerInitial, _readData, revalidate: true);
+
+  Future<void> _readData() async {
     setState(() => _isLoading = true);
     try {
       final payload = await ModelProviderConfigService.listProfiles();
-      if (!mounted) return;
+      if (!await waitForPageReady() ||
+          !mounted ||
+          !pageLoadIsCurrent(#providerInitial)) {
+        return;
+      }
       final profiles = _byokProfiles(payload.profiles);
       if (profiles.isEmpty) {
         // The native store may contain only the read-only official profile on
@@ -680,7 +709,11 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         ),
         _loadRemoteModelsForProfile(editingProfile, enrichMetadata: false),
       ]);
-      if (!mounted) return;
+      if (!await waitForPageReady() ||
+          !mounted ||
+          !pageLoadIsCurrent(#providerInitial)) {
+        return;
+      }
 
       final manualModels = storedModels[0] as List<ProviderModelOption>;
       final remoteModels = storedModels[1] as List<ProviderModelOption>;
@@ -699,10 +732,14 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         remoteModels: remoteModels,
       );
     } catch (_) {
-      if (!mounted) return;
+      if (!await waitForPageReady() ||
+          !mounted ||
+          !pageLoadIsCurrent(#providerInitial)) {
+        return;
+      }
       showToast(context.l10n.modelProviderLoadFailed, type: ToastType.error);
     } finally {
-      if (mounted) {
+      if (await waitForPageReady() && pageLoadIsCurrent(#providerInitial)) {
         setState(() => _isLoading = false);
       }
     }
@@ -763,7 +800,11 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     ModelProviderProfileSummary profile, {
     bool enrichMetadata = true,
   }) async {
-    if (!profile.configured) return const [];
+    if (!profile.configured ||
+        (profile.sourceType == ChatGptOAuthService.sourceType &&
+            !profile.ready)) {
+      return const [];
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _currentProfile?.id == profile.id) {
         unawaited(_fetchModelsLocalized(silentError: false));
@@ -838,7 +879,8 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
       _enrichModelsForProfile(profile, manualModels),
       _enrichModelsForProfile(profile, remoteModels),
     ]);
-    if (!mounted ||
+    if (!await waitForPageReady() ||
+        !mounted ||
         _editingProfileId != profile.id ||
         !identical(_manualModels, manualModels) ||
         !identical(_remoteModels, remoteModels)) {
@@ -1001,14 +1043,16 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   }
 
   Future<void> _switchToProfile(String profileId) async {
-    if (_isSwitchingProfile || profileId == _editingProfileId) {
+    if (_isSwitchingProfile ||
+        _isSelectingProviderType ||
+        profileId == _editingProfileId) {
       return;
     }
     final index = _profiles.indexWhere((profile) => profile.id == profileId);
     if (index == -1) {
       return;
     }
-    _isSwitchingProfile = true;
+    setState(() => _isSwitchingProfile = true);
     try {
       if (_shouldAutoSaveDraft) {
         if (!await _persistProfileDraft()) return;
@@ -1044,7 +1088,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         type: ToastType.error,
       );
     } finally {
-      _isSwitchingProfile = false;
+      if (mounted) setState(() => _isSwitchingProfile = false);
     }
   }
 
@@ -1111,7 +1155,11 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
 
   Future<void> _fetchModelsLocalized({bool silentError = false}) async {
     final current = _currentProfile;
-    if (current == null || _isFetchingModels) return;
+    if (current == null ||
+        _isFetchingModels ||
+        (_isChatGptProvider && !current.ready)) {
+      return;
+    }
     final baseUrl = _baseUrlController.text.trim();
 
     if (baseUrl.isEmpty) {
@@ -1220,10 +1268,10 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     if (current == null || current.readOnly || _profiles.length <= 1) {
       return;
     }
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showOmniGlassCardSheet<bool>(
       context: context,
       builder: (context) {
-        return AlertDialog(
+        return OmniGlassAlertDialog(
           title: Text(context.l10n.modelDeleteProviderTitle),
           content: Text(context.l10n.modelDeleteProviderMsg(current.name)),
           actions: [
@@ -1291,7 +1339,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     if (current == null || current.readOnly) {
       return;
     }
-    final modelId = await showDialog<String>(
+    final modelId = await showOmniGlassCardSheet<String>(
       context: context,
       useRootNavigator: false,
       builder: (_) => const _AddModelIdDialog(),
@@ -1478,12 +1526,30 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     }
   }
 
+  Future<void> _refreshChatGptProfile(String profileId) async {
+    final payload = await ModelProviderConfigService.listProfiles();
+    if (!mounted || _editingProfileId != profileId || !_isChatGptProvider) {
+      return;
+    }
+    setState(() {
+      _profiles = _byokProfiles(payload.profiles);
+      _remoteModels = const [];
+      _modelFetchError = null;
+    });
+    if (_currentProfile?.ready == true) {
+      await _fetchModelsLocalized(silentError: true);
+    }
+  }
+
   Future<void> _selectProviderType(String value) async {
+    if (_isSelectingProviderType) return;
     final selected = _kProviderTypeOptions.firstWhere(
       (option) => option.value == value,
       orElse: () => _kProviderTypeOptions[0],
     );
     final isOfficialSelection = selected.baseUrl.isNotEmpty;
+    final isChatGptSelection =
+        selected.sourceType == ChatGptOAuthService.sourceType;
     final isGenericOpenAiSelection = selected.value == 'openai_compatible';
     final nextProtocolType = selected.protocolType;
     final nextWireApi = isGenericOpenAiSelection
@@ -1498,12 +1564,14 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     if (current == null || current.readOnly) {
       return;
     }
+    _autoSaveTimer?.cancel();
     final previousSourceType = _selectedSourceType;
     final previousValue = _selectedProtocolType;
     final previousWireApi = _selectedWireApi;
     final previousName = _nameController.text;
     final previousBaseUrl = _baseUrlController.text;
     setState(() {
+      _isSelectingProviderType = true;
       _selectedSourceType = selected.sourceType;
       _selectedProtocolType = nextProtocolType;
       _selectedWireApi = nextWireApi;
@@ -1519,15 +1587,19 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
             ? current.name
             : _nameController.text.trim(),
         baseUrl: _baseUrlController.text.trim(),
-        apiKey: _apiKeyDirty ? _apiKeyController.text.trim() : null,
-        customHeaders: _customHeadersDirty
+        apiKey: !isChatGptSelection && _apiKeyDirty
+            ? _apiKeyController.text.trim()
+            : null,
+        clearApiKey: isChatGptSelection,
+        clearCustomHeaders: isChatGptSelection,
+        customHeaders: !isChatGptSelection && _customHeadersDirty
             ? (_validatedCustomHeadersDraft() ?? const <String, String>{})
             : null,
         sourceType: selected.sourceType,
         protocolType: nextProtocolType,
         wireApi: nextWireApi,
       );
-      if (!mounted) return;
+      if (!mounted || _editingProfileId != current.id) return;
       setState(() {
         _profiles = _profiles.map((p) => p.id == saved.id ? saved : p).toList();
         _selectedSourceType = saved.sourceType;
@@ -1537,10 +1609,18 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
           saved.wireApi,
         );
       });
+      if (isChatGptSelection) {
+        _syncController(_apiKeyController, '');
+        _replaceCustomHeaderEntries(const {});
+        setState(() {
+          _remoteModels = const [];
+          _modelFetchError = null;
+        });
+      }
       _apiKeyDirty = false;
       _customHeadersDirty = false;
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || _editingProfileId != current.id) return;
       setState(() {
         _selectedSourceType = previousSourceType;
         _selectedProtocolType = previousValue;
@@ -1548,6 +1628,8 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
       });
       _syncController(_nameController, previousName);
       _syncController(_baseUrlController, previousBaseUrl);
+    } finally {
+      if (mounted) setState(() => _isSelectingProviderType = false);
     }
   }
 
@@ -1637,27 +1719,12 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     final estimatedHeight = (_kProviderTypeOptions.length * 48 + 24)
         .clamp(120.0, _kProviderSwitchPopupMaxHeight)
         .toDouble();
-    final position = PopupMenuAnchorPosition.fromAnchorRect(
-      anchorRect: anchorRect,
-      overlaySize: overlay.size,
-      estimatedMenuHeight: estimatedHeight,
-      reservedBottom: MediaQuery.of(context).viewInsets.bottom,
-      verticalGap: 6,
-    );
-    final selected = await showMenu<String>(
+    final selected = await showOmniMenu<String>(
       context: context,
-      color: _cardColor,
-      elevation: _isDarkTheme ? 0 : 8,
-      shadowColor: _isDarkTheme ? context.omniPalette.shadowColor : null,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: _isDarkTheme
-            ? BorderSide(color: context.omniPalette.borderSubtle)
-            : BorderSide.none,
-      ),
-      constraints: BoxConstraints(minWidth: popupWidth, maxWidth: popupWidth),
-      position: position,
+      sourceContext: anchorContext,
+      anchor: anchorRect,
+      width: popupWidth,
+      padding: EdgeInsets.zero,
       items: [
         _ProviderTypePopupEntry(
           width: popupWidth,
@@ -1724,27 +1791,12 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     final estimatedHeight = (options.length * 48 + 24)
         .clamp(120.0, _kProviderSwitchPopupMaxHeight)
         .toDouble();
-    final position = PopupMenuAnchorPosition.fromAnchorRect(
-      anchorRect: anchorRect,
-      overlaySize: overlay.size,
-      estimatedMenuHeight: estimatedHeight,
-      reservedBottom: MediaQuery.of(context).viewInsets.bottom,
-      verticalGap: 6,
-    );
-    return showMenu<String>(
+    return showOmniMenu<String>(
       context: context,
-      color: _cardColor,
-      elevation: _isDarkTheme ? 0 : 8,
-      shadowColor: _isDarkTheme ? context.omniPalette.shadowColor : null,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: _isDarkTheme
-            ? BorderSide(color: context.omniPalette.borderSubtle)
-            : BorderSide.none,
-      ),
-      constraints: BoxConstraints(minWidth: popupWidth, maxWidth: popupWidth),
-      position: position,
+      sourceContext: anchorContext,
+      anchor: anchorRect,
+      width: popupWidth,
+      padding: EdgeInsets.zero,
       items: [
         _SelectionPopupEntry(
           width: popupWidth,
@@ -1758,7 +1810,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   }
 
   Widget _buildCard({required Widget child}) {
-    return SizedBox(width: double.infinity, child: child);
+    return OmniSettingsCard(child: child);
   }
 
   InputDecoration _buildInputDecoration({
@@ -1766,7 +1818,8 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     String? hint,
     Widget? suffixIcon,
   }) {
-    return InputDecoration(
+    return omniSettingsInputDecoration(
+      context,
       labelText: label,
       hintText: hint,
       suffixIcon: suffixIcon,
@@ -1814,7 +1867,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               color: _primaryTextColor,
-                              fontSize: 14,
+                              fontSize: 15,
                               fontWeight: FontWeight.w600,
                               fontFamily: 'PingFang SC',
                             ),
@@ -1901,15 +1954,9 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                     vertical: 14,
                   ),
                   decoration: BoxDecoration(
-                    color: _isDarkTheme
-                        ? context.omniPalette.surfaceSecondary
-                        : const Color(0xFFF7F9FC),
+                    color: context.omniPalette.surfaceSecondary,
                     borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: _isDarkTheme
-                          ? context.omniPalette.borderSubtle
-                          : const Color(0x14000000),
-                    ),
+                    border: Border.all(color: context.omniPalette.borderSubtle),
                   ),
                   child: Text(
                     _headerText('暂未配置自定义请求头', 'No custom headers configured'),
@@ -1960,15 +2007,9 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 12, 8, 8),
       decoration: BoxDecoration(
-        color: _isDarkTheme
-            ? context.omniPalette.surfaceSecondary
-            : const Color(0xFFF7F9FC),
+        color: context.omniPalette.surfaceSecondary,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: _isDarkTheme
-              ? context.omniPalette.borderSubtle
-              : const Color(0x14000000),
-        ),
+        border: Border.all(color: context.omniPalette.borderSubtle),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2001,16 +2042,14 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
             ),
           ),
           const SizedBox(width: 8),
-          IconButton(
+          OmniCircleButton(
             tooltip: _headerText('删除', 'Delete'),
             onPressed: readOnly
                 ? null
                 : () => _removeCustomHeaderEntry(entry.id),
-            icon: Icon(
-              LucideIcons.trash2,
-              size: 18,
-              color: readOnly ? _tertiaryTextColor : AppColors.alertRed,
-            ),
+            icon: LucideIcons.trash2,
+            size: 36,
+            foregroundColor: readOnly ? _tertiaryTextColor : AppColors.alertRed,
           ),
         ],
       ),
@@ -2023,85 +2062,22 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     bool highlighted = false,
     bool loading = false,
   }) {
-    final isEnabled = onPressed != null;
-    final useHighlightStyle = highlighted || loading;
-    final accentColor = _isDarkTheme
-        ? context.omniPalette.accentPrimary
-        : const Color(0xFF2C7FEB);
-    final iconColor = !isEnabled && !loading
-        ? _tertiaryTextColor
-        : useHighlightStyle
-        ? accentColor
-        : _primaryTextColor;
-
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: onPressed,
-        splashColor: accentColor.withValues(alpha: 0.08),
-        highlightColor: accentColor.withValues(alpha: 0.04),
-        child: SizedBox(
-          width: 42,
-          height: 42,
-          child: Center(
-            child: loading
-                ? SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(iconColor),
-                    ),
-                  )
-                : Icon(icon, size: 20, color: iconColor),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLucideModelActionButton({
-    required IconData icon,
-    required VoidCallback? onPressed,
-    required String tooltip,
-    Key? key,
-    bool highlighted = false,
-  }) {
-    final isEnabled = onPressed != null;
-    final accentColor = _isDarkTheme
-        ? context.omniPalette.accentPrimary
-        : const Color(0xFF2C7FEB);
-    final iconColor = !isEnabled
-        ? _tertiaryTextColor
-        : highlighted
-        ? accentColor
-        : _primaryTextColor;
-
-    return Tooltip(
-      message: tooltip,
-      child: Semantics(
-        button: true,
-        label: tooltip,
-        enabled: isEnabled,
-        child: Material(
-          color: Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-          child: InkWell(
-            key: key,
-            borderRadius: BorderRadius.circular(10),
-            onTap: onPressed,
-            splashColor: accentColor.withValues(alpha: 0.08),
-            highlightColor: accentColor.withValues(alpha: 0.04),
-            child: SizedBox(
-              width: 42,
-              height: 42,
-              child: Center(child: Icon(icon, size: 20, color: iconColor)),
-            ),
-          ),
-        ),
-      ),
+    final tooltip = icon == LucideIcons.plus
+        ? _headerText('添加', 'Add')
+        : icon == LucideIcons.trash2
+        ? _headerText('删除', 'Delete')
+        : _headerText('获取模型', 'Fetch models');
+    return OmniCircleButton(
+      icon: icon,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      foregroundColor: highlighted ? context.omniPalette.accentPrimary : null,
+      iconWidget: loading
+          ? const SizedBox.square(
+              dimension: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : null,
     );
   }
 
@@ -2142,11 +2118,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         decoration: BoxDecoration(
           color: _cardColor,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color: _isDarkTheme
-                ? context.omniPalette.borderSubtle
-                : const Color(0x14000000),
-          ),
+          border: Border.all(color: context.omniPalette.borderSubtle),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2193,11 +2165,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         decoration: BoxDecoration(
           color: _cardColor,
           borderRadius: BorderRadius.circular(6),
-          border: Border.all(
-            color: _isDarkTheme
-                ? context.omniPalette.borderSubtle
-                : const Color(0x14000000),
-          ),
+          border: Border.all(color: context.omniPalette.borderSubtle),
         ),
         child: Text(
           label,
@@ -2223,11 +2191,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
       decoration: BoxDecoration(
         color: _cardColor,
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(
-          color: _isDarkTheme
-              ? context.omniPalette.borderSubtle
-              : const Color(0x14000000),
-        ),
+        border: Border.all(color: context.omniPalette.borderSubtle),
       ),
       child: Text(
         modality.toUpperCase(),
@@ -2449,9 +2413,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                       child: Container(
                         key: Key('provider-model-group-line-$groupName'),
                         height: 1,
-                        color: _isDarkTheme
-                            ? palette.borderSubtle.withValues(alpha: 0.56)
-                            : const Color(0x16000000),
+                        color: palette.borderSubtle,
                       ),
                     ),
                     const SizedBox(width: lineToIconGap),
@@ -2608,7 +2570,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                             child: Text(
                               item.id,
                               style: TextStyle(
-                                fontSize: 13,
+                                fontSize: 15,
                                 fontWeight: FontWeight.w600,
                                 color: _primaryTextColor,
                                 fontFamily: 'PingFang SC',
@@ -2673,27 +2635,12 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     final estimatedHeight = (_profiles.length * 48 + 24)
         .clamp(120.0, _kProviderSwitchPopupMaxHeight)
         .toDouble();
-    final position = PopupMenuAnchorPosition.fromAnchorRect(
-      anchorRect: anchorRect,
-      overlaySize: overlay.size,
-      estimatedMenuHeight: estimatedHeight,
-      reservedBottom: MediaQuery.of(context).viewInsets.bottom,
-      verticalGap: 6,
-    );
-    final selected = await showMenu<String>(
+    final selected = await showOmniMenu<String>(
       context: context,
-      color: _cardColor,
-      elevation: _isDarkTheme ? 0 : 8,
-      shadowColor: _isDarkTheme ? context.omniPalette.shadowColor : null,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: _isDarkTheme
-            ? BorderSide(color: context.omniPalette.borderSubtle)
-            : BorderSide.none,
-      ),
-      constraints: BoxConstraints(minWidth: popupWidth, maxWidth: popupWidth),
-      position: position,
+      sourceContext: anchorContext,
+      anchor: anchorRect,
+      width: popupWidth,
+      padding: EdgeInsets.zero,
       items: [
         _ProviderSwitchPopupEntry(
           width: popupWidth,
@@ -2734,27 +2681,12 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
     final estimatedHeight = (_remoteModels.length * 48 + 72)
         .clamp(160.0, 360.0)
         .toDouble();
-    final position = PopupMenuAnchorPosition.fromAnchorRect(
-      anchorRect: anchorRect,
-      overlaySize: overlay.size,
-      estimatedMenuHeight: estimatedHeight,
-      reservedBottom: MediaQuery.of(context).viewInsets.bottom,
-      verticalGap: 6,
-    );
-    await showMenu<String>(
+    await showOmniMenu<String>(
       context: context,
-      color: _cardColor,
-      elevation: _isDarkTheme ? 0 : 8,
-      shadowColor: _isDarkTheme ? context.omniPalette.shadowColor : null,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: _isDarkTheme
-            ? BorderSide(color: context.omniPalette.borderSubtle)
-            : BorderSide.none,
-      ),
-      constraints: BoxConstraints(minWidth: popupWidth, maxWidth: popupWidth),
-      position: position,
+      sourceContext: anchorContext,
+      anchor: anchorRect,
+      width: popupWidth,
+      padding: EdgeInsets.zero,
       items: [
         _ChatModelVisibilityPopupEntry(
           width: popupWidth,
@@ -2791,7 +2723,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
             color: _primaryTextColor,
-            fontSize: 14,
+            fontSize: 16,
             fontWeight: FontWeight.w600,
             fontFamily: 'PingFang SC',
           ),
@@ -2818,7 +2750,10 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
       ],
     );
     final boundedMaxWidth = maxWidth != null && maxWidth.isFinite;
-    final titleButton = Builder(
+    final titleButton = FlClashPopupSource(
+      glass: false,
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       builder: (anchorContext) {
         return InkWell(
           key: const Key('provider-config-title'),
@@ -2865,10 +2800,16 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
   }
 
   Widget _buildProtocolTypeButton({double maxWidth = 176}) {
-    return Builder(
+    return FlClashPopupSource(
+      glass: false,
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       builder: (anchorContext) {
         final current = _currentProfile;
-        final enabled = !(current?.readOnly ?? false);
+        final enabled =
+            !(current?.readOnly ?? false) &&
+            !_isSelectingProviderType &&
+            !_isSwitchingProfile;
         return ConstrainedBox(
           constraints: BoxConstraints(maxWidth: math.max(0, maxWidth)),
           child: Opacity(
@@ -2894,7 +2835,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: _primaryTextColor,
-                          fontSize: 14,
+                          fontSize: 15,
                           fontWeight: FontWeight.w600,
                           fontFamily: 'PingFang SC',
                         ),
@@ -2918,7 +2859,21 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
 
   Widget _buildWireApiField() {
     final enabled = !(_currentProfile?.readOnly ?? false);
-    return Builder(
+    final decoration = _buildInputDecoration(
+      label: _headerText('接口方式', 'Wire API'),
+    ).applyDefaults(Theme.of(context).inputDecorationTheme);
+    return FlClashPopupSource(
+      glass: false,
+      color: decoration.filled == true
+          ? decoration.fillColor ?? Colors.transparent
+          : Colors.transparent,
+      shape: decoration.enabledBorder ?? decoration.border ?? InputBorder.none,
+      captureRect: (context) => glassPopupInputContainerRect(
+        context,
+        _wireApiContentKey.currentContext,
+      ),
+      captureOverflow: (context) =>
+          glassPopupInputLabelRects(context, _wireApiContentKey.currentContext),
       builder: (anchorContext) {
         return Opacity(
           opacity: enabled ? 1 : 0.68,
@@ -2934,12 +2889,11 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
                   : null,
               borderRadius: BorderRadius.circular(12),
               child: InputDecorator(
-                decoration: _buildInputDecoration(
-                  label: _headerText('接口方式', 'Wire API'),
-                ),
+                decoration: decoration,
                 isEmpty: false,
                 isFocused: false,
                 child: Row(
+                  key: _wireApiContentKey,
                   children: [
                     Expanded(
                       child: Text(
@@ -2977,304 +2931,340 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage> {
         title: context.l10n.settingsModelProviderTitle,
         primary: true,
       ),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: edgeToEdgeScrollPadding(
-                  context,
-                  const EdgeInsets.fromLTRB(18, 12, 18, 24),
-                ),
-                children: [
-                  SettingsSectionTitle(
-                    label: context.l10n.modelProviderConfigTitle,
-                    subtitle: context.l10n.modelProviderConfigDesc,
-                  ),
-                  _buildCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+      body: OmniContentWidth(
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : ListView.builder(
+                  itemCount: 1 + modelGroups.length,
+                  itemBuilder: (context, index) {
+                    if (index > 0) {
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: _buildCard(
+                          child: _buildModelGroupSection(
+                            modelGroups[index - 1],
+                            isLast: true,
+                          ),
+                        ),
+                      );
+                    }
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: LayoutBuilder(
-                                builder: (context, constraints) {
-                                  const providerTitleMinWidth = 72.0;
-                                  const protocolButtonPreferredWidth = 176.0;
-                                  const titleSpacing = 4.0;
-                                  final availableWidth =
-                                      constraints.maxWidth.isFinite
-                                      ? constraints.maxWidth
-                                      : providerTitleMinWidth +
-                                            titleSpacing +
-                                            protocolButtonPreferredWidth;
-                                  final usableWidth = math.max(
-                                    0.0,
-                                    availableWidth - titleSpacing,
-                                  );
-                                  final protocolButtonMaxWidth =
-                                      (usableWidth - providerTitleMinWidth)
-                                          .clamp(
-                                            0.0,
-                                            protocolButtonPreferredWidth,
-                                          )
-                                          .toDouble();
-                                  final providerTitleMaxWidth = math.max(
-                                    0.0,
-                                    usableWidth - protocolButtonMaxWidth,
-                                  );
-                                  return Align(
-                                    alignment: Alignment.centerLeft,
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        _buildProviderConfigTitle(
-                                          maxWidth: providerTitleMaxWidth,
-                                        ),
-                                        const SizedBox(width: titleSpacing),
-                                        _buildProtocolTypeButton(
-                                          maxWidth: protocolButtonMaxWidth,
-                                        ),
-                                      ],
+                        SettingsSectionTitle(
+                          label: _headerText('当前提供商', 'Current provider'),
+                        ),
+                        _buildCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: LayoutBuilder(
+                                      builder: (context, constraints) {
+                                        return Align(
+                                          alignment: Alignment.centerLeft,
+                                          child: _buildProviderConfigTitle(
+                                            maxWidth: constraints.maxWidth,
+                                          ),
+                                        );
+                                      },
                                     ),
-                                  );
-                                },
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildModelActionButton(
+                                    icon: LucideIcons.trash2,
+                                    onPressed:
+                                        _profiles.length <= 1 ||
+                                            _currentProfile?.readOnly == true
+                                        ? null
+                                        : _deleteCurrentProfile,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildModelActionButton(
+                                    icon: LucideIcons.plus,
+                                    onPressed: _promptAddProfile,
+                                  ),
+                                ],
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            _buildModelActionButton(
-                              icon: LucideIcons.trash2,
-                              onPressed:
-                                  _profiles.length <= 1 ||
-                                      _currentProfile?.readOnly == true
-                                  ? null
-                                  : _deleteCurrentProfile,
-                            ),
-                            const SizedBox(width: 8),
-                            _buildModelActionButton(
-                              icon: LucideIcons.plus,
-                              onPressed: _promptAddProfile,
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _nameController,
-                          focusNode: _nameFocusNode,
-                          enabled: !(_currentProfile?.readOnly ?? false),
-                          style: context.omniInputTextStyle,
-                          decoration: _buildInputDecoration(
-                            label: context.l10n.modelProviderName,
-                            hint: context.l10n.modelProviderNameHint,
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          controller: _baseUrlController,
-                          focusNode: _baseUrlFocusNode,
-                          enabled: !(_currentProfile?.readOnly ?? false),
-                          style: context.omniInputTextStyle,
-                          decoration: _buildInputDecoration(
-                            label: 'Base URL',
-                            hint: context.l10n.modelProviderBaseUrlHint,
-                          ),
+                        const SizedBox(height: 28),
+                        SettingsSectionTitle(
+                          label: _headerText('连接设置', 'Connection'),
+                          subtitle: context.l10n.modelProviderConfigDesc,
                         ),
-                        const SizedBox(height: 8),
-                        ValueListenableBuilder<TextEditingValue>(
-                          valueListenable: _baseUrlController,
-                          builder: (context, value, child) {
-                            final url = _buildBaseUrlHelperText(value.text);
-                            if (url == null) {
-                              return const SizedBox.shrink();
-                            }
-                            return Text(
-                              url,
-                              style: TextStyle(
-                                color: _tertiaryTextColor,
-                                fontSize: 12,
-                                fontFamily: 'PingFang SC',
-                              ),
-                            );
-                          },
-                        ),
-                        if (_selectedProviderValue == 'openai_compatible') ...[
-                          const SizedBox(height: 12),
-                          _buildWireApiField(),
-                        ],
-                        const SizedBox(height: 14),
-                        TextField(
-                          controller: _apiKeyController,
-                          focusNode: _apiKeyFocusNode,
-                          enabled: !(_currentProfile?.readOnly ?? false),
-                          style: context.omniInputTextStyle,
-                          obscureText: _obscureApiKey,
-                          decoration: _buildInputDecoration(
-                            label: 'API Key',
-                            hint: 'e.g., sk-xxxx',
-                            suffixIcon: IconButton(
-                              key: const Key(
-                                'provider-api-key-visibility-button',
-                              ),
-                              splashRadius: 18,
-                              onPressed: () {
-                                setState(() {
-                                  _obscureApiKey = !_obscureApiKey;
-                                });
-                              },
-                              icon: Icon(
-                                _obscureApiKey
-                                    ? LucideIcons.eyeOff
-                                    : LucideIcons.eye,
-                                color: _tertiaryTextColor,
-                                size: 18,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          context.l10n.modelProviderApiKeyHint,
-                          style: TextStyle(
-                            color: _tertiaryTextColor,
-                            fontSize: 12,
-                            fontFamily: 'PingFang SC',
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        _buildCustomHeadersEditor(),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  SettingsSectionTitle(
-                    label: context.l10n.modelListTitle,
-                    subtitle: context.l10n.modelListDesc,
-                  ),
-                  _buildCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                context.l10n.modelListCount(modelItems.length),
-                                style: TextStyle(
-                                  color: _secondaryTextColor,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  fontFamily: 'PingFang SC',
+                        _buildCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  minHeight: 44,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      _headerText('提供商', 'Provider'),
+                                      style: TextStyle(
+                                        color: _secondaryTextColor,
+                                        fontSize: 13,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: LayoutBuilder(
+                                        builder: (context, constraints) =>
+                                            _buildProtocolTypeButton(
+                                              maxWidth: constraints.maxWidth,
+                                            ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ),
-                            _buildModelActionButton(
-                              icon: LucideIcons.plus,
-                              onPressed: _currentProfile?.readOnly == true
-                                  ? null
-                                  : _promptAddModel,
-                            ),
-                            const SizedBox(width: 8),
-                            _buildModelActionButton(
-                              icon: LucideIcons.arrowBigDown,
-                              onPressed: _isFetchingModels
-                                  ? null
-                                  : _fetchModelsLocalized,
-                              highlighted: true,
-                              loading: _isFetchingModels,
-                            ),
-                            const SizedBox(width: 4),
-                            Builder(
-                              builder: (anchorContext) {
-                                final hasHiddenRemoteModel = _remoteModels.any(
-                                  (model) => !_isModelVisibleInChat(model),
-                                );
-                                return _buildLucideModelActionButton(
-                                  key: const Key(
-                                    'provider-chat-model-visibility-button',
+                              const SizedBox(height: 12),
+                              TextField(
+                                controller: _nameController,
+                                focusNode: _nameFocusNode,
+                                enabled: !(_currentProfile?.readOnly ?? false),
+                                style: context.omniInputTextStyle,
+                                decoration: _buildInputDecoration(
+                                  label: context.l10n.modelProviderName,
+                                  hint: context.l10n.modelProviderNameHint,
+                                ),
+                              ),
+                              if (_isChatGptProvider) ...[
+                                const SizedBox(height: 16),
+                                ChatGptAccountSection(
+                                  key: ValueKey(
+                                    'chatgpt-account-$_editingProfileId',
                                   ),
-                                  icon: LucideIcons.columns3Cog,
-                                  tooltip: _headerText(
-                                    '管理聊天页模型',
-                                    'Manage chat list models',
+                                  profileId: _editingProfileId,
+                                  enabled:
+                                      !_isSelectingProviderType &&
+                                      !_isSwitchingProfile,
+                                  beforeLogin: _persistProfileDraft,
+                                  onAccountChanged: _refreshChatGptProfile,
+                                ),
+                              ] else ...[
+                                const SizedBox(height: 12),
+                                TextField(
+                                  controller: _baseUrlController,
+                                  focusNode: _baseUrlFocusNode,
+                                  enabled:
+                                      !(_currentProfile?.readOnly ?? false),
+                                  style: context.omniInputTextStyle,
+                                  decoration: _buildInputDecoration(
+                                    label: 'Base URL',
+                                    hint: context.l10n.modelProviderBaseUrlHint,
                                   ),
-                                  highlighted: hasHiddenRemoteModel,
-                                  onPressed: _currentProfile == null
-                                      ? null
-                                      : () {
-                                          unawaited(
-                                            _openChatModelVisibilityMenu(
-                                              anchorContext,
-                                            ),
-                                          );
-                                        },
-                                );
-                              },
-                            ),
-                            const SizedBox(width: 4),
-                            _buildModelGroupToggleButton(modelGroups),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          height: 280,
-                          child: modelItems.isEmpty
-                              ? Padding(
-                                  padding: const EdgeInsets.all(10),
-                                  child: Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          LucideIcons.package,
-                                          size: 64,
-                                          color: _tertiaryTextColor,
-                                        ),
-                                        const SizedBox(height: 10),
-                                        Text(
-                                          _modelFetchError ?? context.l10n.modelAddPrompt,
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: _secondaryTextColor,
-                                            fontSize: 14,
-                                            fontWeight: FontWeight.w600,
-                                            fontFamily: 'PingFang SC',
-                                          ),
-                                        ),
-                                        if (_modelFetchError != null) ...[
-                                          const SizedBox(height: 8),
-                                          TextButton(
-                                            onPressed: _isFetchingModels ? null : _fetchModelsLocalized,
-                                            child: Text(_headerText('重试', 'Retry')),
-                                          ),
-                                        ],
-                                      ],
-                                    ),
-                                  ),
-                                )
-                              : ListView.builder(
-                                  padding: const EdgeInsets.fromLTRB(
-                                    2,
-                                    2,
-                                    2,
-                                    8,
-                                  ),
-                                  itemCount: modelGroups.length,
-                                  itemBuilder: (context, index) {
-                                    final group = modelGroups[index];
-                                    return _buildModelGroupSection(
-                                      group,
-                                      isLast: index == modelGroups.length - 1,
+                                ),
+                                const SizedBox(height: 8),
+                                ValueListenableBuilder<TextEditingValue>(
+                                  valueListenable: _baseUrlController,
+                                  builder: (context, value, child) {
+                                    final url = _buildBaseUrlHelperText(
+                                      value.text,
+                                    );
+                                    if (url == null) {
+                                      return const SizedBox.shrink();
+                                    }
+                                    return Text(
+                                      url,
+                                      style: TextStyle(
+                                        color: _tertiaryTextColor,
+                                        fontSize: 12,
+                                        fontFamily: 'PingFang SC',
+                                      ),
                                     );
                                   },
                                 ),
+                                if (_selectedProviderValue ==
+                                    'openai_compatible') ...[
+                                  const SizedBox(height: 12),
+                                  _buildWireApiField(),
+                                ],
+                                const SizedBox(height: 14),
+                                TextField(
+                                  controller: _apiKeyController,
+                                  focusNode: _apiKeyFocusNode,
+                                  enabled:
+                                      !(_currentProfile?.readOnly ?? false),
+                                  style: context.omniInputTextStyle,
+                                  obscureText: _obscureApiKey,
+                                  decoration: _buildInputDecoration(
+                                    label: 'API Key',
+                                    hint: 'e.g., sk-xxxx',
+                                    suffixIcon: IconButton(
+                                      key: const Key(
+                                        'provider-api-key-visibility-button',
+                                      ),
+                                      splashRadius: 18,
+                                      onPressed: () {
+                                        setState(() {
+                                          _obscureApiKey = !_obscureApiKey;
+                                        });
+                                      },
+                                      icon: Icon(
+                                        _obscureApiKey
+                                            ? LucideIcons.eyeOff
+                                            : LucideIcons.eye,
+                                        color: _tertiaryTextColor,
+                                        size: 18,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  context.l10n.modelProviderApiKeyHint,
+                                  style: TextStyle(
+                                    color: _tertiaryTextColor,
+                                    fontSize: 12,
+                                    fontFamily: 'PingFang SC',
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                _buildCustomHeadersEditor(),
+                              ],
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 28),
+                        SettingsSectionTitle(
+                          label: context.l10n.modelListTitle,
+                          subtitle: context.l10n.modelListDesc,
+                        ),
+                        _buildCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      context.l10n.modelListCount(
+                                        modelItems.length,
+                                      ),
+                                      style: TextStyle(
+                                        color: _secondaryTextColor,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500,
+                                        fontFamily: 'PingFang SC',
+                                      ),
+                                    ),
+                                  ),
+                                  _buildModelActionButton(
+                                    icon: LucideIcons.plus,
+                                    onPressed: _currentProfile?.readOnly == true
+                                        ? null
+                                        : _promptAddModel,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  _buildModelActionButton(
+                                    icon: LucideIcons.arrowBigDown,
+                                    onPressed:
+                                        _isFetchingModels ||
+                                            (_isChatGptProvider &&
+                                                _currentProfile?.ready != true)
+                                        ? null
+                                        : _fetchModelsLocalized,
+                                    highlighted: true,
+                                    loading: _isFetchingModels,
+                                  ),
+                                  const SizedBox(width: 4),
+                                  OmniCircleButton.popup(
+                                    key: const Key(
+                                      'provider-chat-model-visibility-button',
+                                    ),
+                                    icon: LucideIcons.columns3Cog,
+                                    tooltip: _headerText(
+                                      '管理聊天页模型',
+                                      'Manage chat list models',
+                                    ),
+                                    foregroundColor:
+                                        _remoteModels.any(
+                                          (model) =>
+                                              !_isModelVisibleInChat(model),
+                                        )
+                                        ? context.omniPalette.accentPrimary
+                                        : null,
+                                    onOpen: _currentProfile == null
+                                        ? null
+                                        : (anchorContext) => unawaited(
+                                            _openChatModelVisibilityMenu(
+                                              anchorContext,
+                                            ),
+                                          ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  _buildModelGroupToggleButton(modelGroups),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              ConstrainedBox(
+                                constraints: BoxConstraints(
+                                  minHeight: modelItems.isEmpty ? 120 : 0,
+                                ),
+                                child: modelItems.isEmpty
+                                    ? Padding(
+                                        padding: const EdgeInsets.all(10),
+                                        child: Center(
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                LucideIcons.package,
+                                                size: 64,
+                                                color: _tertiaryTextColor,
+                                              ),
+                                              const SizedBox(height: 10),
+                                              Text(
+                                                _modelFetchError ??
+                                                    context.l10n.modelAddPrompt,
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                  color: _secondaryTextColor,
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w600,
+                                                  fontFamily: 'PingFang SC',
+                                                ),
+                                              ),
+                                              if (_modelFetchError != null) ...[
+                                                const SizedBox(height: 8),
+                                                TextButton(
+                                                  onPressed: _isFetchingModels
+                                                      ? null
+                                                      : _fetchModelsLocalized,
+                                                  child: Text(
+                                                    _headerText('重试', 'Retry'),
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ),
+                                      )
+                                    : const SizedBox.shrink(),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
-                    ),
+                    );
+                  },
+                  padding: edgeToEdgeScrollPadding(
+                    context,
+                    const EdgeInsets.fromLTRB(16, 16, 16, 24),
                   ),
-                ],
-              ),
+                ),
+        ),
       ),
     );
   }
@@ -3306,54 +3296,12 @@ class _ProviderSwitchPopupEntry extends PopupMenuEntry<String> {
 
 class _ProviderSwitchPopupEntryState extends State<_ProviderSwitchPopupEntry> {
   Widget _buildProviderTile(ModelProviderProfileSummary profile) {
-    final palette = context.omniPalette;
     final selected = profile.id == widget.selectedProfileId;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: InkWell(
-        onTap: () {
-          Navigator.of(context).pop(profile.id);
-        },
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          decoration: BoxDecoration(
-            color: selected
-                ? (_isDarkTheme(context)
-                      ? palette.segmentThumb
-                      : const Color(0xFFEAF3FF))
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  profile.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _isDarkTheme(context)
-                        ? palette.textPrimary
-                        : AppColors.text,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              ),
-              if (selected)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: _isDarkTheme(context)
-                      ? palette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-            ],
-          ),
-        ),
-      ),
+    return OmniMenuItem(
+      onTap: () => Navigator.of(context).pop(profile.id),
+      label: profile.name,
+      selected: selected,
+      trailing: selected ? const Icon(LucideIcons.check) : null,
     );
   }
 
@@ -3377,9 +3325,7 @@ class _ProviderSwitchPopupEntryState extends State<_ProviderSwitchPopupEntry> {
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
-                    color: _isDarkTheme(context)
-                        ? palette.textTertiary
-                        : const Color(0xFF94A3B8),
+                    color: palette.textTertiary,
                     fontWeight: FontWeight.w500,
                     fontFamily: 'PingFang SC',
                   ),
@@ -3387,7 +3333,7 @@ class _ProviderSwitchPopupEntryState extends State<_ProviderSwitchPopupEntry> {
               )
             : Scrollbar(
                 child: ListView.builder(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  padding: OmniMenuStyle.panelPadding,
                   itemCount: widget.profiles.length,
                   itemBuilder: (context, index) {
                     return _buildProviderTile(widget.profiles[index]);
@@ -3515,93 +3461,38 @@ class _ChatModelVisibilityPopupEntryState
   }
 
   Widget _buildModelTile(ProviderModelOption model) {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
     final visible = !_hiddenModelIds.contains(model.id);
     final pending = _removingAll || _pendingModelIds.contains(model.id);
-    final accentColor = isDark
-        ? palette.accentPrimary
-        : const Color(0xFF2C7FEB);
-    final removeColor = isDark ? const Color(0xFFFCA5A5) : AppColors.alertRed;
-    final actionColor = visible ? removeColor : accentColor;
     final tooltip = visible ? widget.removeTooltip : widget.addTooltip;
     final vendor = ModelVendorCatalog.resolve(
       model.id,
       ownedBy: model.ownedBy,
       providerId: model.modelsDevProviderId,
     );
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: Container(
+    return Tooltip(
+      message: tooltip,
+      child: OmniMenuItem(
         key: Key('provider-chat-model-visibility-row-${model.id}'),
-        constraints: const BoxConstraints(minHeight: 44),
-        padding: const EdgeInsets.fromLTRB(12, 7, 6, 7),
-        decoration: BoxDecoration(borderRadius: BorderRadius.circular(12)),
-        child: Row(
-          children: [
-            ProviderVendorIcon(vendor: vendor, size: 15),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                model.id,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: isDark ? palette.textPrimary : AppColors.text,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'PingFang SC',
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Tooltip(
-              message: tooltip,
-              child: Semantics(
-                button: true,
-                label: '$tooltip ${model.id}',
-                enabled: !pending,
-                child: Material(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(9),
-                  child: InkWell(
-                    key: Key(
-                      'provider-chat-model-visibility-toggle-${model.id}',
-                    ),
-                    onTap: pending
-                        ? null
-                        : () => unawaited(_toggleModel(model)),
-                    borderRadius: BorderRadius.circular(9),
-                    splashColor: actionColor.withValues(alpha: 0.08),
-                    highlightColor: actionColor.withValues(alpha: 0.04),
-                    child: SizedBox(
-                      width: 34,
-                      height: 34,
-                      child: Center(
-                        child: pending
-                            ? SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                    actionColor,
-                                  ),
-                                ),
-                              )
-                            : Icon(
-                                visible ? LucideIcons.minus : LucideIcons.plus,
-                                size: 17,
-                                color: actionColor,
-                              ),
-                      ),
-                    ),
+        onTap: () => unawaited(_toggleModel(model)),
+        enabled: !pending,
+        selected: visible,
+        label: model.id,
+        leading: ProviderVendorIcon(
+          vendor: vendor,
+          size: OmniMenuStyle.iconSize,
+        ),
+        trailing: Semantics(
+          label: '$tooltip ${model.id}',
+          child: SizedBox.square(
+            key: Key('provider-chat-model-visibility-toggle-${model.id}'),
+            dimension: OmniMenuStyle.iconSize,
+            child: pending
+                ? const CircularProgressIndicator(strokeWidth: 2)
+                : Icon(
+                    visible ? LucideIcons.minus : LucideIcons.plus,
+                    color: visible ? Theme.of(context).colorScheme.error : null,
                   ),
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -3641,8 +3532,8 @@ class _ChatModelVisibilityPopupEntryState
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 13,
-                        color: isDark ? palette.textPrimary : AppColors.text,
+                        fontSize: 15,
+                        color: palette.textPrimary,
                         fontWeight: FontWeight.w700,
                         fontFamily: 'PingFang SC',
                       ),
@@ -3652,9 +3543,7 @@ class _ChatModelVisibilityPopupEntryState
                     '$visibleCount/${widget.models.length}',
                     style: TextStyle(
                       fontSize: 12,
-                      color: isDark
-                          ? palette.textTertiary
-                          : const Color(0xFF94A3B8),
+                      color: palette.textTertiary,
                       fontWeight: FontWeight.w600,
                       fontFamily: 'PingFang SC',
                     ),
@@ -3668,7 +3557,7 @@ class _ChatModelVisibilityPopupEntryState
                       enabled: canRemoveAll,
                       child: Material(
                         color: Colors.transparent,
-                        borderRadius: BorderRadius.circular(9),
+                        borderRadius: OmniMenuStyle.rowRadius,
                         child: InkWell(
                           key: const Key(
                             'provider-chat-model-visibility-remove-all',
@@ -3676,7 +3565,7 @@ class _ChatModelVisibilityPopupEntryState
                           onTap: canRemoveAll
                               ? () => unawaited(_removeAllModels())
                               : null,
-                          borderRadius: BorderRadius.circular(9),
+                          borderRadius: OmniMenuStyle.rowRadius,
                           splashColor: removeColor.withValues(alpha: 0.08),
                           highlightColor: removeColor.withValues(alpha: 0.04),
                           child: SizedBox(
@@ -3700,9 +3589,7 @@ class _ChatModelVisibilityPopupEntryState
                                       size: 17,
                                       color: canRemoveAll
                                           ? removeColor
-                                          : (isDark
-                                                ? palette.textTertiary
-                                                : const Color(0xFF94A3B8)),
+                                          : (palette.textTertiary),
                                     ),
                             ),
                           ),
@@ -3721,9 +3608,7 @@ class _ChatModelVisibilityPopupEntryState
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 12,
-                    color: isDark
-                        ? palette.textTertiary
-                        : const Color(0xFF94A3B8),
+                    color: palette.textTertiary,
                     fontWeight: FontWeight.w500,
                     fontFamily: 'PingFang SC',
                   ),
@@ -3733,7 +3618,7 @@ class _ChatModelVisibilityPopupEntryState
               Flexible(
                 child: Scrollbar(
                   child: ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 8),
+                    padding: OmniMenuStyle.panelPadding,
                     itemCount: widget.models.length,
                     itemBuilder: (context, index) {
                       return _buildModelTile(widget.models[index]);
@@ -3799,49 +3684,12 @@ class _SelectionPopupEntry extends PopupMenuEntry<String> {
 
 class _SelectionPopupEntryState extends State<_SelectionPopupEntry> {
   Widget _buildTile(_SelectionOption option) {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
     final selected = option.value == widget.selectedValue;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: InkWell(
-        onTap: () => Navigator.of(context).pop(option.value),
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          decoration: BoxDecoration(
-            color: selected
-                ? (isDark ? palette.segmentThumb : const Color(0xFFEAF3FF))
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  option.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: isDark ? palette.textPrimary : AppColors.text,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              ),
-              if (selected)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: isDark
-                      ? palette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-            ],
-          ),
-        ),
-      ),
+    return OmniMenuItem(
+      onTap: () => Navigator.of(context).pop(option.value),
+      label: option.label,
+      selected: selected,
+      trailing: selected ? const Icon(LucideIcons.check) : null,
     );
   }
 
@@ -3859,7 +3707,7 @@ class _SelectionPopupEntryState extends State<_SelectionPopupEntry> {
         constraints: BoxConstraints(maxHeight: dynamicMaxHeight),
         child: Scrollbar(
           child: ListView.builder(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: OmniMenuStyle.panelPadding,
             itemCount: widget.options.length,
             itemBuilder: (context, index) {
               return _buildTile(widget.options[index]);
@@ -3873,49 +3721,12 @@ class _SelectionPopupEntryState extends State<_SelectionPopupEntry> {
 
 class _ProviderTypePopupEntryState extends State<_ProviderTypePopupEntry> {
   Widget _buildProtocolTile(_ProviderTypeOption option) {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
     final selected = option.value == widget.selectedValue;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: InkWell(
-        onTap: () => Navigator.of(context).pop(option.value),
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          decoration: BoxDecoration(
-            color: selected
-                ? (isDark ? palette.segmentThumb : const Color(0xFFEAF3FF))
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  option.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: isDark ? palette.textPrimary : AppColors.text,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              ),
-              if (selected)
-                Icon(
-                  LucideIcons.check,
-                  size: 16,
-                  color: isDark
-                      ? palette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-            ],
-          ),
-        ),
-      ),
+    return OmniMenuItem(
+      onTap: () => Navigator.of(context).pop(option.value),
+      label: option.label,
+      selected: selected,
+      trailing: selected ? const Icon(LucideIcons.check) : null,
     );
   }
 
@@ -3933,7 +3744,7 @@ class _ProviderTypePopupEntryState extends State<_ProviderTypePopupEntry> {
         constraints: BoxConstraints(maxHeight: dynamicMaxHeight),
         child: Scrollbar(
           child: ListView.builder(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: OmniMenuStyle.panelPadding,
             itemCount: widget.options.length,
             itemBuilder: (context, index) {
               return _buildProtocolTile(widget.options[index]);
@@ -3944,8 +3755,6 @@ class _ProviderTypePopupEntryState extends State<_ProviderTypePopupEntry> {
     );
   }
 }
-
-bool _isDarkTheme(BuildContext context) => context.isDarkTheme;
 
 class _AddModelIdDialog extends StatefulWidget {
   const _AddModelIdDialog();
@@ -3983,12 +3792,11 @@ class _AddModelIdDialogState extends State<_AddModelIdDialog> {
   @override
   Widget build(BuildContext context) {
     return PopScope(
-      canPop: false,
+      canPop: true,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) return;
-        _close();
+        if (didPop) _focusNode.unfocus();
       },
-      child: AlertDialog(
+      child: OmniGlassAlertDialog(
         title: Text(context.l10n.modelIdHint),
         content: TextField(
           controller: _controller,

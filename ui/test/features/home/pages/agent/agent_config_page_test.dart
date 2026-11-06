@@ -5,10 +5,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/features/home/pages/agent/agent_config_page.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/services/model_provider_config_service.dart';
+import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
-import 'package:ui/widgets/predictive_back_gesture_wrapper.dart';
-import 'package:ui/widgets/predictive_back_route.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
 
 Future<void> _sendBackGesture(
   WidgetTester tester,
@@ -36,13 +36,202 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await StorageService.init();
+    ModelsDevCatalogService.setCatalogForTesting(
+      const ModelsDevCatalog(providers: {}),
+    );
   });
 
   tearDown(() {
+    ModelsDevCatalogService.resetForTesting();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(agentRuntimeChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(assistCoreChannel, null);
+  });
+
+  testWidgets(
+    'Na uses the existing Agent config without device model settings',
+    (tester) async {
+      final providerCalls = <String>[];
+      Map<String, dynamic>? saved;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+            if (call.method == 'agent/list') {
+              return _catalog(_agent('na-cloud', 'Na'));
+            }
+            if (call.method == 'agent/config/read') {
+              return {
+                'kind': 'na-cloud',
+                'baseUrl': 'http://127.0.0.1:8787',
+                'connectionMode': 'development',
+                'developmentAvailable': true,
+              };
+            }
+            if (call.method == 'agent/config/write') {
+              saved = Map<String, dynamic>.from(call.arguments as Map);
+              return {
+                'kind': 'na-cloud',
+                'baseUrl': saved!['baseUrl'],
+                'apiKey': saved!['apiKey'],
+                'connectionMode': 'development',
+                'developmentAvailable': true,
+              };
+            }
+            return null;
+          });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+            providerCalls.add(call.method);
+            return null;
+          });
+      await _pumpPage(tester, 'na-cloud');
+      expect(find.byKey(const Key('na-service-address')), findsOneWidget);
+      expect(find.byKey(const Key('na-access-token')), findsOneWidget);
+      expect(
+        find.byKey(const Key('agent-shared-provider-model-selector')),
+        findsNothing,
+      );
+      expect(find.byType(DropdownButtonFormField<String>), findsNothing);
+      await tester.enterText(
+        find.byKey(const Key('na-service-address')),
+        'https://na.example.test',
+      );
+      await tester.enterText(
+        find.byKey(const Key('na-access-token')),
+        'fixture-account-token',
+      );
+      await tester.ensureVisible(find.byKey(const Key('agent-config-save')));
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+      expect(saved, {
+        'agentId': 'na-cloud',
+        'connectionMode': 'development',
+        'baseUrl': 'https://na.example.test',
+        'apiKey': 'fixture-account-token',
+      });
+      expect(providerCalls, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'managed Na uses account connection without exposing credentials',
+    (tester) async {
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+            calls.add(call);
+            if (call.method == 'agent/list') {
+              return _catalog(_agent('na-cloud', 'Na'));
+            }
+            if (call.method == 'agent/config/read' ||
+                call.method == 'agent/config/write') {
+              return {
+                'kind': 'na-cloud',
+                'connectionMode': 'managed',
+                'signedIn': true,
+                'developmentAvailable': false,
+              };
+            }
+            if (call.method == 'agent/test') return {'connected': true};
+            return null;
+          });
+      await _pumpPage(tester, 'na-cloud');
+      expect(find.byKey(const Key('na-service-address')), findsNothing);
+      expect(find.byKey(const Key('na-access-token')), findsNothing);
+      expect(find.byKey(const Key('na-development-connection')), findsNothing);
+      expect(find.byKey(const Key('na-account')), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const Key('agent-config-save')));
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+      expect(
+        calls
+            .singleWhere((call) => call.method == 'agent/config/write')
+            .arguments,
+        {'agentId': 'na-cloud', 'connectionMode': 'managed'},
+      );
+      expect(calls.where((call) => call.method == 'agent/test'), hasLength(1));
+    },
+  );
+
+  testWidgets('production Na direct links cannot load or edit configuration', (
+    tester,
+  ) async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+          calls.add(call);
+          if (call.method == 'agent/list') {
+            return _catalog({
+              ..._agent('na-cloud', 'Na'),
+              'configurationAvailable': false,
+            });
+          }
+          throw StateError('Production Na must not access configuration');
+        });
+    await _pumpPage(tester, 'na-cloud');
+    expect(find.text('Na 自动使用当前登录账号，无需配置。'), findsOneWidget);
+    expect(find.byKey(const Key('na-account')), findsOneWidget);
+    expect(find.byKey(const Key('agent-config-save')), findsNothing);
+    expect(find.byKey(const Key('na-development-connection')), findsNothing);
+    expect(find.byKey(const Key('na-service-address')), findsNothing);
+    expect(find.byKey(const Key('na-access-token')), findsNothing);
+    expect(calls.map((call) => call.method), ['agent/list']);
+  });
+
+  testWidgets('unavailable Na development support ignores stale test mode', (
+    tester,
+  ) async {
+    final writes = <Map<String, dynamic>>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+          if (call.method == 'agent/list') {
+            return _catalog(_agent('na-cloud', 'Na'));
+          }
+          if (call.method == 'agent/config/write') {
+            writes.add(Map<String, dynamic>.from(call.arguments as Map));
+          }
+          if (call.method == 'agent/test') return {'connected': true};
+          return {
+            'kind': 'na-cloud',
+            'connectionMode': 'development',
+            'developmentAvailable': false,
+            'signedIn': true,
+            'baseUrl': 'https://stale-test.example',
+          };
+        });
+    await _pumpPage(tester, 'na-cloud');
+    expect(find.byKey(const Key('na-development-connection')), findsNothing);
+    expect(find.byKey(const Key('na-service-address')), findsNothing);
+    expect(find.byKey(const Key('na-access-token')), findsNothing);
+    await tester.tap(find.byKey(const Key('agent-config-save')));
+    await tester.pumpAndSettle();
+    expect(writes, [
+      {'agentId': 'na-cloud', 'connectionMode': 'managed'},
+    ]);
+  });
+
+  testWidgets('managed Na shows a useful entitlement error', (tester) async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+          if (call.method == 'agent/list') {
+            return _catalog(_agent('na-cloud', 'Na'));
+          }
+          if (call.method == 'agent/test') {
+            return {'connected': false, 'error': '当前账号尚未开通 Na 云端使用权限。'};
+          }
+          return {
+            'kind': 'na-cloud',
+            'connectionMode': 'managed',
+            'signedIn': true,
+            'developmentAvailable': false,
+          };
+        });
+    await _pumpPage(tester, 'na-cloud');
+    await tester.ensureVisible(find.byKey(const Key('agent-config-save')));
+    await tester.tap(find.byKey(const Key('agent-config-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('当前账号尚未开通 Na 云端使用权限。'), findsOneWidget);
+    expect(find.textContaining('Bad state:'), findsNothing);
   });
 
   testWidgets('custom Agent launch edits survive saving and reopening', (
@@ -196,6 +385,72 @@ void main() {
     expect(savedBinding?['modelId'], 'deepseek-v4-pro');
   });
 
+  testWidgets(
+    'shared Agent model selection accepts ready OAuth without an API key',
+    (tester) async {
+      Map<String, dynamic>? savedBinding;
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('codex-acp', 'Codex'));
+        }
+        if (call.method == 'agent/config/read') return {'kind': 'codex'};
+        return null;
+      });
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return {
+              'editingProfileId': 'chatgpt-1',
+              'profiles': [
+                {
+                  'id': 'chatgpt-1',
+                  'name': 'My ChatGPT',
+                  'baseUrl': 'https://api.openai.com/v1',
+                  'sourceType': 'chatgpt_oauth',
+                  'wireApi': 'responses',
+                  'configured': true,
+                  'ready': true,
+                  'apiKey': '',
+                  'hasApiKey': false,
+                  'revision': 12,
+                },
+              ],
+            };
+          case 'getSceneModelBindings':
+            return <dynamic>[];
+          case 'fetchProviderModels':
+            expect((call.arguments as Map)['profileId'], 'chatgpt-1');
+            return [
+              {'id': 'gpt-test', 'displayName': 'gpt-test'},
+            ];
+          case 'saveSceneModelBinding':
+            savedBinding = Map<String, dynamic>.from(call.arguments as Map);
+            return [
+              {
+                'sceneId': 'scene.dispatch.model',
+                'providerProfileId': 'chatgpt-1',
+                'modelId': 'gpt-test',
+              },
+            ];
+        }
+        return null;
+      });
+      await _pumpPage(tester, 'codex-acp');
+      await tester.tap(
+        find.byKey(const Key('agent-shared-provider-model-selector')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('gpt-test'));
+      await tester.pumpAndSettle();
+      expect(savedBinding?['sceneId'], 'scene.dispatch.model');
+      expect(savedBinding?['providerProfileId'], 'chatgpt-1');
+      expect(savedBinding?['modelId'], 'gpt-test');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('Codex config page uses the shared Provider selector', (
     tester,
   ) async {
@@ -232,7 +487,7 @@ void main() {
   });
 
   testWidgets(
-    'built-in Agent config allows predictive back to drive its route',
+    'built-in Agent config uses ordinary system back without a second transition',
     (tester) async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
@@ -257,15 +512,10 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      await StorageService.setPredictiveBackEnabled(true);
 
       await tester.pumpWidget(
         MaterialApp(
-          theme: AppTheme.lightTheme.copyWith(
-            pageTransitionsTheme: const PageTransitionsTheme(
-              builders: {TargetPlatform.android: MiuixPageTransitionsBuilder()},
-            ),
-          ),
+          theme: AppTheme.lightTheme,
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
           locale: const Locale('zh'),
@@ -273,7 +523,7 @@ void main() {
             body: Builder(
               builder: (context) => TextButton(
                 onPressed: () => Navigator.of(context).push(
-                  PredictiveBackMaterialPageRoute<void>(
+                  OmniPageRoute<void>(
                     builder: (_) => const AgentConfigPage(agentId: 'codex-acp'),
                   ),
                 ),
@@ -298,7 +548,7 @@ void main() {
       });
       await tester.pump();
 
-      expect(route.popGestureInProgress, isTrue);
+      expect(route.popGestureInProgress, isFalse);
       await _sendBackGesture(
         tester,
         'updateBackGestureProgress',
@@ -309,20 +559,20 @@ void main() {
         },
       );
       await tester.pump();
-      expect(route.animation!.value, closeTo(0.6, 0.001));
-      final transition = tester.widget<PredictiveBackPageTransition>(
-        find.ancestor(
-          of: find.byType(AgentConfigPage),
-          matching: find.byType(PredictiveBackPageTransition),
-        ),
-      );
-      expect(transition.animation.value, closeTo(0.6, 0.001));
-
+      expect(route.animation!.value, 1);
       await _sendBackGesture(tester, 'cancelBackGesture');
       await tester.pumpAndSettle();
       expect(find.byType(AgentConfigPage), findsOneWidget);
       expect(route.animation!.value, 1);
       expect(route.popGestureInProgress, isFalse);
+      await _sendBackGesture(tester, 'startBackGesture', <String, dynamic>{
+        'touchOffset': <double>[0.0, 300.0],
+        'progress': 0.0,
+        'swipeEdge': 0,
+      });
+      await _sendBackGesture(tester, 'commitBackGesture');
+      await tester.pumpAndSettle();
+      expect(route.isActive, isFalse);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );
@@ -373,60 +623,6 @@ void main() {
     expect(saved?['content'], updated);
     expect(find.textContaining('claude-opus'), findsOneWidget);
   });
-
-  testWidgets('DeepSeek Harness config keeps file permission in composer', (
-    tester,
-  ) async {
-    Map<String, dynamic>? saved;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
-          if (call.method == 'agent/list') {
-            return _catalog(_agent('deepseek-harness-acp', 'DeepSeek Harness'));
-          }
-          if (call.method == 'agent/config/read') {
-            return <String, dynamic>{
-              'agentId': 'deepseek-harness-acp',
-              'kind': 'deepseek-harness',
-              'configPath': '~/.dsh/omnibot-acp/config.json',
-              'baseUrl': 'https://api.deepseek.com',
-              'model': 'deepseek-v4-pro',
-              'apiKey': 'sk-old',
-              'reasoningEffort': 'high',
-              'permissionMode': 'read-only',
-            };
-          }
-          if (call.method == 'agent/config/write') {
-            saved = Map<String, dynamic>.from(call.arguments as Map);
-            return <String, dynamic>{
-              'agentId': 'deepseek-harness-acp',
-              'kind': 'deepseek-harness',
-              'configPath': '~/.dsh/omnibot-acp/config.json',
-              ...saved!,
-            };
-          }
-          return null;
-        });
-
-    await _pumpPage(tester, 'deepseek-harness-acp');
-
-    expect(
-      find.byKey(const ValueKey('deepseek-harness-permission-read-only')),
-      findsOneWidget,
-    );
-    expect(
-      find.textContaining('~/.dsh/omnibot-acp/config.json'),
-      findsOneWidget,
-    );
-    await tester.tap(find.byKey(const Key('agent-config-save')));
-    await tester.pumpAndSettle();
-
-    expect(saved?['agentId'], 'deepseek-harness-acp');
-    expect(saved?['reasoningEffort'], 'high');
-    expect(saved?['permissionMode'], 'read-only');
-    expect(saved?.containsKey('baseUrl'), isFalse);
-    expect(saved?.containsKey('model'), isFalse);
-    expect(saved?.containsKey('apiKey'), isFalse);
-  });
 }
 
 Future<void> _pumpPage(WidgetTester tester, String agentId) async {
@@ -449,7 +645,6 @@ Future<void> _pumpPage(WidgetTester tester, String agentId) async {
 
 Map<String, dynamic> _catalog(Map<String, dynamic> agent) {
   return <String, dynamic>{
-    'selectedAgentId': agent['id'],
     'agents': <Map<String, dynamic>>[agent],
   };
 }
@@ -457,7 +652,6 @@ Map<String, dynamic> _catalog(Map<String, dynamic> agent) {
 Map<String, dynamic> _agent(String id, String name) {
   final command = switch (id) {
     'codex-acp' => 'codex-acp',
-    'deepseek-harness-acp' => 'dsh',
     _ => 'claude-agent-acp',
   };
   return <String, dynamic>{
@@ -469,6 +663,7 @@ Map<String, dynamic> _agent(String id, String name) {
     'builtIn': true,
     'source': 'official',
     'status': 'online',
+    'configurationAvailable': true,
   };
 }
 

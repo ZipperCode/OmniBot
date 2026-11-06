@@ -5,6 +5,7 @@ import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.bot.agent.runtime.NaConversationAccess
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +82,7 @@ internal class WebAgentRunBridge(
     private val appContext = context.applicationContext
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val conversationService = ConversationDomainService(appContext)
+    private val historyAccess = NaConversationAccess(appContext)
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val events = Channel<Map<String, Any?>>(Channel.UNLIMITED)
@@ -156,12 +158,8 @@ internal class WebAgentRunBridge(
                 attachments = attachments,
                 createdAt = state.createdAt
             )
-            // `agent/select` changes the global default used by the Agent
-            // picker.  It is not a session binding and must not be issued as
-            // part of starting a conversation: two WebChat conversations can
-            // start concurrently with different Agents.  `session/prompt`
-            // carries the requested agentId and resolves the durable
-            // conversation owner at the ACP boundary.
+            // The persisted Conversation owns this request. Parallel WebChat
+            // conversations carry their own Agent identity into session/prompt.
             val arguments = buildWebAgentTurnArguments(
                 conversationId = conversationId,
                 userMessage = userMessage,
@@ -547,19 +545,24 @@ internal class WebAgentRunBridge(
         state: WebAgentRunState,
         finalizeInterruptedEntries: Boolean
     ) {
-        val messages = historyRepository.listConversationMessages(
-            conversationId = state.conversationId,
-            conversationMode = state.conversationMode,
-            finalizeInterruptedEntries = finalizeInterruptedEntries
-        )
-        RealtimeHub.publish(
-            "messages_replaced",
+        val owner = historyAccess.captureOwner()
+        // Visibility is separate from ACP completion. An account switch hides
+        // this mirror without aborting the run's journal/terminal cleanup.
+        RealtimeHub.publishSnapshot(
+            event = "messages_replaced",
+            isVisible = { historyAccess.canRead(state.conversationId, owner) },
+        ) {
+            val messages = historyRepository.listConversationMessages(
+                conversationId = state.conversationId,
+                conversationMode = state.conversationMode,
+                finalizeInterruptedEntries = finalizeInterruptedEntries,
+            )
             mapOf(
                 "conversationId" to state.conversationId,
                 "mode" to state.conversationMode,
                 "messages" to messages
             )
-        )
+        }
     }
 
     private fun publishTaskEvent(
@@ -567,6 +570,7 @@ internal class WebAgentRunBridge(
         kind: String,
         error: String? = null
     ) {
+        val owner = historyAccess.captureOwner()
         RealtimeHub.publish(
             "chat_task_event",
             linkedMapOf<String, Any?>(
@@ -577,7 +581,8 @@ internal class WebAgentRunBridge(
                 "threadId" to state.threadId,
                 "turnId" to state.turnId,
                 "error" to error
-            ).filterValues { it != null }
+            ).filterValues { it != null },
+            isVisible = { historyAccess.canRead(state.conversationId, owner) },
         )
     }
 

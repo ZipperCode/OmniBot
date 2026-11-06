@@ -9,7 +9,9 @@ import 'package:ui/theme/app_text_styles.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/settings_detail_sheet.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 const int _runtimeLogLimit = 200;
 
@@ -89,18 +91,23 @@ class _RuntimeLogsPageState extends State<RuntimeLogsPage> {
   }
 
   Future<void> _clearLogs() async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showSettingsDetailSheet<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(LegacyTextLocalizer.localize('确定删除吗？')),
-        content: Text(LegacyTextLocalizer.localize('删除后该内容将不可找回')),
+      builder: (sheetContext) => SettingsDetailSheet(
+        title: LegacyTextLocalizer.localize('确定删除吗？'),
+        body: Text(LegacyTextLocalizer.localize('删除后该内容将不可找回')),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            style: settingsDetailSheetActionStyle(sheetContext),
+            onPressed: () => Navigator.of(sheetContext).pop(false),
             child: Text(LegacyTextLocalizer.localize('取消')),
           ),
           TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
+            style: settingsDetailSheetActionStyle(
+              sheetContext,
+              foregroundColor: AppColors.alertRed,
+            ),
+            onPressed: () => Navigator.of(sheetContext).pop(true),
             child: Text(LegacyTextLocalizer.localize('确认')),
           ),
         ],
@@ -188,36 +195,38 @@ class _RuntimeLogsPageState extends State<RuntimeLogsPage> {
           label: LegacyTextLocalizer.localize('概览'),
           subtitle: LegacyTextLocalizer.localize('最近 200 条错误和崩溃日志，按时间倒序展示。'),
         ),
-        Row(
-          children: [
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('总数'),
-                value: _logs.length.toString(),
+        OmniSettingsCard(
+          child: Row(
+            children: [
+              Expanded(
+                child: _buildOverviewMetric(
+                  context,
+                  label: LegacyTextLocalizer.localize('总数'),
+                  value: _logs.length.toString(),
+                ),
               ),
-            ),
-            _buildOverviewDivider(context),
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('崩溃'),
-                value: _crashCount.toString(),
-                valueColor: const Color(0xFFD93025),
+              _buildOverviewDivider(context),
+              Expanded(
+                child: _buildOverviewMetric(
+                  context,
+                  label: LegacyTextLocalizer.localize('崩溃'),
+                  value: _crashCount.toString(),
+                  valueColor: const Color(0xFFD93025),
+                ),
               ),
-            ),
-            _buildOverviewDivider(context),
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('最近一条'),
-                value: _logs.isEmpty
-                    ? '-'
-                    : _formatDateTime(_logs.first.createdAt).substring(5, 10),
-                alignEnd: true,
+              _buildOverviewDivider(context),
+              Expanded(
+                child: _buildOverviewMetric(
+                  context,
+                  label: LegacyTextLocalizer.localize('最近一条'),
+                  value: _logs.isEmpty
+                      ? '-'
+                      : _formatDateTime(_logs.first.createdAt).substring(5, 10),
+                  alignEnd: true,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ],
     );
@@ -567,15 +576,17 @@ class _RuntimeLogsPageState extends State<RuntimeLogsPage> {
   }
 
   Widget _buildLogsList(BuildContext context) {
-    return Column(
-      children: List.generate(_logs.length, (index) {
-        return _buildLogItem(
-          context,
-          _logs[index],
-          index,
-          isLast: index == _logs.length - 1,
-        );
-      }),
+    return OmniSettingsGroup(
+      dividerIndent: 44,
+      children: [
+        for (var index = 0; index < _logs.length; index++)
+          _buildLogItem(
+            context,
+            _logs[index],
+            index,
+            isLast: true,
+          ),
+      ],
     );
   }
 

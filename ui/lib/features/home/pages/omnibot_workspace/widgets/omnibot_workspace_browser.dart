@@ -7,6 +7,8 @@ import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/services/workspace_mount_service.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/omni_menu.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
 import 'package:ui/widgets/image_preview_overlay.dart';
@@ -137,13 +139,6 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
       baseColor: context.omniPalette.surfacePrimary,
       opacity: opacity,
     );
-  }
-
-  Color _secondarySurfaceColor({double opacity = 0.64}) {
-    final palette = context.omniPalette;
-    return widget.translucentSurfaces
-        ? palette.surfaceSecondary.withValues(alpha: opacity)
-        : palette.surfaceSecondary;
   }
 
   @override
@@ -1309,16 +1304,14 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     final name = _entryNameFromPath(entry.path);
     final mountEntry = _workspaceMountEntryFor(entry);
     final editable = _canEditEntry(entry);
-    final action = await showModalBottomSheet<_WorkspaceEntryAction>(
+    final action = await showOmniGlassModalBottomSheet<_WorkspaceEntryAction>(
       context: context,
-      backgroundColor: _surfaceColor(opacity: 0.92),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+      backgroundColor: palette.surfacePrimary,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       builder: (sheetContext) {
         return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: SingleChildScrollView(
+            padding: OmniMenuStyle.panelPadding,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1356,98 +1349,42 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                if (mountEntry == null && editable) ...[
-                  ListTile(
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    tileColor: _secondarySurfaceColor(),
-                    leading: Icon(
-                      Icons.edit_outlined,
-                      color: palette.textPrimary,
-                    ),
-                    title: Text(
-                      '编辑',
-                      style: TextStyle(
-                        color: palette.textPrimary,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'PingFang SC',
-                      ),
-                    ),
-                    onTap: () => Navigator.of(
-                      sheetContext,
-                    ).pop(_WorkspaceEntryAction.edit),
+                if (mountEntry == null && editable)
+                  OmniMenuItem(
+                    onTap: () =>
+                        Navigator.of(sheetContext)
+                            .pop(_WorkspaceEntryAction.edit),
+                    label: '编辑',
+                    leading: const Icon(Icons.edit_outlined),
                   ),
-                  const SizedBox(height: 8),
-                ],
-                if (mountEntry == null) ...[
-                  ListTile(
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    tileColor: _secondarySurfaceColor(),
-                    leading: Icon(
+                if (mountEntry == null)
+                  OmniMenuItem(
+                    onTap: () =>
+                        Navigator.of(sheetContext)
+                            .pop(_WorkspaceEntryAction.rename),
+                    label: '重命名',
+                    leading: const Icon(
                       Icons.drive_file_rename_outline_rounded,
-                      color: palette.textPrimary,
-                    ),
-                    title: Text(
-                      '重命名',
-                      style: TextStyle(
-                        color: palette.textPrimary,
-                        fontWeight: FontWeight.w600,
-                        fontFamily: 'PingFang SC',
-                      ),
-                    ),
-                    onTap: () => Navigator.of(
-                      sheetContext,
-                    ).pop(_WorkspaceEntryAction.rename),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-                ListTile(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  tileColor: _secondarySurfaceColor(),
-                  leading: Icon(
-                    mountEntry == null
-                        ? Icons.delete_outline_rounded
-                        : Icons.link_off_rounded,
-                    color: const Color(0xFFE53935),
-                  ),
-                  title: Text(
-                    mountEntry == null ? '删除' : '卸载挂载',
-                    style: const TextStyle(
-                      color: Color(0xFFE53935),
-                      fontWeight: FontWeight.w600,
-                      fontFamily: 'PingFang SC',
                     ),
                   ),
+                OmniMenuItem(
                   onTap: () => Navigator.of(sheetContext).pop(
                     mountEntry == null
                         ? _WorkspaceEntryAction.delete
                         : _WorkspaceEntryAction.unmount,
                   ),
-                ),
-                const SizedBox(height: 8),
-                ListTile(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  tileColor: _secondarySurfaceColor(),
+                  label: mountEntry == null ? '删除' : '卸载挂载',
                   leading: Icon(
-                    Icons.close_rounded,
-                    color: palette.textPrimary,
+                    mountEntry == null
+                        ? Icons.delete_outline_rounded
+                        : Icons.link_off_rounded,
                   ),
-                  title: Text(
-                    '取消',
-                    style: TextStyle(
-                      color: palette.textPrimary,
-                      fontWeight: FontWeight.w500,
-                      fontFamily: 'PingFang SC',
-                    ),
-                  ),
+                  destructive: true,
+                ),
+                OmniMenuItem(
                   onTap: () => Navigator.of(sheetContext).pop(),
+                  label: '取消',
+                  leading: const Icon(Icons.close_rounded),
                 ),
               ],
             ),
@@ -2222,7 +2159,9 @@ class _WorkspaceInlineFilePreviewState
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFF2C7FEB)),
+                  borderSide: BorderSide(
+                    color: context.omniPalette.accentPrimary,
+                  ),
                 ),
               ),
             ),

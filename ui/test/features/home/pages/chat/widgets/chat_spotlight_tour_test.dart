@@ -43,6 +43,107 @@ class _TourHarnessState extends State<_TourHarness> {
 }
 
 void main() {
+  testWidgets('model explanation stays above its target and keyboard', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final anchor = GlobalKey();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            viewInsets: const EdgeInsets.only(bottom: 280),
+            textScaler: const TextScaler.linear(1.6),
+          ),
+          child: child!,
+        ),
+        home: Stack(
+          fit: StackFit.expand,
+          children: [
+            Positioned(
+              left: 220,
+              top: 350,
+              child: SizedBox(key: anchor, width: 112, height: 36),
+            ),
+            ChatSpotlightTour(
+              step: ChatSpotlightTour.modelStep,
+              anchorKey: anchor,
+              onNext: () {},
+              onFinish: () {},
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final card = tester.getRect(
+      find.byKey(const ValueKey('chat-spotlight-viewport-3')),
+    );
+    expect(card.top, greaterThanOrEqualTo(18));
+    expect(card.bottom, lessThanOrEqualTo(350 - 4 - 18));
+    expect(card.left, greaterThanOrEqualTo(18));
+    expect(card.right, lessThanOrEqualTo(390 - 18));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'model tour ignores a hidden anchor and measures it when visible',
+    (tester) async {
+      final anchor = GlobalKey();
+      final size = ValueNotifier<Size>(Size.zero);
+      addTearDown(size.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: ValueListenableBuilder<Size>(
+            valueListenable: size,
+            builder: (context, value, _) => Stack(
+              fit: StackFit.expand,
+              children: [
+                Positioned(
+                  left: 100,
+                  top: 300,
+                  child: SizedBox(
+                    key: anchor,
+                    width: value.width,
+                    height: value.height,
+                  ),
+                ),
+                ChatSpotlightTour(
+                  step: ChatSpotlightTour.modelStep,
+                  anchorKey: anchor,
+                  onNext: () {},
+                  onFinish: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Rect? spotlight() {
+        final painter =
+            tester
+                    .widget<CustomPaint>(
+                      find.byKey(const ValueKey('chat-spotlight-hole-3')),
+                    )
+                    .painter
+                as dynamic;
+        return painter.spotlight as Rect?;
+      }
+
+      expect(spotlight(), isNull);
+      size.value = const Size(112, 36);
+      await tester.pumpAndSettle();
+      expect(spotlight(), const Rect.fromLTWH(96, 296, 120, 44));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('spotlight tour advances from blank areas without bottom bar', (
     tester,
   ) async {
@@ -59,7 +160,7 @@ void main() {
     );
     expect(find.byKey(const ValueKey('chat-spotlight-tour')), findsOneWidget);
     expect(find.byKey(const ValueKey('chat-spotlight-card-0')), findsOneWidget);
-    expect(find.text('菜单与会话'), findsOneWidget);
+    expect(find.text('返回会话列表'), findsOneWidget);
 
     expect(
       find.byKey(const ValueKey('chat-spotlight-navigation')),

@@ -7,12 +7,18 @@ import cn.com.omnimind.bot.webchat.RealtimeHub
 import cn.com.omnimind.bot.webchat.WebChatAvatarService
 import cn.com.omnimind.bot.webchat.WorkspaceFileService
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParseException
+import com.google.gson.reflect.TypeToken
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.call
-import io.ktor.server.request.receive
+import io.ktor.server.plugins.BadRequestException
+import io.ktor.server.plugins.UnsupportedMediaTypeException
+import io.ktor.server.request.contentType
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.header
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondFile
@@ -29,9 +35,26 @@ import kotlinx.coroutines.flow.collect
 object WebChatRoutes {
 
     private val gson by lazy { Gson() }
+    private val requestBodyType = object : TypeToken<Map<String, Any?>>() {}.type
+
+    /** Keep WebChat maps out of the MCP kotlinx converter, which cannot deserialize Any. */
+    internal suspend fun ApplicationCall.receiveJson(): Map<String, Any?> {
+        val contentType = request.contentType()
+        if (!contentType.match(ContentType.Application.Json)) {
+            throw UnsupportedMediaTypeException(contentType)
+        }
+        val text = receiveText()
+        return try {
+            val body = gson.fromJson(text, JsonObject::class.java)
+                ?: throw BadRequestException("Expected a JSON object")
+            gson.fromJson<Map<String, Any?>>(body, requestBodyType)
+        } catch (error: JsonParseException) {
+            throw BadRequestException("Invalid JSON request", error)
+        }
+    }
 
     /** Serialize heterogeneous WebChat payloads explicitly instead of relying on Ktor's map serializer. */
-    private suspend fun ApplicationCall.respondJson(
+    internal suspend fun ApplicationCall.respondJson(
         payload: Any?,
         status: HttpStatusCode = HttpStatusCode.OK
     ) {
@@ -58,6 +81,7 @@ object WebChatRoutes {
                             "browserMirror" to true
                         ),
                         "agentProfiles" to conversationService.listWebAgentProfiles(),
+                        "retiredAgentIds" to conversationService.retiredAgentIds(),
                         "routes" to mapOf(
                             "events" to "/webchat/api/events",
                             "browserFrame" to "/webchat/api/browser/frame",
@@ -90,7 +114,7 @@ object WebChatRoutes {
 
             post("/conversations") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@post
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 call.respondJson(
                     conversationService.createConversation(
                         title = body["title"]?.toString() ?: "新对话",
@@ -113,7 +137,7 @@ object WebChatRoutes {
                     call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
                     return@patch
                 }
-                val body = call.receive<Map<String, Any?>>().toMutableMap()
+                val body = call.receiveJson().toMutableMap()
                 body["id"] = conversationId
                 call.respondJson(
                     conversationService.updateConversationFromPayload(body)
@@ -159,7 +183,7 @@ object WebChatRoutes {
                     call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
                     return@post
                 }
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 val accepted = runCatching {
                     agentRunService.startConversationRun(conversationId, body)
                 }.getOrElse { error ->
@@ -178,7 +202,7 @@ object WebChatRoutes {
             post("/tasks/{taskId}/clarify") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@post
                 val taskId = call.parameters["taskId"]?.trim().takeUnless { it.isNullOrEmpty() }
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 val reply = body["reply"]?.toString() ?: body["userInput"]?.toString().orEmpty()
                 if (reply.isBlank()) {
                     call.respondJson(mapOf("error" to "EMPTY_REPLY"), HttpStatusCode.BadRequest)
@@ -193,8 +217,16 @@ object WebChatRoutes {
                 call.response.header(HttpHeaders.Connection, "keep-alive")
                 call.respondTextWriter(contentType = ContentType.Text.EventStream) {
                     write(": connected\n\n")
+                    // A reconnect may have missed the device's account change.
+                    // Revalidate Na caches through the ordinary metadata path.
+                    write("event: conversation_updated\n")
+                    write("data: {\"reason\":\"na_history_owner_changed\"}\n\n")
                     flush()
                     RealtimeHub.stream().collect { event ->
+                        val conversationId = (event.data["conversationId"] as? Number)?.toLong()
+                        if (conversationId != null && !conversationService.canReadConversation(conversationId)) {
+                            return@collect
+                        }
                         write("id: ${event.id}\n")
                         write("event: ${event.event}\n")
                         write("data: ${gson.toJson(event.data)}\n\n")
@@ -256,7 +288,7 @@ object WebChatRoutes {
 
             put("/file") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@put
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 val path = body["path"]?.toString().orEmpty()
                 if (path.isBlank()) {
                     call.respondJson(mapOf("error" to "MISSING_PATH"), HttpStatusCode.BadRequest)
@@ -273,7 +305,7 @@ object WebChatRoutes {
 
             post("/move") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@post
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 val sourcePath = body["sourcePath"]?.toString().orEmpty()
                 val targetPath = body["targetPath"]?.toString().orEmpty()
                 if (sourcePath.isBlank() || targetPath.isBlank()) {
@@ -344,7 +376,7 @@ object WebChatRoutes {
 
             post("/action") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@post
-                val body = call.receive<Map<String, Any?>>()
+                val body = call.receiveJson()
                 call.respondJson(browserMirrorService.executeAction(body))
             }
         }

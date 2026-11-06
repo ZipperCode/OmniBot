@@ -1,5 +1,7 @@
 package cn.com.omnimind.bot.manager
 
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
+
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -21,6 +23,7 @@ import cn.com.omnimind.baselib.llm.ChatCompletionRequest
 import cn.com.omnimind.baselib.llm.ChatCompletionTool
 import cn.com.omnimind.baselib.llm.AiRequestLogStore
 import cn.com.omnimind.baselib.llm.DeepSeekProvider
+import cn.com.omnimind.baselib.llm.ChatGptOAuthProvider
 import cn.com.omnimind.baselib.llm.ModelProviderConfig
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ReasoningEffort
@@ -75,6 +78,7 @@ import cn.com.omnimind.bot.mcp.RemoteMcpConfigStore
 import cn.com.omnimind.bot.quicklog.QuickLogService
 import cn.com.omnimind.bot.util.TaskCompletionNavigator
 import cn.com.omnimind.bot.webchat.ConversationDomainService
+import cn.com.omnimind.bot.statistics.UsageStatisticsService
 import cn.com.omnimind.bot.webchat.FlutterChatSyncBridge
 import cn.com.omnimind.bot.workspace.PublicStorageAccess
 import cn.com.omnimind.bot.workspace.WorkspaceStorageAccess
@@ -312,8 +316,8 @@ class AssistsCoreManager(private val context: Context) {
                 t("悬浮窗权限", "Overlay")
             "应用列表读取权限", "Installed Apps Access", "Installed Apps Permission" ->
                 t("应用列表读取权限", "Installed Apps Access")
-            "高权限来源", "Privileged Source", "privileged" ->
-                t("高权限来源", "Privileged Source")
+            "Shizuku 权限", "Shizuku Permission" ->
+                t("Shizuku 权限", "Shizuku Permission")
             "公共文件访问", "Public Storage Access" ->
                 t("公共文件访问", "Public Storage Access")
             else -> trimmed
@@ -332,6 +336,7 @@ class AssistsCoreManager(private val context: Context) {
     private var mainJob: CoroutineScope = CoroutineScope(Dispatchers.Main)
     private var workJob: CoroutineScope = CoroutineScope(Dispatchers.Default)
     private val conversationDomainService by lazy { ConversationDomainService(context) }
+    private val usageStatisticsService by lazy { UsageStatisticsService(conversationDomainService) }
 
     // 当前活跃的对话ID
     private var currentConversationId: Long? = null
@@ -395,6 +400,15 @@ class AssistsCoreManager(private val context: Context) {
             "group" to group,
             "attachment" to attachment,
             "reasoning" to reasoning,
+            "supportedReasoningLevels" to supportedReasoningLevels,
+            "defaultReasoningLevel" to defaultReasoningLevel,
+            "reasoningCanDisable" to reasoningCanDisable,
+            "reasoningDefaultEnabled" to reasoningDefaultEnabled,
+            "reasoningSupportsAdaptive" to reasoningSupportsAdaptive,
+            "reasoningWireFormat" to reasoningWireFormat,
+            "reasoningEffortSupported" to reasoningEffortSupported,
+            "reasoningContentRequired" to reasoningContentRequired,
+            "reasoningCapabilitySource" to reasoningCapabilitySource,
             "toolCall" to toolCall,
             "structuredOutput" to structuredOutput,
             "temperature" to temperature
@@ -1622,8 +1636,9 @@ class AssistsCoreManager(private val context: Context) {
                     }
                     return@launch
                 }
-                val profile = profileId?.let(ModelProviderConfigStore::getProfile)
-                    ?: ModelProviderConfigStore.getEditingProfile()
+                val profile = if (profileId != null) {
+                    requireNotNull(ModelProviderConfigStore.getProfile(profileId)) { "provider profile changed" }
+                } else ModelProviderConfigStore.getEditingProfile()
                 require(expectedProfileRevision != null && expectedProfileRevision >= 0L) {
                     "provider profile revision is required"
                 }
@@ -1638,16 +1653,23 @@ class AssistsCoreManager(private val context: Context) {
                         )
                 ) { "provider profile changed" }
                 val apiBase = if (baseUrlArg.isNotEmpty()) baseUrlArg else profile.baseUrl
+                require(!ChatGptOAuthProvider.isOAuth(profile.sourceType) ||
+                    (!useProvidedApiKey && !useProvidedCustomHeaders &&
+                        ModelProviderConfigStore.sameCanonicalEndpoint(apiBase, ChatGptOAuthProvider.BASE_URL))) {
+                    "ChatGPT OAuth requires its registered provider endpoint"
+                }
                 val apiKey = if (useProvidedApiKey) apiKeyArg else profile.apiKey
                 val customHeaders = if (useProvidedCustomHeaders) customHeadersArg else profile.customHeaders
+                LocalNetworkPermission.requestForEndpoint(context, apiBase)
                 val models = HttpController.fetchProviderModels(
                     apiBase = apiBase,
                     apiKey = apiKey,
                     customHeaders = customHeaders,
                     protocolType = profile.protocolType,
-                    wireApi = profile.wireApi
+                    wireApi = profile.wireApi,
+                    providerProfile = profile,
                 )
-                val currentProfile = profileId?.let(ModelProviderConfigStore::getProfile)
+                val currentProfile = ModelProviderConfigStore.getProfile(profile.id)
                 require(
                     currentProfile != null &&
                         currentProfile.revision == expectedProfileRevision &&
@@ -1660,8 +1682,11 @@ class AssistsCoreManager(private val context: Context) {
                     ModelProviderConfigStore.sameCanonicalEndpoint(apiBase, profile.baseUrl)) {
                     ModelProviderConfigStore.rememberModels(context, profile, models)
                 }
+                val resolvedModels = ModelProviderConfigStore.resolveModelCapabilities(
+                    context, profile.copy(baseUrl = apiBase), models,
+                )
                 withContext(Dispatchers.Main) {
-                    result.success(models.map { it.toMap() })
+                    result.success(resolvedModels.map { it.toMap() })
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -1717,9 +1742,15 @@ class AssistsCoreManager(private val context: Context) {
                     }
                     return@launch
                 }
-                val profile = profileId?.let(ModelProviderConfigStore::getProfile)
-                    ?: ModelProviderConfigStore.getEditingProfile()
+                val profile = if (profileId != null) {
+                    requireNotNull(ModelProviderConfigStore.getProfile(profileId)) { "provider profile changed" }
+                } else ModelProviderConfigStore.getEditingProfile()
                 val apiBase = if (baseUrlArg.isNotEmpty()) baseUrlArg else profile.baseUrl
+                require(!ChatGptOAuthProvider.isOAuth(profile.sourceType) ||
+                    (!useProvidedApiKey && !useProvidedCustomHeaders &&
+                        ModelProviderConfigStore.sameCanonicalEndpoint(apiBase, ChatGptOAuthProvider.BASE_URL))) {
+                    "ChatGPT OAuth requires its registered provider endpoint"
+                }
                 val apiKey = if (useProvidedApiKey) apiKeyArg else profile.apiKey
                 val customHeaders = if (useProvidedCustomHeaders) {
                     customHeadersArg
@@ -1732,8 +1763,14 @@ class AssistsCoreManager(private val context: Context) {
                     apiKey = apiKey,
                     customHeaders = customHeaders,
                     protocolType = profile.protocolType,
-                    wireApi = profile.wireApi
+                    wireApi = profile.wireApi,
+                    providerProfile = profile,
                 )
+                val currentProfile = ModelProviderConfigStore.getProfile(profile.id)
+                require(currentProfile != null && currentProfile.revision == profile.revision &&
+                    ModelProviderConfigStore.sameCanonicalEndpoint(currentProfile.baseUrl, profile.baseUrl)) {
+                    "provider profile changed"
+                }
 
                 withContext(Dispatchers.Main) {
                     result.success(
@@ -1887,8 +1924,11 @@ class AssistsCoreManager(private val context: Context) {
     fun getSceneVoiceConfig(call: MethodCall, result: MethodChannel.Result) {
         workJob.launch {
             try {
+                val config = withContext(Dispatchers.IO) {
+                    SceneVoiceConfigStore.getConfig().toMap()
+                }
                 withContext(Dispatchers.Main) {
-                    result.success(SceneVoiceConfigStore.getConfig().toMap())
+                    result.success(config)
                 }
             } catch (e: Exception) {
                 OmniLog.e(TAG, "getSceneVoiceConfig error: ${e.message}")
@@ -2941,6 +2981,29 @@ class AssistsCoreManager(private val context: Context) {
         }
     }
 
+    fun getUsageStatistics(call: MethodCall, result: MethodChannel.Result) {
+        workJob.launch {
+            try {
+                val summary = withContext(Dispatchers.IO) {
+                    when (call.method) {
+                        "getConversationActivitySummary" -> usageStatisticsService.conversationSummary(
+                            requireNotNull(call.argument<Number>("startDateMs")).toLong(),
+                            requireNotNull(call.argument<Number>("todayMs")).toLong(),
+                        )
+                        "getTokenUsageSummary" -> usageStatisticsService.tokenSummary(
+                            requireNotNull(call.argument<Number>("alignedStartMs")).toLong(),
+                            requireNotNull(call.argument<List<Number>>("weekStartsMs")).map(Number::toLong),
+                        )
+                        else -> error("Unknown usage statistics operation")
+                    }
+                }
+                withContext(Dispatchers.Main) { result.success(summary) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) { result.error("USAGE_STATISTICS_ERROR", error.message, null) }
+            }
+        }
+    }
+
     fun getTokenUsageRecords(call: MethodCall, result: MethodChannel.Result) {
         val sinceMs = call.argument<Number>("since")?.toLong() ?: 0L
         workJob.launch {
@@ -2975,6 +3038,72 @@ class AssistsCoreManager(private val context: Context) {
     /**
      * 获取所有对话列表
      */
+    fun manageConversation(call: MethodCall, result: MethodChannel.Result) {
+        workJob.launch {
+            try {
+                val action = call.argument<String>("action").orEmpty()
+                val id = requireNotNull(call.argument<Number>("conversationId")).toLong()
+                val success = conversationDomainService.manageFromUi(
+                    action, id, call.argument<String>("mode"), call.argument<String>("title").orEmpty(),
+                )
+                if (success && action in setOf("delete", "archive")) {
+                    val target = cn.com.omnimind.bot.agent.ChatConversationPreferences(context).lastTarget()
+                    currentConversationId = (target?.get("conversationId") as? Number)?.toLong()?.takeIf { it > 0 }
+                    currentConversationMode = target?.get("mode")?.toString() ?: "agent"
+                }
+                withContext(Dispatchers.Main) { result.success(success) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) { result.error("MANAGE_CONVERSATION_ERROR", error.message, null) }
+            }
+        }
+    }
+
+    fun handleConversationStorage(call: MethodCall, result: MethodChannel.Result) {
+        workJob.launch {
+            try {
+                val value = if (call.method == "conversationSelection") {
+                    cn.com.omnimind.bot.agent.ChatConversationPreferences(context).handle(
+                        call.argument<String>("operation").orEmpty(),
+                        call.arguments as? Map<*, *> ?: emptyMap<String, Any?>(),
+                    )
+                } else {
+                    val conversationId = requireNotNull(call.argument<Number>("conversationId")).toLong()
+                    require(conversationId > 0)
+                    val mode = normalizeConversationMode(call.argument<String>("mode"))
+                    val messages = conversationDomainService.listConversationMessages(conversationId, mode)
+                    if (call.argument<String>("format") == "text") {
+                        cn.com.omnimind.bot.agent.ConversationTranscript.clipboard(messages)
+                    } else {
+                        cn.com.omnimind.bot.agent.ConversationTranscript.export(conversationId, mode, messages)
+                    }
+                }
+                withContext(Dispatchers.Main) { result.success(value) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) { result.error("CONVERSATION_STORAGE_ERROR", error.message, null) }
+            }
+        }
+    }
+
+    fun handleChatLinkPreview(call: MethodCall, result: MethodChannel.Result) {
+        workJob.launch {
+            try {
+                val repository = cn.com.omnimind.bot.agent.ChatLinkPreviewRepository.shared
+                val value = if (call.method == "loadChatLinkPreview") {
+                    repository.load(call.argument<String>("url").orEmpty())
+                } else {
+                    repository.reconcile(
+                        call.argument<String>("text").orEmpty(),
+                        call.argument<Any?>("existing"),
+                        (call.argument<Number>("maxCount")?.toInt() ?: 3).coerceIn(0, 3),
+                    )
+                }
+                withContext(Dispatchers.Main) { result.success(value) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) { result.error("LINK_PREVIEW_ERROR", error.message, null) }
+            }
+        }
+    }
+
     fun getConversations(call: MethodCall, result: MethodChannel.Result) {
         OmniLog.d(TAG, "[getConversations] 开始获取对话列表...")
         val includeArchived = call.argument<Boolean>("includeArchived") ?: true
@@ -2989,11 +3118,12 @@ class AssistsCoreManager(private val context: Context) {
                 }
                 val jsonList = conversationDomainService.listConversationPayloads(
                     includeArchived = includeArchived,
-                    archivedOnly = archivedOnly
+                    archivedOnly = archivedOnly,
+                    mode = call.argument<String>("mode"),
+                    excludeHidden = true,
                 )
                 OmniLog.d(TAG, "[getConversations] 从数据库获取到 ${jsonList.size} 条对话记录")
                 withContext(Dispatchers.Main) {
-                    OmniLog.d(TAG, "[getConversations] 返回 Flutter: $jsonList")
                     result.success(jsonList)
                 }
             } catch (e: Exception) {
@@ -3079,7 +3209,8 @@ class AssistsCoreManager(private val context: Context) {
                     conversationId = conversationId,
                     conversationMode = mode,
                     messages = messages,
-                    allowHistoryRemoval = call.argument<Boolean>("allowHistoryRemoval") == true
+                    allowHistoryRemoval = call.argument<Boolean>("allowHistoryRemoval") == true,
+                    removedMessageIds = call.argument<List<String>>("removedMessageIds"),
                 )
                 withContext(Dispatchers.Main) {
                     result.success("SUCCESS")
@@ -3204,14 +3335,14 @@ class AssistsCoreManager(private val context: Context) {
 
         workJob.launch {
             try {
-                val all = conversationDomainService.listConversationPayloads(
-                    includeArchived = true
+                val jsonList = conversationDomainService.listConversationPayloads(
+                    includeArchived = call.argument<Boolean>("includeArchived") ?: false,
+                    archivedOnly = call.argument<Boolean>("archivedOnly") ?: false,
+                    offset = offset,
+                    limit = limit,
+                    mode = call.argument<String>("mode"),
+                    excludeHidden = true,
                 )
-                val jsonList = if (offset >= all.size) {
-                    emptyList()
-                } else {
-                    all.subList(offset.coerceAtLeast(0), (offset + limit).coerceAtMost(all.size))
-                }
                 withContext(Dispatchers.Main) {
                     result.success(jsonList)
                 }
@@ -3229,7 +3360,8 @@ class AssistsCoreManager(private val context: Context) {
      */
     fun createConversation(call: MethodCall, result: MethodChannel.Result) {
         val title = call.argument<String>("title") ?: "新对话"
-        val mode = normalizeConversationMode(call.argument<String>("mode"))
+        // Preserve explicit product modes until the domain claims their Agent owner.
+        val mode = call.argument<String>("mode")?.trim()?.takeIf(String::isNotEmpty) ?: "agent"
         val summary = call.argument<String>("summary")
         val parentConversationId = call.argument<Number>("parentConversationId")
             ?.toLong()
@@ -3271,7 +3403,8 @@ class AssistsCoreManager(private val context: Context) {
             try {
                 if (conversationMap != null) {
                     conversationDomainService.updateConversationFromPayload(
-                        conversationMap.mapValues { it.value }
+                        conversationMap.mapValues { it.value },
+                        preserveLatestMetadata = call.argument<Boolean>("preserveLatestMetadata") ?: false,
                     )
                     withContext(Dispatchers.Main) {
                         result.success("SUCCESS")

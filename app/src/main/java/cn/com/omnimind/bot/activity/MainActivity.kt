@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +15,8 @@ import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.App
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
+import cn.com.omnimind.bot.terminal.EmbeddedTerminalInstallService
 import cn.com.omnimind.bot.quicklog.QuickLogWidgetActionRouter
 import cn.com.omnimind.bot.ui.channel.ChannelManager
 import cn.com.omnimind.bot.ui.channel.FileSaveChannel
@@ -50,6 +53,13 @@ class MainActivity : FlutterActivity() {
         return false
     }
 
+    override fun onFlutterUiDisplayed() {
+        super.onFlutterUiDisplayed()
+        // The shared installer owns this work beyond the Activity lifetime.
+        // Start after the first frame so setup never holds the launch screen.
+        EmbeddedTerminalInitCoordinator.startInBackground(applicationContext)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val mainActivityStart = System.currentTimeMillis()
         OmniLog.d(TAG, "MainActivity onCreate start")
@@ -57,6 +67,11 @@ class MainActivity : FlutterActivity() {
         applyResponsiveOrientation()
         applySoftInputResizeMode()
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Flutter's pre-draw gate keeps the splash until its first frame.
+            // Reveal that frame immediately instead of playing another exit animation.
+            splashScreen.setOnExitAnimationListener { splashView -> splashView.remove() }
+        }
         applyEdgeToEdgeWindow()
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.consumeTaskCompletionNotificationIntent(this, intent)
@@ -100,12 +115,20 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun applyResponsiveOrientation() {
-        val isTablet = resources.configuration.smallestScreenWidthDp >= 600
-        requestedOrientation = if (isTablet) {
+        val allowRotation = resources.configuration.smallestScreenWidthDp >= 600 || isInMultiWindowMode
+        val orientation = if (allowRotation) {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         } else {
             ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
+        if (requestedOrientation != orientation) requestedOrientation = orientation
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // A fold/unfold or split-window resize can change the available layout
+        // without recreating the cached Flutter engine or its conversation.
+        applyResponsiveOrientation()
     }
 
     private fun applySoftInputResizeMode() {
@@ -146,6 +169,7 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.onActivityResumed(this)
+        EmbeddedTerminalInstallService.refresh(applicationContext)
         AppUpdateManager.requestSilentCheckIfDue(this)
         lifecycleScope.launch {
             runCatching {

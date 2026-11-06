@@ -29,7 +29,6 @@ class PermissionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
     return ValueListenableBuilder<bool>(
       valueListenable: isAuthorized,
       builder: (context, authorized, child) {
@@ -49,6 +48,10 @@ class PermissionRow extends StatelessWidget {
                         iconPath,
                         width: iconWidth,
                         height: iconHeight,
+                        colorFilter: ColorFilter.mode(
+                          palette.textPrimary,
+                          BlendMode.srcIn,
+                        ),
                       )
                     : Image.asset(
                         iconPath,
@@ -64,16 +67,16 @@ class PermissionRow extends StatelessWidget {
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          permissionName,
-                          style: TextStyle(
-                            color: isDark
-                                ? palette.textPrimary
-                                : const Color(0xFF1F2336),
-                            fontSize: 16,
-                            height: 1.5,
-                            fontFamily: 'PingFang SC',
-                            fontWeight: FontWeight.w500,
+                        Flexible(
+                          child: Text(
+                            permissionName,
+                            style: TextStyle(
+                              color: palette.textPrimary,
+                              fontSize: 15,
+                              height: 1.5,
+                              fontFamily: 'PingFang SC',
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
                         if (iconInfo != null && iconClick != null) ...[
@@ -85,13 +88,9 @@ class PermissionRow extends StatelessWidget {
                                 vertical: 4,
                               ),
                               decoration: BoxDecoration(
-                                color: isDark
-                                    ? palette.surfaceSecondary
-                                    : Colors.white.withValues(alpha: 0.9),
+                                color: palette.surfaceSecondary,
                                 borderRadius: BorderRadius.circular(12),
-                                border: isDark
-                                    ? Border.all(color: palette.borderSubtle)
-                                    : null,
+                                border: Border.all(color: palette.borderSubtle),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -99,18 +98,14 @@ class PermissionRow extends StatelessWidget {
                                   Icon(
                                     Icons.info,
                                     size: 14,
-                                    color: isDark
-                                        ? palette.accentPrimary
-                                        : const Color(0xFF00AEFF),
+                                    color: palette.textSecondary,
                                   ),
                                   const SizedBox(width: 4),
                                   Text(
                                     iconInfo!,
                                     style: TextStyle(
                                       fontSize: 11,
-                                      color: isDark
-                                          ? palette.accentPrimary
-                                          : const Color(0xFF00AEFF),
+                                      color: palette.textSecondary,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -125,11 +120,6 @@ class PermissionRow extends StatelessWidget {
                     Text(
                       permissionDescription,
                       style: TextStyle(
-                        // 浅色模式下原来写死 #9FB0BA,那是为白底实色卡片设计
-                        // 的浅灰蓝;放到权限弹窗的玻璃面板上(背景半透,
-                        // 透出页面浅色调)对比度严重不足,"桌面悬浮显示……"
-                        // 这类描述文字基本看不清。这里直接走 palette token,
-                        // 浅色 textSecondary = #71809B,玻璃上也能读清。
                         color: palette.textSecondary,
                         fontSize: 12,
                         fontFamily: 'PingFang SC',
@@ -151,6 +141,10 @@ class PermissionRow extends StatelessWidget {
                             'assets/welcome/permission_authorized.svg',
                             width: 24,
                             height: 24,
+                            colorFilter: ColorFilter.mode(
+                              palette.accentPrimary,
+                              BlendMode.srcIn,
+                            ),
                           ),
                         ),
                       )
@@ -162,6 +156,10 @@ class PermissionRow extends StatelessWidget {
                             'assets/welcome/permission_go.svg',
                             width: 20,
                             height: 20,
+                            colorFilter: ColorFilter.mode(
+                              palette.textTertiary,
+                              BlendMode.srcIn,
+                            ),
                           ),
                         ),
                       ),

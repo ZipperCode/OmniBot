@@ -14,8 +14,10 @@ import androidx.lifecycle.Lifecycle.Event.ON_STOP
  */
 class NestedBackgroundStateUtil private constructor() : Application.ActivityLifecycleCallbacks, LifecycleObserver {
     private var listener: NestedBackgroundStateListener? = null
-    private var activityCount = 0
+    @Volatile private var activityCount = 0
     private var isInBackground = false
+
+    fun hasVisibleActivity(): Boolean = activityCount > 0
 
     companion object {
         @Volatile

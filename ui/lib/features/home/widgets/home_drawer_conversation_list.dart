@@ -20,87 +20,17 @@ const double _kScheduledParentToggleHitWidth = 40;
 const double _kScheduledParentToggleIconSlotWidth = 24;
 const double _kScheduledChildConversationItemInset =
     _kScheduledConversationLeadingInset + 26;
-const List<String> _kDateHeaderIconAssetPaths = <String>[
-  'assets/home/date_header_icons/amphora.svg',
-  'assets/home/date_header_icons/apple.svg',
-  'assets/home/date_header_icons/banana.svg',
-  'assets/home/date_header_icons/barrel.svg',
-  'assets/home/date_header_icons/bean.svg',
-  'assets/home/date_header_icons/beef.svg',
-  'assets/home/date_header_icons/beer.svg',
-  'assets/home/date_header_icons/bird.svg',
-  'assets/home/date_header_icons/birdhouse.svg',
-  'assets/home/date_header_icons/blender.svg',
-  'assets/home/date_header_icons/bone.svg',
-  'assets/home/date_header_icons/bottle-wine.svg',
-  'assets/home/date_header_icons/broccoli.svg',
-  'assets/home/date_header_icons/bug-play.svg',
-  'assets/home/date_header_icons/bug.svg',
-  'assets/home/date_header_icons/cake-slice.svg',
-  'assets/home/date_header_icons/cake.svg',
-  'assets/home/date_header_icons/candy-cane.svg',
-  'assets/home/date_header_icons/candy.svg',
-  'assets/home/date_header_icons/carrot.svg',
-  'assets/home/date_header_icons/cat.svg',
-  'assets/home/date_header_icons/chef-hat.svg',
-  'assets/home/date_header_icons/cherry.svg',
-  'assets/home/date_header_icons/citrus.svg',
-  'assets/home/date_header_icons/coffee.svg',
-  'assets/home/date_header_icons/cookie.svg',
-  'assets/home/date_header_icons/cooking-pot.svg',
-  'assets/home/date_header_icons/croissant.svg',
-  'assets/home/date_header_icons/cuboid.svg',
-  'assets/home/date_header_icons/cup-soda.svg',
-  'assets/home/date_header_icons/dessert.svg',
-  'assets/home/date_header_icons/dog.svg',
-  'assets/home/date_header_icons/donut.svg',
-  'assets/home/date_header_icons/drumstick.svg',
-  'assets/home/date_header_icons/egg-fried.svg',
-  'assets/home/date_header_icons/egg.svg',
-  'assets/home/date_header_icons/fish-symbol.svg',
-  'assets/home/date_header_icons/fish.svg',
-  'assets/home/date_header_icons/glass-water.svg',
-  'assets/home/date_header_icons/grape.svg',
-  'assets/home/date_header_icons/ham.svg',
-  'assets/home/date_header_icons/hamburger.svg',
-  'assets/home/date_header_icons/hand-platter.svg',
-  'assets/home/date_header_icons/hop.svg',
-  'assets/home/date_header_icons/ice-cream-bowl.svg',
-  'assets/home/date_header_icons/ice-cream-cone.svg',
-  'assets/home/date_header_icons/leafy-green.svg',
-  'assets/home/date_header_icons/lollipop.svg',
-  'assets/home/date_header_icons/martini.svg',
-  'assets/home/date_header_icons/microwave.svg',
-  'assets/home/date_header_icons/milk.svg',
-  'assets/home/date_header_icons/nut.svg',
-  'assets/home/date_header_icons/origami.svg',
-  'assets/home/date_header_icons/panda.svg',
-  'assets/home/date_header_icons/paw-print.svg',
-  'assets/home/date_header_icons/pizza.svg',
-  'assets/home/date_header_icons/popcorn.svg',
-  'assets/home/date_header_icons/popsicle.svg',
-  'assets/home/date_header_icons/rabbit.svg',
-  'assets/home/date_header_icons/rat.svg',
-  'assets/home/date_header_icons/refrigerator.svg',
-  'assets/home/date_header_icons/salad.svg',
-  'assets/home/date_header_icons/sandwich.svg',
-  'assets/home/date_header_icons/shell.svg',
-  'assets/home/date_header_icons/shrimp.svg',
-  'assets/home/date_header_icons/snail.svg',
-  'assets/home/date_header_icons/soup.svg',
-  'assets/home/date_header_icons/squirrel.svg',
-  'assets/home/date_header_icons/torus.svg',
-  'assets/home/date_header_icons/tractor.svg',
-  'assets/home/date_header_icons/turtle.svg',
-  'assets/home/date_header_icons/utensils-crossed.svg',
-  'assets/home/date_header_icons/utensils.svg',
-  'assets/home/date_header_icons/vegan.svg',
-  'assets/home/date_header_icons/wheat.svg',
-  'assets/home/date_header_icons/wine.svg',
-  'assets/home/date_header_icons/worm.svg',
-];
 
 extension _HomeDrawerConversationList on HomeDrawerState {
+  bool _isCurrentConversationRow(ConversationModel conversation) {
+    final target = widget.selectedThreadTarget;
+    return !_isSelectingConversations &&
+        target != null &&
+        !target.isNewConversation &&
+        target.conversationId == conversation.id &&
+        target.mode == conversation.mode;
+  }
+
   Widget _buildConversationSection() {
     final visibleConversationResults = _visibleConversationResults;
     return Column(
@@ -169,17 +99,15 @@ extension _HomeDrawerConversationList on HomeDrawerState {
           ? _buildSearchingConversationState()
           : _buildEmptySearchResult();
     }
-    return SlidableAutoCloseBehavior(
-      child: ListView.builder(
-        padding: EdgeInsets.zero,
-        itemCount: results.length + 1,
-        itemBuilder: (context, index) => index == 0
-            ? _buildSearchResultHeader(results.length)
-            : _buildSwipeConversationItem(
-                results[index - 1],
-                showDivider: index != results.length,
-              ),
-      ),
+    return ListView.builder(
+      padding: EdgeInsets.only(bottom: widget.homePage ? 112 : 0),
+      itemCount: results.length + 1,
+      itemBuilder: (context, index) => index == 0
+          ? _buildSearchResultHeader(results.length)
+          : _buildSwipeConversationItem(
+              results[index - 1],
+              showDivider: index != results.length,
+            ),
     );
   }
 
@@ -190,7 +118,7 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     final omniAiResults = <_ConversationSearchResult>[];
     for (final result in results) {
       final mode = result.conversation.mode;
-      if (mode == ConversationMode.chatOnly) {
+      if (mode == ConversationMode.chatOnly && !widget.homePage) {
         chatOnlyResults.add(result);
       } else {
         // Agent、Xiaowan、SubAgent 和 OpenClaw 共用一个会话入口。
@@ -208,7 +136,9 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       sections.add(section);
     }
 
-    final scheduledGroups = _scheduledConversationGroups;
+    final scheduledGroups = _scheduledConversationGroups
+        .where((group) => _matchesHomeFilter(group.parent))
+        .toList(growable: false);
     final pinnedResults = _pinnedConversationResults;
     if (scheduledGroups.isNotEmpty) {
       addSection(_buildScheduledConversationSection(scheduledGroups));
@@ -243,8 +173,12 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       return _buildEmptyConversation();
     }
     // 所有区块共用同一个滚动列表：任何区块展开条目过多时整体滚动，不再溢出。
-    return SlidableAutoCloseBehavior(
-      child: CustomScrollView(slivers: sections),
+    return CustomScrollView(
+      slivers: [
+        ...sections,
+        if (widget.homePage)
+          const SliverToBoxAdapter(child: SizedBox(height: 112)),
+      ],
     );
   }
 
@@ -252,36 +186,46 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 24),
       child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              context.l10n.chatHistoryEmpty,
-              style: TextStyle(fontSize: 14, color: _drawerSecondaryTextColor),
-            ),
-            const SizedBox(height: 12),
-            GestureDetector(
-              onTap: _openNewConversation,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                context.l10n.chatHistoryEmpty,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: _drawerSecondaryTextColor,
                 ),
-                decoration: BoxDecoration(
-                  color: context.omniPalette.accentPrimary,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  context.l10n.chatHistoryStartConversation,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: Theme.of(context).colorScheme.onPrimary,
+              ),
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: _openNewConversation,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.omniPalette.accentPrimary,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    context.l10n.chatHistoryStartConversation,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
+              if (widget.homePage)
+                InstallationNotificationPermissionButton(
+                  textColor: _drawerSecondaryTextColor,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -289,29 +233,32 @@ extension _HomeDrawerConversationList on HomeDrawerState {
 
   Widget _buildSearchingConversationState() {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(
-              strokeWidth: 2.2,
-              valueColor: AlwaysStoppedAnimation<Color>(
-                context.omniPalette.accentPrimary,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.2,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  context.omniPalette.accentPrimary,
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 14),
-          Text(
-            context.l10n.homeDrawerSearching,
-            style: TextStyle(
-              fontSize: 14,
-              color: _drawerSecondaryTextColor,
-              fontFamily: 'PingFang SC',
+            const SizedBox(height: 14),
+            Text(
+              context.l10n.homeDrawerSearching,
+              style: TextStyle(
+                fontSize: 14,
+                color: _drawerSecondaryTextColor,
+                fontFamily: 'PingFang SC',
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -321,71 +268,74 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 24),
       child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: context.isDarkTheme
-                    ? palette.surfaceSecondary
-                    : palette.previewFallback,
-                shape: BoxShape.circle,
-              ),
-              alignment: Alignment.center,
-              child: Icon(
-                Icons.search_off_rounded,
-                size: 22,
-                color: palette.textSecondary,
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              context.l10n.homeDrawerNoResults,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: _drawerTextColor,
-                fontFamily: 'PingFang SC',
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              context.l10n.homeDrawerSearchHint2,
-              style: TextStyle(
-                fontSize: 12,
-                color: _drawerSecondaryTextColor,
-                fontFamily: 'PingFang SC',
-              ),
-            ),
-            const SizedBox(height: 14),
-            GestureDetector(
-              onTap: _searchController.clear,
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 8,
-                ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
                 decoration: BoxDecoration(
                   color: context.isDarkTheme
                       ? palette.surfaceSecondary
-                      : Colors.white,
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: palette.borderSubtle),
+                      : palette.previewFallback,
+                  shape: BoxShape.circle,
                 ),
-                child: Text(
-                  context.l10n.homeDrawerClearSearch,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: _drawerTextColor,
-                    fontFamily: 'PingFang SC',
+                alignment: Alignment.center,
+                child: Icon(
+                  Icons.search_off_rounded,
+                  size: 22,
+                  color: palette.textSecondary,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                context.l10n.homeDrawerNoResults,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: _drawerTextColor,
+                  fontFamily: 'PingFang SC',
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                context.l10n.homeDrawerSearchHint2,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _drawerSecondaryTextColor,
+                  fontFamily: 'PingFang SC',
+                ),
+              ),
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: _searchController.clear,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.isDarkTheme
+                        ? palette.surfaceSecondary
+                        : Colors.white,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: palette.borderSubtle),
+                  ),
+                  child: Text(
+                    context.l10n.homeDrawerClearSearch,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: _drawerTextColor,
+                      fontFamily: 'PingFang SC',
+                    ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -394,7 +344,12 @@ extension _HomeDrawerConversationList on HomeDrawerState {
   Widget _buildSearchResultHeader(int count) {
     final palette = context.omniPalette;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+      padding: EdgeInsets.fromLTRB(
+        widget.conversationSidebar ? 16 : 4,
+        0,
+        widget.conversationSidebar ? 16 : 4,
+        8,
+      ),
       child: Row(
         children: [
           Icon(
@@ -434,46 +389,18 @@ extension _HomeDrawerConversationList on HomeDrawerState {
   }) {
     final sections = _buildConversationSections(results, namespace: namespace);
     final children = <Widget>[];
-    final usedIconIndexes = <int>{};
     for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
       final section = sections[sectionIndex];
       if (children.isNotEmpty || sectionIndex > 0) {
-        children.add(const SliverToBoxAdapter(child: SizedBox(height: 14)));
-      }
-      children.add(
-        _buildConversationDateSection(
-          section,
-          iconAssetPath: _dateSectionIconAssetPath(
-            section.sectionKey,
-            usedIconIndexes: usedIconIndexes,
+        children.add(
+          SliverToBoxAdapter(
+            child: SizedBox(height: widget.homePage ? 22 : 14),
           ),
-        ),
-      );
+        );
+      }
+      children.add(_buildConversationDateSection(section));
     }
     return children;
-  }
-
-  String _dateSectionIconAssetPath(
-    String sectionKey, {
-    required Set<int> usedIconIndexes,
-  }) {
-    var iconIndex =
-        _stablePositiveHash(sectionKey) % _kDateHeaderIconAssetPaths.length;
-    if (usedIconIndexes.length < _kDateHeaderIconAssetPaths.length) {
-      while (!usedIconIndexes.add(iconIndex)) {
-        iconIndex = (iconIndex + 1) % _kDateHeaderIconAssetPaths.length;
-      }
-    }
-    return _kDateHeaderIconAssetPaths[iconIndex];
-  }
-
-  int _stablePositiveHash(String value) {
-    var hash = 0x811c9dc5;
-    for (final codeUnit in value.codeUnits) {
-      hash ^= codeUnit;
-      hash = (hash * 0x01000193) & 0x7fffffff;
-    }
-    return hash;
   }
 
   List<_ConversationSection> _buildConversationSections(
@@ -481,13 +408,16 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     required String namespace,
   }) {
     final sections = <_ConversationSection>[];
+    final now = DateTime.now();
     for (final result in results) {
       final conversation = result.conversation;
-      final label = conversation.timeDisplay;
-      final sectionKey = _dateConversationSectionKeyForConversation(
-        conversation,
-        namespace: namespace,
-      );
+      final (group, label) = widget.homePage
+          ? _homeConversationDateGroup(conversation.updatedDate, now)
+          : (
+              '${conversation.updatedDate.year}-${conversation.updatedDate.month}-${conversation.updatedDate.day}',
+              conversation.timeDisplay,
+            );
+      final sectionKey = '__home_drawer_date__${namespace}__$group';
       if (sections.isEmpty || sections.last.sectionKey != sectionKey) {
         sections.add(
           _ConversationSection(
@@ -514,15 +444,23 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     _persistExpandedConversationSections();
   }
 
-  String _dateConversationSectionKeyForConversation(
-    ConversationModel conversation, {
-    required String namespace,
-  }) {
-    final date = conversation.updatedDate;
-    final year = date.year.toString().padLeft(4, '0');
-    final month = date.month.toString().padLeft(2, '0');
-    final day = date.day.toString().padLeft(2, '0');
-    return '__home_drawer_date__${namespace}__$year-$month-$day';
+  (String, String) _homeConversationDateGroup(DateTime date, DateTime now) {
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = DateTime(now.year, now.month, now.day - 1);
+    final weekStart = DateTime(now.year, now.month, now.day - now.weekday + 1);
+    final monthStart = DateTime(now.year, now.month);
+    final english = Localizations.localeOf(context).languageCode == 'en';
+    if (!date.isBefore(today)) return ('today', english ? 'Today' : '今天');
+    if (!date.isBefore(yesterday)) {
+      return ('yesterday', english ? 'Yesterday' : '昨天');
+    }
+    if (!date.isBefore(weekStart)) {
+      return ('week', english ? 'This week' : '这周');
+    }
+    if (!date.isBefore(monthStart)) {
+      return ('month', english ? 'This month' : '这个月');
+    }
+    return ('earlier', english ? 'Earlier' : '更久以前');
   }
 
   String _scheduledParentConversationSectionKey(ConversationModel parent) =>
@@ -548,7 +486,9 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       }
       return <String, bool>{
         for (final entry in decoded.entries)
-          if (entry.value is bool) entry.key.toString(): entry.value as bool,
+          if (entry.value is bool &&
+              !entry.key.toString().startsWith('__home_drawer_date__'))
+            entry.key.toString(): entry.value as bool,
       };
     } catch (error) {
       debugPrint('[HomeDrawer] Failed to load expanded sections: $error');
@@ -574,7 +514,9 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       label: context.l10n.homeDrawerPinnedConversations,
       itemCount: results.length,
       iconAssetPath: 'assets/home/pin_icon.svg',
-      childrenLeadingInset: _kPromotedConversationItemTitleInset,
+      childrenLeadingInset: widget.homePage
+          ? 0
+          : _kPromotedConversationItemTitleInset,
       children: [
         SliverList.builder(
           itemCount: results.length,
@@ -635,8 +577,8 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     required List<_ConversationSearchResult> results,
   }) {
     return SliverPadding(
-      padding: const EdgeInsets.only(
-        left: _kModeSectionTimelineLeadingInset,
+      padding: EdgeInsets.only(
+        left: widget.homePage ? 0 : _kModeSectionTimelineLeadingInset,
         top: 2,
       ),
       sliver: SliverMainAxisGroup(
@@ -710,32 +652,6 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     );
   }
 
-  /// 参考项目侧边栏的紧凑相对时间：今天 / N 天 / N 周 / N 个月 / N 年。
-  String _conversationRelativeTimeLabel(ConversationModel conversation) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final updated = conversation.updatedDate;
-    final updatedDay = DateTime(updated.year, updated.month, updated.day);
-    final days = today.difference(updatedDay).inDays;
-    final isEnglish = LegacyTextLocalizer.isEnglish;
-    if (days <= 0) {
-      return isEnglish ? 'Today' : '今天';
-    }
-    if (days < 7) {
-      return isEnglish ? '${days}d' : '$days 天';
-    }
-    if (days < 30) {
-      final weeks = days ~/ 7;
-      return isEnglish ? '${weeks}w' : '$weeks 周';
-    }
-    if (days < 365) {
-      final months = days ~/ 30;
-      return isEnglish ? '${months}mo' : '$months 个月';
-    }
-    final years = days ~/ 365;
-    return isEnglish ? '${years}y' : '$years 年';
-  }
-
   Widget _buildScheduledParentConversationRow(
     _ScheduledConversationGroup group, {
     required bool expanded,
@@ -746,85 +662,183 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     final childCount = group.children.length;
     final countText = childCount > 0 ? '$childCount' : '${group.taskCount}';
     final isEditing = _editingThreadKey == group.parent.threadKey;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: isEditing
+    final row = Builder(
+      builder: (rowContext) => Semantics(
+        key: ValueKey('home-current-thread-${group.parent.threadKey}'),
+        selected: _isSelectingConversations
+            ? _selectedConversationKeys.contains(group.parent.threadKey)
+            : widget.selectedThreadTarget == null
             ? null
-            : () => _openConversationFromDrawer(group.parent),
-        onLongPress: isEditing ? null : () => _startEditingTitle(group.parent),
-        borderRadius: BorderRadius.circular(8),
-        splashColor: palette.accentPrimary.withValues(alpha: 0.08),
-        highlightColor: Colors.transparent,
-        child: Stack(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(0, 8, 2, 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: _kScheduledParentToggleHitWidth,
-                    height: 24,
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: SizedBox(
-                        width: _kScheduledParentToggleIconSlotWidth,
-                        height: 24,
-                        child: Center(
-                          child: AnimatedRotation(
-                            turns: expanded ? 0 : -0.25,
-                            duration: HomeDrawerState._sectionToggleDuration,
-                            curve: Curves.easeInOutCubicEmphasized,
-                            child: SvgPicture.asset(
-                              'assets/common/chevron-down.svg',
-                              width: 16,
-                              height: 16,
-                              colorFilter: ColorFilter.mode(
-                                palette.textTertiary,
-                                BlendMode.srcIn,
+            : _isCurrentConversationRow(group.parent),
+        child: Opacity(
+          key: ValueKey(
+            'home-context-source-visibility-${group.parent.threadKey}',
+          ),
+          opacity:
+              widget.homePage &&
+                  _activeContextMenuThreadKey == group.parent.threadKey
+              ? 0
+              : 1,
+          child: GestureDetector(
+            key: ValueKey('home-source-row-${group.parent.threadKey}'),
+            onLongPressStart: isEditing || _isSelectingConversations
+                ? null
+                : (details) {
+                    if (widget.homePage) {
+                      _showConversationContextMenu(
+                        rowContext,
+                        group.parent,
+                        pressPosition: details.globalPosition,
+                      );
+                    } else {
+                      _startEditingTitle(group.parent);
+                    }
+                  },
+            child: Material(
+              color: _isCurrentConversationRow(group.parent)
+                  ? palette.accentPrimary.withValues(alpha: 0.08)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                onTap: isEditing
+                    ? null
+                    : () => _openConversationFromDrawer(group.parent),
+                borderRadius: BorderRadius.circular(8),
+                splashColor: palette.accentPrimary.withValues(alpha: 0.08),
+                highlightColor: Colors.transparent,
+                child: widget.homePage
+                    ? Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: widget.conversationSidebar ? 12 : 0,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: HomeConversationTileContent(
+                                conversation: group.parent,
+                                avatarColorIndex:
+                                    _homeAvatarColorIndices[group
+                                        .parent
+                                        .threadKey],
+                                title: title,
+                                titleWidget: isEditing
+                                    ? _buildEditableConversationTitle(
+                                        title: title,
+                                        isEditing: true,
+                                      )
+                                    : null,
+                                leading: _isSelectingConversations
+                                    ? _buildConversationSelectionIndicator(
+                                        group.parent,
+                                      )
+                                    : null,
+                                isExecuting: _runtimeCoordinator
+                                    .isAgentConversationActive(group.parent.id),
                               ),
                             ),
-                          ),
+                            IconButton(
+                              key: ValueKey(
+                                'home-scheduled-toggle-${group.parent.threadKey}',
+                              ),
+                              tooltip:
+                                  '${expanded ? context.trLegacy('收起') : context.trLegacy('展开')} · $countText',
+                              onPressed: onToggle,
+                              visualDensity: VisualDensity.compact,
+                              icon: AnimatedRotation(
+                                turns: expanded ? 0 : -0.25,
+                                duration:
+                                    HomeDrawerState._sectionToggleDuration,
+                                child: Icon(
+                                  LucideIcons.chevronDown,
+                                  size: 16,
+                                  color: palette.textTertiary,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
+                      )
+                    : Stack(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(0, 8, 2, 8),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                if (_isSelectingConversations)
+                                  _buildConversationSelectionIndicator(
+                                    group.parent,
+                                  ),
+                                SizedBox(
+                                  width: _kScheduledParentToggleHitWidth,
+                                  height: 24,
+                                  child: Align(
+                                    alignment: Alignment.centerRight,
+                                    child: SizedBox(
+                                      width:
+                                          _kScheduledParentToggleIconSlotWidth,
+                                      height: 24,
+                                      child: Center(
+                                        child: AnimatedRotation(
+                                          turns: expanded ? 0 : -0.25,
+                                          duration: HomeDrawerState
+                                              ._sectionToggleDuration,
+                                          curve:
+                                              Curves.easeInOutCubicEmphasized,
+                                          child: SvgPicture.asset(
+                                            'assets/common/chevron-down.svg',
+                                            width: 16,
+                                            height: 16,
+                                            colorFilter: ColorFilter.mode(
+                                              palette.textTertiary,
+                                              BlendMode.srcIn,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 2),
+                                Expanded(
+                                  child: _buildEditableConversationTitle(
+                                    title: title,
+                                    isEditing: isEditing,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  countText,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w500,
+                                    color: palette.textTertiary,
+                                    fontFamily: 'PingFang SC',
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Positioned(
+                            left: _isSelectingConversations ? 34 : 0,
+                            top: 0,
+                            bottom: 0,
+                            width: _kScheduledParentToggleHitWidth,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: onToggle,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(
-                    child: _buildEditableConversationTitle(
-                      title: title,
-                      isEditing: isEditing,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    countText,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                      color: palette.textTertiary,
-                      fontFamily: 'PingFang SC',
-                    ),
-                  ),
-                ],
               ),
             ),
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: _kScheduledParentToggleHitWidth,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onToggle,
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
+    return _wrapHomeConversationSwipe(group.parent, child: row);
   }
 
   Widget _buildScheduledChildConversationItem(
@@ -843,34 +857,41 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     );
   }
 
-  Widget _buildConversationDateSection(
-    _ConversationSection section, {
-    required String iconAssetPath,
-  }) {
-    final expanded = _isConversationSectionExpanded(section.sectionKey);
+  Widget _buildConversationDateSection(_ConversationSection section) {
     return SliverMainAxisGroup(
       slivers: [
         SliverToBoxAdapter(
-          child: _buildConversationSectionHeader(
-            section.label,
-            expanded: expanded,
-            itemCount: section.results.length,
-            onTap: () => _toggleConversationSection(section.sectionKey),
-            iconAssetPath: iconAssetPath,
-            leadingSlotWidth: _kConversationSectionHeaderLeadingSlotWidth,
-          ),
-        ),
-        if (expanded)
-          SliverPadding(
-            padding: const EdgeInsets.only(top: 4),
-            sliver: SliverList.builder(
-              itemCount: section.results.length,
-              itemBuilder: (context, index) => _buildSwipeConversationItem(
-                section.results[index],
-                showDivider: index != section.results.length - 1,
+          child: Semantics(
+            header: true,
+            child: Padding(
+              key: ValueKey('home-date-heading-${section.sectionKey}'),
+              padding: EdgeInsets.fromLTRB(
+                widget.conversationSidebar ? 12 : (widget.homePage ? 0 : 4),
+                12,
+                widget.conversationSidebar ? 16 : 4,
+                8,
+              ),
+              child: Text(
+                section.label,
+                style: TextStyle(
+                  fontSize: widget.homePage ? 15 : 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: context.omniPalette.textTertiary,
+                ),
               ),
             ),
           ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.only(top: 4),
+          sliver: SliverList.builder(
+            itemCount: section.results.length,
+            itemBuilder: (context, index) => _buildSwipeConversationItem(
+              section.results[index],
+              showDivider: index != section.results.length - 1,
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -883,6 +904,7 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     String? iconAssetPath,
     Key? iconKey,
     double leadingSlotWidth = 0,
+    bool showExpandChevron = false,
   }) {
     final palette = context.omniPalette;
     final headerContent = Semantics(
@@ -890,9 +912,12 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       toggled: expanded,
       onTap: onTap,
       child: Container(
-        constraints: const BoxConstraints(minHeight: 28),
+        constraints: BoxConstraints(minHeight: widget.homePage ? 44 : 28),
         alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.fromLTRB(4, 5, 4, 5),
+        padding: EdgeInsets.symmetric(
+          horizontal: widget.conversationSidebar ? 16 : 4,
+          vertical: 5,
+        ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
@@ -919,37 +944,57 @@ extension _HomeDrawerConversationList on HomeDrawerState {
             Text(
               label,
               style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0,
+                fontSize: widget.homePage ? 14 : 11.5,
+                fontWeight: widget.homePage ? FontWeight.w400 : FontWeight.w600,
+                letterSpacing: 0.2,
                 color: palette.textTertiary,
                 fontFamily: 'PingFang SC',
               ),
             ),
-            const SizedBox(width: 8),
-            Text(
-              '$itemCount',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w500,
-                color: palette.textTertiary.withValues(alpha: 0.82),
-                fontFamily: 'PingFang SC',
+            const SizedBox(width: 6),
+            if (!widget.homePage)
+              Text(
+                '$itemCount',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: palette.textTertiary.withValues(alpha: 0.8),
+                  fontFamily: 'PingFang SC',
+                ),
               ),
-            ),
+            if (showExpandChevron) ...[
+              const SizedBox(width: 4),
+              AnimatedRotation(
+                turns: expanded ? 0 : -0.25,
+                duration: HomeDrawerState._sectionToggleDuration,
+                curve: Curves.easeInOutCubicEmphasized,
+                child: Icon(
+                  LucideIcons.chevronDown,
+                  size: widget.homePage ? 16 : 13,
+                  color: palette.textTertiary.withValues(alpha: 0.8),
+                ),
+              ),
+            ],
             const Spacer(),
           ],
         ),
       ),
     );
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 4),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          splashColor: palette.accentPrimary.withValues(alpha: 0.06),
+          onTap: () {
+            performOmniSelectionHaptic();
+            onTap();
+          },
+          borderRadius: BorderRadius.circular(10),
+          splashFactory: NoSplash.splashFactory,
+          splashColor: Colors.transparent,
           highlightColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          hoverColor: Colors.transparent,
           child: headerContent,
         ),
       ),
@@ -963,31 +1008,47 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     bool isPrimary = false,
   }) {
     final palette = context.omniPalette;
+    final isDark = context.isDarkTheme;
     return Tooltip(
       message: tooltip,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: isPrimary
-                ? context.omniPalette.accentPrimary
-                : context.isDarkTheme
-                ? palette.surfaceSecondary
-                : Colors.white,
-            shape: BoxShape.circle,
-          ),
-          padding: const EdgeInsets.all(8),
-          child: SvgPicture.asset(
-            iconPath,
-            width: 16,
-            height: 16,
-            colorFilter: ColorFilter.mode(
-              isPrimary
-                  ? Theme.of(context).colorScheme.onPrimary
-                  : _drawerTextColor,
-              BlendMode.srcIn,
+      child: Material(
+        color: isPrimary
+            ? palette.accentPrimary
+            : isDark
+            ? palette.surfacePrimary
+            : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: isPrimary
+              ? BorderSide.none
+              : BorderSide(
+                  color: palette.borderSubtle.withValues(
+                    alpha: isDark ? 0.65 : 0.85,
+                  ),
+                  width: 0.75,
+                ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            performOmniSelectionHaptic();
+            onTap();
+          },
+          child: SizedBox(
+            width: 38,
+            height: 38,
+            child: Center(
+              child: SvgPicture.asset(
+                iconPath,
+                width: 16,
+                height: 16,
+                colorFilter: ColorFilter.mode(
+                  isPrimary
+                      ? Theme.of(context).colorScheme.onPrimary
+                      : _drawerTextColor,
+                  BlendMode.srcIn,
+                ),
+              ),
             ),
           ),
         ),
@@ -1001,6 +1062,7 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     bool includePinAction = true,
     String? trailingLabel,
   }) {
+    final palette = context.omniPalette;
     final conversation = result.conversation;
     final isBusy = _busyConversationKeys.contains(conversation.threadKey);
     final title = _resolveConversationTitle(conversation);
@@ -1012,100 +1074,268 @@ extension _HomeDrawerConversationList on HomeDrawerState {
     final showArchivedBadge = _isSearchActive && conversation.isArchived;
     final isEditing = _editingThreadKey == conversation.threadKey;
 
-    return ConversationSlidable(
-      key: ValueKey(conversation.threadKey),
-      itemKey: conversation.threadKey,
-      groupTag: 'home-drawer-conversations',
-      isBusy: isBusy,
-      actions: _buildDrawerActions(
-        conversation,
-        includePinAction: includePinAction,
-      ),
-      onDismissed: () => _deleteConversation(conversation),
-      onFullSwipe: () => conversation.isArchived
-          ? _unarchiveConversation(conversation)
-          : _archiveConversation(conversation),
-      child: Column(
-        children: [
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: isEditing
-                  ? null
-                  : () => _openConversationFromDrawer(conversation),
-              onLongPress: isEditing
-                  ? null
-                  : () => _startEditingTitle(conversation),
-              borderRadius: BorderRadius.circular(14),
-              splashColor: context.omniPalette.accentPrimary.withValues(
-                alpha: 0.08,
-              ),
-              highlightColor: Colors.transparent,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(4, 9, 2, 9),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Expanded(
-                          child: _buildEditableConversationTitle(
-                            title: title,
-                            isEditing: isEditing,
+    final row = Semantics(
+      key: ValueKey('home-current-thread-${conversation.threadKey}'),
+      selected: _isSelectingConversations
+          ? _selectedConversationKeys.contains(conversation.threadKey)
+          : widget.selectedThreadTarget == null
+          ? null
+          : _isCurrentConversationRow(conversation),
+      child: IgnorePointer(
+        key: ValueKey(conversation.threadKey),
+        ignoring: isBusy,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 180),
+          opacity: isBusy && !widget.homePage ? 0.72 : 1,
+          child: Column(
+            children: [
+              Builder(
+                builder: (rowContext) => Opacity(
+                  key: ValueKey(
+                    'home-context-source-visibility-${conversation.threadKey}',
+                  ),
+                  opacity:
+                      widget.homePage &&
+                          _activeContextMenuThreadKey == conversation.threadKey
+                      ? 0
+                      : 1,
+                  child: GestureDetector(
+                    key: ValueKey('home-source-row-${conversation.threadKey}'),
+                    onLongPressStart: isEditing || _isSelectingConversations
+                        ? null
+                        : (details) => _showConversationContextMenu(
+                            rowContext,
+                            conversation,
+                            pressPosition: details.globalPosition,
+                            includePinAction: includePinAction,
+                            previewOverride: _isSearchActive
+                                ? result.matchedPreview
+                                : null,
+                            showArchivedBadge: showArchivedBadge,
                           ),
+                    child: Material(
+                      color: _isCurrentConversationRow(conversation)
+                          ? palette.accentPrimary.withValues(alpha: 0.08)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
+                      child: InkWell(
+                        onTap: isEditing
+                            ? null
+                            : () => _openConversationFromDrawer(conversation),
+                        borderRadius: BorderRadius.circular(12),
+                        splashColor: palette.accentPrimary.withValues(
+                          alpha: 0.08,
                         ),
-                        if (showArchivedBadge) ...[
-                          const SizedBox(width: 10),
-                          _buildArchivedBadge(),
-                        ],
-                        if (agentLabel != null && !isEditing) ...[
-                          const SizedBox(width: 10),
-                          _buildConversationAgentBadge(
-                            conversation: conversation,
-                            agentLabel: agentLabel,
-                            isExecuting: isExecuting,
-                            isCompleted: isCompleted,
-                          ),
-                        ],
-                        if (trailingLabel != null && !isEditing) ...[
-                          const SizedBox(width: 10),
-                          Text(
-                            trailingLabel,
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w400,
-                              color: context.omniPalette.textTertiary,
-                              fontFamily: 'PingFang SC',
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    _buildConversationImagePreviewStrip(conversation),
-                    if (_isSearchActive && result.matchedPreview != null) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        result.matchedPreview!,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w400,
-                          color: _drawerSecondaryTextColor,
-                          height: 1.4,
-                          fontFamily: 'PingFang SC',
+                        highlightColor: palette.accentPrimary.withValues(
+                          alpha: 0.04,
                         ),
+                        child: widget.homePage
+                            ? Padding(
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: widget.conversationSidebar
+                                      ? 12
+                                      : 0,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    HomeConversationTileContent(
+                                      conversation: conversation,
+                                      avatarColorIndex:
+                                          _homeAvatarColorIndices[conversation
+                                              .threadKey],
+                                      title: title,
+                                      titleWidget: isEditing
+                                          ? _buildEditableConversationTitle(
+                                              title: title,
+                                              isEditing: true,
+                                            )
+                                          : null,
+                                      previewOverride: _isSearchActive
+                                          ? result.matchedPreview
+                                          : null,
+                                      leading: _isSelectingConversations
+                                          ? _buildConversationSelectionIndicator(
+                                              conversation,
+                                            )
+                                          : null,
+                                      badge: showArchivedBadge
+                                          ? _buildArchivedBadge()
+                                          : null,
+                                      isExecuting: isExecuting,
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 58),
+                                      child:
+                                          _buildConversationImagePreviewStrip(
+                                            conversation,
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : Padding(
+                                padding: const EdgeInsets.fromLTRB(4, 9, 2, 9),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.center,
+                                      children: [
+                                        if (_isSelectingConversations)
+                                          _buildConversationSelectionIndicator(
+                                            conversation,
+                                          ),
+                                        Expanded(
+                                          child:
+                                              _buildEditableConversationTitle(
+                                                title: title,
+                                                isEditing: isEditing,
+                                              ),
+                                        ),
+                                        if (showArchivedBadge) ...[
+                                          const SizedBox(width: 10),
+                                          _buildArchivedBadge(),
+                                        ],
+                                        if (agentLabel != null &&
+                                            !isEditing) ...[
+                                          const SizedBox(width: 10),
+                                          _buildConversationAgentBadge(
+                                            conversation: conversation,
+                                            agentLabel: agentLabel,
+                                            isExecuting: isExecuting,
+                                            isCompleted: isCompleted,
+                                          ),
+                                        ],
+                                        if (trailingLabel != null &&
+                                            !isEditing) ...[
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            trailingLabel,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w400,
+                                              color: palette.textTertiary,
+                                              fontFamily: 'PingFang SC',
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                    _buildConversationImagePreviewStrip(
+                                      conversation,
+                                    ),
+                                    if (_isSearchActive &&
+                                        result.matchedPreview != null) ...[
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        result.matchedPreview!,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w400,
+                                          color: _drawerSecondaryTextColor,
+                                          height: 1.4,
+                                          fontFamily: 'PingFang SC',
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
                       ),
-                    ],
-                  ],
+                    ),
+                  ),
+                ),
+              ),
+              if (showDivider) const SizedBox(height: 2),
+            ],
+          ),
+        ),
+      ),
+    );
+    return _wrapHomeConversationSwipe(conversation, child: row);
+  }
+
+  Widget _wrapHomeConversationSwipe(
+    ConversationModel conversation, {
+    required Widget child,
+  }) {
+    if (!widget.homePage ||
+        _isSelectingConversations ||
+        _editingThreadKey == conversation.threadKey) {
+      return child;
+    }
+
+    final palette = context.omniPalette;
+    void toggleArchive() => conversation.isArchived
+        ? _unarchiveConversation(conversation)
+        : _archiveConversation(conversation);
+
+    return ConversationSlidable(
+      key: ValueKey('home-swipe-${conversation.threadKey}'),
+      itemKey: conversation.threadKey,
+      groupTag: 'home-conversations',
+      isBusy: _busyConversationKeys.contains(conversation.threadKey),
+      followHabitualHand: false,
+      resetAfterFullSwipe: true,
+      onDismissed: toggleArchive,
+      onFullSwipe: toggleArchive,
+      actions: [
+        ConversationSlideAction(
+          onPressed: () => _deleteConversation(conversation),
+          backgroundColor: AppColors.alertRed,
+          child: Tooltip(
+            message: context.trLegacy('删除对话'),
+            child: Center(
+              child: SvgPicture.asset(
+                'assets/memory/memory_delete.svg',
+                width: 18,
+                height: 18,
+                colorFilter: const ColorFilter.mode(
+                  Colors.white,
+                  BlendMode.srcIn,
                 ),
               ),
             ),
           ),
-          if (showDivider) const SizedBox(height: 2),
-        ],
-      ),
+        ),
+        ConversationSlideAction(
+          onPressed: toggleArchive,
+          backgroundColor: context.isDarkTheme
+              ? Color.lerp(palette.surfaceElevated, palette.accentPrimary, 0.3)!
+              : AppColors.buttonPrimary,
+          borderRadius: const BorderRadius.only(
+            topRight: Radius.circular(4),
+            bottomRight: Radius.circular(4),
+          ),
+          child: Tooltip(
+            message: conversation.isArchived
+                ? (LegacyTextLocalizer.isEnglish ? 'Unarchive' : '取消归档')
+                : (LegacyTextLocalizer.isEnglish ? 'Archive' : '归档'),
+            child: Center(
+              child: conversation.isArchived
+                  ? const Icon(
+                      Icons.unarchive_outlined,
+                      size: 18,
+                      color: Colors.white,
+                    )
+                  : SvgPicture.asset(
+                      'assets/home/archive_icon.svg',
+                      width: 18,
+                      height: 18,
+                      colorFilter: const ColorFilter.mode(
+                        Colors.white,
+                        BlendMode.srcIn,
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      ],
+      child: child,
     );
   }
 
@@ -1124,6 +1354,7 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       'codex-acp' || 'codex-remote' => 'Codex',
       'claude-code-acp' => 'Claude Code',
       'opencode-acp' => 'OpenCode',
+      'pi-acp' => 'Pi',
       'deepseek-harness-acp' => 'DeepSeek',
       _ => _humanizeAgentId(agentId),
     };
@@ -1225,8 +1456,8 @@ extension _HomeDrawerConversationList on HomeDrawerState {
         cursorColor: _drawerTextColor.withValues(alpha: 0.6),
         cursorWidth: 1.5,
         style: TextStyle(
-          fontSize: 13,
-          fontWeight: fontWeight,
+          fontSize: widget.homePage ? 16 : 13,
+          fontWeight: widget.homePage ? FontWeight.w600 : fontWeight,
           color: _drawerTextColor,
           height: 1.35,
           fontFamily: 'PingFang SC',
@@ -1251,8 +1482,8 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(
-        fontSize: 13,
-        fontWeight: fontWeight,
+        fontSize: widget.homePage ? 16 : 13,
+        fontWeight: widget.homePage ? FontWeight.w600 : fontWeight,
         color: _drawerTextColor,
         height: 1.35,
         fontFamily: 'PingFang SC',

@@ -410,18 +410,6 @@ abstract class AppLocalizations {
   /// **'开启后，聊天页键盘回车为换行；关闭后，回车直接发送'**
   String get settingsIndependentSendButtonSubtitle;
 
-  /// No description provided for @settingsPredictiveBackTitle.
-  ///
-  /// In zh, this message translates to:
-  /// **'预测性返回手势'**
-  String get settingsPredictiveBackTitle;
-
-  /// No description provided for @settingsPredictiveBackSubtitle.
-  ///
-  /// In zh, this message translates to:
-  /// **'开启后，返回手势可跟随手指预览上一页面或桌面；关闭则保持旧版返回行为'**
-  String get settingsPredictiveBackSubtitle;
-
   /// No description provided for @settingsHabitualHandTitle.
   ///
   /// In zh, this message translates to:
@@ -2555,19 +2543,19 @@ abstract class AppLocalizations {
   /// No description provided for @aboutApkSourceDisclaimer.
   ///
   /// In zh, this message translates to:
-  /// **'使用本软件即表示您同意我们的隐私政策，并同意我们通过开源的更新 Worker 收集匿名使用信息，以持续改进软件。因使用本软件产生的任何损失或后果由您自行承担。'**
+  /// **'使用本软件即表示您同意我们的隐私政策，并同意我们通过开源的网站后端收集匿名使用信息，以持续改进软件。因使用本软件产生的任何损失或后果由您自行承担。'**
   String get aboutApkSourceDisclaimer;
 
   /// No description provided for @aboutApkSourceOptionCnb.
   ///
   /// In zh, this message translates to:
-  /// **'Cloudflare R2'**
+  /// **'小万官网'**
   String get aboutApkSourceOptionCnb;
 
   /// No description provided for @aboutApkSourceOptionCnbDescription.
   ///
   /// In zh, this message translates to:
-  /// **'通过更新 Worker 分发'**
+  /// **'通过小万官网分发'**
   String get aboutApkSourceOptionCnbDescription;
 
   /// No description provided for @aboutApkSourceOptionGithub.
@@ -2798,17 +2786,17 @@ abstract class AppLocalizations {
   /// **'OpenCode CLI（内置 ACP 支持）'**
   String get alpineOpenCode;
 
-  /// No description provided for @alpineDeepSeekHarness.
-  ///
-  /// In zh, this message translates to:
-  /// **'DeepSeek Harness（dsh）官方 ACP 运行组件'**
-  String get alpineDeepSeekHarness;
-
   /// No description provided for @alpineKimiCode.
   ///
   /// In zh, this message translates to:
   /// **'Kimi Code 官方 CLI 与本地 Web 界面'**
   String get alpineKimiCode;
+
+  /// No description provided for @alpinePi.
+  ///
+  /// In zh, this message translates to:
+  /// **'Pi Agent 与 MCP 工具支持'**
+  String get alpinePi;
 
   /// No description provided for @alpineSshClient.
   ///
@@ -3439,6 +3427,198 @@ abstract class AppLocalizations {
   /// In zh, this message translates to:
   /// **'好好和今天说晚安～'**
   String get homeDrawerLateNightSub2;
+
+  /// No description provided for @dialogCancel.
+  ///
+  /// In zh, this message translates to:
+  /// **'取消'**
+  String get dialogCancel;
+
+  /// No description provided for @dialogConfirm.
+  ///
+  /// In zh, this message translates to:
+  /// **'确认'**
+  String get dialogConfirm;
+
+  /// No description provided for @dialogOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'确定'**
+  String get dialogOk;
+
+  /// No description provided for @dialogLoading.
+  ///
+  /// In zh, this message translates to:
+  /// **'加载中'**
+  String get dialogLoading;
+
+  /// No description provided for @dialogPleaseWait.
+  ///
+  /// In zh, this message translates to:
+  /// **'请稍候...'**
+  String get dialogPleaseWait;
+
+  /// No description provided for @webviewDownloading.
+  ///
+  /// In zh, this message translates to:
+  /// **'正在下载中，请稍候...'**
+  String get webviewDownloading;
+
+  /// No description provided for @webviewDownloadStarted.
+  ///
+  /// In zh, this message translates to:
+  /// **'开始下载...'**
+  String get webviewDownloadStarted;
+
+  /// No description provided for @webviewImageSaved.
+  ///
+  /// In zh, this message translates to:
+  /// **'图片已保存到相册'**
+  String get webviewImageSaved;
+
+  /// No description provided for @webviewFileSavedDownloads.
+  ///
+  /// In zh, this message translates to:
+  /// **'文件已保存到下载目录'**
+  String get webviewFileSavedDownloads;
+
+  /// No description provided for @webviewFileSaved.
+  ///
+  /// In zh, this message translates to:
+  /// **'文件已下载：{fileName}'**
+  String webviewFileSaved(Object fileName);
+
+  /// No description provided for @webviewDownloadFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'下载失败'**
+  String get webviewDownloadFailed;
+
+  /// No description provided for @webviewBrowse.
+  ///
+  /// In zh, this message translates to:
+  /// **'网页浏览'**
+  String get webviewBrowse;
+
+  /// No description provided for @webviewRefresh.
+  ///
+  /// In zh, this message translates to:
+  /// **'刷新'**
+  String get webviewRefresh;
+
+  /// No description provided for @webviewLoadFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'页面加载失败'**
+  String get webviewLoadFailed;
+
+  /// No description provided for @webviewUnknownError.
+  ///
+  /// In zh, this message translates to:
+  /// **'未知错误'**
+  String get webviewUnknownError;
+
+  /// No description provided for @webviewReload.
+  ///
+  /// In zh, this message translates to:
+  /// **'重新加载'**
+  String get webviewReload;
+
+  /// No description provided for @openclawBaseUrlEmpty.
+  ///
+  /// In zh, this message translates to:
+  /// **'OpenClaw Base URL 为空，请先配置'**
+  String get openclawBaseUrlEmpty;
+
+  /// No description provided for @openclawConnected.
+  ///
+  /// In zh, this message translates to:
+  /// **'OpenClaw 连接成功，Gateway 协议正常'**
+  String get openclawConnected;
+
+  /// No description provided for @openclawConnectedNoChallenge.
+  ///
+  /// In zh, this message translates to:
+  /// **'OpenClaw 已连接但未收到 challenge，请检查 Gateway 版本'**
+  String get openclawConnectedNoChallenge;
+
+  /// No description provided for @openclawTimeout.
+  ///
+  /// In zh, this message translates to:
+  /// **'OpenClaw 连接超时，请检查服务地址和网络'**
+  String get openclawTimeout;
+
+  /// No description provided for @openclawFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'OpenClaw 连接失败：{error}'**
+  String openclawFailed(Object error);
+
+  /// No description provided for @chatHistoryExpandAll.
+  ///
+  /// In zh, this message translates to:
+  /// **'展开全部日期'**
+  String get chatHistoryExpandAll;
+
+  /// No description provided for @chatHistoryCollapseAll.
+  ///
+  /// In zh, this message translates to:
+  /// **'折叠全部日期'**
+  String get chatHistoryCollapseAll;
+
+  /// No description provided for @chatHistoryMessageCount.
+  ///
+  /// In zh, this message translates to:
+  /// **'{count} 条消息'**
+  String chatHistoryMessageCount(Object count);
+
+  /// No description provided for @chatHistoryUntitled.
+  ///
+  /// In zh, this message translates to:
+  /// **'未命名对话'**
+  String get chatHistoryUntitled;
+
+  /// No description provided for @authContinueTaskRequires.
+  ///
+  /// In zh, this message translates to:
+  /// **'继续任务仅要求：{permissions}'**
+  String authContinueTaskRequires(Object permissions);
+
+  /// No description provided for @authSetPermissions.
+  ///
+  /// In zh, this message translates to:
+  /// **'设置权限'**
+  String get authSetPermissions;
+
+  /// No description provided for @authPermissionsSafe.
+  ///
+  /// In zh, this message translates to:
+  /// **'请放心，这些权限你随时可以收回'**
+  String get authPermissionsSafe;
+
+  /// No description provided for @authCheckingPermissions.
+  ///
+  /// In zh, this message translates to:
+  /// **'权限检查中...'**
+  String get authCheckingPermissions;
+
+  /// No description provided for @authContinueTask.
+  ///
+  /// In zh, this message translates to:
+  /// **'继续任务'**
+  String get authContinueTask;
+
+  /// No description provided for @permissionAccessibility.
+  ///
+  /// In zh, this message translates to:
+  /// **'无障碍权限'**
+  String get permissionAccessibility;
+
+  /// No description provided for @permissionAccessibilityAndroidGui.
+  ///
+  /// In zh, this message translates to:
+  /// **'Android GUI 无障碍权限'**
+  String get permissionAccessibilityAndroidGui;
 }
 
 class _AppLocalizationsDelegate

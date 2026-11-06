@@ -57,15 +57,8 @@ extension _ChatInputAttachmentSupport on _ChatInputAreaStateBase {
             height: 72,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: context.isDarkTheme
-                    ? palette.borderSubtle
-                    : const Color(0xFFD3E3FB),
-                width: 1,
-              ),
-              color: context.isDarkTheme
-                  ? palette.surfaceSecondary
-                  : const Color(0xFFF1F6FF),
+              border: Border.all(color: palette.borderSubtle, width: 1),
+              color: palette.surfaceSecondary,
             ),
             clipBehavior: Clip.antiAlias,
             child: Hero(
@@ -73,11 +66,11 @@ extension _ChatInputAttachmentSupport on _ChatInputAreaStateBase {
               child: Image.file(
                 File(item.path),
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const Center(
+                errorBuilder: (_, _, _) => Center(
                   child: Icon(
                     Icons.image_not_supported_outlined,
                     size: 20,
-                    color: Color(0xFF6A83AA),
+                    color: palette.textTertiary,
                   ),
                 ),
               ),
@@ -92,18 +85,10 @@ extension _ChatInputAttachmentSupport on _ChatInputAreaStateBase {
   Widget _buildFileAttachmentTile(ChatInputAttachment item) {
     final sizeText = _formatAttachmentSize(item.size);
     final palette = context.omniPalette;
-    final tileColor = context.isDarkTheme
-        ? palette.surfaceSecondary
-        : const Color(0xFFF1F6FF);
-    final tileBorderColor = context.isDarkTheme
-        ? palette.borderSubtle
-        : const Color(0xFFD3E3FB);
-    final textColor = context.isDarkTheme
-        ? palette.textSecondary
-        : const Color(0xFF35517A);
-    final iconColor = context.isDarkTheme
-        ? palette.accentPrimary
-        : const Color(0xFF3B6FD6);
+    final tileColor = palette.surfaceSecondary;
+    final tileBorderColor = palette.borderSubtle;
+    final textColor = palette.textSecondary;
+    final iconColor = palette.textPrimary;
     return Stack(
       children: [
         Container(

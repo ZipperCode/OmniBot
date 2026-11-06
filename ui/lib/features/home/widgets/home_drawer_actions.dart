@@ -2,6 +2,8 @@
 
 part of 'home_drawer.dart';
 
+enum _ConversationContextAction { pin, rename, copy, select, archive, delete }
+
 extension _HomeDrawerActions on HomeDrawerState {
   bool get _shouldCloseOnNavigate => widget.closeOnNavigate && !widget.embedded;
 
@@ -17,12 +19,30 @@ extension _HomeDrawerActions on HomeDrawerState {
       widget.onThreadTargetSelected!(target);
       return;
     }
-    _maybeCloseDrawer();
-    GoRouterManager.push(
+    final queryParams = _threadTargetQueryParams(target);
+    void open() => GoRouterManager.push(
       '/home/chat',
       extra: target,
-      queryParams: _threadTargetQueryParams(target),
+      queryParams: queryParams,
     );
+    if (!_closeDrawerForNavigation()) {
+      open();
+      return;
+    }
+    // Switching the chat target rebuilds the whole chat page (history load,
+    // message list, composer). Doing it in the frames of the close slide made
+    // every close stutter, so it runs once the drawer has settled. The drawer
+    // state is gone by then; the router does not need it.
+    Future<void>.delayed(HomeDrawerState.drawerSettleDelay, open);
+  }
+
+  /// Pops a modal drawer. Returns false when there was nothing to close.
+  bool _closeDrawerForNavigation() {
+    if (!_shouldCloseOnNavigate || !Navigator.of(context).canPop()) {
+      return false;
+    }
+    Navigator.pop(context);
+    return true;
   }
 
   Map<String, dynamic> _threadTargetQueryParams(
@@ -48,12 +68,18 @@ extension _HomeDrawerActions on HomeDrawerState {
     // 永远不应继承它(否则 subagent_dispatch / schedule_* / alarm_* / calendar_*
     // 都会被 AgentConversationModePolicy 过滤掉)。chatOnly 保持继承,因为那是用户
     // 主动选择的纯聊天模式。
-    final newMode = widget.newConversationMode == ConversationMode.subagent
-        ? ConversationMode.agent
+    final requestedMode = widget.homePage
+        ? _homeFilter.mode
         : widget.newConversationMode;
+    final newMode = requestedMode == ConversationMode.subagent
+        ? ConversationMode.agent
+        : requestedMode;
     _openThreadTarget(
       ConversationThreadTarget.newConversation(
         mode: newMode,
+        agentId: widget.homePage && newMode == ConversationMode.agent
+            ? _homeFilter.agentId ?? 'xiaowan-acp'
+            : null,
         requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
       ),
     );
@@ -175,6 +201,10 @@ extension _HomeDrawerActions on HomeDrawerState {
   }
 
   void _openConversationFromDrawer(ConversationModel conversation) {
+    if (_isSelectingConversations) {
+      _toggleConversationSelection(conversation);
+      return;
+    }
     if (_busyConversationKeys.contains(conversation.threadKey)) {
       return;
     }
@@ -186,11 +216,11 @@ extension _HomeDrawerActions on HomeDrawerState {
         // persisted. Resolve that missing binding at the boundary so a
         // switch cannot temporarily inherit whichever ACP is selected in the
         // global UI state.
-        agentId:
-            conversation.agentId ??
-            (conversation.mode == ConversationMode.agent
-                ? 'xiaowan-acp'
-                : null),
+        agentId: conversation.agentId?.trim().isNotEmpty == true
+            ? conversation.agentId!.trim()
+            : (conversation.mode == ConversationMode.agent
+                  ? 'xiaowan-acp'
+                  : null),
       ),
     );
   }
@@ -201,7 +231,7 @@ extension _HomeDrawerActions on HomeDrawerState {
     }
 
     final originalIndex = _allConversations.indexWhere(
-      (item) => item.id == conversation.id,
+      (item) => item.threadKey == conversation.threadKey,
     );
     if (originalIndex < 0) {
       return;
@@ -396,95 +426,188 @@ extension _HomeDrawerActions on HomeDrawerState {
     );
   }
 
-  List<ConversationSlideAction> _buildDrawerActions(
+  Future<void> _showConversationContextMenu(
+    BuildContext rowContext,
     ConversationModel conversation, {
+    required Offset pressPosition,
     bool includePinAction = true,
-  }) {
-    final actions = <ConversationSlideAction>[
-      ConversationSlideAction(
-        onPressed: () => _deleteConversation(conversation),
-        backgroundColor: AppColors.alertRed,
-        child: Center(
-          child: SvgPicture.asset(
-            'assets/memory/memory_delete.svg',
-            width: HomeDrawerState._conversationActionIconSize,
-            height: HomeDrawerState._conversationActionIconSize,
-            colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
-          ),
-        ),
-      ),
-      if (includePinAction)
-        ConversationSlideAction(
-          onPressed: () => _setConversationPinned(
-            conversation,
-            pinned: !conversation.isPinned,
-          ),
-          backgroundColor: context.isDarkTheme
-              ? Color.lerp(
-                  context.omniPalette.surfaceElevated,
-                  context.omniPalette.accentPrimary,
-                  0.18,
-                )!
-              : AppColors.text.withValues(alpha: 0.72),
-          child: Center(
-            child: SvgPicture.asset(
-              conversation.isPinned
-                  ? 'assets/home/pin_off_icon.svg'
-                  : 'assets/home/pin_icon.svg',
-              width: HomeDrawerState._conversationActionIconSize,
-              height: HomeDrawerState._conversationActionIconSize,
-              colorFilter: const ColorFilter.mode(
-                Colors.white,
-                BlendMode.srcIn,
-              ),
-            ),
-          ),
-        ),
-      ConversationSlideAction(
-        onPressed: () => _copyConversation(conversation),
-        backgroundColor: context.isDarkTheme
-            ? context.omniPalette.surfaceElevated
-            : AppColors.text.withValues(alpha: 0.62),
-        child: const Center(
-          child: Icon(
-            Icons.content_copy_rounded,
-            size: HomeDrawerState._conversationActionIconSize,
-            color: Colors.white,
-          ),
-        ),
-      ),
-      ConversationSlideAction(
-        onPressed: () => conversation.isArchived
-            ? _unarchiveConversation(conversation)
-            : _archiveConversation(conversation),
-        backgroundColor: context.isDarkTheme
-            ? Color.lerp(
-                context.omniPalette.surfaceElevated,
-                context.omniPalette.accentPrimary,
-                0.3,
-              )!
-            : AppColors.buttonPrimary,
-        borderRadius: HomeDrawerState._drawerTrailingActionRadius,
-        child: Center(
-          child: conversation.isArchived
-              ? Icon(
-                  Icons.unarchive_outlined,
-                  size: HomeDrawerState._conversationActionIconSize,
-                  color: Colors.white,
-                )
-              : SvgPicture.asset(
-                  'assets/home/archive_icon.svg',
-                  width: HomeDrawerState._conversationActionIconSize,
-                  height: HomeDrawerState._conversationActionIconSize,
-                  colorFilter: const ColorFilter.mode(
-                    Colors.white,
-                    BlendMode.srcIn,
+    String? previewOverride,
+    bool showArchivedBadge = false,
+  }) async {
+    if (_busyConversationKeys.contains(conversation.threadKey) ||
+        _activeContextMenuThreadKey != null) {
+      return;
+    }
+    unawaited(Feedback.forLongPress(rowContext));
+
+    final box = rowContext.findRenderObject() as RenderBox?;
+    final navigator = Navigator.of(rowContext, rootNavigator: true);
+    final overlay = navigator.overlay?.context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize || overlay == null || !overlay.hasSize) {
+      return;
+    }
+
+    final rowTopLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final rowBottomRight = box.localToGlobal(
+      box.size.bottomRight(Offset.zero),
+      ancestor: overlay,
+    );
+    if (widget.homePage) {
+      setState(() => _activeContextMenuThreadKey = conversation.threadKey);
+    }
+    final route = ConversationContextMenuRoute<_ConversationContextAction>(
+      reduceMotion: MediaQuery.disableAnimationsOf(rowContext),
+      barrierLabel: MaterialLocalizations.of(rowContext)
+          .modalBarrierDismissLabel,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final isEnglish =
+            Localizations.localeOf(dialogContext).languageCode == 'en';
+        String tr(String zh, String en) => isEnglish ? en : zh;
+        return ConversationContextMenu(
+          animation: animation,
+          onDismiss: () => Navigator.of(dialogContext).pop(),
+          anchor: Rect.fromPoints(rowTopLeft, rowBottomRight),
+          origin: overlay.globalToLocal(pressPosition),
+          preview: widget.homePage
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: HomeConversationTileContent(
+                    conversation: conversation,
+                    avatarColorIndex:
+                        _homeAvatarColorIndices[conversation.threadKey],
+                    title: _resolveConversationTitle(conversation),
+                    previewOverride: previewOverride,
+                    badge: showArchivedBadge ? _buildArchivedBadge() : null,
+                    isExecuting: _runtimeCoordinator.isAgentConversationActive(
+                      conversation.id,
+                    ),
                   ),
-                ),
-        ),
-      ),
-    ];
-    return actions;
+                )
+              : null,
+          actions: [
+            if (includePinAction)
+              _buildConversationMenuOption(
+                dialogContext,
+                action: _ConversationContextAction.pin,
+                icon: conversation.isPinned
+                    ? LucideIcons.pinOff
+                    : LucideIcons.pin,
+                label: conversation.isPinned
+                    ? tr('取消置顶', 'Unpin')
+                    : tr('置顶对话', 'Pin'),
+              ),
+            _buildConversationMenuOption(
+              dialogContext,
+              action: _ConversationContextAction.rename,
+              icon: LucideIcons.pencil,
+              label: tr('重命名', 'Rename'),
+            ),
+            _buildConversationMenuOption(
+              dialogContext,
+              action: _ConversationContextAction.copy,
+              icon: LucideIcons.copy,
+              label: tr('复制对话', 'Copy'),
+            ),
+            if (widget.homePage)
+              _buildConversationMenuOption(
+                dialogContext,
+                action: _ConversationContextAction.select,
+                icon: LucideIcons.listChecks,
+                label: tr('多选', 'Select'),
+              ),
+            _buildConversationMenuOption(
+              dialogContext,
+              action: _ConversationContextAction.archive,
+              icon: conversation.isArchived
+                  ? LucideIcons.archiveRestore
+                  : LucideIcons.archive,
+              label: conversation.isArchived
+                  ? tr('取消归档', 'Unarchive')
+                  : tr('归档对话', 'Archive'),
+            ),
+            _buildConversationMenuOption(
+              dialogContext,
+              action: _ConversationContextAction.delete,
+              icon: LucideIcons.trash2,
+              label: tr('删除对话', 'Delete'),
+              isDestructive: true,
+            ),
+          ],
+        );
+      },
+    );
+    var sourceRestored = false;
+    void restoreSource() {
+      if (sourceRestored) return;
+      sourceRestored = true;
+      if (mounted && _activeContextMenuThreadKey == conversation.threadKey) {
+        setState(() => _activeContextMenuThreadKey = null);
+      }
+    }
+
+    final selection = navigator.push(route);
+    final animation = route.animation!;
+    void restoreWhenReturned() {
+      if (animation.value == 0 && animation.status != AnimationStatus.forward) {
+        restoreSource();
+      }
+    }
+
+    // Restore before the closing animation's final paint so the row never
+    // disappears between its focused preview and the original list position.
+    animation.addListener(restoreWhenReturned);
+    _ConversationContextAction? selectedAction;
+    try {
+      selectedAction = await selection;
+      // A menu action starts only after both focused row and menu are removed.
+      await route.completed;
+    } finally {
+      animation.removeListener(restoreWhenReturned);
+      restoreSource();
+    }
+
+    if (!mounted || selectedAction == null) return;
+    switch (selectedAction) {
+      case _ConversationContextAction.pin:
+        await _setConversationPinned(
+          conversation,
+          pinned: !conversation.isPinned,
+        );
+      case _ConversationContextAction.rename:
+        _startEditingTitle(conversation);
+      case _ConversationContextAction.copy:
+        await _copyConversation(conversation);
+      case _ConversationContextAction.select:
+        _startConversationSelection(conversation);
+      case _ConversationContextAction.archive:
+        if (conversation.isArchived) {
+          await _unarchiveConversation(conversation);
+        } else {
+          await _archiveConversation(conversation);
+        }
+      case _ConversationContextAction.delete:
+        await _deleteConversation(conversation);
+    }
+  }
+
+  Widget _buildConversationMenuOption(
+    BuildContext dialogContext, {
+    required _ConversationContextAction action,
+    required IconData icon,
+    required String label,
+    bool isDestructive = false,
+  }) {
+    return OmniMenuItem(
+      key: ValueKey('home-drawer-context-${action.name}'),
+      label: label,
+      leading: Icon(icon),
+      destructive: isDestructive,
+      onTap: () {
+        if (ModalRoute.of(dialogContext)?.isCurrent != true) return;
+        performOmniSelectionHaptic();
+        Navigator.of(dialogContext).pop(action);
+      },
+    );
   }
 
   String _resolveConversationTitle(ConversationModel conversation) {

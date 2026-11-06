@@ -1,12 +1,200 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/chat/widgets/acp_config_button.dart';
 import 'package:ui/widgets/conversation_model_selector.dart';
 import 'package:ui/widgets/provider_vendor_icon.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 void main() {
+  testWidgets('ACP model handoff waits for source return and runs only once', (
+    tester,
+  ) async {
+    var opened = 0;
+    final visibility = <bool>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AcpConfigButton(
+            isRunning: false,
+            load: () async => {
+              'sessionId': 'existing-session',
+              'configOptions': [
+                {
+                  'id': 'model',
+                  'category': 'model',
+                  'type': 'select',
+                  'currentValue': 'old',
+                  'options': [
+                    {'value': 'old', 'name': 'Old model'},
+                  ],
+                },
+              ],
+            },
+            write: (_, _, _) async => {},
+            onVisibilityChanged: visibility.add,
+            configureModel: (source) async {
+              expect(source.mounted, isTrue);
+              opened++;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('chat-acp-config-button')));
+    await tester.pumpAndSettle();
+    expect(visibility, [true]);
+    await tester.tap(find.byKey(const ValueKey('acp-config-model')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(opened, 0);
+    expect(visibility, [true]);
+    await tester.pumpAndSettle();
+    expect(opened, 1);
+    expect(find.byType(AcpConfigPanel), findsNothing);
+    expect(visibility, [true, false]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'compact label projects official selection without eager session loading',
+    (tester) async {
+      var loads = 0;
+      var identity = 'conversation-a';
+      String? label = 'provider/gpt-5.4';
+      late StateSetter update;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                update = setState;
+                return AcpConfigButton(
+                  modelLabel: label,
+                  presentationIdentity: identity,
+                  isRunning: false,
+                  load: () async {
+                    loads++;
+                    return {
+                      'sessionId': 'session-a',
+                      'configOptions': [
+                        {
+                          'id': 'model',
+                          'category': 'model',
+                          'type': 'select',
+                          'currentValue': 'server-model',
+                          'options': [
+                            {'value': 'server-model', 'name': 'Server model'},
+                          ],
+                        },
+                      ],
+                    };
+                  },
+                  write: (_, _, _) async => {},
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('gpt-5.4'), findsOneWidget);
+      expect(loads, 0);
+      await tester.tap(find.byKey(const ValueKey('chat-acp-config-button')));
+      await tester.pumpAndSettle();
+      expect(loads, 1);
+      expect(find.text('Server model'), findsWidgets);
+      update(() {
+        identity = 'conversation-b';
+        label = null;
+      });
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpConfigPanel), findsNothing);
+      expect(find.text('Server model'), findsNothing);
+      expect(find.text('Model'), findsOneWidget);
+      expect(find.text('Auto'), findsNothing);
+      expect(loads, 1);
+    },
+  );
+
+  testWidgets(
+    'header opens the existing hidden config owner and a conversation switch dismisses it',
+    (tester) async {
+      final configKey = GlobalKey<AcpConfigButtonState>();
+      var identity = 1;
+      var writes = 0;
+      late StateSetter update;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: StatefulBuilder(
+            builder: (context, setState) {
+              update = setState;
+              return Scaffold(
+                body: Column(
+                  children: [
+                    Builder(
+                      builder: (anchor) => TextButton(
+                        onPressed: () => configKey.currentState!.open(
+                          anchor,
+                          preferBelow: true,
+                        ),
+                        child: const Text('Model menu'),
+                      ),
+                    ),
+                    Offstage(
+                      child: AcpConfigButton(
+                        key: configKey,
+                        presentationIdentity: identity,
+                        isRunning: false,
+                        load: () async => {
+                          'sessionId': 'session-$identity',
+                          'configOptions': [
+                            {
+                              'id': 'temperature',
+                              'name': 'Temperature',
+                              'type': 'select',
+                              'currentValue': 'one',
+                              'options': [
+                                {'value': 'one', 'name': 'One'},
+                              ],
+                            },
+                          ],
+                        },
+                        write: (_, _, _) async {
+                          writes++;
+                          return {};
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final owner = configKey.currentState;
+      expect(owner, isNotNull);
+      expect(
+        find.byKey(const ValueKey('chat-acp-config-button')),
+        findsNothing,
+      );
+      await tester.tap(find.text('Model menu'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpConfigPanel), findsOneWidget);
+      update(() => identity = 2);
+      await tester.pumpAndSettle();
+      expect(find.byType(AcpConfigPanel), findsNothing);
+      expect(configKey.currentState, same(owner));
+      expect(writes, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   for (final readOnly in [false, true]) {
     testWidgets(
       'shared model selection uses configured connections (readOnly=$readOnly)',
@@ -229,17 +417,21 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('acp-config-back')));
       await tester.pump();
       expect(
-        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).onChanged,
-        isNull,
+        tester
+            .widget<OmniSettingsSwitch>(find.byType(OmniSettingsSwitch))
+            .enabled,
+        isFalse,
       );
-      await tester.tap(find.byType(SwitchListTile));
+      await tester.tap(find.byType(OmniSettingsSwitch));
       await tester.pump();
       expect(writes, 0);
       refresh.complete(response);
       await tester.pumpAndSettle();
       expect(
-        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).onChanged,
-        isNotNull,
+        tester
+            .widget<OmniSettingsSwitch>(find.byType(OmniSettingsSwitch))
+            .enabled,
+        isTrue,
       );
     },
   );
@@ -375,13 +567,17 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Vendor thought'), findsOneWidget);
       expect(find.text('Experimental setting'), findsOneWidget);
-      await tester.tap(find.byType(SwitchListTile));
+      await tester.tap(
+        find.byKey(const ValueKey('acp-config-vendor_experimental')),
+      );
       await tester.pumpAndSettle();
       expect(writes, [
         ['session-a', 'vendor_experimental', false],
       ]);
       expect(
-        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        tester
+            .widget<OmniSettingsSwitch>(find.byType(OmniSettingsSwitch))
+            .value,
         false,
       );
     },
@@ -497,13 +693,16 @@ void main() {
       expect(refreshes, 2);
       await tester.tap(find.byKey(const ValueKey('acp-config-vendor_thought')));
       await tester.pumpAndSettle();
-      expect(find.text('High'), findsOneWidget);
+      expect(find.text('high'), findsOneWidget);
     },
   );
 
   testWidgets('select rejection restores the official value', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
+        locale: const Locale('zh'),
+        supportedLocales: const [Locale('en'), Locale('zh')],
+        localizationsDelegates: GlobalMaterialLocalizations.delegates,
         home: Scaffold(
           body: AcpConfigPanel(
             load: () async => {
@@ -522,9 +721,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('acp-config-vendor_thought')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('High').last);
+    expect(find.text('思考强度'), findsOneWidget);
+    await tester.tap(find.text('high').last);
     await tester.pumpAndSettle();
-    expect(find.text('Low'), findsOneWidget);
+    expect(find.text('low'), findsOneWidget);
     expect(find.text('助手暂时无法完成操作，请重试。'), findsOneWidget);
   });
 
@@ -546,10 +746,10 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byType(SwitchListTile));
+    await tester.tap(find.byType(OmniSettingsSwitch));
     await tester.pumpAndSettle();
     expect(
-      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      tester.widget<OmniSettingsSwitch>(find.byType(OmniSettingsSwitch)).value,
       true,
     );
     expect(find.text('助手暂时无法完成操作，请重试。'), findsOneWidget);
@@ -573,8 +773,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(
-      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).onChanged,
-      isNull,
+      tester
+          .widget<OmniSettingsSwitch>(find.byType(OmniSettingsSwitch))
+          .enabled,
+      isFalse,
     );
   });
 }

@@ -9,7 +9,7 @@ class LegacyTextLocalizer {
 
   static final Map<String, String> _exactEn = <String, String>{
     '宠物': 'Pet',
-    '小万': 'OmniAi',
+    '小万': 'Omnibot',
     '小万（OmniAi）': 'OmniAi',
     '默认的桌面悬浮窗宠物': 'Default desktop floating pet',
     '自定义宠物': 'Custom Pet',
@@ -47,6 +47,7 @@ class LegacyTextLocalizer {
     '复制地址': 'Copy Address',
     '复制 Token': 'Copy Token',
     '刷新 Token': 'Refresh Token',
+    '加载中': 'Loading',
     '加载中...': 'Loading...',
     '模型与记忆': 'Models & Memory',
     '服务与环境': 'Services & Environment',
@@ -131,6 +132,8 @@ class LegacyTextLocalizer {
         'Non-photo files start the file server and create a LAN link',
     '默认': 'Default',
     '关于小万': 'About Omnibot',
+    '我要反馈': 'Send feedback',
+    '无法打开反馈页面': 'Unable to open the feedback page',
     '背景来源': 'Background Source',
     '效果预览': 'Preview',
     '效果调整': 'Adjustments',
@@ -154,8 +157,7 @@ class LegacyTextLocalizer {
         'Browser tool view is not supported on this platform yet',
     '悬浮窗权限': 'Overlay',
     '应用列表读取权限': 'Installed Apps Access',
-    '特权访问': 'Privileged Access',
-    '特权访问权限': 'Privileged Access',
+    'Shizuku 权限': 'Shizuku Permission',
     '公共文件访问': 'Public Storage Access',
     '正在调用工具': 'Calling tool',
     '暂时无法生成回复，请重试。': "I can't generate a reply right now. Please try again.",
@@ -343,16 +345,8 @@ class LegacyTextLocalizer {
     '已开启': 'Enabled',
     '去开启': 'Enable',
     '清除缓存': 'Clear cache',
-    '查看并配置悬浮窗、后台运行、特权访问等权限':
-        'Review overlay, background operation, privileged access, and related permissions',
-    '直接 Root (KernelSU)': 'Direct Root (KernelSU)',
-    '特权访问设置': 'Privileged Access Settings',
-    '选择提权来源': 'Select privileged source',
-    '切换特权来源将停止当前特权会话并移出路由表；已在后台运行的 Root 进程可能仍会残留，无法保证物理终止。':
-        'Switching privileged source stops active sessions and removes them from routing; processes already running as root may remain and cannot be guaranteed to terminate physically.',
-    '验证 Root 授权': 'Verify Root Authorization',
-    '发起授权 / 验证': 'Authorize / Verify',
-    '打开 Shizuku': 'Open Shizuku',
+    '查看并配置悬浮窗、后台运行、Shizuku 等权限':
+        'Review overlay, background operation, Shizuku, and related permissions',
     '权限检查中...': 'Checking permissions...',
     '继续任务': 'Continue task',
     '继续任务仅要求': 'Continue requires only',
@@ -365,8 +359,8 @@ class LegacyTextLocalizer {
         'Termux capability is optional; leaving it off will not affect basic features',
     '未绑定': 'Unbound',
     '恢复默认': 'Restore default',
-    '点击右侧按钮后，可按 Provider 搜索、折叠并选择模型。':
-        'After tapping the button on the right, you can search, collapse, and select models by Provider.',
+    '点击右侧按钮选择模型，也可按模型名称、ID 或服务商搜索。':
+        'Tap the button on the right to select a model, or search by model name, ID, or provider.',
     '使用内置模型服务': 'Use Built-in Model Service',
     '内置模型服务': 'Built-in Model Service',
     '内置模型服务已启用': 'Built-in model service enabled',
@@ -374,7 +368,9 @@ class LegacyTextLocalizer {
     '已启用内置模型服务': 'Built-in model service enabled',
     '已切换为自定义模型': 'Switched to custom model',
     '没有匹配的模型': 'No matching models',
+    '没有匹配的选项': 'No matching options',
     '搜索模型 ID': 'Search model ID',
+    '搜索模型或服务商': 'Search models or providers',
     '请先在模型提供商页配置 Provider':
         'Please configure a provider in Model Providers first',
     '该 Provider 暂无可选模型': 'No selectable models for this provider',
@@ -475,6 +471,39 @@ class LegacyTextLocalizer {
     '特性': 'Features',
     '初次使用教程': 'First-use Tutorial',
     '重新查看应用首次启动时的引导页面': 'Replay the first-launch onboarding page',
+    '正在下载中，请稍候...': 'Downloading, please wait...',
+    '开始下载...': 'Download started...',
+    '图片已保存到相册': 'Image saved to gallery',
+    '文件已保存到下载目录': 'File saved to Downloads',
+    '下载失败': 'Download failed',
+    '网页浏览': 'Web Browser',
+    '页面加载失败': 'Page load failed',
+    '未知错误': 'Unknown error',
+    '重新加载': 'Reload',
+    'OpenClaw Base URL 为空，请先配置': 'OpenClaw Base URL is empty, please configure first',
+    'OpenClaw 连接成功，Gateway 协议正常': 'OpenClaw connected successfully, Gateway protocol OK',
+    'OpenClaw 已连接但未收到 challenge，请检查 Gateway 版本': 'OpenClaw connected but no challenge received, check Gateway version',
+    'OpenClaw 连接超时，请检查服务地址和网络': 'OpenClaw connection timeout, check service address and network',
+    'Workspace 挂载': 'Workspace mounts',
+    '把设备目录连接到工作区，终端和聊天可直接访问。移除挂载不会删除原文件。': 'Link device directories to the workspace for direct access in terminal and chat. Unmounting does not delete files.',
+    '新增挂载': 'Add mount',
+    '还没有挂载任何宿主目录。': 'No mounted directories yet.',
+    '选择宿主目录': 'Select a host directory',
+    '挂载名称': 'Mount name',
+    '会显示为 `/workspace/<名称>`': 'Will appear as `/workspace/<name>`',
+    '挂载': 'Mount',
+    '卸载挂载': 'Unmount directory',
+    '卸载': 'Unmount',
+    '取消下载': 'Cancel',
+    '正在取消下载…': 'Canceling download…',
+    '切换终端系统失败': 'Failed to switch terminal system',
+    '终端系统': 'Terminal system',
+    '选择终端与 Agent 共用的 Linux 系统。': 'Choose the Linux system shared by terminal and Agent.',
+    '正在准备终端系统…': 'Preparing terminal system…',
+    '检测未完成，请重新检测以确认组件状态。': 'Detection incomplete, please retest to confirm component status.',
+    '异常': 'broken',
+    '已挂载': 'mounted',
+    '未确认': 'Not confirmed',
   };
 
   static final List<(RegExp, _TextRewriter)>
@@ -580,6 +609,38 @@ class LegacyTextLocalizer {
     ),
     (RegExp(r'^打开\s*(.+?)\s*应用$'), (match) => 'Opening ${match.group(1)!} app'),
     (RegExp(r'^正在打开(.+)$'), (match) => 'Opening ${match.group(1)!}'),
+    (
+      RegExp(r'^文件已下载：(.+)$'),
+      (match) => 'File downloaded: ${match.group(1)!}',
+    ),
+    (
+      RegExp(r'^OpenClaw 连接失败：(.+)$'),
+      (match) => 'OpenClaw connection failed: ${match.group(1)!}',
+    ),
+    (
+      RegExp(r'^确认卸载 `/workspace/(.+)` 吗？原始宿主目录和里面的文件都不会被删除。$'),
+      (match) => 'Unmount `/workspace/${match.group(1)!}`? The original host directory and its files will not be deleted.',
+    ),
+    (
+      RegExp(r'^原始目录不存在或当前不可读：(.+)$'),
+      (match) => 'Original directory does not exist or is currently unreadable: ${match.group(1)!}',
+    ),
+    (
+      RegExp(r'^已挂载到 /workspace/(.+)$'),
+      (match) => 'Mounted as /workspace/${match.group(1)!}',
+    ),
+    (
+      RegExp(r'^已卸载 /workspace/(.+)$'),
+      (match) => 'Unmounted /workspace/${match.group(1)!}',
+    ),
+    (
+      RegExp(r'^正在准备 (Ubuntu|Alpine)…$'),
+      (match) => 'Preparing ${match.group(1)!}…',
+    ),
+    (
+      RegExp(r'^终端系统已切换为 (Ubuntu|Alpine)$'),
+      (match) => 'Terminal system switched to ${match.group(1)!}',
+    ),
   ];
 
   static void setResolvedLocale(Locale locale) {

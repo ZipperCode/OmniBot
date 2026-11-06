@@ -16,8 +16,6 @@ class ChatPageModeState {
       ChatMessageListNavigator();
   final List<ChatInputAttachment> pendingAttachments = <ChatInputAttachment>[];
   final List<ChatMessageModel> messages = <ChatMessageModel>[];
-  final Set<String> expandedAgentRunTaskIds = <String>{};
-  final List<String> expandedAgentRunTaskOrder = <String>[];
   final Map<String, String> currentAiMessages = <String, String>{};
 
   String draftMessage = '';
@@ -29,10 +27,8 @@ class ChatPageModeState {
   bool isInputAreaVisible = true;
   bool isExecutingTask = false;
   String? editingUserMessageId;
-  double toolActivityOccupiedHeight = 0;
   double slashCommandPanelOccupiedHeight = 0;
   bool slashCommandExpanded = false;
-  bool toolActivityExpanded = false;
   double inputAreaHeight = 0;
   bool isAiResponding = false;
   bool isContextCompressing = false;
@@ -51,7 +47,10 @@ class ChatPageModeState {
   /// Consume only references already attached to an admitted user message.
   /// Commands that only change settings or are rejected do not call this.
   void consumeMessageAttachments(List<Map<String, dynamic>> attachments) {
-    final ids = attachments.map((item) => item['id']).whereType<String>().toSet();
+    final ids = attachments
+        .map((item) => item['id'])
+        .whereType<String>()
+        .toSet();
     pendingAttachments.removeWhere((item) => ids.contains(item.id));
   }
 
@@ -70,6 +69,9 @@ class ChatPageModeState {
     currentThinkingStage = 1;
     currentConversationId = null;
     currentConversation = null;
+    hasMoreMessages = false;
+    messageOffset = 0;
+    isLoadingMore = false;
     isInputAreaVisible = true;
     isExecutingTask = false;
     chatIslandDisplayLayer = ChatIslandDisplayLayer.mode;

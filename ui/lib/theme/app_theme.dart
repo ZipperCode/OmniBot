@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/omni_theme_palette.dart';
+import 'package:ui/widgets/omni_menu.dart';
 
 class AppTheme {
   AppTheme._();
@@ -27,27 +28,47 @@ class AppTheme {
     final onAccentColor = _foregroundForAccent(palette.accentPrimary);
     final globalInputDecorationTheme = _buildInputDecorationTheme(
       palette: palette,
-      isDark: isDark,
     );
-    final colorScheme =
-        ColorScheme.fromSeed(
-          seedColor: palette.accentPrimary,
-          brightness: brightness,
-        ).copyWith(
-          primary: palette.accentPrimary,
-          onPrimary: onAccentColor,
-          secondary: isDark
-              ? _secondaryAccentForDark(palette)
-              : AppColors.gradientAux,
-          onSecondary: isDark ? onAccentColor : palette.textPrimary,
-          error: AppColors.alertRed,
-          onError: Colors.white,
-          surface: palette.surfacePrimary,
-          onSurface: palette.textPrimary,
-          outline: palette.borderStrong,
-          outlineVariant: palette.borderSubtle,
-          surfaceTint: Colors.transparent,
-        );
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: palette.accentPrimary,
+      brightness: brightness,
+      primary: palette.accentPrimary,
+      onPrimary: onAccentColor,
+      primaryContainer: palette.surfaceElevated,
+      onPrimaryContainer: palette.textPrimary,
+      secondary: palette.textSecondary,
+      onSecondary: palette.surfacePrimary,
+      secondaryContainer: palette.surfaceSecondary,
+      onSecondaryContainer: palette.textPrimary,
+      tertiary: palette.textSecondary,
+      onTertiary: palette.surfacePrimary,
+      tertiaryContainer: palette.surfaceElevated,
+      onTertiaryContainer: palette.textPrimary,
+      error: AppColors.alertRed,
+      onError: Colors.white,
+      surface: palette.surfacePrimary,
+      onSurface: palette.textPrimary,
+      onSurfaceVariant: palette.textSecondary,
+      surfaceBright: palette.surfacePrimary,
+      surfaceDim: palette.surfaceElevated,
+      surfaceContainerLowest: palette.surfacePrimary,
+      surfaceContainerLow: palette.pageBackground,
+      surfaceContainer: palette.surfaceSecondary,
+      surfaceContainerHigh: palette.surfaceElevated,
+      surfaceContainerHighest: palette.surfaceElevated,
+      inverseSurface: isDark
+          ? OmniThemePalette.light.surfacePrimary
+          : OmniThemePalette.dark.surfacePrimary,
+      onInverseSurface: isDark
+          ? OmniThemePalette.light.textPrimary
+          : OmniThemePalette.dark.textPrimary,
+      inversePrimary: isDark
+          ? OmniThemePalette.light.accentPrimary
+          : OmniThemePalette.dark.accentPrimary,
+      outline: palette.borderStrong,
+      outlineVariant: palette.borderSubtle,
+      surfaceTint: Colors.transparent,
+    );
 
     final baseTheme = ThemeData(
       useMaterial3: true,
@@ -72,7 +93,6 @@ class AppTheme {
           fontSize: 17,
           fontWeight: FontWeight.w600,
           color: palette.textPrimary,
-          fontFamily: 'SF Pro',
         ),
         iconTheme: IconThemeData(color: palette.textPrimary, size: 24),
       ),
@@ -88,7 +108,7 @@ class AppTheme {
       inputDecorationTheme: globalInputDecorationTheme,
       chipTheme: ChipThemeData(
         backgroundColor: palette.surfaceElevated,
-        selectedColor: palette.segmentThumb,
+        selectedColor: palette.accentPrimary,
         disabledColor: palette.surfaceSecondary,
         labelStyle: TextStyle(
           color: palette.textSecondary,
@@ -96,13 +116,13 @@ class AppTheme {
           fontWeight: FontWeight.w600,
         ),
         secondaryLabelStyle: TextStyle(
-          color: palette.textPrimary,
+          color: onAccentColor,
           fontSize: 13,
           fontWeight: FontWeight.w600,
         ),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        shape: StadiumBorder(side: BorderSide(color: palette.borderSubtle)),
-        side: BorderSide(color: palette.borderSubtle),
+        shape: const StadiumBorder(),
+        side: BorderSide.none,
       ),
       sliderTheme: SliderThemeData(
         activeTrackColor: palette.accentPrimary,
@@ -114,7 +134,7 @@ class AppTheme {
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return Colors.white;
+            return onAccentColor;
           }
           return palette.surfacePrimary;
         }),
@@ -130,9 +150,46 @@ class AppTheme {
         textColor: palette.textPrimary,
         iconColor: palette.textSecondary,
       ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          disabledBackgroundColor: palette.surfaceElevated,
+          disabledForegroundColor: palette.textTertiary,
+          minimumSize: const Size(0, 44),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          disabledBackgroundColor: palette.surfaceElevated,
+          disabledForegroundColor: palette.textTertiary,
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          minimumSize: const Size(0, 44),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: palette.textPrimary,
+          disabledForegroundColor: palette.textTertiary,
+          side: BorderSide(color: palette.borderStrong),
+          minimumSize: const Size(0, 44),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+      ),
       bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: palette.surfacePrimary,
         surfaceTintColor: Colors.transparent,
+        modalBarrierColor: palette.overlayScrim,
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
@@ -140,25 +197,61 @@ class AppTheme {
       dialogTheme: DialogThemeData(
         backgroundColor: palette.surfacePrimary,
         surfaceTintColor: Colors.transparent,
+        shadowColor: palette.shadowColor,
+        elevation: 6,
+        titleTextStyle: TextStyle(
+          color: palette.textPrimary,
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+        ),
+        contentTextStyle: TextStyle(color: palette.textSecondary, fontSize: 14),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      ),
+      popupMenuTheme: PopupMenuThemeData(
+        color: palette.surfacePrimary,
+        surfaceTintColor: Colors.transparent,
+        shadowColor: palette.shadowColor,
+        elevation: 6,
+        shape: const RoundedRectangleBorder(
+          borderRadius: OmniMenuStyle.panelRadius,
+        ),
+        menuPadding: OmniMenuStyle.panelPadding,
+        textStyle: OmniMenuStyle.labelStyle.copyWith(
+          color: palette.textPrimary,
+        ),
+        labelTextStyle: WidgetStateProperty.resolveWith(
+          (states) => OmniMenuStyle.labelStyle.copyWith(
+            color: states.contains(WidgetState.disabled)
+                ? palette.textTertiary
+                : palette.textPrimary,
+          ),
+        ),
       ),
     );
 
     return baseTheme.copyWith(
-      textTheme: baseTheme.textTheme.apply(
-        bodyColor: palette.textPrimary,
-        displayColor: palette.textPrimary,
-      ),
+      textTheme: baseTheme.textTheme
+          .copyWith(
+            bodyLarge: baseTheme.textTheme.bodyLarge?.copyWith(fontSize: 15),
+            bodyMedium: baseTheme.textTheme.bodyMedium?.copyWith(fontSize: 14),
+            bodySmall: baseTheme.textTheme.bodySmall?.copyWith(fontSize: 12),
+            titleLarge: baseTheme.textTheme.titleLarge?.copyWith(fontSize: 18),
+            titleMedium: baseTheme.textTheme.titleMedium?.copyWith(
+              fontSize: 15,
+            ),
+            titleSmall: baseTheme.textTheme.titleSmall?.copyWith(fontSize: 14),
+          )
+          .apply(
+            bodyColor: palette.textPrimary,
+            displayColor: palette.textPrimary,
+          ),
     );
   }
 
   static InputDecorationTheme _buildInputDecorationTheme({
     required OmniThemePalette palette,
-    required bool isDark,
   }) {
-    final fillColor = palette.surfaceSecondary.withValues(
-      alpha: isDark ? 0.72 : 0.64,
-    );
+    final fillColor = palette.surfaceSecondary;
     final radius = BorderRadius.circular(10);
     return InputDecorationTheme(
       filled: true,
@@ -214,15 +307,7 @@ class AppTheme {
 
   static Color _foregroundForAccent(Color accentColor) {
     return accentColor.computeLuminance() > 0.35
-        ? const Color(0xFF141716)
+        ? const Color(0xFF161616)
         : Colors.white;
-  }
-
-  static Color _secondaryAccentForDark(OmniThemePalette palette) {
-    final hsl = HSLColor.fromColor(palette.accentPrimary);
-    return hsl
-        .withSaturation((hsl.saturation * 0.72).clamp(0.0, 1.0))
-        .withLightness((hsl.lightness + 0.08).clamp(0.0, 1.0))
-        .toColor();
   }
 }

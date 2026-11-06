@@ -1,6 +1,8 @@
 package cn.com.omnimind.baselib.privileged
 
 object PrivilegedActionPolicy {
+    val deviceStateTargets: List<String> = listOf("wifi", "bluetooth", "mobile_data", "airplane_mode", "location", "nfc", "battery_saver", "auto_rotate", "auto_brightness", "dark_mode")
+
     private data class CommandBlockRule(
         val regex: Regex,
         val reason: String,
@@ -27,7 +29,18 @@ object PrivilegedActionPolicy {
     const val ACTION_DIAGNOSTICS_LIST_PACKAGES = "diagnostics.list_packages"
     const val ACTION_DIAGNOSTICS_LOGCAT_TAIL = "diagnostics.logcat_tail"
 
+    const val ACTION_DEVICE_GET_STATE = "device_control.get_state"
+    const val ACTION_DEVICE_SET_STATE = "device_control.set_state"
+    const val ACTION_DEVICE_GET_DISPLAY = "device_control.get_display"
+    const val ACTION_DEVICE_SET_BRIGHTNESS = "device_control.set_brightness"
+    const val ACTION_DEVICE_SET_SCREEN_TIMEOUT = "device_control.set_screen_timeout"
+    const val ACTION_DEVICE_GET_SOUND = "device_control.get_sound"
+    const val ACTION_DEVICE_SET_VOLUME = "device_control.set_volume"
+    const val ACTION_DEVICE_SET_DND = "device_control.set_do_not_disturb"
+
     const val ACTION_SHELL_EXEC = "shell.exec"
+
+    internal const val ACTION_DEVICE_COMMAND = "device_control.command"
 
     internal const val ACTION_SESSION_START = "shell.session_start"
     internal const val ACTION_SESSION_EXEC = "shell.session_exec"
@@ -35,6 +48,14 @@ object PrivilegedActionPolicy {
     internal const val ACTION_SESSION_STOP = "shell.session_stop"
 
     private val adbVisibleActions = linkedSetOf(
+        ACTION_DEVICE_GET_STATE,
+        ACTION_DEVICE_SET_STATE,
+        ACTION_DEVICE_GET_DISPLAY,
+        ACTION_DEVICE_SET_BRIGHTNESS,
+        ACTION_DEVICE_SET_SCREEN_TIMEOUT,
+        ACTION_DEVICE_GET_SOUND,
+        ACTION_DEVICE_SET_VOLUME,
+        ACTION_DEVICE_SET_DND,
         ACTION_PACKAGE_LAUNCH,
         ACTION_PACKAGE_FORCE_STOP,
         ACTION_PACKAGE_GRANT_PERMISSION,
@@ -59,6 +80,7 @@ object PrivilegedActionPolicy {
     )
 
     private val internalOnlyActions = linkedSetOf(
+        ACTION_DEVICE_COMMAND,
         ACTION_DEVICE_INPUT_TEXT,
         ACTION_SESSION_START,
         ACTION_SESSION_EXEC,
@@ -124,21 +146,20 @@ object PrivilegedActionPolicy {
 
     fun normalizeAction(raw: String): String = raw.trim().lowercase()
 
-    fun visibleAgentActions(authority: PrivilegedAuthority): List<String> {
-        return when (authority) {
-            PrivilegedAuthority.ROOT -> rootVisibleActions.toList()
-            PrivilegedAuthority.ADB -> adbVisibleActions.toList()
-            PrivilegedAuthority.NONE -> emptyList()
+    fun visibleAgentActions(backend: PrivilegedBackend): List<String> {
+        return when (backend) {
+            PrivilegedBackend.ROOT -> rootVisibleActions.toList()
+            PrivilegedBackend.ADB,
+            PrivilegedBackend.NONE -> adbVisibleActions.toList()
         }
     }
 
     fun supportedActions(
-        authority: PrivilegedAuthority,
+        backend: PrivilegedBackend,
         includeInternal: Boolean = false,
     ): Set<String> {
-        if (authority == PrivilegedAuthority.NONE) return emptySet()
         val actions = linkedSetOf<String>()
-        actions += visibleAgentActions(authority)
+        actions += visibleAgentActions(backend)
         if (includeInternal) {
             actions += internalOnlyActions
         }
@@ -147,15 +168,15 @@ object PrivilegedActionPolicy {
 
     fun isSupported(
         action: String,
-        authority: PrivilegedAuthority,
+        backend: PrivilegedBackend,
         includeInternal: Boolean = false,
         arguments: Map<String, String> = emptyMap(),
     ): Boolean {
         val normalizedAction = normalizeAction(action)
-        if (!supportedActions(authority, includeInternal).contains(normalizedAction)) {
+        if (!supportedActions(backend, includeInternal).contains(normalizedAction)) {
             return false
         }
-        if (requiresRoot(normalizedAction, arguments) && authority != PrivilegedAuthority.ROOT) {
+        if (requiresRoot(normalizedAction, arguments) && backend != PrivilegedBackend.ROOT) {
             return false
         }
         return true
@@ -163,6 +184,12 @@ object PrivilegedActionPolicy {
 
     fun requiresConfirmation(action: String): Boolean {
         return when (normalizeAction(action)) {
+            ACTION_DEVICE_SET_STATE,
+            ACTION_DEVICE_SET_WIFI_ENABLED,
+            ACTION_DEVICE_SET_BRIGHTNESS,
+            ACTION_DEVICE_SET_SCREEN_TIMEOUT,
+            ACTION_DEVICE_SET_VOLUME,
+            ACTION_DEVICE_SET_DND,
             ACTION_PACKAGE_FORCE_STOP,
             ACTION_PACKAGE_GRANT_PERMISSION,
             ACTION_PACKAGE_REVOKE_PERMISSION,
@@ -181,7 +208,8 @@ object PrivilegedActionPolicy {
         arguments: Map<String, String> = emptyMap(),
     ): Boolean {
         val normalizedAction = normalizeAction(action)
-        if (normalizedAction == ACTION_DEVICE_SET_MOBILE_DATA_ENABLED) {
+        if (normalizedAction == ACTION_DEVICE_SET_MOBILE_DATA_ENABLED ||
+            (normalizedAction == ACTION_DEVICE_SET_STATE && arguments["target"] == "mobile_data")) {
             return true
         }
         if (normalizedAction == ACTION_DIAGNOSTICS_LOGCAT_TAIL) {

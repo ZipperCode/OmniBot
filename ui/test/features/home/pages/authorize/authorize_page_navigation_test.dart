@@ -52,24 +52,17 @@ void main() {
           });
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(spePermission, (call) async {
-            if (call.method == 'getPrivilegedStatus') {
+            if (call.method == 'getShizukuStatus') {
               return <String, Object?>{
-                'selected': 'shizuku',
-                'granted': true,
-                'authority': 'adb',
-                'uid': 2000,
-                'code': 'granted',
-                'message': '',
+                'status': 'GRANTED_ADB',
+                'backend': 'SHIZUKU',
+                'installed': true,
+                'running': true,
+                'permissionGranted': true,
+                'binderReady': true,
+                'serviceBound': true,
                 'availableActions': <String>[],
-                'shizuku': <String, dynamic>{
-                  'installed': true,
-                  'running': true,
-                  'binderReady': true,
-                  'serviceBound': true,
-                  'permissionGranted': true,
-                  'version': 13,
-                },
-                'su': null,
+                'message': '',
               };
             }
             return true;
@@ -117,6 +110,10 @@ void main() {
   testWidgets(
     'automatically opens a missing task permission and resumes after grant',
     (tester) async {
+      tester.view.physicalSize = const Size(1366, 1024);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
       var overlayGranted = false;
       var openOverlaySettingsCalls = 0;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -134,24 +131,17 @@ void main() {
               case 'openOverlaySettings':
                 openOverlaySettingsCalls += 1;
                 return null;
-              case 'getPrivilegedStatus':
+              case 'getShizukuStatus':
                 return <String, Object?>{
-                  'selected': 'shizuku',
-                  'granted': true,
-                  'authority': 'adb',
-                  'uid': 2000,
-                  'code': 'granted',
-                  'message': '',
+                  'status': 'GRANTED_ADB',
+                  'backend': 'SHIZUKU',
+                  'installed': true,
+                  'running': true,
+                  'permissionGranted': true,
+                  'binderReady': true,
+                  'serviceBound': true,
                   'availableActions': <String>[],
-                  'shizuku': <String, dynamic>{
-                    'installed': true,
-                    'running': true,
-                    'binderReady': true,
-                    'serviceBound': true,
-                    'permissionGranted': true,
-                    'version': 13,
-                  },
-                  'su': null,
+                  'message': '',
                 };
               default:
                 return true;
@@ -192,6 +182,26 @@ void main() {
       await tester.pumpAndSettle();
       expect(openOverlaySettingsCalls, 1);
       expect(router.state.uri.path, '/home/authorize');
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('authorize-permission-scroll')))
+            .width,
+        840,
+      );
+      final continueButton = find.byKey(const ValueKey('authorize-continue'));
+      expect(tester.getSize(continueButton).width, 796);
+      final pageState = tester.state(find.byType(AuthorizePage));
+      tester.view.physicalSize = const Size(600, 900);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('authorize-permission-scroll')))
+            .width,
+        600,
+      );
+      expect(tester.getSize(continueButton).width, 556);
+      expect(tester.state(find.byType(AuthorizePage)), same(pageState));
+      expect(openOverlaySettingsCalls, 1);
 
       overlayGranted = true;
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);

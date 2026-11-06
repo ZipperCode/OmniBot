@@ -20,13 +20,13 @@ val fullGitCommitHash: Provider<String> =
 val gitCommitDate: Provider<String> =
     providers.exec { commandLine("git", "show", "-s", "--format=%cI", "HEAD") }.standardOutput.asText.map { it.trim() }
 
-val termuxPackageBaseUrl = "https://packages-cf.termux.dev/apt/termux-main"
+val termuxPackageBaseUrl = "https://packages.termux.dev/apt/termux-main"
 val bundledRuntimeDir = layout.projectDirectory.dir("src/main/embedded-terminal-runtime")
 val prootDebFileName = "proot_5.1.107.77_aarch64.deb"
 val prootDebFile = bundledRuntimeDir.file(prootDebFileName)
 val prootDebChecksum = "f2cd07bafbebf625c62931994120d469934a8925a831f6e049bb08f91889a00d"
-val libtallocDebUrl = "$termuxPackageBaseUrl/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb"
-val libtallocDebChecksum = "ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da"
+val libtallocDebUrl = "$termuxPackageBaseUrl/pool/main/libt/libtalloc/libtalloc_2.5.0_aarch64.deb"
+val libtallocDebChecksum = "556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7"
 val alpineMiniRootfsUrl =
     "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.0-aarch64.tar.gz"
 val alpineMiniRootfsChecksum = "f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
@@ -81,9 +81,8 @@ android {
 
 
     compileOptions {
-        // Miuix 0.9.4's public Compose DSL contains JVM 21 inline functions.
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     buildFeatures {
@@ -99,9 +98,8 @@ android {
 }
 
 kotlin {
-    jvmToolchain(21)
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_21)
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 
@@ -198,8 +196,18 @@ fun unpackDebData(debFile: File, targetDir: File) {
     extractDebMember(debFile, "data.tar.xz", dataArchive)
     targetDir.deleteRecursively()
     targetDir.mkdirs()
+    // Windows cannot create the package's documentation/library symlinks
+    // without elevated privileges. Only these regular files enter the APK.
+    val windowsMembers = if (System.getProperty("os.name").startsWith("Windows")) {
+        val prefix = "./data/data/com.termux/files/usr/"
+        when (debFile.name) {
+            "proot.deb" -> listOf("bin/proot", "libexec/proot/loader", "libexec/proot/loader32")
+            "libtalloc.deb" -> listOf("lib/libtalloc.so.2.5.0")
+            else -> error("Unexpected embedded runtime package: ${debFile.name}")
+        }.map { prefix + it }
+    } else emptyList()
     providers.exec {
-        commandLine("tar", "-xJf", dataArchive.absolutePath, "-C", targetDir.absolutePath)
+        commandLine(listOf("tar", "-xJf", dataArchive.absolutePath, "-C", targetDir.absolutePath) + windowsMembers)
     }.result.get().assertNormalExitValue()
 }
 
@@ -271,7 +279,7 @@ val prepareEmbeddedTerminalRuntime by tasks.registering {
         val libtallocPackageRoot = workDir.resolve("libtalloc")
         unpackDebData(libtallocDeb, libtallocPackageRoot)
         copyRuntimeFile(
-            source = libtallocPackageRoot.resolve("data/data/com.termux/files/usr/lib/libtalloc.so.2.4.3"),
+            source = libtallocPackageRoot.resolve("data/data/com.termux/files/usr/lib/libtalloc.so.2.5.0"),
             target = root.resolve("libtalloc.so.2"),
             executable = false
         )
@@ -306,7 +314,6 @@ dependencies {
     api(libs.ui.graphics)
     api(libs.material3)
     api(libs.navigation.compose)
-    implementation(libs.miuix.nav)
     implementation(libs.kotlinx.serialization.json)
     api(project(":core:terminal-view"))
     api(project(":core:terminal-emulator"))

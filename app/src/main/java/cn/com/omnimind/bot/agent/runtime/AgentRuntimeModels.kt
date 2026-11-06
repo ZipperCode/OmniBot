@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.baselib.llm.DeepSeekProvider
+import cn.com.omnimind.baselib.llm.ChatGptOAuthProvider
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
@@ -27,8 +28,12 @@ data class AgentModelOverride(
     val customHeaders: Map<String, String> = emptyMap(),
     val protocolType: String = "openai_compatible",
     val wireApi: String = "chat_completions",
-    val contextLimit: Int? = null
+    val contextLimit: Int? = null,
+    val providerSourceType: String = "custom",
 ) {
+    val oauthProfileId: String?
+        get() = providerProfileId.takeIf { ChatGptOAuthProvider.isOAuth(providerSourceType) }
+
     companion object {
         /**
          * Creates the only supported Agent-side projection of a shared
@@ -52,6 +57,7 @@ data class AgentModelOverride(
                 customHeaders = profile.customHeaders,
                 protocolType = profile.protocolType,
                 wireApi = profile.wireApi,
+                providerSourceType = profile.sourceType,
                 contextLimit = contextLimit?.takeIf { it > 0 },
             ).normalizedOrNull()
         }
@@ -136,7 +142,8 @@ data class ArtifactRef(
                 .replace("[", "\\[")
                 .replace("]", "\\]")
             return if (embedKind == "image") {
-                "![${safeTitle}]($uri)"
+                val markdownTitle = if (sourceTool == "sticker_search") " \"sticker\"" else ""
+                "![${safeTitle}]($uri$markdownTitle)"
             } else {
                 "[${safeTitle}]($uri)"
             }

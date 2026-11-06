@@ -41,6 +41,7 @@ OmniBot is an on-device AI agent built with native Android Kotlin and Flutter. I
 
 - **Extensible tool ecosystem**: Skills, Alpine environment, browser access, MCP, and Android system-level tools.
 - **System-level actions**: Supports scheduled tasks, alarms, calendar creation/query/update, and audio playback control.
+- **Personal context**: Query authorized calendars, contacts, notifications, app usage, location, media, documents, SMS and call history without root, and manage calendar events and contacts.
 - **Memory system**: Short-term and long-term memory with embedding support.
 - **Productivity tools**: Read and write files, browse the workspace, use the browser, and access the terminal.
 
@@ -76,6 +77,22 @@ Note: `Memory embedding` requires an embedding model. For the best overall exper
 The app usually initializes the Alpine environment automatically on startup, and you can also manage that environment from the same settings area.
 
 <h2 id="use-cases">Use Cases</h2>
+
+### Personal context
+
+Enable individual sources in **Settings → App permissions → Personal context**. AI queries shared device tools on demand; results may be sent to your configured model and are not automatically added to long-term memory. Calendar and contact read/write permissions are separate. Background location needs its own “Allow all the time” grant. Approximate location and selected-only photo access are supported.
+
+Notification access is separate from receiving Omnibot notifications. Observed notifications are cached locally for up to 7 days and 10,000 records, excluded from system backups, and can be cleared manually. Previously dismissed notifications and system-redacted content cannot be recovered. Revocation stops recording and querying without deleting conversations.
+
+File queries return metadata first; requested contents are imported into the existing file inbox. Files and folders can be selected and access removed through the system-picker entry. SMS and call history are read-only and depend on installer/system eligibility; Omnibot does not request default SMS, phone or assistant roles. These features require neither root, Shizuku nor accessibility and do not access other apps' private databases.
+
+Device MCP and the built-in Agent share tool definitions and execution. `context_capabilities` reports actual access; missing permissions do not open dialogs or terminate ordinary chat. Contact mutations use `rawContactId` and `version` from queries and affect only the selected account record. Calendar queries accept an `offset`; all-day dates use UTC and an exclusive end date.
+
+### Optional Root and device controls
+
+Direct Root access is off by default. Enable **Root access** under **Settings → App permissions → Advanced Access** to request authorization from your device's Root manager. When available, direct Root takes priority over Shizuku; disabling it stops its commands and persistent shells. Shizuku remains independently available.
+
+The agent can query and change supported system toggles, display and sound settings, manage app permissions, run diagnostics, and execute privileged shell commands. Mutations and shell commands require ACP client confirmation. State changes are checked against the device before being reported as successful; unsupported ROM interfaces return an explicit error. See [Android privileged actions](docs/android-privileged-actions.md) for the tool contract and compatibility details.
 
 ### Skills
 
@@ -125,8 +142,8 @@ Choose the LAN address and token mode in the terminal setup UI, then scan the pr
 
 ### Requirements
 
-- Flutter SDK `3.9.2+`
-- JDK `11+`
+- Flutter SDK `3.47.2+`
+- JDK `17+`
 - Node.js `20.19+` or `22.12+` and pnpm `10.28.0` (for WebUI development)
 
 ### Get the code
@@ -190,9 +207,11 @@ Flutter Web is not part of this workflow.
 
 ### Build and install
 
-Release APK builds use `OMNIBOT_UPDATE_WORKER_URL` as the default GUI VLM proxy
-and receive the Gelab route from the update Worker. The upstream Gelab key stays
-in the Worker. Debug APK builds use the OpenAI-compatible LLM API configured by
+Android builds use `OMNIBOT_UPDATE_WORKER_URL` for the website backend's update
+checks, anonymous statistics, cloud policy, and official VLM proxy configuration.
+It defaults to `https://omnibot.omnimind.com.cn`; upstream proxy credentials stay
+on the backend. See [the integration notes](docs/website-backend-migration.md).
+Debug APK builds use the OpenAI-compatible LLM API configured by
 `LLMTHU_API_BASE`, `LLMTHU_API_KEY`, and `LLMTHU_MODEL` for normal LLM requests,
 context compaction, and `scene.vlm.operation.primary`.
 For local acceptance testing, Release builds can explicitly enable
@@ -242,7 +261,7 @@ Special thanks to these open-source projects:
 <table align="center">
   <tr>
     <td align="center">
-      <img src="https://omni.1775885.xyz/community/wechat-qr" alt="WeChat Group" width="220"/><br/>
+      <img src="https://omnibot.omnimind.com.cn/community/wechat-qr" alt="WeChat Group" width="220"/><br/>
       <b>WeChat Group</b><br/>
       <a href="https://discord.gg/WnBvBXgykD">Join the Discord community</a>
     </td>

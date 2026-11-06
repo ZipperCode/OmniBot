@@ -9,10 +9,18 @@ void main() {
   test('consumption preserves later picks and same-path replacement across repeated sends', () {
     final state = ChatPageModeState();
     final other = ChatPageModeState();
-    const replacement = ChatInputAttachment(id: 'new', name: 'a.txt', path: '/a.txt');
+    const replacement = ChatInputAttachment(
+      id: 'new',
+      name: 'a.txt',
+      path: '/a.txt',
+    );
     other.pendingAttachments.add(replacement);
     for (var round = 0; round < 20; round++) {
-      final submitted = ChatInputAttachment(id: 'old-$round', name: 'a.txt', path: '/a.txt');
+      final submitted = ChatInputAttachment(
+        id: 'old-$round',
+        name: 'a.txt',
+        path: '/a.txt',
+      );
       state.pendingAttachments.add(submitted);
       final references = [submitted.toMap()];
       state.pendingAttachments.add(replacement);
@@ -28,10 +36,17 @@ void main() {
 
   test('empty or historical references do not consume current composer attachments', () {
     final state = ChatPageModeState();
-    const attachment = ChatInputAttachment(id: 'picked', name: 'a.png', path: '/a.png');
+    const attachment = ChatInputAttachment(
+      id: 'picked',
+      name: 'a.png',
+      path: '/a.png',
+    );
     state.pendingAttachments.add(attachment);
     state.consumeMessageAttachments([]);
-    state.consumeMessageAttachments([{'path': '/a.png'}, {'id': 'another', 'path': '/a.png'}]);
+    state.consumeMessageAttachments([
+      {'path': '/a.png'},
+      {'id': 'another', 'path': '/a.png'},
+    ]);
     expect(state.pendingAttachments, [attachment]);
   });
 
@@ -71,6 +86,9 @@ void main() {
       ..isDeepThinking = true
       ..currentDispatchTurnId = 'task'
       ..currentThinkingStage = 2
+      ..hasMoreMessages = true
+      ..messageOffset = 37
+      ..isLoadingMore = true
       ..currentConversationId = 42
       ..currentConversation = ConversationModel(
         id: 42,
@@ -80,15 +98,16 @@ void main() {
         createdAt: 1,
         updatedAt: 1,
       )
-      ..expandedAgentRunTaskIds.add('expanded-task')
-      ..expandedAgentRunTaskOrder.add('expanded-task')
-      ..toolActivityExpanded = true;
+      ..slashCommandExpanded = true;
 
     state.resetConversation();
 
     expect(state.messages, isEmpty);
     expect(state.pendingAttachments, isEmpty);
     expect(state.currentAiMessages, isEmpty);
+    expect(state.hasMoreMessages, isFalse);
+    expect(state.messageOffset, 0);
+    expect(state.isLoadingMore, isFalse);
     expect(state.draftMessage, isEmpty);
     expect(state.chatIslandDisplayLayer, ChatIslandDisplayLayer.mode);
     expect(state.lastAgentToolType, isNull);
@@ -108,8 +127,6 @@ void main() {
     expect(state.currentConversationId, isNull);
     expect(state.currentConversation, isNull);
 
-    expect(state.expandedAgentRunTaskIds, {'expanded-task'});
-    expect(state.expandedAgentRunTaskOrder, ['expanded-task']);
-    expect(state.toolActivityExpanded, isTrue);
+    expect(state.slashCommandExpanded, isTrue);
   });
 }

@@ -23,12 +23,10 @@ class SystemToolHandler(
     override val toolNames: Set<String> = setOf(
         "schedule_task_create", "schedule_task_list", "schedule_task_update", "schedule_task_delete",
         "alarm_reminder_create", "alarm_reminder_list", "alarm_reminder_delete",
-        "calendar_list", "calendar_event_create", "calendar_event_list", "calendar_event_update", "calendar_event_delete",
         "music_playback_control"
     )
 
     private val alarmToolService = AgentAlarmToolService(helper.context)
-    private val calendarToolService = AgentCalendarToolService(helper.context)
     private val musicToolService = AgentMusicToolService(helper.context, workspaceManager)
 
     override suspend fun execute(
@@ -45,8 +43,6 @@ class SystemToolHandler(
                 executeScheduleTool(toolName, args, env.runtimeContextRepository, callback)
             in setOf("alarm_reminder_create", "alarm_reminder_list", "alarm_reminder_delete") ->
                 executeAlarmTool(toolName, args, callback)
-            in setOf("calendar_list", "calendar_event_create", "calendar_event_list", "calendar_event_update", "calendar_event_delete") ->
-                executeCalendarTool(toolName, args, callback)
             "music_playback_control" -> executeMusicTool(args, env.workspaceDescriptor, callback)
             else -> ToolExecutionResult.Error(toolName, "Unknown system tool")
         }
@@ -171,113 +167,6 @@ class SystemToolHandler(
             }
         } catch (e: CancellationException) { throw e }
         catch (e: Exception) { ToolExecutionResult.Error(toolName, helper.localized(e.message ?: "Alarm tool failed")) }
-    }
-
-    private suspend fun executeCalendarTool(toolName: String, args: JsonObject, callback: AgentCallback): ToolExecutionResult {
-        return try {
-            if (!calendarToolService.hasCalendarPermissions()) {
-                helper.reportToolProgress(callback, toolName, "正在请求日历权限")
-                val granted = calendarToolService.requestCalendarPermissions()
-                if (!granted) { return helper.permissionRequiredResult(callback, listOf("日历权限(READ/WRITE_CALENDAR)")) }
-            }
-            when (toolName) {
-                "calendar_list" -> {
-                    helper.reportToolProgress(callback, toolName, "正在读取日历列表")
-                    val writableOnly = args["writableOnly"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true
-                    val visibleOnly = args["visibleOnly"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: true
-                    val items = calendarToolService.listCalendars(writableOnly = writableOnly, visibleOnly = visibleOnly)
-                    val payload = mapOf("count" to items.size, "items" to items)
-                    val payloadJson = helper.encodeLocalizedPayload(payload)
-                    ToolExecutionResult.ContextResult(
-                        toolName = toolName,
-                        summaryText = helper.localized(if (items.isEmpty()) "未找到符合条件的日历。" else "找到 ${items.size} 个日历。"),
-                        previewJson = payloadJson, rawResultJson = payloadJson, success = true
-                    )
-                }
-                "calendar_event_create" -> {
-                    helper.reportToolProgress(callback, toolName, "正在创建日程")
-                    val title = args["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    val startAt = args["startAt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    val endAt = args["endAt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    if (title.isBlank()) throw IllegalArgumentException("title 不能为空")
-                    if (startAt.isBlank()) throw IllegalArgumentException("startAt 不能为空")
-                    if (endAt.isBlank()) throw IllegalArgumentException("endAt 不能为空")
-                    val payload = calendarToolService.createEvent(
-                        CalendarEventCreateRequest(
-                            title = title, startAt = startAt, endAt = endAt,
-                            calendarId = args["calendarId"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            description = args["description"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            location = args["location"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            timezone = args["timezone"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            allDay = args["allDay"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false,
-                            reminderMinutes = helper.parseIntegerArray(args["reminderMinutes"] as? JsonArray)
-                        )
-                    )
-                    val payloadJson = helper.encodeLocalizedPayload(payload)
-                    ToolExecutionResult.ContextResult(
-                        toolName = toolName,
-                        summaryText = helper.localized(payload["summary"]?.toString().orEmpty().ifBlank { "日程已创建" }),
-                        previewJson = payloadJson, rawResultJson = payloadJson, success = payload["success"] != false
-                    )
-                }
-                "calendar_event_list" -> {
-                    helper.reportToolProgress(callback, toolName, "正在查询日程")
-                    val payload = calendarToolService.listEvents(
-                        CalendarEventListRequest(
-                            calendarId = args["calendarId"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            startAt = args["startAt"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            endAt = args["endAt"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            query = args["query"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            limit = resolveCalendarListLimit(args["limit"]?.jsonPrimitive?.intOrNull)
-                        )
-                    )
-                    val payloadJson = helper.encodeLocalizedPayload(payload)
-                    ToolExecutionResult.ContextResult(
-                        toolName = toolName,
-                        summaryText = helper.localized("找到 ${payload["count"] ?: 0} 条日程。"),
-                        previewJson = payloadJson, rawResultJson = payloadJson, success = payload["success"] != false
-                    )
-                }
-                "calendar_event_update" -> {
-                    helper.reportToolProgress(callback, toolName, "正在修改日程")
-                    val eventId = args["eventId"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    if (eventId.isBlank()) throw IllegalArgumentException("eventId 不能为空")
-                    val payload = calendarToolService.updateEvent(
-                        CalendarEventUpdateRequest(
-                            eventId = eventId,
-                            title = args["title"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            startAt = args["startAt"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            endAt = args["endAt"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            description = args["description"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            location = args["location"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            timezone = args["timezone"]?.jsonPrimitive?.contentOrNull?.trim(),
-                            allDay = args["allDay"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull(),
-                            reminderMinutes = if (args.containsKey("reminderMinutes")) helper.parseIntegerArray(args["reminderMinutes"] as? JsonArray) else null
-                        )
-                    )
-                    val payloadJson = helper.encodeLocalizedPayload(payload)
-                    ToolExecutionResult.ContextResult(
-                        toolName = toolName,
-                        summaryText = helper.localized(payload["summary"]?.toString().orEmpty().ifBlank { "日程已更新" }),
-                        previewJson = payloadJson, rawResultJson = payloadJson, success = payload["success"] != false
-                    )
-                }
-                "calendar_event_delete" -> {
-                    helper.reportToolProgress(callback, toolName, "正在删除日程")
-                    val eventId = args["eventId"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                    if (eventId.isBlank()) throw IllegalArgumentException("eventId 不能为空")
-                    val payload = calendarToolService.deleteEvent(eventId)
-                    val payloadJson = helper.encodeLocalizedPayload(payload)
-                    ToolExecutionResult.ContextResult(
-                        toolName = toolName,
-                        summaryText = helper.localized(payload["summary"]?.toString().orEmpty().ifBlank { "日程已删除" }),
-                        previewJson = payloadJson, rawResultJson = payloadJson, success = payload["success"] != false
-                    )
-                }
-                else -> ToolExecutionResult.Error(toolName, "Unknown calendar tool")
-            }
-        } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { ToolExecutionResult.Error(toolName, helper.localized(e.message ?: "Calendar tool failed")) }
     }
 
     private suspend fun executeMusicTool(args: JsonObject, workspace: AgentWorkspaceDescriptor, callback: AgentCallback): ToolExecutionResult {

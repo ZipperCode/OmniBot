@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/theme/theme_context.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 import '../onboarding_definitions.dart';
 import '../onboarding_l10n.dart';
@@ -120,10 +121,8 @@ class _SceneModelBlock extends StatelessWidget {
                   const SizedBox(height: 4),
                   Text(
                     onbTr(context, scene.descriptionZh, scene.descriptionEn),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: palette.textSecondary,
-                      height: 1.5,
-                    ),
+                    style: Theme.of(context).textTheme.bodySmall
+                        ?.copyWith(color: palette.textSecondary, height: 1.5),
                   ),
                 ],
               ),
@@ -131,23 +130,18 @@ class _SceneModelBlock extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 14),
-        DropdownButtonFormField<String>(
+        OmniSettingsDropdown<String?>(
           key: ValueKey<String>(
             '${scene.id}-${controller.activeProfile?.id ?? 'none'}-${modelOptions.length}',
           ),
-          initialValue: validValue,
-          isExpanded: true,
-          items: modelOptions
+          value: validValue,
+          options: modelOptions
               .map(
-                (model) => DropdownMenuItem<String>(
+                (model) => OmniSettingsOption<String?>(
                   value: model.id,
-                  child: Text(
-                    model.displayName.trim().isEmpty
-                        ? model.id
-                        : '${model.displayName}  ·  ${model.id}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  label: model.displayName.trim().isEmpty
+                      ? model.id
+                      : '${model.displayName}  ·  ${model.id}',
                 ),
               )
               .toList(growable: false),
@@ -165,10 +159,8 @@ class _SceneModelBlock extends StatelessWidget {
                 : onbTr(context, '选择模型', 'Choose a model'),
             icon: LucideIcons.cpu,
           ),
-          dropdownColor: palette.surfacePrimary,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: palette.textPrimary),
+          style: Theme.of(context).textTheme.bodyMedium
+              ?.copyWith(color: palette.textPrimary),
         ),
       ],
     );

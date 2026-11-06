@@ -168,8 +168,8 @@ fun KarbonTheme(
     val extras =
         if (darkTheme) {
             OmniPaletteExtras(
-                textTertiary = Color(0xFF9A9488),
-                rowDivider = Color(0x80373A3C),
+                textTertiary = Color(0xFF8E8E8E),
+                rowDivider = Color(0x80383838),
             )
         } else {
             OmniPaletteExtras()

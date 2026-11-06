@@ -11,6 +11,7 @@ import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class AiRequestLogsPage extends StatefulWidget {
   const AiRequestLogsPage({super.key});
@@ -135,56 +136,61 @@ class _AiRequestLogsPageState extends State<AiRequestLogsPage> {
           label: '概览',
           subtitle: '最近 10 条 AI 请求，按时间倒序展示。',
         ),
-        Row(
-          children: [
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('总数'),
-                value: _logs.length.toString(),
+        OmniSettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildOverviewMetric(
+                      context,
+                      label: LegacyTextLocalizer.localize('总数'),
+                      value: _logs.length.toString(),
+                    ),
+                  ),
+                  _buildOverviewDivider(context),
+                  Expanded(
+                    child: _buildOverviewMetric(
+                      context,
+                      label: LegacyTextLocalizer.localize('成功'),
+                      value: _successCount.toString(),
+                      valueColor: const Color(0xFF1E8E5A),
+                    ),
+                  ),
+                  _buildOverviewDivider(context),
+                  Expanded(
+                    child: _buildOverviewMetric(
+                      context,
+                      label: LegacyTextLocalizer.localize('失败'),
+                      value: _failureCount.toString(),
+                      valueColor: const Color(0xFFD93025),
+                      alignEnd: true,
+                    ),
+                  ),
+                ],
               ),
-            ),
-            _buildOverviewDivider(context),
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('成功'),
-                value: _successCount.toString(),
-                valueColor: const Color(0xFF1E8E5A),
+              const SizedBox(height: 14),
+              Text(
+                LegacyTextLocalizer.localize('最近一条'),
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                  color: palette.textTertiary,
+                ),
               ),
-            ),
-            _buildOverviewDivider(context),
-            Expanded(
-              child: _buildOverviewMetric(
-                context,
-                label: LegacyTextLocalizer.localize('失败'),
-                value: _failureCount.toString(),
-                valueColor: const Color(0xFFD93025),
-                alignEnd: true,
+              const SizedBox(height: 4),
+              Text(
+                latestAt,
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w500,
+                  height: 1.45,
+                  color: palette.textPrimary,
+                ),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        Text(
-          LegacyTextLocalizer.localize('最近一条'),
-          style: TextStyle(
-            fontFamily: 'PingFang SC',
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.4,
-            color: palette.textTertiary,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          latestAt,
-          style: TextStyle(
-            fontFamily: AppTextStyles.fontFamily,
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            height: 1.45,
-            color: palette.textPrimary,
+            ],
           ),
         ),
       ],
@@ -549,15 +555,17 @@ class _AiRequestLogsPageState extends State<AiRequestLogsPage> {
   }
 
   Widget _buildLogsList(BuildContext context) {
-    return Column(
-      children: List.generate(_logs.length, (index) {
-        return _buildLogItem(
-          context,
-          _logs[index],
-          index,
-          isLast: index == _logs.length - 1,
-        );
-      }),
+    return OmniSettingsGroup(
+      dividerIndent: 44,
+      children: [
+        for (var index = 0; index < _logs.length; index++)
+          _buildLogItem(
+            context,
+            _logs[index],
+            index,
+            isLast: true,
+          ),
+      ],
     );
   }
 

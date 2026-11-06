@@ -12,6 +12,9 @@ import 'package:ui/services/model_provider_config_service.dart';
 import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
+import 'package:ui/widgets/settings_ui.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/provider_vendor_icon.dart';
 
 class _SvgTestAssetBundle extends CachingAssetBundle {
   static final Uint8List _svgBytes = Uint8List.fromList(
@@ -199,6 +202,14 @@ void main() {
               );
               sceneBindings.add(binding);
               return sceneBindings;
+            case 'clearSceneModelBinding':
+              final arguments = Map<String, dynamic>.from(
+                call.arguments as Map,
+              );
+              sceneBindings.removeWhere(
+                (item) => item['sceneId'] == arguments['sceneId'],
+              );
+              return sceneBindings;
             case 'listModelProviderProfiles':
               return <String, dynamic>{
                 'profiles': <Map<String, dynamic>>[
@@ -322,7 +333,12 @@ void main() {
       ],
     );
     final loader = Completer<ModelsDevCatalog>();
+    const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(pathProvider, (_) async => null);
     addTearDown(() {
+      messenger.setMockMethodCallHandler(pathProvider, null);
       if (!loader.isCompleted) {
         loader.complete(const ModelsDevCatalog(providers: {}));
       }
@@ -480,8 +496,6 @@ void main() {
     expect(find.text('OmniBot 官方 AI'), findsOneWidget);
     expect(find.text('byok-model'), findsOneWidget);
 
-    await tester.tap(find.text('OmniBot 官方 AI'));
-    await tester.pumpAndSettle();
     expect(find.text('official-model'), findsOneWidget);
   });
 
@@ -526,8 +540,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('unknown-byok-model'), findsOneWidget);
 
-      await tester.tap(find.text('OmniBot 官方 AI'));
-      await tester.pumpAndSettle();
       expect(find.text('official-embedding-model'), findsOneWidget);
       expect(find.text('official-text-model'), findsNothing);
     },
@@ -561,8 +573,6 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('OmniBot 官方 AI'), findsOneWidget);
-    await tester.tap(find.text('OmniBot 官方 AI'));
-    await tester.pumpAndSettle();
     expect(find.text('official-text-model'), findsOneWidget);
 
     embeddingPending.complete(<Map<String, dynamic>>[
@@ -602,8 +612,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('OmniBot 官方 AI'), findsOneWidget);
-    await tester.tap(find.text('OmniBot 官方 AI'));
-    await tester.pumpAndSettle();
     expect(find.text('official-embedding-model'), findsOneWidget);
     expect(find.text('official-text-model'), findsNothing);
   });
@@ -661,8 +669,6 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Provider One'));
-      await tester.pumpAndSettle();
       await tester.tap(find.text('custom-gui-model'));
       await tester.pumpAndSettle();
       expect(
@@ -676,6 +682,134 @@ void main() {
       expect(find.text('Provider One / custom-gui-model'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'model IDs and icons preserve channel selection without a restore entry',
+    (tester) async {
+      includeOfficialProvider = true;
+      providerFetchResponse = [
+        {'id': 'gpt-5.4', 'displayName': 'Custom Choice'},
+      ];
+      officialFetchResponse = [
+        {'id': 'gpt-5.4', 'displayName': 'Official Choice'},
+      ];
+      await pumpSceneSettings(tester);
+      final fetchCountBeforeOpen = providerFetchCount;
+      final selector = find.byKey(
+        const Key('scene-model-selector-scene.compactor.context.chat'),
+      );
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      final dropdown = tester.widget<OmniSettingsDropdown>(
+        find.ancestor(
+          of: selector,
+          matching: find.byWidgetPredicate(
+            (widget) => widget is OmniSettingsDropdown,
+          ),
+        ),
+      );
+      expect(dropdown.maxWidth, 164);
+      expect(dropdown.menuMinWidth, 188);
+      expect(find.byType(OmniSettingsSearchField), findsOneWidget);
+      expect(find.text('gpt-5.4'), findsNWidgets(2));
+      expect(find.textContaining('恢复默认'), findsNothing);
+      expect(
+        tester
+            .widgetList<ProviderVendorIcon>(find.byType(ProviderVendorIcon))
+            .map((icon) => icon.vendor?.key),
+        everyElement('openai'),
+      );
+      // Display names remain searchable, but the visible primary label is ID.
+      await tester.enterText(find.byType(TextField), 'Official');
+      await tester.pumpAndSettle();
+      expect(find.text('Custom Choice'), findsNothing);
+      expect(find.text('Official Choice'), findsNothing);
+      await tester.tap(find.text('gpt-5.4'));
+      await tester.pumpAndSettle();
+      expect(sceneBindings.single, containsPair('modelId', 'gpt-5.4'));
+      expect(
+        sceneBindings.single,
+        containsPair('providerProfileId', 'omnibot-official-ai'),
+      );
+      expect(providerFetchCount, fetchCountBeforeOpen);
+
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      final selectedRow = tester.widget<OmniMenuItem>(
+        find.ancestor(
+          of: find.text('OmniBot 官方 AI'),
+          matching: find.byType(OmniMenuItem),
+        ),
+      );
+      expect(selectedRow.selected, isTrue);
+      expect(find.textContaining('恢复默认'), findsNothing);
+      // Channel text also remains searchable and determines the saved binding.
+      await tester.enterText(find.byType(TextField), 'Provider One');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('gpt-5.4'));
+      await tester.pumpAndSettle();
+      expect(sceneBindings.single, containsPair('modelId', 'gpt-5.4'));
+      expect(
+        sceneBindings.single,
+        containsPair('providerProfileId', 'provider-1'),
+      );
+      expect(find.byType(OmniSettingsSearchField), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'startup-style dropdown fits a phone keyboard and cancels without saving',
+    (tester) async {
+      providerFetchResponse = [
+        {'id': 'custom-model', 'displayName': 'Custom Choice'},
+      ];
+      await pumpSceneSettings(tester);
+      tester.view.physicalSize = const Size(360, 800);
+      await tester.pumpAndSettle();
+      final selector = find.byKey(
+        const Key('scene-model-selector-scene.compactor.context.chat'),
+      );
+      await tester.ensureVisible(selector);
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'custom');
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      expect(find.text('custom-model'), findsOneWidget);
+      final bounds = tester.getRect(find.byType(OmniMenuSurface));
+      expect(bounds.left, greaterThanOrEqualTo(0));
+      expect(bounds.right, lessThanOrEqualTo(360));
+      expect(bounds.bottom, lessThanOrEqualTo(500));
+      expect(tester.takeException(), isNull);
+      await tester.tapAt(const Offset(2, 2));
+      await tester.pumpAndSettle();
+      expect(find.byType(OmniSettingsSearchField), findsNothing);
+      expect(sceneBindings, isEmpty);
+    },
+  );
+
+  testWidgets('an empty model catalog still opens a dismissible list', (
+    tester,
+  ) async {
+    providerConfigured = false;
+    await pumpSceneSettings(tester);
+    await tester.tap(
+      find.byKey(
+        const Key('scene-model-selector-scene.compactor.context.chat'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('没有匹配的选项'), findsOneWidget);
+    expect(find.byType(OmniMenuItem), findsNothing);
+    expect(find.textContaining('恢复默认'), findsNothing);
+    await tester.tapAt(const Offset(2, 2));
+    await tester.pumpAndSettle();
+    expect(find.byType(OmniMenuSurface), findsNothing);
+    expect(sceneBindings, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('remote bridge setting autosaves only bridge fields', (
     tester,

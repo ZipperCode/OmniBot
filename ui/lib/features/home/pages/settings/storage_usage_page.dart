@@ -1,6 +1,9 @@
 import 'dart:math' as math;
 
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
@@ -9,6 +12,7 @@ import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class StorageUsagePage extends StatefulWidget {
   const StorageUsagePage({super.key});
@@ -17,7 +21,8 @@ class StorageUsagePage extends StatefulWidget {
   State<StorageUsagePage> createState() => _StorageUsagePageState();
 }
 
-class _StorageUsagePageState extends State<StorageUsagePage> {
+class _StorageUsagePageState extends State<StorageUsagePage>
+    with FlClashPageLoadMixin {
   bool _loading = true;
   String? _error;
   String? _clearingCategoryId;
@@ -64,6 +69,7 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
   }
 
   Future<void> _loadSummary({bool silent = false}) async {
+    if (!await waitForPageReady() || !mounted) return;
     if (!silent) {
       setState(() {
         _loading = true;
@@ -72,14 +78,14 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
     }
     try {
       final summary = await StorageUsageService.getStorageUsageSummary();
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() {
         _summary = summary;
         _loading = false;
         _error = null;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       setState(() {
         _loading = false;
         _error = _t(
@@ -155,13 +161,13 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
   Future<int?> _showClearOptionsDialog(StorageUsageCategory category) async {
     int selected = 0;
     final canRetention = category.riskLevel != 'dangerous';
-    return showDialog<int>(
+    return showOmniGlassCardSheet<int>(
       context: context,
       builder: (dialogContext) {
         final palette = dialogContext.omniPalette;
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
-            return AlertDialog(
+            return OmniGlassAlertDialog(
               backgroundColor: palette.surfacePrimary,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(16),
@@ -238,11 +244,11 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
   }
 
   Future<void> _applyStrategy(StorageCleanupStrategyPreset preset) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showOmniGlassCardSheet<bool>(
       context: context,
       builder: (dialogContext) {
         final palette = dialogContext.omniPalette;
-        return AlertDialog(
+        return OmniGlassAlertDialog(
           backgroundColor: palette.surfacePrimary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
@@ -340,59 +346,61 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
         title: _t(context, '存储占用', 'Storage Usage'),
         primary: true,
       ),
-      body: _loading
-          ? Center(
-              child: CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  palette.accentPrimary,
-                ),
-              ),
-            )
-          : summary == null
-          ? _buildErrorView()
-          : RefreshIndicator(
-              color: palette.accentPrimary,
-              onRefresh: _loadSummary,
-              child: ListView(
-                padding: edgeToEdgeScrollPadding(
-                  context,
-                  const EdgeInsets.fromLTRB(18, 12, 18, 24),
-                ),
-                children: [
-                  SettingsSectionTitle(
-                    label: _t(context, '存储概览', 'Storage overview'),
-                    subtitle: _t(
-                      context,
-                      '查看当前占用总量、可清理空间和最近变化',
-                      'Review total usage, cleanable space, and recent changes',
-                    ),
+      body: OmniContentWidth(
+        child: _loading
+            ? Center(
+                child: CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    palette.accentPrimary,
                   ),
-                  _buildOverviewSection(summary),
-                  if (summary.strategyPresets.isNotEmpty) ...[
-                    const SizedBox(height: 18),
+                ),
+              )
+            : summary == null
+            ? _buildErrorView()
+            : RefreshIndicator(
+                color: palette.accentPrimary,
+                onRefresh: _loadSummary,
+                child: ListView(
+                  padding: edgeToEdgeScrollPadding(
+                    context,
+                    const EdgeInsets.fromLTRB(22, 12, 22, 32),
+                  ),
+                  children: [
                     SettingsSectionTitle(
-                      label: _t(context, '清理建议', 'Cleanup suggestions'),
+                      label: _t(context, '存储概览', 'Storage overview'),
                       subtitle: _t(
                         context,
-                        '根据当前占用情况执行推荐的清理策略',
-                        'Run recommended cleanup actions based on current usage',
+                        '查看当前占用总量、可清理空间和最近变化',
+                        'Review total usage, cleanable space, and recent changes',
                       ),
                     ),
-                    _buildStrategySection(summary),
-                  ],
-                  const SizedBox(height: 18),
-                  SettingsSectionTitle(
-                    label: _t(context, '分类占用', 'Usage by category'),
-                    subtitle: _t(
-                      context,
-                      '查看各类数据占用，并对可清理项进行处理',
-                      'Review occupied categories and clean removable data',
+                    OmniSettingsCard(child: _buildOverviewSection(summary)),
+                    if (summary.strategyPresets.isNotEmpty) ...[
+                      const SizedBox(height: 22),
+                      SettingsSectionTitle(
+                        label: _t(context, '清理建议', 'Cleanup suggestions'),
+                        subtitle: _t(
+                          context,
+                          '根据当前占用情况执行推荐的清理策略',
+                          'Run recommended cleanup actions based on current usage',
+                        ),
+                      ),
+                      OmniSettingsCard(child: _buildStrategySection(summary)),
+                    ],
+                    const SizedBox(height: 22),
+                    SettingsSectionTitle(
+                      label: _t(context, '分类占用', 'Usage by category'),
+                      subtitle: _t(
+                        context,
+                        '查看各类数据占用，并对可清理项进行处理',
+                        'Review occupied categories and clean removable data',
+                      ),
                     ),
-                  ),
-                  _buildCategorySection(summary),
-                ],
+                    OmniSettingsCard(child: _buildCategorySection(summary)),
+                  ],
+                ),
               ),
-            ),
+      ),
     );
   }
 
@@ -1026,8 +1034,8 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
         break;
       default:
         text = _t(context, '只读', 'Read-only');
-        bgColor = isDark ? const Color(0xFF2B3138) : const Color(0xFFF1F5F9);
-        fgColor = isDark ? const Color(0xFFB0BCCB) : const Color(0xFF475569);
+        bgColor = context.omniPalette.surfaceSecondary;
+        fgColor = context.omniPalette.textSecondary;
         break;
     }
     return Container(
@@ -1065,9 +1073,7 @@ class _StorageUsagePageState extends State<StorageUsagePage> {
     List<StorageUsageCategory> categories,
     Map<String, Color> colorMap,
   ) {
-    final fallbackColor = context.isDarkTheme
-        ? const Color(0xFF9AA4B2)
-        : const Color(0xFF94A3B8);
+    final fallbackColor = context.omniPalette.textTertiary;
     final sorted = [...categories]..sort((a, b) => b.bytes.compareTo(a.bytes));
     if (sorted.length <= 7) {
       return sorted.map((item) {

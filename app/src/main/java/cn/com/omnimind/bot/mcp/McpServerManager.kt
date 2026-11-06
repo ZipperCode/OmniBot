@@ -2,8 +2,11 @@ package cn.com.omnimind.bot.mcp
 
 import android.content.Context
 import android.content.pm.PackageManager
+import cn.com.omnimind.baselib.permission.LocalNetworkPermission
 import android.util.Base64
 import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.mcp.WebChatRoutes.receiveJson
+import cn.com.omnimind.bot.mcp.WebChatRoutes.respondJson
 import cn.com.omnimind.bot.webchat.AgentRunService
 import cn.com.omnimind.bot.webchat.BrowserMirrorService
 import cn.com.omnimind.bot.webchat.ConversationDomainService
@@ -30,7 +33,6 @@ import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.host
 import io.ktor.server.request.path
-import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondFile
@@ -125,7 +127,7 @@ object McpServerManager {
      * second private protocol or a second server lifecycle.
      */
     fun ensureRunning(context: Context): McpServerState {
-        val currentHost = resolveLanIp() ?: LOOPBACK_HOST
+        val currentHost = permittedAdvertisedHost(context)
         if (isRunning && activeHost == currentHost) return currentState()
         val port = mmkv.decodeInt(PREF_PORT, DEFAULT_PORT).takeIf { it > 0 } ?: DEFAULT_PORT
         return startServer(context, port)
@@ -207,7 +209,7 @@ object McpServerManager {
             call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Access denied"))
             return
         }
-        val body = runCatching { call.receive<Map<String, Any?>>() }.getOrDefault(emptyMap())
+        val body = runCatching { call.receiveJson() }.getOrDefault(emptyMap())
         val token = body["token"]?.toString()
             ?: call.request.headers["Authorization"]?.removePrefix("Bearer ")?.trim()
         if (token.isNullOrBlank() || !timingSafeEquals(token, ensureToken())) {
@@ -228,7 +230,7 @@ object McpServerManager {
                 maxAge = (WEBCHAT_SESSION_TTL_MS / 1000L).toInt()
             )
         )
-        call.respond(
+        call.respondJson(
             mapOf(
                 "success" to true,
                 "server" to currentState().toMap()
@@ -293,7 +295,7 @@ object McpServerManager {
             // Local ACP/DSH agents use loopback and must remain available even
             // when Wi-Fi is absent. WebChat still advertises the LAN address
             // whenever one exists.
-            val lanIp = resolveLanIp() ?: LOOPBACK_HOST
+            val lanIp = permittedAdvertisedHost(context)
             if (isRunning) {
                 val currentPort = mmkv.decodeInt(PREF_PORT, DEFAULT_PORT).takeIf { it > 0 } ?: DEFAULT_PORT
                 if (currentPort == port && activeHost == lanIp) {
@@ -570,6 +572,10 @@ object McpServerManager {
             .onFailure { OmniLog.e(TAG, "resolveLanIp failed: ${it.message}") }
             .getOrNull()
     }
+
+    private fun permittedAdvertisedHost(context: Context): String =
+        if (LocalNetworkPermission.isGranted(context)) resolveLanIp() ?: LOOPBACK_HOST
+        else LOOPBACK_HOST
 
     private fun resolveAdvertisedHost(): String? {
         val currentHost = resolveLanIp()

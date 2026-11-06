@@ -185,13 +185,6 @@ class AppLocalizationsEn extends AppLocalizations {
       'When enabled, Enter creates a new line; when disabled, Enter sends the message directly';
 
   @override
-  String get settingsPredictiveBackTitle => 'Predictive Back Gesture';
-
-  @override
-  String get settingsPredictiveBackSubtitle =>
-      'When enabled, the back gesture follows your finger to preview the previous page or home screen; when disabled, the legacy back behavior is kept';
-
-  @override
   String get settingsHabitualHandTitle => 'Dominant Hand';
 
   @override
@@ -1425,13 +1418,14 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get aboutApkSourceDisclaimer =>
-      'By using this app, you agree to our Privacy Policy and consent to the collection of anonymous usage information through the open-source update Worker to help improve the software. You are solely responsible for any loss or consequence arising from your use of the app.';
+      'By using this app, you agree to our Privacy Policy and consent to the collection of anonymous usage information through the open-source website backend to help improve the software. You are solely responsible for any loss or consequence arising from your use of the app.';
 
   @override
-  String get aboutApkSourceOptionCnb => 'Cloudflare R2';
+  String get aboutApkSourceOptionCnb => 'Omnibot website';
 
   @override
-  String get aboutApkSourceOptionCnbDescription => 'Served by update worker';
+  String get aboutApkSourceOptionCnbDescription =>
+      'Served by the Omnibot website';
 
   @override
   String get aboutApkSourceOptionGithub => 'GitHub';
@@ -1560,11 +1554,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get alpineOpenCode => 'OpenCode CLI with built-in ACP support';
 
   @override
-  String get alpineDeepSeekHarness =>
-      'DeepSeek Harness (dsh) official ACP runtime';
+  String get alpineKimiCode => 'Kimi Code official CLI and local Web UI';
 
   @override
-  String get alpineKimiCode => 'Kimi Code official CLI and local Web UI';
+  String get alpinePi => 'Pi Agent with MCP tool support';
 
   @override
   String get alpineSshClient => 'SSH Client';
@@ -1894,4 +1887,114 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get homeDrawerLateNightSub2 => 'Say good night to today';
+
+  @override
+  String get dialogCancel => 'Cancel';
+
+  @override
+  String get dialogConfirm => 'Confirm';
+
+  @override
+  String get dialogOk => 'OK';
+
+  @override
+  String get dialogLoading => 'Loading';
+
+  @override
+  String get dialogPleaseWait => 'Please wait...';
+
+  @override
+  String get webviewDownloading => 'Downloading, please wait...';
+
+  @override
+  String get webviewDownloadStarted => 'Download started...';
+
+  @override
+  String get webviewImageSaved => 'Image saved to gallery';
+
+  @override
+  String get webviewFileSavedDownloads => 'File saved to Downloads';
+
+  @override
+  String webviewFileSaved(Object fileName) {
+    return 'File downloaded: $fileName';
+  }
+
+  @override
+  String get webviewDownloadFailed => 'Download failed';
+
+  @override
+  String get webviewBrowse => 'Web Browser';
+
+  @override
+  String get webviewRefresh => 'Refresh';
+
+  @override
+  String get webviewLoadFailed => 'Page load failed';
+
+  @override
+  String get webviewUnknownError => 'Unknown error';
+
+  @override
+  String get webviewReload => 'Reload';
+
+  @override
+  String get openclawBaseUrlEmpty =>
+      'OpenClaw Base URL is empty, please configure first';
+
+  @override
+  String get openclawConnected =>
+      'OpenClaw connected successfully, Gateway protocol OK';
+
+  @override
+  String get openclawConnectedNoChallenge =>
+      'OpenClaw connected but no challenge received, check Gateway version';
+
+  @override
+  String get openclawTimeout =>
+      'OpenClaw connection timeout, check service address and network';
+
+  @override
+  String openclawFailed(Object error) {
+    return 'OpenClaw connection failed: $error';
+  }
+
+  @override
+  String get chatHistoryExpandAll => 'Expand all dates';
+
+  @override
+  String get chatHistoryCollapseAll => 'Collapse all dates';
+
+  @override
+  String chatHistoryMessageCount(Object count) {
+    return '$count messages';
+  }
+
+  @override
+  String get chatHistoryUntitled => 'Untitled conversation';
+
+  @override
+  String authContinueTaskRequires(Object permissions) {
+    return 'Continue task only requires: $permissions';
+  }
+
+  @override
+  String get authSetPermissions => 'Set Permissions';
+
+  @override
+  String get authPermissionsSafe =>
+      'Don\'t worry, you can revoke these permissions anytime';
+
+  @override
+  String get authCheckingPermissions => 'Checking permissions...';
+
+  @override
+  String get authContinueTask => 'Continue Task';
+
+  @override
+  String get permissionAccessibility => 'Accessibility permission';
+
+  @override
+  String get permissionAccessibilityAndroidGui =>
+      'Android GUI Accessibility permission';
 }

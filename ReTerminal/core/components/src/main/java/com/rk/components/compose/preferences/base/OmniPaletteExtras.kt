@@ -14,9 +14,9 @@ import androidx.compose.ui.graphics.Color
 @Immutable
 data class OmniPaletteExtras(
     /** Tertiary text color (section headers, chevrons, hints). */
-    val textTertiary: Color = Color(0xFF98A5BB),
+    val textTertiary: Color = Color(0xFF929292),
     /** Hairline between setting rows (borderSubtle at 78%). */
-    val rowDivider: Color = Color(0xC7E2EAF4),
+    val rowDivider: Color = Color(0xC7E4E4E4),
 )
 
 val LocalOmniPaletteExtras = compositionLocalOf { OmniPaletteExtras() }

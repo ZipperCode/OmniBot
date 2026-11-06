@@ -1,6 +1,10 @@
 package cn.com.omnimind.bot.agent
 
-import cn.com.omnimind.baselib.privileged.PrivilegedAuthority
+import cn.com.omnimind.baselib.shizuku.ShizukuBackend
+import cn.com.omnimind.baselib.privileged.PrivilegedProvider
+import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
+import cn.com.omnimind.bot.agent.personal.PersonalContextTools
+import cn.com.omnimind.bot.agent.tool.search.WebSearchToolDefinitions
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.i18n.PromptLocale
 import com.rk.terminal.runtime.TerminalDistribution
@@ -16,11 +20,37 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import cn.com.omnimind.bot.agent.tool.search.WebSearchToolDefinitions
 
 object AgentToolDefinitions {
 
     private fun currentLocale(): PromptLocale = AppLocaleManager.currentPromptLocale()
+
+    private fun localizeDescription(zhDescription: String, locale: PromptLocale): String {
+        if (locale != PromptLocale.EN_US) return zhDescription
+
+        // Key tool descriptions in English for when app language is English
+        return when (zhDescription) {
+            "读取 workspace 或 Omnibot 白名单目录中的文件。文本默认每次返回最多 65536 个字符，可用 maxChars 缩小读取量（例如 2048），适用于长单行文件或上下文预算较小时；hasMore=true 时用 nextOffset 作为 offset 继续，不要同时传 lineStart，原文件不截断。图片返回元数据与可视预览；PDF、音视频、压缩包等二进制文件返回文件信息，请用相应解析工具提取内容。" ->
+                "Read files from workspace or Omnibot whitelist directories. Text files return up to 65536 characters by default; use maxChars to reduce (e.g. 2048) for long single-line files or tight context budgets. When hasMore=true, pass the returned nextOffset as offset to continue; do not also pass lineStart, and the original file is not truncated. Images return metadata and visual preview; PDFs, audio/video, archives and other binary files return file info—use appropriate parsing tools to extract content."
+
+            "将内容写入指定路径。写入总是完整覆盖（若文件已存在，则清空重写）。路径需在 workspace 或 Omnibot 白名单范围内；如父目录不存在，会自动创建。请检查返回的写入结果（成功或错误），不要凭假设继续。" ->
+                "Write content to a specified path. Writing always performs a full overwrite (if the file exists, it is cleared and rewritten). The path must be within workspace or Omnibot whitelist; parent directories are created automatically if they don't exist. Check the returned write result (success or error); do not proceed based on assumptions."
+
+            "在已有文件中插入、删除或替换多处内容。此工具首次调用前先用 file_read 确认当前内容，保证 insert/delete/replace 锚点正确；若锚点不存在或重复，操作会失败。不要尝试全文覆盖：全文替换请用 file_write。" ->
+                "Insert, delete, or replace multiple sections in an existing file. Before first use, confirm current content with file_read to ensure insert/delete/replace anchors are correct; if an anchor doesn't exist or is duplicated, the operation will fail. Do not attempt full-file replacement: use file_write for complete rewrites."
+
+            "执行命令行命令或启动需要后台交互的进程。支持单次命令和持久会话（session），进程结束前用 terminal_read 读取输出。命令输出默认只展示最近部分，用户看不到完整历史；如果需要分析完整日志，应主动用 file_write 重定向保存。" ->
+                "Execute command-line commands or launch processes requiring background interaction. Supports single commands and persistent sessions; use terminal_read to fetch output before the process ends. Command output shows only the most recent portion by default; users cannot see full history, so actively redirect and save with file_write when full logs are needed for analysis."
+
+            "创建新的定时任务。`targetKind=subagent` 为唯一支持的执行类型；`subagentPrompt` 必须写成任务触发时要立即执行的动作，不要重复填写\"每天几点提醒我/定时去做\"这类调度描述。" ->
+                "Create a new scheduled task. `targetKind=subagent` is the only supported execution type; `subagentPrompt` must describe the action to execute when triggered, not scheduling descriptions like \"remind me at X time every day\" or \"scheduled to do\"."
+
+            "修改已有定时任务的时间、标题、每日重复或启停状态。`targetKind=subagent` 为唯一支持的执行类型；更新后的 `subagentPrompt` 仍应描述触发时真正执行的动作，而不是再次描述调度本身。" ->
+                "Modify an existing scheduled task's time, title, daily repeat, or enabled state. `targetKind=subagent` is the only supported execution type; the updated `subagentPrompt` should still describe the action to execute when triggered, not the scheduling itself."
+
+            else -> zhDescription // Keep Chinese for other tools
+        }
+    }
 
     fun decorateToolDefinition(
         definition: JsonObject,
@@ -47,7 +77,10 @@ object AgentToolDefinitions {
                         // private field must not enter any runtime catalog.
                         "postToolRule" -> Unit
 
-                        "description" -> put("description", value)
+                        "description" -> {
+                            val zhDesc = value.jsonPrimitive.contentOrNull.orEmpty()
+                            put("description", localizeDescription(zhDesc, locale))
+                        }
 
                             "parameters" -> put("parameters", value)
 
@@ -158,11 +191,21 @@ object AgentToolDefinitions {
         "修改日程" to "Update Calendar Event",
         "删除日程" to "Delete Calendar Event",
         "音乐播放控制" to "Music Playback Control",
+        "搜索聊天表情包" to "Find Chat Sticker",
+        "按简短情绪或动作关键词搜索并下载一张经过格式校验的聊天表情包，支持静态图片与 GIF。适合自然的玩笑、庆祝或鼓励场景，也可响应用户明确的表情包请求。返回图片尚未发送；合适时在最终回复中原样引用返回的 artifact.renderMarkdown 一次。不要上传用户原话或隐私，不要把搜索当作已发送，失败时继续文字回复，不要循环重试。" to
+            "Search by a short emotion or action keyword and download one format-validated chat sticker, static or GIF. Use for natural playful, celebratory, or encouraging moments, or an explicit sticker request. The returned image has not been sent; when appropriate, copy its artifact.renderMarkdown exactly once into the final reply. Do not submit user messages or private information, treat a search as a sent image, or retry in a loop on failure; continue with text instead.",
+        "简短的情绪或动作关键词，如“开心”“鼓掌”“加油”，最多 24 个字符。只传检索词，不传用户原话、姓名、联系方式或其他隐私。" to
+            "A short emotion or action keyword, such as happy, applause, or encouragement, at most 24 characters. Send only the search term, never user messages, names, contact details, or other private information.",
+        "图片类型：auto 接受静态图或 GIF，static 仅静态图，gif 仅 GIF；默认 auto。" to
+            "Image type: auto accepts static images or GIF, static accepts only static images, and gif accepts only GIF. Defaults to auto.",
         "检索记忆" to "Search Memory",
         "写入当日记忆" to "Write Daily Memory",
         "沉淀长期记忆" to "Upsert Long-Term Memory",
         "整理当日记忆" to "Roll Up Daily Memory",
+        "加载长期记忆" to "Load Long-Term Memory",
         "分派子任务" to "Dispatch Subtasks",
+        "查找可用工具" to "Find Available Tools",
+        "查询当前时间" to "Query Current Time",
         "查询设备已安装应用列表。需要应用包名或确认应用是否已安装时优先调用。" to
             "Query the list of apps installed on the device. Prefer this when you need an app package name or need to confirm whether an app is installed.",
         "通过 Android GUI 插件的 VLM 流程操作当前界面。只要用户要求操作手机或 App（例如下单咖啡、购物、联系人、设置、导航、打开应用），必须立即调用此工具，并把完整用户目标原样放入 goal；不要用 terminal/browser 代替，也不要直接回复已完成。若 OmniFlow 操作模块未启用，调用后会提示用户到插件市场手动启用。" to
@@ -593,19 +636,25 @@ object AgentToolDefinitions {
         }
     }
 
+    private fun privilegedBackendLabel(backend: ShizukuBackend, provider: PrivilegedProvider, locale: PromptLocale): String {
+        val level = when (backend) {
+            ShizukuBackend.ROOT -> "Root"
+            ShizukuBackend.ADB -> "adb shell"
+            ShizukuBackend.NONE -> if (locale == PromptLocale.ZH_CN) "未授权" else "not granted"
+        }
+        return if (provider == PrivilegedProvider.SHIZUKU) "Shizuku / $level" else level
+    }
+
     fun androidPrivilegedActionTool(
         visibleActions: List<String>,
-        backend: PrivilegedAuthority,
-        locale: PromptLocale = currentLocale()
+        backend: ShizukuBackend,
+        locale: PromptLocale = currentLocale(),
+        provider: PrivilegedProvider = PrivilegedProvider.NONE,
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
-        val backendLabel = when (backend) {
-            PrivilegedAuthority.ROOT -> text("root", "root")
-            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
-            PrivilegedAuthority.NONE -> text("未授权", "not granted")
-        }
+        val backendLabel = privilegedBackendLabel(backend, provider, locale)
         val actionList = visibleActions.joinToString(", ")
 
         return decorateToolDefinition(buildJsonObject {
@@ -617,8 +666,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "通过用户显式选择的高权限来源执行安卓动作。这条能力链路独立于 `terminal_execute`：既保留 typed action，也支持 `action=shell.exec` 的一次性非 login shell；不会加载 login profile，环境和命令可见性可能不同。若需要保留 cwd、环境变量或 shell 状态，请改用 `android_privileged_session_*`。当前实测权限：$backendLabel。当前可见 action：$actionList。需要确认时由 ACP 客户端统一请求。",
-                        "Run Android privileged actions through the explicitly selected privileged source. This path stays separate from `terminal_execute`: it keeps typed actions and supports a one-shot non-login shell via `action=shell.exec`; login profiles are not loaded, so environment and command visibility may differ. For persistent cwd, environment, or shell state, use `android_privileged_session_*`. Current authority: $backendLabel. Currently visible actions: $actionList. Permission is requested through the standard ACP client boundary when needed."
+                        "通过已选定的 Root 或 Shizuku 后端执行安卓高权限动作。这条能力链路独立于 `terminal_execute`：既保留受控 typed action，也支持 `action=shell.exec` 的一次性任意 shell。若确实需要保留 cwd、环境变量或 shell 状态，请改用 `android_privileged_session_*`。当前后端：$backendLabel。当前可见 action：$actionList。需要授权时由 ACP 客户端统一请求确认。",
+                        "Run Android privileged actions through the selected Root or Shizuku backend. This path stays separate from `terminal_execute`: it keeps the typed allowlisted actions and also supports one-shot arbitrary shell via `action=shell.exec`. When you truly need persistent cwd, environment, or shell state, switch to `android_privileged_session_*`. Current backend: $backendLabel. Currently visible actions: $actionList. Permission is requested through the standard ACP client boundary when needed."
                     )
                 )
                 put(
@@ -636,8 +685,8 @@ object AgentToolDefinitions {
                             put(
                                 "description",
                                 text(
-                                    "要执行的受控高级动作标识。",
-                                    "The controlled privileged action to run."
+                                    "要执行的高级动作。设备状态查询/切换使用 device_control.get_state/set_state 与 target/enabled；亮度、音量使用 percent；息屏使用 seconds；查询显示/声音使用 get_display/get_sound。",
+                                    "The privileged action to run. Use device_control.get_state/set_state with target/enabled, set_brightness/set_volume with percent, set_screen_timeout with seconds, and get_display/get_sound for queries."
                                 )
                             )
                             putJsonArray("enum") {
@@ -672,7 +721,7 @@ object AgentToolDefinitions {
                                 }
                                 putJsonObject("mode") {
                                     put("type", "string")
-                                    put("description", text("AppOps 模式。", "AppOps mode."))
+                                    put("description", text("AppOps 模式，或 set_do_not_disturb 的 off/priority/silent/alarms。", "AppOps mode, or off/priority/silent/alarms for set_do_not_disturb."))
                                 }
                                 putJsonObject("op") {
                                     put("type", "string")
@@ -693,6 +742,28 @@ object AgentToolDefinitions {
                                 putJsonObject("enabled") {
                                     put("type", "boolean")
                                     put("description", text("是否启用该设备功能。", "Whether to enable the device feature."))
+                                }
+                                putJsonObject("target") {
+                                    put("type", "string")
+                                    put("description", text("get_state/set_state 的系统开关。", "System toggle for get_state/set_state."))
+                                    putJsonArray("enum") { PrivilegedActionPolicy.deviceStateTargets.forEach { add(it) } }
+                                }
+                                putJsonObject("percent") {
+                                    put("type", "integer")
+                                    put("minimum", 0)
+                                    put("maximum", 100)
+                                    put("description", text("set_brightness/set_volume 的百分比。", "Percentage for set_brightness/set_volume."))
+                                }
+                                putJsonObject("stream") {
+                                    put("type", "string")
+                                    putJsonArray("enum") { listOf("media", "alarm", "ring", "notification", "voice_call", "system").forEach { add(it) } }
+                                    put("description", text("set_volume 的音量通道。", "Audio stream for set_volume."))
+                                }
+                                putJsonObject("seconds") {
+                                    put("type", "integer")
+                                    put("minimum", 15)
+                                    put("maximum", 1800)
+                                    put("description", text("set_screen_timeout 的息屏等待秒数。", "Screen timeout in seconds for set_screen_timeout."))
                                 }
                                 putJsonObject("text") {
                                     put("type", "string")
@@ -755,24 +826,20 @@ object AgentToolDefinitions {
                         add("action")
                         add("arguments")
                     }
-                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionStartTool(
-        backend: PrivilegedAuthority,
-        locale: PromptLocale = currentLocale()
+        backend: ShizukuBackend,
+        locale: PromptLocale = currentLocale(),
+        provider: PrivilegedProvider = PrivilegedProvider.NONE,
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
-        val backendLabel = when (backend) {
-            PrivilegedAuthority.ROOT -> text("root", "root")
-            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
-            PrivilegedAuthority.NONE -> text("未授权", "not granted")
-        }
+        val backendLabel = privilegedBackendLabel(backend, provider, locale)
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
             putJsonObject("function") {
@@ -782,8 +849,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "启动一个绑定到当前所选来源的高权限 shell 会话，仅用于需要跨多轮保留 cwd、环境变量或 shell 状态的任务。当前实测权限：$backendLabel。需要确认时由 ACP 客户端统一请求。",
-                        "Start a reusable shell session bound to the selected privileged source. Use it only for persistent cwd, environment variables, or shell state. Current authority: $backendLabel. Confirmation uses the standard ACP client boundary."
+                        "启动一个可复用的安卓高权限 shell 会话，仅用于确实需要跨多轮保留 cwd、环境变量或 shell 状态的任务。当前后端：$backendLabel。需要确认时由 ACP 客户端统一请求权限。",
+                        "Start a reusable Android privileged shell session. Use it only when a task truly needs persistent cwd, environment variables, or shell state across turns. Current backend: $backendLabel. When confirmation is needed, the standard ACP client boundary requests permission."
                     )
                 )
                 put(
@@ -812,24 +879,20 @@ object AgentToolDefinitions {
                             }
                         }
                     }
-                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionExecTool(
-        backend: PrivilegedAuthority,
-        locale: PromptLocale = currentLocale()
+        backend: ShizukuBackend,
+        locale: PromptLocale = currentLocale(),
+        provider: PrivilegedProvider = PrivilegedProvider.NONE,
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
-        val backendLabel = when (backend) {
-            PrivilegedAuthority.ROOT -> text("root", "root")
-            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
-            PrivilegedAuthority.NONE -> text("未授权", "not granted")
-        }
+        val backendLabel = privilegedBackendLabel(backend, provider, locale)
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
             putJsonObject("function") {
@@ -839,8 +902,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "向已有且来源固定的高权限 shell 会话发送命令，并等待该命令完成。当前实测权限：$backendLabel。需要确认时由 ACP 客户端统一请求。",
-                        "Send a command to an existing source-bound privileged shell session and wait for completion. Current authority: $backendLabel. Confirmation uses the standard ACP client boundary."
+                        "向已有的安卓高权限 shell 会话发送一条命令，并等待该命令完成。当前后端：$backendLabel。每次需要确认时由 ACP 客户端统一请求权限。",
+                        "Send a command to an existing Android privileged shell session and wait for that command to finish. Current backend: $backendLabel. When confirmation is needed, permission is requested through the standard ACP client boundary."
                     )
                 )
                 put(
@@ -870,24 +933,20 @@ object AgentToolDefinitions {
                         add("sessionId")
                         add("command")
                     }
-                    put("additionalProperties", false)
                 }
             }
         }, locale)
     }
 
     fun androidPrivilegedSessionReadTool(
-        backend: PrivilegedAuthority,
-        locale: PromptLocale = currentLocale()
+        backend: ShizukuBackend,
+        locale: PromptLocale = currentLocale(),
+        provider: PrivilegedProvider = PrivilegedProvider.NONE,
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
-        val backendLabel = when (backend) {
-            PrivilegedAuthority.ROOT -> text("root", "root")
-            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
-            PrivilegedAuthority.NONE -> text("未授权", "not granted")
-        }
+        val backendLabel = privilegedBackendLabel(backend, provider, locale)
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
             putJsonObject("function") {
@@ -897,8 +956,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "读取高权限 shell 会话最近的 transcript 尾部。当前实测权限：$backendLabel。该操作不会再次请求确认。",
-                        "Read the latest transcript tail from a privileged shell session. Current authority: $backendLabel. This operation does not require another confirmation."
+                        "读取安卓高权限 shell 会话最近的 transcript 尾部。当前后端：$backendLabel。该操作不会再次请求确认。",
+                        "Read the latest transcript tail from an Android privileged shell session. Current backend: $backendLabel. This operation does not require another confirmation."
                     )
                 )
                 put(
@@ -925,17 +984,14 @@ object AgentToolDefinitions {
     }
 
     fun androidPrivilegedSessionStopTool(
-        backend: PrivilegedAuthority,
-        locale: PromptLocale = currentLocale()
+        backend: ShizukuBackend,
+        locale: PromptLocale = currentLocale(),
+        provider: PrivilegedProvider = PrivilegedProvider.NONE,
     ): JsonObject {
         val text: (String, String) -> String = { zh, en ->
             if (locale == PromptLocale.ZH_CN) zh else en
         }
-        val backendLabel = when (backend) {
-            PrivilegedAuthority.ROOT -> text("root", "root")
-            PrivilegedAuthority.ADB -> text("adb shell", "adb shell")
-            PrivilegedAuthority.NONE -> text("未授权", "not granted")
-        }
+        val backendLabel = privilegedBackendLabel(backend, provider, locale)
         return decorateToolDefinition(buildJsonObject {
             put("type", "function")
             putJsonObject("function") {
@@ -945,8 +1001,8 @@ object AgentToolDefinitions {
                 put(
                     "description",
                     text(
-                        "结束已有的高权限 shell 会话并清理逻辑状态。当前实测权限：$backendLabel。若应用无权杀死 root 进程，物理进程可能残留。",
-                        "Stop an existing privileged shell session and clean up its logical state. Current authority: $backendLabel. A root process may survive if the app cannot kill it."
+                        "结束已有的安卓高权限 shell 会话并清理状态。当前后端：$backendLabel。该操作不会再次请求确认。",
+                        "Stop an existing Android privileged shell session and clean up its state. Current backend: $backendLabel. This operation does not require another confirmation."
                     )
                 )
                 put(
@@ -1351,6 +1407,44 @@ object AgentToolDefinitions {
                 putJsonArray("required") {
                     add("prompt")
                     add("outputPath")
+                }
+            }
+        }
+    }
+
+    val stickerSearchTool: JsonObject = buildJsonObject {
+        put("type", "function")
+        putJsonObject("function") {
+            put("name", "sticker_search")
+            put("displayName", "搜索聊天表情包")
+            put("toolType", "workspace")
+            put(
+                "description",
+                "按简短情绪或动作关键词搜索并下载一张经过格式校验的聊天表情包，支持静态图片与 GIF。适合自然的玩笑、庆祝或鼓励场景，也可响应用户明确的表情包请求。返回图片尚未发送；合适时在最终回复中原样引用返回的 artifact.renderMarkdown 一次。不要上传用户原话或隐私，不要把搜索当作已发送，失败时继续文字回复，不要循环重试。"
+            )
+            putJsonObject("parameters") {
+                put("type", "object")
+                put("additionalProperties", false)
+                putJsonObject("properties") {
+                    putJsonObject("keyword") {
+                        put("type", "string")
+                        put("minLength", 1)
+                        put("maxLength", 24)
+                        put("description", "简短的情绪或动作关键词，如“开心”“鼓掌”“加油”，最多 24 个字符。只传检索词，不传用户原话、姓名、联系方式或其他隐私。")
+                    }
+                    putJsonObject("format") {
+                        put("type", "string")
+                        put("description", "图片类型：auto 接受静态图或 GIF，static 仅静态图，gif 仅 GIF；默认 auto。")
+                        put("default", "auto")
+                        putJsonArray("enum") {
+                            add("auto")
+                            add("static")
+                            add("gif")
+                        }
+                    }
+                }
+                putJsonArray("required") {
+                    add("keyword")
                 }
             }
         }
@@ -1831,7 +1925,10 @@ object AgentToolDefinitions {
                         put("type", "string")
                         put("description", "可选 IANA 时区，未传默认系统时区。")
                     }
-                    putJsonObject("allDay") { put("type", "boolean") }
+                    putJsonObject("allDay") {
+                        put("type", "boolean")
+                        put("description", "全天事件使用日期：startAt 为首日，endAt 为不包含的结束日；同日输入代表一天。")
+                    }
                     putJsonObject("reminderMinutes") {
                         put("type", "array")
                         put("description", "提醒分钟列表，例如 [10, 30]。")
@@ -1872,6 +1969,11 @@ object AgentToolDefinitions {
                     putJsonObject("query") {
                         put("type", "string")
                         put("description", "可选关键词，匹配标题或地点。")
+                    }
+                    putJsonObject("offset") {
+                        put("type", "integer")
+                        put("minimum", 0)
+                        put("description", "分页偏移，默认 0；使用上次结果中的 nextOffset。")
                     }
                     putJsonObject("limit") {
                         put("type", "integer")
@@ -2197,6 +2299,7 @@ object AgentToolDefinitions {
         fileReadTool,
         fileWriteTool,
         imageGenerateTool,
+        stickerSearchTool,
         fileEditTool,
         fileListTool,
         fileSearchTool,
@@ -2279,7 +2382,7 @@ object AgentToolDefinitions {
         includeVlmTool: Boolean = true,
     ): List<JsonObject> =
         builtinTools(locale, terminalDistribution, includeVlmTool) +
-        scheduleTools(locale) + alarmTools(locale) + calendarTools(locale) + musicTools(locale) +
+        scheduleTools(locale) + alarmTools(locale) + PersonalContextTools.definitions(locale) + musicTools(locale) +
         webSearchTools(locale)
 
     fun reservedToolNames(): Set<String> {
@@ -2288,11 +2391,11 @@ object AgentToolDefinitions {
             addAll(staticTools(locale))
             addAll(memoryTools(locale))
             addAll(subagentTools(locale))
-            add(androidPrivilegedActionTool(emptyList(), PrivilegedAuthority.NONE, locale))
-            add(androidPrivilegedSessionStartTool(PrivilegedAuthority.NONE, locale))
-            add(androidPrivilegedSessionExecTool(PrivilegedAuthority.NONE, locale))
-            add(androidPrivilegedSessionReadTool(PrivilegedAuthority.NONE, locale))
-            add(androidPrivilegedSessionStopTool(PrivilegedAuthority.NONE, locale))
+            add(androidPrivilegedActionTool(emptyList(), ShizukuBackend.NONE, locale))
+            add(androidPrivilegedSessionStartTool(ShizukuBackend.NONE, locale))
+            add(androidPrivilegedSessionExecTool(ShizukuBackend.NONE, locale))
+            add(androidPrivilegedSessionReadTool(ShizukuBackend.NONE, locale))
+            add(androidPrivilegedSessionStopTool(ShizukuBackend.NONE, locale))
         }
         return definitions.mapNotNullTo(linkedSetOf()) { definition ->
             (definition["function"] as? JsonObject)

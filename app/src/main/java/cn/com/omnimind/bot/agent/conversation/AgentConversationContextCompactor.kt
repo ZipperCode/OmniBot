@@ -539,6 +539,7 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
                 reasoningEffort = reasoningEffort,
                 promptCacheKey = promptCacheKey,
                 maxCompletionTokens = maxOutputTokens,
+                explicitProviderProfileId = modelOverride?.oauthProfileId,
             )
             result.await()
         } finally {

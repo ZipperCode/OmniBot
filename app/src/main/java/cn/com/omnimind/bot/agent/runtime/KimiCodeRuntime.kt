@@ -96,7 +96,11 @@ internal fun buildKimiCodeManagedFiles(
         appendLine("[providers.omnibot]")
         appendLine("type = ${tomlString(providerType)}")
         appendLine("base_url = ${tomlString(if (providerType == "anthropic") provider.baseUrl else normalizeKimiCodeBaseUrl(provider.baseUrl))}")
-        appendLine("api_key = ${tomlString(provider.apiKey)}")
+        if (provider.isHostManaged) {
+            appendLine("api_key_env = \"OPENAI_API_KEY\"")
+        } else {
+            appendLine("api_key = ${tomlString(provider.apiKey)}")
+        }
         if (provider.customHeaders.isNotEmpty()) {
             appendLine("[providers.omnibot.custom_headers]")
             provider.customHeaders.forEach { (name, value) ->

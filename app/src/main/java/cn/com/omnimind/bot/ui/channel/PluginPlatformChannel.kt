@@ -6,6 +6,8 @@ import cn.com.omnimind.baselib.llm.OfficialVlmOperationConfigStore
 import cn.com.omnimind.baselib.llm.OfficialVlmOperationRouteResolver
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 import cn.com.omnimind.baselib.llm.SceneOperationConfigStore
+import cn.com.omnimind.bot.agent.AgentToolRegistry
+import kotlinx.coroutines.withContext
 import cn.com.omnimind.bot.BuildConfig
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.OmniPluginState
@@ -55,6 +57,25 @@ class PluginPlatformChannel {
         scope.launch {
             runCatching {
                 when (call.method) {
+                    "listTools" -> withContext(Dispatchers.IO) {
+                        // Read configuration metadata; no ACP session or prompt is admitted.
+                        val definitions = host.listToolDefinitions()
+                        val registry = AgentToolRegistry(
+                            context = safeContext,
+                            pluginToolDefinitions = definitions,
+                        )
+                        val owners = definitions.associate { it.name to it.ownerPluginId }
+                        registry.searchTools("", null).map { tool ->
+                            mapOf(
+                                "name" to tool.name,
+                                "displayName" to tool.displayName,
+                                "description" to tool.description,
+                                "group" to if (owners[tool.name] != null) "plugin" else "builtin",
+                                "source" to owners[tool.name],
+                                "status" to "registered",
+                            )
+                        }
+                    }
                     "list" -> host.list().map(::stateToMap)
                     "install" -> stateToMap(host.install(call.requirePluginId()))
                     "update" -> stateToMap(host.update(call.requirePluginId()))

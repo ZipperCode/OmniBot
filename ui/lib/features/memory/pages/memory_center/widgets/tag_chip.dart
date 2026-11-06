@@ -28,7 +28,7 @@ class TagChip extends StatelessWidget {
     final palette = context.omniPalette;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      height: 24,
+      constraints: const BoxConstraints(minHeight: 28),
       decoration: BoxDecoration(
         color: selected
             ? palette.segmentThumb
@@ -91,7 +91,7 @@ class TagChip extends StatelessWidget {
               fontWeight: selected
                   ? AppTextStyles.fontWeightMedium
                   : AppTextStyles.fontWeightRegular,
-              height: 0.92,
+              height: 1.2,
               letterSpacing: AppTextStyles.letterSpacingWide,
             ),
           ),

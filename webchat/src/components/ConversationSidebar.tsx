@@ -14,6 +14,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
+import { isAgentConversationMode } from "../conversationDraft";
 import { conversationKey, modeLabel, relativeDate } from "../format";
 import type {
   AgentProfile,
@@ -57,6 +58,8 @@ const SECTION_ORDER = [
   "deepseek",
   "claude",
   "opencode",
+  "pi",
+  "na",
   "acp",
   "omni",
   "chat",
@@ -67,9 +70,12 @@ type ConversationSection = typeof SECTION_ORDER[number];
 const SECTION_LABELS: Record<ConversationSection, string> = {
   pinned: "置顶会话",
   codex: "Codex",
+  // Keep retired Agent history identifiable without offering new conversations.
   deepseek: "DeepSeek Harness",
   claude: "Claude Code",
   opencode: "OpenCode",
+  pi: "Pi",
+  na: "Na",
   acp: "Agent",
   omni: "小万",
   chat: "纯聊天",
@@ -80,32 +86,31 @@ const SECTION_ICONS: Record<Exclude<ConversationSection, "pinned">, IconName> = 
   deepseek: "deepseek",
   claude: "claude",
   opencode: "opencode",
+  pi: "pi",
+  na: "na",
   acp: "agent",
   omni: "agent",
   chat: "chat",
 };
 
-const FALLBACK_AGENT_PROFILES: AgentProfile[] = [
-  { id: "codex-acp", name: "Codex", enabled: true, builtIn: true },
-  { id: "claude-code-acp", name: "Claude Code", enabled: true, builtIn: true },
-  { id: "opencode-acp", name: "OpenCode", enabled: true, builtIn: true },
-  { id: "deepseek-harness-acp", name: "DeepSeek Harness", enabled: true, builtIn: true },
-];
-
 function agentIcon(agentId?: string): IconName {
+  if (agentId === "na-cloud") return "na";
   if (agentId === "codex-acp") return "codex";
   if (agentId === "claude-code-acp") return "claude";
   if (agentId === "opencode-acp") return "opencode";
+  if (agentId === "pi-acp") return "pi";
   if (agentId === "deepseek-harness-acp") return "deepseek";
   return "agent";
 }
 
 function conversationSection(conversation: Conversation): ConversationSection {
   if (conversation.isPinned) return "pinned";
-  if (conversation.mode === "codex") {
+  if (isAgentConversationMode(conversation.mode)) {
+    if (conversation.agentId === "na-cloud") return "na";
     if (!conversation.agentId || conversation.agentId === "codex-acp") return "codex";
     if (conversation.agentId === "claude-code-acp") return "claude";
     if (conversation.agentId === "opencode-acp") return "opencode";
+    if (conversation.agentId === "pi-acp") return "pi";
     if (conversation.agentId === "deepseek-harness-acp") return "deepseek";
     return "acp";
   }
@@ -148,16 +153,18 @@ export function ConversationSidebar({
   const contextMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const query = search.trim().toLowerCase();
   const createOptions = useMemo(() => {
-    const profiles = agentProfiles.length ? agentProfiles : FALLBACK_AGENT_PROFILES;
+    const profiles = agentProfiles;
     return [
       {
         key: "omni",
-        target: { mode: "normal" } as ConversationCreateTarget,
+        target: { mode: "normal", agentId: "xiaowan-acp" } as ConversationCreateTarget,
         label: "小万",
         icon: "agent" as IconName,
       },
       ...profiles
-        .filter((profile) => profile.enabled !== false)
+        // Xiaowan already has the entry above; preserve the native catalog
+        // order for every other Agent.
+        .filter((profile) => profile.enabled !== false && profile.id !== "xiaowan-acp")
         .map((profile) => ({
           key: profile.id,
           target: {
@@ -169,7 +176,7 @@ export function ConversationSidebar({
         })),
       {
         key: "chat",
-        target: { mode: "chat_only" } as ConversationCreateTarget,
+        target: { mode: "chat_only", agentId: "xiaowan-acp" } as ConversationCreateTarget,
         label: "纯聊天模式",
         icon: "chat" as IconName,
       },
@@ -395,7 +402,7 @@ export function ConversationSidebar({
           )}
         </div>
         <div
-          className="archive-popover-anchor"
+          className={`archive-popover-anchor${archivePanelOpen ? " expanded" : ""}`}
           ref={archivePanelAnchorRef}
         >
           <button
@@ -489,7 +496,7 @@ export function ConversationSidebar({
           )}
         </div>
         <div
-          className="new-conversation-anchor"
+          className={`new-conversation-anchor${createMenuOpen ? " expanded" : ""}`}
           ref={createMenuAnchorRef}
           onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {

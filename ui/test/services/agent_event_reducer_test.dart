@@ -1,7 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ui/features/home/pages/chat/chat_page.dart';
+import 'package:ui/features/home/pages/chat/chat_page.dart'
+    hide remoteCodexMessagesFromThreadResponseForTesting;
+import 'package:ui/features/home/pages/chat/chat_page.dart'
+    as chat
+    show remoteCodexMessagesFromThreadResponseForTesting;
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
 import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
@@ -731,8 +736,8 @@ void main() {
         'turnId': 'turn-live-user',
         'update': {
           'sessionUpdate': 'user_message_chunk',
-          'messageId': 'dsh-user-message',
-          'content': {'type': 'text', 'text': 'DSH 实时用户问题'},
+          'messageId': 'acp-user-message',
+          'content': {'type': 'text', 'text': 'ACP 实时用户问题'},
         },
       },
     };
@@ -741,7 +746,7 @@ void main() {
 
     expect(runtime.messages, hasLength(1));
     expect(runtime.messages.single.user, 1);
-    expect(runtime.messages.single.text, 'DSH 实时用户问题');
+    expect(runtime.messages.single.text, 'ACP 实时用户问题');
 
     final hostRuntime = ChatConversationRuntimeState(
       conversationId: 43,
@@ -750,7 +755,7 @@ void main() {
     addTearDown(hostRuntime.dispose);
     hostRuntime.currentDispatchTurnId = 'turn-live-user-ai';
     hostRuntime.messages.add(
-      ChatMessageModel.userMessage('DSH 实时用户问题', id: 'turn-live-user-user'),
+      ChatMessageModel.userMessage('ACP 实时用户问题', id: 'turn-live-user-user'),
     );
     reducer.reduce(runtime: hostRuntime, event: liveEvent);
 
@@ -1045,7 +1050,7 @@ void main() {
     () {
       // AgentRuntimeManager keeps session/update protocol params untouched and
       // attaches the host-owned turn id to the outer event envelope. This is
-      // the shape emitted by LocalAcpRuntime for official DSH; the reducer must
+      // the shape emitted by LocalAcpRuntime for ACP Agents; the reducer must
       // not require a non-ACP turnId field inside params.update.
       reducer.reduce(
         runtime: runtime,
@@ -1058,7 +1063,7 @@ void main() {
             'update': {
               'sessionUpdate': 'agent_thought_chunk',
               'messageId': 'thought-1',
-              'content': {'type': 'text', 'text': '来自 DSH 的思考'},
+              'content': {'type': 'text', 'text': '来自 ACP 的思考'},
             },
           },
         },
@@ -1067,7 +1072,7 @@ void main() {
       final thinking = runtime.messages.firstWhere(
         (message) => message.cardData?['type'] == 'deep_thinking',
       );
-      expect(thinking.cardData?['thinkingContent'], '来自 DSH 的思考');
+      expect(thinking.cardData?['thinkingContent'], '来自 ACP 的思考');
       expect(thinking.cardData?['taskID'], 'native-turn-1');
       expect(runtime.isAiResponding, isTrue);
     },
@@ -3240,56 +3245,78 @@ void main() {
   });
 
   for (final output in ['', 'command stderr\n']) {
-    test('preserves ACP command exit detail with output ${output.isNotEmpty}', () {
-      reducer.reduce(runtime: runtime, event: {
-        'method': 'session/update',
-        'turnId': 'turn-exit-detail',
-        'params': {
-          'sessionId': 'session-exit-detail',
-          'update': {
-            'sessionUpdate': 'tool_call_update',
-            'toolCallId': 'exit-detail',
-            'kind': 'execute',
-            'title': 'printf test; exit 182',
-            'status': 'failed',
-            'rawOutput': {'formatted_output': output, 'exit_code': 182},
+    test(
+      'preserves ACP command exit detail with output ${output.isNotEmpty}',
+      () {
+        reducer.reduce(
+          runtime: runtime,
+          event: {
+            'method': 'session/update',
+            'turnId': 'turn-exit-detail',
+            'params': {
+              'sessionId': 'session-exit-detail',
+              'update': {
+                'sessionUpdate': 'tool_call_update',
+                'toolCallId': 'exit-detail',
+                'kind': 'execute',
+                'title': 'printf test; exit 182',
+                'status': 'failed',
+                'rawOutput': {'formatted_output': output, 'exit_code': 182},
+              },
+            },
           },
-        },
-      });
-      final card = runtime.messages.single.cardData!;
-      expect(card['status'], 'error');
-      expect(card['summary'], 'Command exited with code 182');
-      expect(card['terminalOutput'] ?? '', output);
-      expect(runtime.messages, hasLength(1));
-    });
+        );
+        final card = runtime.messages.single.cardData!;
+        expect(card['status'], 'error');
+        expect(card['summary'], 'Command exited with code 182');
+        expect(card['terminalOutput'] ?? '', output);
+        expect(runtime.messages, hasLength(1));
+      },
+    );
   }
 
   for (final sample in [
     ('in_progress', <String, dynamic>{'exit_code': 182}, 'running', ''),
-    ('completed', <String, dynamic>{'exit_code': 0}, 'success', 'Command exited with code 0'),
-    ('failed', <String, dynamic>{'exit_code': 182, 'summary': 'Backend unavailable'}, 'error', 'Backend unavailable'),
+    (
+      'completed',
+      <String, dynamic>{'exit_code': 0},
+      'success',
+      'Command exited with code 0',
+    ),
+    (
+      'failed',
+      <String, dynamic>{'exit_code': 182, 'summary': 'Backend unavailable'},
+      'error',
+      'Backend unavailable',
+    ),
     ('failed', <String, dynamic>{}, 'error', ''),
   ]) {
-    test('command exit fallback preserves ACP state and explicit detail $sample', () {
-      reducer.reduce(runtime: runtime, event: {
-        'method': 'session/update',
-        'turnId': 'turn-exit-state',
-        'params': {
-          'sessionId': 'session-exit-state',
-          'update': {
-            'sessionUpdate': 'tool_call_update',
-            'toolCallId': 'exit-state',
-            'kind': 'execute',
-            'title': 'command',
-            'status': sample.$1,
-            'rawOutput': sample.$2,
+    test(
+      'command exit fallback preserves ACP state and explicit detail $sample',
+      () {
+        reducer.reduce(
+          runtime: runtime,
+          event: {
+            'method': 'session/update',
+            'turnId': 'turn-exit-state',
+            'params': {
+              'sessionId': 'session-exit-state',
+              'update': {
+                'sessionUpdate': 'tool_call_update',
+                'toolCallId': 'exit-state',
+                'kind': 'execute',
+                'title': 'command',
+                'status': sample.$1,
+                'rawOutput': sample.$2,
+              },
+            },
           },
-        },
-      });
-      final card = runtime.messages.single.cardData!;
-      expect(card['status'], sample.$3);
-      expect(card['summary'], sample.$4);
-    });
+        );
+        final card = runtime.messages.single.cardData!;
+        expect(card['status'], sample.$3);
+        expect(card['summary'], sample.$4);
+      },
+    );
   }
 
   test('projects legacy tool-result details from ACP rawOutput', () {
@@ -3923,7 +3950,7 @@ void main() {
           'update': {
             'sessionUpdate': 'agent_message_chunk',
             'messageId': 'message-1',
-            'content': {'type': 'text', 'text': '来自 DSH 的完整消息'},
+            'content': {'type': 'text', 'text': '来自 ACP 的完整消息'},
           },
         },
       },
@@ -3933,7 +3960,7 @@ void main() {
     reducer.reduce(runtime: runtime, event: event);
 
     expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.text, '来自 DSH 的完整消息');
+    expect(runtime.messages.single.text, '来自 ACP 的完整消息');
   });
 
   test(
@@ -4010,7 +4037,7 @@ void main() {
             'sessionId': 'session-1',
             'update': {
               'sessionUpdate': 'agent_message_chunk',
-              // DeepSeek Harness reuses this ACP messageId in later turns.
+              // An Agent reuses this ACP messageId in later turns.
               'messageId': '1:1',
               'content': {'type': 'text', 'text': text},
             },
@@ -6017,8 +6044,8 @@ diff --git a/lib/main.dart b/lib/main.dart
     reducer.reduce(
       runtime: runtime,
       event: {
-        'agentId': 'deepseek-harness-acp',
-        'agentName': 'DeepSeek Harness',
+        'agentId': 'kimi-code-acp',
+        'agentName': 'Kimi Code',
         'sessionId': 'session-top-level',
         'message': {
           'id': 'request-1',
@@ -6040,8 +6067,8 @@ diff --git a/lib/main.dart b/lib/main.dart
     expect(cardData['status'], 'pending');
     expect(cardData['conversationId'], 42);
     expect(cardData['sessionId'], 'session-top-level');
-    expect(cardData['agentId'], 'deepseek-harness-acp');
-    expect(cardData['agentName'], 'DeepSeek Harness');
+    expect(cardData['agentId'], 'kimi-code-acp');
+    expect(cardData['agentName'], 'Kimi Code');
   });
 
   test('preserves request id when ACP places it inside params', () {
@@ -6168,39 +6195,46 @@ diff --git a/lib/main.dart b/lib/main.dart
     expect(runtime.isAiResponding, isTrue);
   });
 
-  for (final settledStatus in ['submitted', 'cancelled', 'interrupted', 'failed']) {
-  test('keeps $settledStatus request user input status during event replay', () {
-    final requestEvent = {
-      'message': {
-        'id': 'request-1',
-        'method': 'item/tool/requestUserInput',
-        'params': {
-          'questions': [
-            {
-              'id': 'choice',
-              'question': 'Choose one',
-              'options': [
-                {'label': 'Option A'},
+  for (final settledStatus in [
+    'submitted',
+    'cancelled',
+    'interrupted',
+    'failed',
+  ]) {
+    test(
+      'keeps $settledStatus request user input status during event replay',
+      () {
+        final requestEvent = {
+          'message': {
+            'id': 'request-1',
+            'method': 'item/tool/requestUserInput',
+            'params': {
+              'questions': [
+                {
+                  'id': 'choice',
+                  'question': 'Choose one',
+                  'options': [
+                    {'label': 'Option A'},
+                  ],
+                },
               ],
             },
-          ],
-        },
+          },
+        };
+
+        reducer.reduce(runtime: runtime, event: requestEvent);
+        final existing = runtime.messages.single;
+        final submittedCardData = Map<String, dynamic>.from(existing.cardData!)
+          ..['status'] = settledStatus;
+        runtime.messages[0] = existing.copyWith(
+          content: {'cardData': submittedCardData, 'id': existing.id},
+        );
+
+        reducer.reduce(runtime: runtime, event: requestEvent);
+
+        expect(runtime.messages.single.cardData!['status'], settledStatus);
       },
-    };
-
-    reducer.reduce(runtime: runtime, event: requestEvent);
-    final existing = runtime.messages.single;
-    final submittedCardData = Map<String, dynamic>.from(existing.cardData!)
-      ..['status'] = settledStatus;
-    runtime.messages[0] = existing.copyWith(
-      content: {'cardData': submittedCardData, 'id': existing.id},
     );
-
-    reducer.reduce(runtime: runtime, event: requestEvent);
-
-    expect(runtime.messages.single.cardData!['status'], settledStatus);
-  });
-
   }
 
   test('hydrates historical request user input as submitted request card', () {
@@ -7181,4 +7215,38 @@ diff --git a/lib/main.dart b/lib/main.dart
     expect(card['terminalOutput'], 'one\\ntwo\\n');
     expect(card['terminalSessionId'], 'terminal-1');
   });
+}
+
+// Shared with the Kotlin import regression tests. These expected items were
+// captured from the pre-migration Dart implementation, not regenerated by Kotlin.
+final _historyImportFixtures = (jsonDecode(
+  File('../app/src/test/resources/chat/remote-history-compatibility.json')
+      .readAsStringSync(),
+) as List).cast<Map>();
+
+List<ChatMessageModel> remoteCodexMessagesFromThreadResponseForTesting(
+  Map<String, dynamic> response, {
+  bool active = false,
+  String? activeTurnId,
+}) {
+  final thread = Map<String, dynamic>.from(
+    response['thread'] as Map? ?? response,
+  );
+  final turns = thread['turns'] as List?;
+  if (turns != null) {
+    thread['turns'] = turns.map((raw) {
+      final fixture = _historyImportFixtures.firstWhere(
+        (row) => jsonEncode(row['turn']) == jsonEncode(raw),
+      );
+      return {
+        ...Map<String, dynamic>.from(raw as Map),
+        'items': fixture['items'],
+      };
+    }).toList();
+  }
+  return chat.remoteCodexMessagesFromThreadResponseForTesting(
+    {...response, 'thread': thread},
+    active: active,
+    activeTurnId: activeTurnId,
+  );
 }

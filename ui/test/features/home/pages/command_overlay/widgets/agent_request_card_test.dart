@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -403,71 +404,103 @@ void main() {
     expect(find.byType(TextField), findsNothing);
   });
 
-  testWidgets('ACP elicitation renders a form and submits typed primitives', (
-    tester,
-  ) async {
-    MethodCall? submittedCall;
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(agentRuntimeChannel, (call) async {
-      submittedCall = call;
-      return <String, dynamic>{'ok': true};
-    });
+  testWidgets(
+    'ACP elicitation requires an enum and locks fields while submitting',
+    (tester) async {
+      MethodCall? submittedCall;
+      var submittedCount = 0;
+      final submissionGate = Completer<void>();
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        submittedCall = call;
+        submittedCount += 1;
+        await submissionGate.future;
+        return <String, dynamic>{'ok': true};
+      });
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: AgentRequestCard(
-            cardData: <String, dynamic>{
-              'type': 'agent_request',
-              'requestId': 'elicitation-1',
-              'cardId': 'elicitation-1-card',
-              'requestKind': 'user_input',
-              'structuredElicitation': true,
-              'title': 'Project details',
-              'detail': 'Provide the project information',
-              'status': 'pending',
-              'rawParamsJson': jsonEncode(<String, dynamic>{
-                'requestedSchema': <String, dynamic>{
-                  'type': 'object',
-                  'required': <String>['name', 'count'],
-                  'properties': <String, dynamic>{
-                    'name': <String, dynamic>{
-                      'type': 'string',
-                      'title': 'Name',
-                    },
-                    'count': <String, dynamic>{
-                      'type': 'integer',
-                      'title': 'Count',
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AgentRequestCard(
+              cardData: <String, dynamic>{
+                'type': 'agent_request',
+                'requestId': 'elicitation-1',
+                'cardId': 'elicitation-1-card',
+                'requestKind': 'user_input',
+                'structuredElicitation': true,
+                'title': 'Project details',
+                'detail': 'Provide the project information',
+                'status': 'pending',
+                'rawParamsJson': jsonEncode(<String, dynamic>{
+                  'requestedSchema': <String, dynamic>{
+                    'type': 'object',
+                    'required': <String>['name', 'count', 'color'],
+                    'properties': <String, dynamic>{
+                      'name': <String, dynamic>{
+                        'type': 'string',
+                        'title': 'Name',
+                      },
+                      'count': <String, dynamic>{
+                        'type': 'integer',
+                        'title': 'Count',
+                      },
+                      'color': <String, dynamic>{
+                        'type': 'string',
+                        'title': 'Color',
+                        'description': 'Choose the project color',
+                        'enum': <String>['Red', 'Blue'],
+                      },
                     },
                   },
-                },
-              }),
-            },
+                }),
+              },
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    expect(find.byType(TextField), findsNWidgets(2));
-    await tester.enterText(find.byType(TextField).at(0), 'demo');
-    await tester.enterText(find.byType(TextField).at(1), '3');
-    // TextField.onChanged updates the form validity in a stateful card. Give
-    // that state transition a frame before tapping the submit action.
-    await tester.pump();
-    await tester.tap(find.text('Submit ↵'));
-    await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNWidgets(2));
+      expect(find.text('Color *'), findsOneWidget);
+      expect(find.text('Choose the project color'), findsOneWidget);
+      expect(find.text('Red'), findsNothing);
+      expect(find.text('Blue'), findsNothing);
+      await tester.enterText(find.byType(TextField).at(0), 'demo');
+      await tester.enterText(find.byType(TextField).at(1), '3');
+      // TextField.onChanged updates the form validity in a stateful card. Give
+      // that state transition a frame before tapping the submit action.
+      await tester.pump();
+      await tester.tap(find.text('Submit ↵'));
+      await tester.pumpAndSettle();
+      expect(submittedCall, isNull);
 
-    expect(submittedCall?.method, 'respondToServerRequest');
-    final arguments = Map<String, dynamic>.from(
-      submittedCall!.arguments as Map,
-    );
-    expect(arguments['requestId'], 'elicitation-1');
-    expect(arguments['response'], {
-      'action': 'accept',
-      'content': {'name': 'demo', 'count': 3},
-    });
-  });
+      await tester.tap(find.widgetWithText(InputDecorator, 'Color *'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Blue'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Submit ↵'));
+      await tester.pump();
+
+      // A submitted request owns its payload until the runtime acknowledges it.
+      // Disabled fields must neither reopen the picker nor issue another request.
+      await tester.tap(find.text('Blue'));
+      await tester.pump();
+      expect(find.text('Red'), findsNothing);
+      expect(submittedCount, 1);
+      expect(submittedCall?.method, 'respondToServerRequest');
+      final arguments = Map<String, dynamic>.from(
+        submittedCall!.arguments as Map,
+      );
+      expect(arguments['requestId'], 'elicitation-1');
+      expect(arguments['response'], {
+        'action': 'accept',
+        'content': {'name': 'demo', 'count': 3, 'color': 'Blue'},
+      });
+      submissionGate.complete();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('fills the available message width', (tester) async {
     await tester.pumpWidget(

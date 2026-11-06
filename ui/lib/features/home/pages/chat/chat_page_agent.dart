@@ -48,7 +48,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
   bool _usesSharedProviderModel(String? agentId) {
     final normalizedAgentId = agentId?.trim() ?? '';
     if (normalizedAgentId.isEmpty ||
-        normalizedAgentId == _kRemoteCodexModeAgentId) {
+        normalizedAgentId == _kRemoteCodexModeAgentId ||
+        normalizedAgentId == 'na-cloud') {
       return false;
     }
     // Every local ACP Agent consumes the app's configured Provider catalog.
@@ -132,232 +133,35 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   @override
   Future<void> _refreshAgentRuntimeStatus() async {
-    if (!mounted || _isAgentRuntimeStatusLoading) return;
-    final requestEpoch = _agentRuntimeStatusEpoch;
-    setState(() {
-      _isAgentRuntimeStatusLoading = true;
-    });
-    try {
-      final status = await AgentRuntimeService.status();
-      if (!mounted) return;
-      if (requestEpoch != _agentRuntimeStatusEpoch) {
-        // A Harness switch invalidates an older status request. Do not let
-        // that request leave the AppBar's loading flag latched forever: the
-        // switch has its own loading state and will keep the spinner visible
-        // until its commit completes.
-        if (_isAgentRuntimeStatusLoading) {
-          setState(() {
-            _isAgentRuntimeStatusLoading = false;
-          });
-        }
-        return;
-      }
-      setState(() {
-        _agentRuntimeStatus = status;
-        _isAgentRuntimeStatusLoading = false;
-      });
-      unawaited(_loadAgentCatalog(force: true));
-      if (_activeMode == ChatPageMode.agent) {
-        unawaited(_loadAgentModelOptionsWhenReady());
-      }
-    } catch (_) {
-      if (!mounted) return;
-      if (requestEpoch != _agentRuntimeStatusEpoch) {
-        if (_isAgentRuntimeStatusLoading) {
-          setState(() {
-            _isAgentRuntimeStatusLoading = false;
-          });
-        }
-        return;
-      }
-      setState(() {
-        _agentRuntimeStatus = AgentRuntimeStatus.disconnected;
-        _isAgentRuntimeStatusLoading = false;
-      });
-    }
-  }
-
-  @override
-  Future<void> _handleAgentTap() async {
-    if (_isAgentRuntimeStatusLoading) return;
-    if (_activeMode == ChatPageMode.agent) {
-      await _leaveAgentMode();
+    final agentId = _activeAcpAgentId;
+    if (!mounted ||
+        agentId == null ||
+        agentId.isEmpty ||
+        _isAgentRuntimeStatusLoading)
       return;
-    }
-    setState(() {
-      _isAgentRuntimeStatusLoading = true;
-    });
-    AgentRuntimeStatus status;
+    final generation = _conversationTargetRequestId;
+    setState(() => _isAgentRuntimeStatusLoading = true);
     try {
-      status = await AgentRuntimeService.status();
-      if (status.ready && !status.connected) {
-        status = await AgentRuntimeService.connect();
-        unawaited(AgentRuntimeService.listSessions());
-      }
-    } catch (error) {
-      status = AgentRuntimeStatus(
-        connected: false,
-        ready: false,
-        error: error.toString(),
-      );
-    }
-    if (!mounted) return;
-    setState(() {
-      _agentRuntimeStatus = status;
-      _isAgentRuntimeStatusLoading = false;
-    });
-    if (!status.ready) {
-      if (status.remoteEnabled) {
-        _showSnackBar(
-          LegacyTextLocalizer.isEnglish
-              ? 'Remote Agent Bridge is unavailable'
-              : '远程 Agent Bridge 不可用',
-        );
-        GoRouterManager.push('/home/remote_codex_setting');
-        return;
-      }
-      _showSnackBar(
-        LegacyTextLocalizer.isEnglish
-            ? (status.error?.trim().isNotEmpty == true
-                  ? status.error!.trim()
-                  : 'The selected ACP Agent is unavailable')
-            : (status.error?.trim().isNotEmpty == true
-                  ? status.error!.trim()
-                  : '所选 ACP Agent 当前不可用'),
-      );
-      GoRouterManager.push('/home/agent_mode_setting');
-      return;
-    }
-
-    await _showAgentAccountStatus();
-
-    final target = _newAgentThreadTarget(
-      agentId: _activeAcpAgentId,
-      agentRuntime: status.runtime == 'remote' || status.remoteEnabled
-          ? 'remote'
-          : 'local',
-      conversationId: _modeState(ChatPageMode.agent).currentConversationId,
-    );
-    if (!mounted) return;
-    await _applyConversationThreadTarget(target);
-  }
-
-  @override
-  Future<void> _handleAcpAgentModeShortcutTap(String agentId) async {
-    final normalized = agentId.trim();
-    if (normalized.isEmpty) {
-      return;
-    }
-    final selectsRemote = normalized == _kRemoteCodexModeAgentId;
-    final observedTargetRequestId = _conversationTargetRequestId;
-    final switchGeneration = _harnessSwitchSendBarrier.begin();
-    var switchSucceeded = false;
-    // Invalidate every status/catalog refresh already in flight. Only the
-    // ACP response produced by this switch may become the next global
-    // runtime snapshot.
-    _agentRuntimeStatusEpoch++;
-    _agentCatalogEpoch++;
-    setState(() {
-      _optimisticAcpAgentId = normalized;
-      _isAcpAgentSwitching = true;
-    });
-    try {
+      final status = await AgentRuntimeService.status(agentId: agentId);
       if (!mounted ||
-          !_harnessSwitchSendBarrier.isCurrent(switchGeneration) ||
-          observedTargetRequestId != _conversationTargetRequestId) {
+          generation != _conversationTargetRequestId ||
+          _activeAcpAgentId != agentId)
         return;
-      }
-
-      // A conversation binding is not proof that the native ACP runtime is
-      // selected. On restart the binding can still point at Xiaowan while the
-      // persisted ACP profile is another Harness.
-      final runtimeActiveAgentId =
-          _agentRuntimeStatus.activeAgentId?.trim() ?? '';
-      final sameVisibleAgent =
-          _activeMode == ChatPageMode.agent &&
-          normalized == _committedAcpAgentId;
-      final sameRuntimeAgent = selectsRemote
-          ? _agentRuntimeStatus.connected &&
-                (_agentRuntimeStatus.runtime == 'remote' ||
-                    _agentRuntimeStatus.remoteEnabled)
-          : _agentRuntimeStatus.connected && runtimeActiveAgentId == normalized;
-      if (sameVisibleAgent && sameRuntimeAgent) {
-        switchSucceeded = true;
-        return;
-      }
-
-      await _harnessSwitchSendBarrier.runIfCurrent(switchGeneration, () async {
-        final previousTarget = _threadTargetForMode;
-        final target = buildHarnessSwitchTarget(
-          agentId: normalized,
-          agentRuntime: selectsRemote ? 'remote' : 'local',
-          requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
-        );
-        // Only a real switch invalidates bootstrap/navigation work. A no-op
-        // tap or failed Provider preflight must not strand the page.
-        final switchTargetRequestId = _beginConversationTargetRequest();
-        final selected = selectsRemote
-            ? await _selectRemoteCodexRuntime()
-            : await _selectAgent(normalized);
-        // A newer tap may have arrived while the native selection was in
-        // flight. Never let this older result install a visible target; the
-        // serialized latest request will reconcile the native runtime next.
-        if (!_harnessSwitchSendBarrier.isCurrent(switchGeneration) ||
-            !_isConversationTargetRequestCurrent(switchTargetRequestId)) {
-          return;
-        }
-        if (selected) {
-          await _applyConversationThreadTarget(
-            target,
-            preserveComposer: true,
-            requestId: switchTargetRequestId,
-          );
-          switchSucceeded = _isConversationTargetRequestCurrent(
-            switchTargetRequestId,
-          );
-        } else {
-          await _applyConversationThreadTarget(
-            previousTarget,
-            preserveComposer: true,
-          );
-        }
-      });
+      setState(() => _agentRuntimeStatus = status);
+      unawaited(_loadAgentCatalog(force: true));
+      if (_activeMode == ChatPageMode.agent)
+        unawaited(_loadAgentModelOptionsWhenReady());
+    } catch (_) {
+      if (!mounted || generation != _conversationTargetRequestId) return;
+      setState(() => _agentRuntimeStatus = AgentRuntimeStatus.disconnected);
     } finally {
-      // Also invalidate refreshes started during the switch. They can carry
-      // a pre-handshake/disconnected snapshot and must not overwrite the
-      // committed result after the loading state is cleared.
-      _agentRuntimeStatusEpoch++;
-      _agentCatalogEpoch++;
-      if (mounted && _harnessSwitchSendBarrier.isCurrent(switchGeneration)) {
-        setState(() {
-          _optimisticAcpAgentId = null;
-          _isAcpAgentSwitching = false;
-        });
-      }
-      _harnessSwitchSendBarrier.finish(
-        switchGeneration,
-        succeeded: switchSucceeded,
-      );
+      if (mounted) setState(() => _isAgentRuntimeStatusLoading = false);
     }
-  }
-
-  Future<void> _leaveAgentMode() async {
-    _storeDraftForActiveConversationMode();
-    await _persistVisibleThreadTargetIfNeeded();
-    if (!mounted) return;
-
-    final target = _resolveAgentExitTarget();
-    if (!mounted) return;
-    await _applyConversationThreadTarget(target);
-  }
-
-  ConversationThreadTarget _resolveAgentExitTarget() {
-    return _newThreadTargetForConversationMode(ConversationMode.normal);
   }
 
   @override
   String? _remoteCodexWorkspaceNameForGreeting() {
-    if (!_agentRuntimeStatus.remoteEnabled) {
+    if (!_activeAgentTargetIsRemote) {
       return null;
     }
     return _remoteCodexLastPathSegment(
@@ -367,7 +171,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   @override
   Future<void> _openRemoteCodexWorkspacePicker() async {
-    if (!_agentRuntimeStatus.remoteEnabled) {
+    if (!_activeAgentTargetIsRemote) {
       return;
     }
     CodexRemoteBridgeConfig config;
@@ -413,7 +217,9 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         remoteBridgeToken: config.remoteBridgeToken,
         remoteCwd: nextCwd,
       );
-      final status = await AgentRuntimeService.status();
+      final status = await AgentRuntimeService.status(
+        agentId: _kRemoteCodexModeAgentId,
+      );
       if (!mounted) return;
       setState(() {
         _agentRuntimeStatus = status;
@@ -447,19 +253,18 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     if (threadId.isEmpty) {
       return;
     }
-    final runtimeId = _remoteCodexRuntimeId(threadId);
+    // Reserve the explicit remote session identity before its load can emit
+    // updates; projection remains owned by the shared coordinator.
+    final runtimeId = _ensureRemoteCodexRuntimeForThread(threadId);
     _activeRemoteCodexRuntimeId = runtimeId;
     _activeAgentThreadId = threadId;
     _activeAgentTurnId = null;
     _modeState(ChatPageMode.agent).currentConversationId = runtimeId;
 
     try {
-      AgentRuntimeStatus status = _agentRuntimeStatus;
-      if (!status.connected) {
-        status = await AgentRuntimeService.connect();
-      }
       final response = await AgentRuntimeService.loadSession(
         sessionId: threadId,
+        agentId: _kRemoteCodexModeAgentId,
         conversationMode: ConversationMode.agent.storageValue,
       );
       if (!_isConversationTargetRequestCurrent(targetRequestId)) return;
@@ -476,9 +281,14 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         fallbackThreadId: resolvedThreadId,
         fallbackRuntimeId: runtimeId,
         fallbackConversation: conversation,
-        status: status,
       );
-      this._startRemoteCodexSessionSync(resolvedThreadId);
+      final historySync = _startRemoteCodexSessionSync(resolvedThreadId);
+      if (_messages.isEmpty) {
+        await historySync;
+        if (!_isConversationTargetRequestCurrent(targetRequestId)) return;
+      } else {
+        unawaited(historySync);
+      }
       _rememberRuntimeUiSnapshot(ChatPageMode.agent);
     } catch (error) {
       if (!_isConversationTargetRequestCurrent(targetRequestId)) return;
@@ -524,10 +334,9 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   @override
   Future<void> _loadAgentModelOptionsWhenReady({bool force = false}) async {
-    final currentSourceKey = agentModelSourceKey(_agentRuntimeStatus);
-    final sharedProviderAgent =
-        _usesSharedProviderModel(_activeAcpAgentId) ||
-        _usesSharedProviderModel(_agentRuntimeStatus.activeAgentId);
+    if (_activeAcpAgentId == null) return;
+    final currentSourceKey = _activeAgentModelSourceKey;
+    final sharedProviderAgent = _usesSharedProviderModel(_activeAcpAgentId);
     final hasResolvedEffort =
         _agentReasoningEffortOptions.isEmpty ||
         (_activeAgentReasoningEffort ?? '').trim().isNotEmpty;
@@ -547,28 +356,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       await _loadAgentModelOptions(force: true);
       return;
     }
-    late AgentRuntimeStatus status;
-    try {
-      status = await AgentRuntimeService.status();
-      if (!status.ready) {
-        return;
-      }
-      if (!status.connected) {
-        status = await AgentRuntimeService.connect();
-        unawaited(AgentRuntimeService.listSessions());
-      }
-      _applyRefreshedAgentRuntimeStatus(status);
-    } catch (error) {
-      debugPrint('Prepare Agent model options failed: $error');
-      return;
-    }
-    if (!mounted || !status.connected) {
-      return;
-    }
-    if (status.runtime != 'remote' && !status.remoteEnabled) {
-      await _loadAgentCatalog();
-    }
-    final sourceKey = agentModelSourceKey(status);
+    final sourceKey = _activeAgentModelSourceKey;
     if ((!force &&
             _loadedAgentModelSourceKey == sourceKey &&
             _agentModelOptions.isNotEmpty &&
@@ -589,23 +377,19 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       return;
     }
     if (!mounted) return;
-    final requestEpoch = _agentCatalogEpoch;
     setState(() {
       _isAgentCatalogLoading = true;
     });
     try {
       final catalog = await AgentRuntimeService.listAgents();
-      if (!mounted || requestEpoch != _agentCatalogEpoch) return;
+      if (!mounted) return;
       setState(() {
         _agentCatalog = catalog;
       });
     } catch (error) {
       debugPrint('Load ACP agent catalog failed: $error');
     } finally {
-      // A forced catalog refresh can overlap a previous request when the
-      // user switches Harness quickly. The older request must not clear the
-      // loading state owned by the newer request.
-      if (mounted && requestEpoch == _agentCatalogEpoch) {
+      if (mounted) {
         setState(() {
           _isAgentCatalogLoading = false;
         });
@@ -615,8 +399,24 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   @override
   Future<void> _loadAgentModelOptions({bool force = false}) async {
-    final statusForRequest = _agentRuntimeStatus;
-    final sourceKey = agentModelSourceKey(statusForRequest);
+    final agentId = _activeAcpAgentId;
+    if (agentId == null) return;
+    final remoteTarget = _activeAgentTargetIsRemote;
+    if (_activeAcpAgentId == 'na-cloud') {
+      if (!mounted) return;
+      setState(() {
+        _agentModelOptions = const <String>[];
+        _agentReasoningEffortOptions = const <String>[];
+        _agentCollaborationModes = const <String>[];
+        _agentModelConfigSupported = false;
+        _activeAgentModelId = null;
+        _activeAgentReasoningEffort = null;
+        _activeAgentCollaborationMode = null;
+        _loadedAgentModelSourceKey = _activeAgentModelSourceKey;
+      });
+      return;
+    }
+    final sourceKey = _activeAgentModelSourceKey;
     if (_isAgentModelListLoading && _loadingAgentModelSourceKey == sourceKey) {
       return;
     }
@@ -643,12 +443,14 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       // terminal IPC round-trip and cannot change that result; doing it
       // before the shared-provider branch made the model card wait for the
       // same slow startup path that it was meant to describe.
-      final configSettings = sharedAgent
+      final configSettings = sharedAgent || !remoteTarget
           ? const _AgentRunSettingsSnapshot()
-          : await _readAgentRunSettingsFromServerConfig();
+          : await _readAgentRunSettingsFromServerConfig(agentId);
       final response = sharedAgent
           ? const <String, dynamic>{}
-          : await AgentRuntimeService.listModelsForStatus(statusForRequest);
+          : remoteTarget
+          ? await AgentRuntimeService.listModels(agentId: agentId)
+          : await _readActiveAcpSessionConfig();
       final models = sharedAgent
           ? await _loadSharedProviderModelIds()
           : extractAcpModelIds(response);
@@ -724,7 +526,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
             requestId: requestId,
             activeRequestId: _agentModelListRequestId,
             requestSource: sourceKey,
-            currentSource: agentModelSourceKey(_agentRuntimeStatus),
+            currentSource: _activeAgentModelSourceKey,
           )) {
         return;
       }
@@ -763,7 +565,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
             requestId: requestId,
             activeRequestId: _agentModelListRequestId,
             requestSource: sourceKey,
-            currentSource: agentModelSourceKey(_agentRuntimeStatus),
+            currentSource: _activeAgentModelSourceKey,
           )) {
         return;
       }
@@ -783,10 +585,11 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     }
   }
 
-  Future<_AgentRunSettingsSnapshot>
-  _readAgentRunSettingsFromServerConfig() async {
+  Future<_AgentRunSettingsSnapshot> _readAgentRunSettingsFromServerConfig(
+    String agentId,
+  ) async {
     try {
-      final response = await AgentRuntimeService.readConfig();
+      final response = await AgentRuntimeService.readConfig(agentId: agentId);
       return _AgentRunSettingsSnapshot(
         modelId: _extractAgentConfigModelId(response),
         reasoningEffort: _extractAgentConfigReasoningEffort(response),
@@ -812,20 +615,12 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       _agentCollaborationModeListError = null;
     });
     final generation = _conversationTargetRequestId;
-    final agentId = _activeAcpAgentId;
     try {
-      await _ensureActiveConversationReadyForStreaming();
+      final response = await _readActiveAcpSessionConfig();
       if (!mounted || generation != _conversationTargetRequestId) return;
-      final response = await AgentRuntimeService.readSession(
-        conversationId: _currentConversationId,
-        agentId: agentId,
-        conversationMode: _modeKey(_activeMode),
-        includeHistory: false,
-      );
-      if (!mounted || generation != _conversationTargetRequestId) return;
-      final option = acpConfigOptions(
-        response,
-      ).where((option) => option['id'] == 'collaboration_mode').firstOrNull;
+      final option = acpConfigOptions(response)
+          .where((option) => option['id'] == 'collaboration_mode')
+          .firstOrNull;
       final choices = <Map>[];
       for (final entry
           in (option?['options'] as List? ?? const []).whereType<Map>()) {
@@ -869,15 +664,11 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     if (normalized.isEmpty || normalized.startsWith('/')) {
       return;
     }
-    if (!_agentModelConfigSupported &&
-        _agentRuntimeStatus.runtime != 'remote' &&
-        !_agentRuntimeStatus.remoteEnabled) {
+    if (!_agentModelConfigSupported && !_activeAgentTargetIsRemote) {
       return;
     }
     final sharedSelection = _activeDispatchSceneSelection;
-    final sharedAgent = _usesSharedProviderModel(
-      (_agentRuntimeStatus.activeAgentId ?? _activeAcpAgentId)?.trim(),
-    );
+    final sharedAgent = _usesSharedProviderModel(_activeAcpAgentId?.trim());
     var selectedModelId = normalized;
     try {
       if (sharedAgent) {
@@ -895,7 +686,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
           providerProfileId: sharedSelection.providerProfileId,
           modelId: selectedModelId,
         );
-        await AgentRuntimeService.disconnect();
         unawaited(_loadNormalChatModelContext());
       } else {
         await _setAgentConfigOption(configId: 'model', value: normalized);
@@ -922,145 +712,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     if (clearComposer) {
       _messageController.clear();
       _hideSlashCommandPanel();
-    }
-  }
-
-  @override
-  Future<bool> _selectAgent(String agentId) async {
-    final normalized = agentId.trim();
-    if (normalized.isEmpty) {
-      return false;
-    }
-    if (normalized == _kRemoteCodexModeAgentId) {
-      return _selectRemoteCodexRuntime();
-    }
-    final wasRemote =
-        _agentRuntimeStatus.runtime == 'remote' ||
-        _agentRuntimeStatus.remoteEnabled;
-    CodexRemoteBridgeConfig? previousRemoteConfig;
-    try {
-      if (wasRemote) {
-        final remote = await AgentRuntimeService.readRemoteBridgeConfig();
-        previousRemoteConfig = remote;
-        await AgentRuntimeService.writeRemoteBridgeConfig(
-          remoteEnabled: false,
-          remoteBridgeUrl: remote.remoteBridgeUrl,
-          remoteBridgeToken: remote.remoteBridgeToken,
-          remoteCwd: remote.remoteCwd,
-        );
-      }
-      final catalog = await AgentRuntimeService.selectAgent(normalized);
-      // Choose the assistant first. Model configuration/session admission
-      // owns initialization; a failed connection must not undo selection.
-      final status =
-          catalog.runtimeStatus ?? await AgentRuntimeService.status();
-      if (!mounted) return false;
-      setState(() {
-        _agentCatalog = catalog;
-        _agentRuntimeStatus = status;
-        _activeAgentThreadId = null;
-        _activeAgentTurnId = null;
-        _activeAgentModelId = null;
-        _agentReasoningEffortConfigId = null;
-        _agentModelConfigSupported = false;
-        _agentModelOptions = const <String>[];
-        _loadedAgentModelSourceKey = null;
-        _loadingAgentModelSourceKey = null;
-        _agentModelListError = null;
-        _agentModelListRequestId++;
-      });
-      unawaited(_loadAgentModelOptions(force: true));
-      return true;
-    } catch (error) {
-      final remote = previousRemoteConfig;
-      if (wasRemote && remote != null && remote.remoteEnabled) {
-        try {
-          await AgentRuntimeService.writeRemoteBridgeConfig(
-            remoteEnabled: true,
-            remoteBridgeUrl: remote.remoteBridgeUrl,
-            remoteBridgeToken: remote.remoteBridgeToken,
-            remoteCwd: remote.remoteCwd,
-          );
-        } catch (restoreError) {
-          debugPrint('Failed to restore remote Agent config: $restoreError');
-        }
-      }
-      if (!mounted) return false;
-      showToast(
-        formatAgentRuntimeErrorForUser(
-          error,
-          english: LegacyTextLocalizer.isEnglish,
-          fallback: LegacyTextLocalizer.isEnglish
-              ? 'Could not switch assistants. Please try again.'
-              : '未能切换助手，请重试。',
-        ),
-        type: ToastType.error,
-      );
-      return false;
-    }
-  }
-
-  Future<bool> _selectRemoteCodexRuntime() async {
-    final isRemote =
-        _agentRuntimeStatus.runtime == 'remote' ||
-        _agentRuntimeStatus.remoteEnabled;
-    if (isRemote) {
-      return true;
-    }
-    try {
-      final remote = await AgentRuntimeService.readRemoteBridgeConfig();
-      if (!remote.remoteConfigured) {
-        if (mounted) {
-          _showSnackBar(
-            LegacyTextLocalizer.isEnglish
-                ? 'Remote Agent Bridge is not configured'
-                : '远程 Agent Bridge 尚未配置',
-          );
-          GoRouterManager.push('/home/remote_codex_setting');
-        }
-        return false;
-      }
-      await AgentRuntimeService.writeRemoteBridgeConfig(
-        remoteEnabled: true,
-        remoteBridgeUrl: remote.remoteBridgeUrl,
-        remoteBridgeToken: remote.remoteBridgeToken,
-        remoteCwd: remote.remoteCwd,
-      );
-      var status = await AgentRuntimeService.status();
-      if (status.ready && !status.connected) {
-        status = await AgentRuntimeService.connect();
-      }
-      if (!mounted) return false;
-      setState(() {
-        _agentRuntimeStatus = status;
-        _activeAgentThreadId = null;
-        _activeAgentTurnId = null;
-        _activeAgentModelId = null;
-        _agentModelConfigSupported = false;
-        _activeAgentReasoningEffort = null;
-        _agentReasoningEffortConfigId = null;
-        _activeAgentCollaborationMode = null;
-        _agentModelOptions = const <String>[];
-        _agentReasoningEffortOptions = const <String>[];
-        _agentCollaborationModes = const <String>[];
-        _agentModelListError = null;
-        _agentCollaborationModeListError = null;
-        _loadedAgentModelSourceKey = null;
-        _loadingAgentModelSourceKey = null;
-        _agentModelListRequestId++;
-      });
-      unawaited(_loadAgentModelOptions(force: true));
-      return true;
-    } catch (error) {
-      if (!mounted) return false;
-      showToast(
-        formatAgentRuntimeErrorForUser(
-          error,
-          english: LegacyTextLocalizer.isEnglish,
-        ),
-        type: ToastType.error,
-      );
-      return false;
     }
   }
 
@@ -1152,7 +803,13 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     }
     await AgentRuntimeService.setSessionConfigOption(
       sessionId: threadId,
-      conversationId: conversationId,
+      conversationId:
+          _unboundConfigurationSessions.values.any(
+            (session) =>
+                session.sessionId == threadId && session.agentId == agentId,
+          )
+          ? null
+          : conversationId,
       agentId: agentId,
       configId: configId,
       value: value,
@@ -1203,7 +860,10 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     final defaultMode = _agentCollaborationModes
         .where((mode) => mode.toLowerCase() == 'default')
         .firstOrNull;
-    if (defaultMode == null || !mounted || generation != _conversationTargetRequestId) return;
+    if (defaultMode == null ||
+        !mounted ||
+        generation != _conversationTargetRequestId)
+      return;
     await _setAgentConfigOption(
       configId: 'collaboration_mode',
       value: defaultMode,
@@ -1378,26 +1038,28 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
   @override
   Future<void> _startAgentReviewCommand() async {
     if (_availableAcpCommandForText('/review') == null) {
-      _showSnackBar(LegacyTextLocalizer.isEnglish
-          ? 'This Agent does not advertise /review'
-          : '当前 Agent 未提供 /review 命令');
+      _showSnackBar(
+        LegacyTextLocalizer.isEnglish
+            ? 'This Agent does not advertise /review'
+            : '当前 Agent 未提供 /review 命令',
+      );
       return;
     }
     if (_isAiResponding) {
       return;
     }
+    final generation = _conversationTargetRequestId;
     _inputFocusNode.unfocus();
     _messageController.clear();
     _hideSlashCommandPanel();
-    late AgentRuntimeStatus status;
-    try {
-      status = await _refreshConnectedAgentRuntimeStatus();
-    } catch (error) {
-      if (mounted) {
-        handleAgentError('Agent review 启动失败: $error');
-      }
+    final agentId = _activeAcpAgentId;
+    if (agentId == null) {
+      handleAgentError(
+        formatAgentRuntimeErrorForUser('agent_identity_required: review'),
+      );
       return;
     }
+    final remoteCodex = agentId == _kRemoteCodexModeAgentId;
     final messageIds = addUserMessage('/review');
     final preflightConversationId = _currentConversationId;
     if (preflightConversationId != null) {
@@ -1416,7 +1078,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       );
     }
 
-    final remoteCodex = agentModelSourceKey(status) == 'remote';
     int? conversationId = preflightConversationId;
     if (remoteCodex) {
       conversationId = this._ensureRemoteCodexRuntimeForCurrentMessages();
@@ -1464,8 +1125,9 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
           persistMessages: true,
         );
       }
-      final reviewModel = await _resolveAgentRequestModel(status);
+      final reviewModel = await _resolveAgentRequestModel();
       final response = await AgentRuntimeService.reviewSession(
+        agentId: agentId,
         conversationId: remoteCodex ? null : resolvedConversationId,
         sessionId: _activeAgentThreadId,
         approvalPolicy: _agentPermissionMode.approvalPolicy,
@@ -1637,7 +1299,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   String _agentPreferenceKey(String kind, {int? conversationId}) {
     final source = kind == _kAgentModelPreferenceKey
-        ? '.${agentModelSourceKey(_agentRuntimeStatus)}'
+        ? '.$_activeAgentModelSourceKey'
         : '';
     if (conversationId == null) {
       return '$_kAgentPreferenceStoragePrefix.$kind$source.global';
@@ -1647,7 +1309,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   String _legacyAgentPreferenceKey(String kind, {int? conversationId}) {
     final source = kind == _kAgentModelPreferenceKey
-        ? '.${agentModelSourceKey(_agentRuntimeStatus)}'
+        ? '.$_activeAgentModelSourceKey'
         : '';
     if (conversationId == null) {
       return '$_kLegacyAgentPreferenceStoragePrefix.$kind$source.global';
@@ -1656,7 +1318,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
   }
 
   @override
-  void _handleAgentRuntimeEvent(Map<String, dynamic> event) {
+  void _handleAgentRuntimeProjection(ChatAgentEventProjection projection) {
+    final event = projection.event;
     final diagnosticMethod = _diagnosticEventMethod(event);
     _agentEventDiagnosticCounter.update(
       diagnosticMethod,
@@ -1687,125 +1350,33 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         '${_agentEventDiagnosticCounter.entries.map((e) => '${e.key}:${e.value}').join(', ')}',
       );
     }
-    final remoteCodex = _isRemoteCodexConfigured();
+    final conversationId = projection.conversationId;
+    final runtimeMode = projection.mode;
+    if (conversationId == null || runtimeMode == null) return;
     final eventThreadId = _remoteCodexEventThreadId(event);
-    final explicitConversationId = _asAgentInt(event['conversationId']);
-    final eventSessionId = acpEventSessionId(event);
-    final eventTurnId = acpEventTurnId(event);
-    final eventParams = _asAgentMap(event['params']);
-    final hasStandaloneProcessIdentity = <dynamic>[
-      event['processId'],
-      event['process_id'],
-      event['processHandle'],
-      event['process_handle'],
-      eventParams?['processId'],
-      eventParams?['process_id'],
-      eventParams?['processHandle'],
-      eventParams?['process_handle'],
-    ].any((value) => value?.toString().trim().isNotEmpty == true);
-    String? standaloneProcessId;
-    for (final value in <dynamic>[
-      event['processId'],
-      event['process_id'],
-      event['processHandle'],
-      event['process_handle'],
-      eventParams?['processId'],
-      eventParams?['process_id'],
-      eventParams?['processHandle'],
-      eventParams?['process_handle'],
-    ]) {
-      final normalized = value?.toString().trim() ?? '';
-      if (normalized.isNotEmpty) {
-        standaloneProcessId = normalized;
-        break;
-      }
-    }
-    final standaloneProcessOwner = standaloneProcessId == null
-        ? null
-        : _runtimeCoordinator.conversationIdForStandaloneProcess(
-            standaloneProcessId!,
-          );
-    final hasProtocolIdentity =
-        eventSessionId != null || eventTurnId != null || eventThreadId != null;
-    final canUseVisibleFallback =
-        diagnosticMethod == 'error' || hasStandaloneProcessIdentity;
-    final identityConversationId = explicitConversationId == null
-        ? _runtimeCoordinator.conversationIdForAcpEvent(
-            sessionId: eventSessionId,
-            turnId: eventTurnId,
-          )
-        : null;
-    final mappedRemoteConversationId = remoteCodex && eventThreadId != null
-        ? _remoteCodexRuntimeId(eventThreadId)
-        : null;
-    final shouldPromoteRemoteEvent =
-        remoteCodex &&
+    if (_isRemoteCodexConfigured() &&
         eventThreadId != null &&
+        conversationId == _remoteCodexRuntimeId(eventThreadId) &&
         this._shouldPromoteRemoteCodexEventToVisibleThread(
           threadId: eventThreadId,
-          runtimeId: mappedRemoteConversationId!,
-        );
-    final conversationId =
-        explicitConversationId ??
-        (shouldPromoteRemoteEvent
-            ? _activateRemoteCodexRuntimeForThread(eventThreadId)
-            : mappedRemoteConversationId) ??
-        identityConversationId ??
-        standaloneProcessOwner ??
-        (!hasProtocolIdentity && canUseVisibleFallback
-            ? _modeState(ChatPageMode.agent).currentConversationId
-            : null);
-    if (conversationId == null) {
-      debugPrint(
-        '[Agent] dropping $diagnosticMethod — no safe ACP owner '
-        '(remoteCodex=$remoteCodex, eventSessionId=$eventSessionId, '
-        'eventTurnId=$eventTurnId, eventThreadId=$eventThreadId)',
-      );
-      return;
+          runtimeId: conversationId,
+        )) {
+      _activateRemoteCodexRuntimeForThread(eventThreadId);
     }
-    if (remoteCodex && eventThreadId != null && !shouldPromoteRemoteEvent) {
-      this._ensureRemoteCodexRuntimeForThread(eventThreadId);
-    }
-    final normalConversationId = _modeState(
-      ChatPageMode.normal,
-    ).currentConversationId;
-    final agentConversationId = _modeState(
-      ChatPageMode.agent,
-    ).currentConversationId;
-    final ownerMode = _runtimeCoordinator.modeForAcpEvent(
-      conversationId: conversationId,
-      sessionId: eventSessionId,
-      turnId: eventTurnId,
-    );
-    final eventMode = switch (ownerMode) {
+    final eventMode = switch (runtimeMode) {
       kChatRuntimeModeNormal => ChatPageMode.normal,
-      kChatRuntimeModeAgent => ChatPageMode.agent,
       kChatRuntimeModeOpenClaw => ChatPageMode.openclaw,
-      _ =>
-        remoteCodex ||
-                conversationId == agentConversationId ||
-                event['conversationMode'] == ConversationMode.agent.storageValue
-            ? ChatPageMode.agent
-            : conversationId == normalConversationId
-            ? ChatPageMode.normal
-            : _activeMode,
+      _ => ChatPageMode.agent,
     };
     final isVisibleConversation =
         conversationId == _modeState(eventMode).currentConversationId &&
         _activeMode == eventMode;
-    final result = _runtimeCoordinator.applyAgentEvent(
-      conversationId: conversationId,
-      event: event,
-      mode: _modeKey(eventMode),
-      conversation: isVisibleConversation
-          ? _modeState(eventMode).currentConversation
-          : null,
-    );
+    final result = projection.result;
     if (result.compatibilityWarning != null && isVisibleConversation) {
       showToast(result.compatibilityWarning!, type: ToastType.warning);
     }
     final threadId = _asAgentString(event['threadId']) ?? result.threadId;
-    final turnId = eventTurnId ?? result.turnId;
+    final turnId = acpEventTurnId(event) ?? result.turnId;
     if (eventMode == ChatPageMode.agent &&
         isVisibleConversation &&
         result.handled &&
@@ -1816,16 +1387,12 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     }
     if (eventMode == ChatPageMode.agent && isVisibleConversation) {
       _syncAgentCollaborationModeFromServer(result.collaborationMode);
-    }
-    if (eventMode == ChatPageMode.agent && isVisibleConversation) {
       final runtime = _runtimeCoordinator.runtimeFor(
         conversationId: conversationId,
         mode: kChatRuntimeModeAgent,
       );
-      if (runtime != null) {
-        if (!runtime.isAiResponding) {
-          _activeAgentTurnId = null;
-        }
+      if (runtime != null && !runtime.isAiResponding) {
+        _activeAgentTurnId = null;
       }
     }
     if (!result.handled &&
@@ -1858,9 +1425,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     final dispatchModeKey = _modeKey(dispatchMode);
     final dispatchConversationId =
         _currentConversationId ?? dispatchTarget?.conversationId;
-    final dispatchAgentId =
-        (dispatchTarget?.agentId ?? _activeAcpAgentId ?? _kXiaowanAcpAgentId)
-            .trim();
+    final dispatchAgentId = (dispatchTarget?.agentId ?? _activeAcpAgentId ?? '')
+        .trim();
     final dispatchSessionId = _activeAgentThreadId?.trim();
     final dispatchPermissionMode = _agentPermissionMode;
     final dispatchReasoningEffort = _activeAgentReasoningEffort;
@@ -1869,6 +1435,13 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     final dispatchTerminalEnvironment = _buildAgentTerminalEnvironmentPayload();
     final dispatchActiveModel = _activeAgentModelId;
     final dispatchLoadedModelSource = _loadedAgentModelSourceKey;
+    if (dispatchAgentId.isEmpty) {
+      handleAgentError(
+        formatAgentRuntimeErrorForUser('agent_identity_required: prompt'),
+      );
+      return;
+    }
+    final remoteCodex = dispatchAgentId == _kRemoteCodexModeAgentId;
     var dispatchMessages = List<ChatMessageModel>.from(_messages);
     bool isDispatchTargetCurrent() =>
         mounted && dispatchTargetGeneration == _conversationTargetRequestId;
@@ -1877,9 +1450,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     // preparation, or conversation persistence. The chat list can therefore
     // show the selected Agent and an elapsed processing state immediately,
     // without waiting for the first ACP API event.
-    // Admit against the already visible local conversation before asking the
-    // native runtime for status. Provider probes may take several seconds,
-    // but no second local lifecycle is created while they are in flight.
+    // Admit against the already visible conversation before its canonical
+    // session request. Slow runtime startup does not create another run.
     final preflightConversationId = dispatchConversationId;
     if (preflightConversationId != null) {
       _runtimeCoordinator.beginAcpTurn(
@@ -1889,43 +1461,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       );
     }
 
-    late AgentRuntimeStatus status;
-    try {
-      status = await _refreshConnectedAgentRuntimeStatus();
-    } catch (error) {
-      if (isDispatchTargetCurrent()) {
-        handleAgentError('Agent 连接失败: $error');
-      }
-      if (preflightConversationId != null) {
-        _runtimeCoordinator.unregisterTask(
-          aiMessageId,
-          conversationId: preflightConversationId,
-          mode: dispatchModeKey,
-        );
-      }
-      return;
-    }
-    // Status probing is asynchronous. If the user switched conversation or
-    // Harness while it was in flight, this logical turn was never admitted to
-    // the target ACP and must not send a prompt there. Release the preflight
-    // reservation so it cannot leave an invisible spinner in the old runtime.
-    if (!isDispatchTargetCurrent()) {
-      if (preflightConversationId != null) {
-        _runtimeCoordinator.unregisterTask(
-          aiMessageId,
-          conversationId: preflightConversationId,
-          mode: dispatchModeKey,
-        );
-      }
-      return;
-    }
-    // Target metadata is authoritative. Runtime status is a shared/global
-    // snapshot and may still describe the previous ACP during a switch.
-    final remoteCodex =
-        dispatchTarget?.isRemoteCodexSessionTarget == true ||
-        dispatchTarget?.agentRuntime?.trim().toLowerCase() == 'remote' ||
-        dispatchAgentId == _kRemoteCodexModeAgentId ||
-        (dispatchTarget == null && agentModelSourceKey(status) == 'remote');
+    // The canonical session request resolves its explicit Conversation owner.
+    // No selected/global runtime preflight exists on this path.
     int? conversationId = dispatchConversationId;
     if (remoteCodex) {
       conversationId = dispatchSessionId == null || dispatchSessionId.isEmpty
@@ -2050,18 +1587,25 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
     try {
       final turnModel = selectAgentRequestModel(
-        status: status,
         overrideModel: modelOverride,
         activeModel: dispatchActiveModel,
         activeModelSourceMatches:
-            dispatchLoadedModelSource == agentModelSourceKey(status),
+            dispatchLoadedModelSource ==
+            (remoteCodex ? 'remote' : 'local-$dispatchAgentId'),
       );
       final acpSessionId = await _prepareAcpSessionForTurn(
         runtimeCoordinator: _runtimeCoordinator,
         taskId: aiMessageId,
         conversationId: resolvedConversationId,
         mode: dispatchModeKey,
+        agentId: dispatchAgentId,
         existingSessionId: dispatchSessionId,
+        preparedForFirstPrompt:
+            _unboundConfigurationSessions[dispatchMode]?.sessionId ==
+                dispatchSessionId &&
+            _unboundConfigurationSessions[dispatchMode]?.agentId ==
+                dispatchAgentId &&
+            dispatchSessionId != null,
         isTargetCurrent: isDispatchTargetCurrent,
         model: turnModel,
         effort: dispatchReasoningEffort,
@@ -2076,6 +1620,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         );
         return;
       }
+      _unboundConfigurationSessions.remove(dispatchMode);
       _activeAgentThreadId = acpSessionId;
       final response = await AgentRuntimeService.promptSession(
         conversationId: resolvedConversationId,
@@ -2084,7 +1629,10 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         // runtime uses it to return the original turn instead of replaying
         // tool calls.
         requestId: aiMessageId,
-        agentId: remoteCodex ? null : dispatchAgentId,
+        // The cloud adapter preserves the host's actual user item on reload.
+        // Retries may retain a user item while reserving a new prompt id.
+        userMessageId: dispatchAgentId == 'na-cloud' ? userMessageId : null,
+        agentId: dispatchAgentId,
         text: messageText,
         attachments: attachments,
         approvalPolicy: dispatchPermissionMode.approvalPolicy,
@@ -2182,6 +1730,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     }
     try {
       await AgentRuntimeService.cancelPrompt(
+        agentId: _activeAcpAgentId,
         conversationId: _isRemoteCodexConfigured() ? null : conversationId,
         sessionId: sessionId,
         promptId: turnId,
@@ -2194,117 +1743,12 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     }
   }
 
-  Future<String?> _resolveAgentRequestModel(
-    AgentRuntimeStatus status, {
-    String? overrideModel,
-  }) async {
-    final sourceKey = agentModelSourceKey(status);
+  Future<String?> _resolveAgentRequestModel({String? overrideModel}) async {
+    final sourceKey = _activeAgentModelSourceKey;
     return selectAgentRequestModel(
-      status: status,
       overrideModel: overrideModel,
       activeModel: _activeAgentModelId,
       activeModelSourceMatches: _loadedAgentModelSourceKey == sourceKey,
     );
-  }
-
-  Future<void> _showAgentAccountStatus() async {
-    if (_agentRuntimeStatus.runtime != 'remote' &&
-        !_agentRuntimeStatus.remoteEnabled) {
-      return;
-    }
-    try {
-      final account = await AgentRuntimeService.readAccount();
-      final accountMap = account['account'];
-      final requiresOpenaiAuth = account['requiresOpenaiAuth'] == true;
-      final accountType = accountMap is Map
-          ? accountMap['type']?.toString().trim()
-          : null;
-      final isLoggedInWithChatGpt = accountType == 'chatgpt';
-      if (isLoggedInWithChatGpt || !requiresOpenaiAuth) {
-        return;
-      }
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(
-          content: Text(
-            Localizations.localeOf(context).languageCode == 'en'
-                ? 'Agent login required'
-                : '需要登录 Agent',
-          ),
-          action: SnackBarAction(
-            label: Localizations.localeOf(context).languageCode == 'en'
-                ? 'Login'
-                : '登录',
-            onPressed: () {
-              if (_agentRuntimeStatus.runtime == 'remote' ||
-                  _agentRuntimeStatus.remoteEnabled) {
-                unawaited(_startRemoteCodexLogin());
-              } else {
-                GoRouterManager.push('/home/remote_codex_setting');
-              }
-            },
-          ),
-        ),
-      );
-    } catch (error) {
-      debugPrint('Read Agent account failed: $error');
-    }
-  }
-
-  Future<void> _startRemoteCodexLogin() async {
-    try {
-      final response = await AgentRuntimeService.startLogin();
-      final authUrl = _asAgentString(response['authUrl']);
-      if (authUrl == null) return;
-      await launchUrlString(authUrl, mode: LaunchMode.externalApplication);
-    } catch (error) {
-      debugPrint('Start remote Agent login failed: $error');
-    }
-  }
-
-  Future<AgentRuntimeStatus> _refreshConnectedAgentRuntimeStatus() async {
-    final requestEpoch = _agentRuntimeStatusEpoch;
-    var status = await AgentRuntimeService.status();
-    if (!status.connected) {
-      status = await AgentRuntimeService.connect();
-    }
-    if (requestEpoch != _agentRuntimeStatusEpoch) {
-      return _agentRuntimeStatus;
-    }
-    _applyRefreshedAgentRuntimeStatus(status);
-    return status;
-  }
-
-  void _applyRefreshedAgentRuntimeStatus(AgentRuntimeStatus status) {
-    if (_isAcpAgentSwitching) {
-      final expectedAgentId = _optimisticAcpAgentId?.trim() ?? '';
-      final observedAgentId = status.activeAgentId?.trim() ?? '';
-      if (expectedAgentId.isNotEmpty &&
-          observedAgentId.isNotEmpty &&
-          observedAgentId != expectedAgentId) {
-        // A late status response from the previous Harness is not allowed to
-        // change the right-top identity while the requested switch is still
-        // in flight.
-        return;
-      }
-    }
-    final sourceChanged =
-        agentModelSourceKey(_agentRuntimeStatus) != agentModelSourceKey(status);
-    if (!mounted) return;
-    setState(() {
-      _agentRuntimeStatus = status;
-      if (status.runtime != 'remote' &&
-          !status.remoteEnabled &&
-          _agentPermissionMode == AgentPermissionMode.autoReview) {
-        _agentPermissionMode = AgentPermissionMode.defaultMode;
-      }
-      if (sourceChanged) {
-        _activeAgentThreadId = null;
-        _activeAgentTurnId = null;
-        _agentModelConfigSupported = false;
-        _agentModelOptions = const <String>[];
-        _agentModelListError = null;
-      }
-    });
   }
 }

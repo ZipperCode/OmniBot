@@ -38,8 +38,6 @@ class _AgentPermissionGlassMenuContent extends StatefulWidget {
 
 class _AgentPermissionGlassMenuContentState
     extends State<_AgentPermissionGlassMenuContent> {
-  static const Duration _selectionDuration = Duration(milliseconds: 160);
-
   void _select(AgentPermissionMode mode) {
     widget.onSelect(mode);
   }
@@ -47,8 +45,8 @@ class _AgentPermissionGlassMenuContentState
   Widget _buildIcon(_AgentPermissionOptionData option, bool selected) {
     return SvgPicture.asset(
       option.iconAsset,
-      width: 18,
-      height: 18,
+      width: OmniMenuStyle.iconSize,
+      height: OmniMenuStyle.iconSize,
       colorFilter: ColorFilter.mode(
         selected ? widget.selectedColor : widget.inactiveColor,
         BlendMode.srcIn,
@@ -58,83 +56,26 @@ class _AgentPermissionGlassMenuContentState
 
   Widget _buildRow(_AgentPermissionOptionData option) {
     final isSelected = option.mode == widget.selected;
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    final selectedBackground = isDark
-        ? Color.lerp(
-            palette.surfaceSecondary.withValues(alpha: 0.48),
-            palette.accentPrimary,
-            0.18,
-          )!
-        : const Color(0xFF2C7FEB).withValues(alpha: 0.12);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: InkWell(
-        key: ValueKey('chat-input-agent-permission-option-${option.mode.name}'),
-        onTap: () => _select(option.mode),
-        borderRadius: BorderRadius.circular(12),
-        child: AnimatedContainer(
-          duration: _selectionDuration,
-          curve: Curves.easeOutCubic,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: isSelected ? selectedBackground : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildIcon(option, isSelected),
-              const SizedBox(width: 9),
-              Expanded(
-                child: Text(
-                  option.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    height: 1.15,
-                    color: widget.textColor,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (isSelected)
-                Icon(
-                  Icons.check_rounded,
-                  size: 15,
-                  color: isDark
-                      ? palette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-            ],
-          ),
-        ),
-      ),
+    return OmniMenuItem(
+      key: ValueKey('chat-input-agent-permission-option-${option.mode.name}'),
+      onTap: () => _select(option.mode),
+      label: option.label,
+      leading: _buildIcon(option, isSelected),
+      selected: isSelected,
+      trailing: isSelected
+          ? Icon(Icons.check_rounded, color: widget.selectedColor)
+          : null,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
+    return OmniMenuSurface(
       width: widget.width,
-      child: OmniGlassPanel(
-        width: widget.width,
-        borderRadius: BorderRadius.circular(18),
-        child: Material(
-          color: Colors.transparent,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (final option in widget.options) _buildRow(option),
-              ],
-            ),
-          ),
-        ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [for (final option in widget.options) _buildRow(option)],
       ),
     );
   }
@@ -245,57 +186,27 @@ class _AgentRunSettingsMenuContentState
     required VoidCallback onTap,
   }) {
     final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
-      child: InkWell(
-        key: key,
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          constraints: const BoxConstraints(minHeight: 46),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          child: Row(
-            children: [
-              Icon(
-                icon,
-                size: 16,
-                color: isDark ? palette.textSecondary : const Color(0xFF66758E),
-              ),
-              const SizedBox(width: 9),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: widget.textColor,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  value.isEmpty ? '—' : value,
-                  textAlign: TextAlign.end,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isDark
-                        ? palette.textTertiary
-                        : const Color(0xFF8490A3),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 18,
-                color: isDark ? palette.textTertiary : const Color(0xFF9AA4B6),
-              ),
-            ],
+    return OmniMenuItem(
+      key: key,
+      onTap: onTap,
+      child: Row(
+        children: [
+          Icon(icon),
+          const SizedBox(width: OmniMenuStyle.iconGap),
+          Text(label),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '—' : value,
+              textAlign: TextAlign.end,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: palette.textSecondary),
+            ),
           ),
-        ),
+          const SizedBox(width: 4),
+          Icon(Icons.chevron_right_rounded, color: palette.textTertiary),
+        ],
       ),
     );
   }
@@ -303,7 +214,7 @@ class _AgentRunSettingsMenuContentState
   Widget _buildOverview() {
     return Padding(
       key: const ValueKey('agent-run-settings-overview'),
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: EdgeInsets.zero,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -330,44 +241,16 @@ class _AgentRunSettingsMenuContentState
   }
 
   Widget _buildSubmenuHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 7, 10, 3),
-      child: InkWell(
-        key: const ValueKey('chat-input-agent-run-settings-back'),
-        onTap: () => _showPage(_AgentRunSettingsMenuPage.overview),
-        borderRadius: BorderRadius.circular(10),
-        child: SizedBox(
-          height: 34,
-          child: Row(
-            children: [
-              const SizedBox(
-                width: 34,
-                height: 34,
-                child: Icon(Icons.chevron_left_rounded, size: 20),
-              ),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: widget.textColor,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    return OmniMenuItem(
+      key: const ValueKey('chat-input-agent-run-settings-back'),
+      onTap: () => _showPage(_AgentRunSettingsMenuPage.overview),
+      leading: const Icon(Icons.chevron_left_rounded),
+      label: title,
     );
   }
 
   Widget _buildSearch() {
     final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
     return Padding(
       key: const ValueKey('chat-input-agent-run-settings-model-search'),
       padding: const EdgeInsets.fromLTRB(10, 5, 10, 6),
@@ -375,23 +258,13 @@ class _AgentRunSettingsMenuContentState
         height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 10),
         decoration: BoxDecoration(
-          color: isDark
-              ? palette.surfaceSecondary.withValues(alpha: 0.58)
-              : Colors.white.withValues(alpha: 0.42),
+          color: palette.surfaceSecondary,
           borderRadius: BorderRadius.circular(11),
-          border: Border.all(
-            color: isDark
-                ? palette.borderSubtle.withValues(alpha: 0.60)
-                : Colors.white.withValues(alpha: 0.66),
-          ),
+          border: Border.all(color: palette.borderSubtle),
         ),
         child: Row(
           children: [
-            Icon(
-              Icons.search_rounded,
-              size: 17,
-              color: isDark ? palette.textTertiary : const Color(0xFF929EB0),
-            ),
+            Icon(Icons.search_rounded, size: 17, color: palette.textTertiary),
             const SizedBox(width: 7),
             Expanded(
               child: TextField(
@@ -409,9 +282,7 @@ class _AgentRunSettingsMenuContentState
                   hintText: widget.searchHint,
                   hintStyle: TextStyle(
                     fontSize: 12,
-                    color: isDark
-                        ? palette.textTertiary
-                        : const Color(0xFF929EB0),
+                    color: palette.textTertiary,
                     fontWeight: FontWeight.w500,
                   ),
                   border: InputBorder.none,
@@ -435,70 +306,25 @@ class _AgentRunSettingsMenuContentState
     required VoidCallback onTap,
     bool showVendorIcon = false,
   }) {
-    final palette = context.omniPalette;
-    final isDark = context.isDarkTheme;
-    final selectedBackground = isDark
-        ? Color.alphaBlend(
-            widget.selectedColor.withValues(alpha: 0.18),
-            palette.surfaceSecondary.withValues(alpha: 0.52),
-          )
-        : widget.selectedColor.withValues(alpha: 0.10);
-    final row = Padding(
-      padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
-      child: InkWell(
-        key: ValueKey('chat-input-agent-run-settings-option-$keySuffix'),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: AnimatedContainer(
-          duration: _pageAnimationDuration,
-          curve: Curves.easeOutCubic,
-          constraints: const BoxConstraints(minHeight: 42),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          decoration: BoxDecoration(
-            color: selected ? selectedBackground : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              if (showVendorIcon) ...[
-                ProviderVendorIcon(
-                  vendor: ModelVendorCatalog.resolve(value),
-                  size: 14,
-                ),
-                const SizedBox(width: 7),
-              ],
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.1,
-                    color: widget.textColor,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 16,
-                child: selected
-                    ? Icon(
-                        Icons.check_rounded,
-                        size: 16,
-                        color: widget.selectedColor,
-                      )
-                    : null,
-              ),
-            ],
-          ),
-        ),
+    final row = OmniMenuItem(
+      key: ValueKey('chat-input-agent-run-settings-option-$keySuffix'),
+      onTap: onTap,
+      label: label,
+      selected: selected,
+      leading: showVendorIcon
+          ? ProviderVendorIcon(
+              vendor: ModelVendorCatalog.resolve(value),
+              size: OmniMenuStyle.iconSize,
+            )
+          : null,
+      trailing: SizedBox(
+        width: OmniMenuStyle.iconSize,
+        child: selected
+            ? Icon(Icons.check_rounded, color: widget.selectedColor)
+            : null,
       ),
     );
-    if (!showVendorIcon) {
-      return row;
-    }
+    if (!showVendorIcon) return row;
     return Tooltip(
       message: value,
       triggerMode: TooltipTriggerMode.longPress,
@@ -553,7 +379,7 @@ class _AgentRunSettingsMenuContentState
           Flexible(
             child: ListView.builder(
               shrinkWrap: true,
-              padding: const EdgeInsets.only(top: 3, bottom: 8),
+              padding: EdgeInsets.zero,
               itemCount: models.length,
               itemBuilder: (context, index) {
                 final model = models[index];
@@ -582,7 +408,7 @@ class _AgentRunSettingsMenuContentState
         Flexible(
           child: ListView.builder(
             shrinkWrap: true,
-            padding: const EdgeInsets.only(top: 3, bottom: 8),
+            padding: EdgeInsets.zero,
             itemCount: widget.reasoningOptions.length,
             itemBuilder: (context, index) {
               final effort = widget.reasoningOptions[index];
@@ -615,9 +441,8 @@ class _AgentRunSettingsMenuContentState
     return SizedBox(
       key: const ValueKey('chat-input-agent-run-settings-menu'),
       width: widget.width,
-      child: OmniGlassPanel(
+      child: OmniMenuSurface(
         width: widget.width,
-        borderRadius: BorderRadius.circular(18),
         child: Material(
           color: Colors.transparent,
           child: ConstrainedBox(

@@ -1,5 +1,7 @@
 # KernelSU 与系统操作接入方案
 
+> 历史方案：2026-11-06 同步上游 0.7.0.4 后，统一来源选择已替换为上游 Root 开关与 Shizuku 实现。本文描述旧实现；下列验收结论不适用于新版。
+
 状态：代码、聚焦测试与 debug APK 构建已完成；Gate 3 attempt 2 为 `PASS_WITH_DOCUMENTED_LIMITATIONS`。Gate 4 attempt 3 通过本机应用 Root 授权与单次只读工具调用的受限验收，详见 `kernelsu-device-verification.zh-CN.md`。完整管理器集成覆盖与真实 root 会话生命周期仍未完成。
 
 ## 目标与边界

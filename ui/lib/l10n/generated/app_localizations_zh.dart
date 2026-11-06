@@ -169,13 +169,6 @@ class AppLocalizationsZh extends AppLocalizations {
       '开启后，聊天页键盘回车为换行；关闭后，回车直接发送';
 
   @override
-  String get settingsPredictiveBackTitle => '预测性返回手势';
-
-  @override
-  String get settingsPredictiveBackSubtitle =>
-      '开启后，返回手势可跟随手指预览上一页面或桌面；关闭则保持旧版返回行为';
-
-  @override
   String get settingsHabitualHandTitle => '惯用手';
 
   @override
@@ -1333,13 +1326,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get aboutApkSourceDisclaimer =>
-      '使用本软件即表示您同意我们的隐私政策，并同意我们通过开源的更新 Worker 收集匿名使用信息，以持续改进软件。因使用本软件产生的任何损失或后果由您自行承担。';
+      '使用本软件即表示您同意我们的隐私政策，并同意我们通过开源的网站后端收集匿名使用信息，以持续改进软件。因使用本软件产生的任何损失或后果由您自行承担。';
 
   @override
-  String get aboutApkSourceOptionCnb => 'Cloudflare R2';
+  String get aboutApkSourceOptionCnb => '小万官网';
 
   @override
-  String get aboutApkSourceOptionCnbDescription => '通过更新 Worker 分发';
+  String get aboutApkSourceOptionCnbDescription => '通过小万官网分发';
 
   @override
   String get aboutApkSourceOptionGithub => 'GitHub';
@@ -1460,10 +1453,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get alpineOpenCode => 'OpenCode CLI（内置 ACP 支持）';
 
   @override
-  String get alpineDeepSeekHarness => 'DeepSeek Harness（dsh）官方 ACP 运行组件';
+  String get alpineKimiCode => 'Kimi Code 官方 CLI 与本地 Web 界面';
 
   @override
-  String get alpineKimiCode => 'Kimi Code 官方 CLI 与本地 Web 界面';
+  String get alpinePi => 'Pi Agent 与 MCP 工具支持';
 
   @override
   String get alpineSshClient => 'SSH 客户端';
@@ -1789,4 +1782,109 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get homeDrawerLateNightSub2 => '好好和今天说晚安～';
+
+  @override
+  String get dialogCancel => '取消';
+
+  @override
+  String get dialogConfirm => '确认';
+
+  @override
+  String get dialogOk => '确定';
+
+  @override
+  String get dialogLoading => '加载中';
+
+  @override
+  String get dialogPleaseWait => '请稍候...';
+
+  @override
+  String get webviewDownloading => '正在下载中，请稍候...';
+
+  @override
+  String get webviewDownloadStarted => '开始下载...';
+
+  @override
+  String get webviewImageSaved => '图片已保存到相册';
+
+  @override
+  String get webviewFileSavedDownloads => '文件已保存到下载目录';
+
+  @override
+  String webviewFileSaved(Object fileName) {
+    return '文件已下载：$fileName';
+  }
+
+  @override
+  String get webviewDownloadFailed => '下载失败';
+
+  @override
+  String get webviewBrowse => '网页浏览';
+
+  @override
+  String get webviewRefresh => '刷新';
+
+  @override
+  String get webviewLoadFailed => '页面加载失败';
+
+  @override
+  String get webviewUnknownError => '未知错误';
+
+  @override
+  String get webviewReload => '重新加载';
+
+  @override
+  String get openclawBaseUrlEmpty => 'OpenClaw Base URL 为空，请先配置';
+
+  @override
+  String get openclawConnected => 'OpenClaw 连接成功，Gateway 协议正常';
+
+  @override
+  String get openclawConnectedNoChallenge =>
+      'OpenClaw 已连接但未收到 challenge，请检查 Gateway 版本';
+
+  @override
+  String get openclawTimeout => 'OpenClaw 连接超时，请检查服务地址和网络';
+
+  @override
+  String openclawFailed(Object error) {
+    return 'OpenClaw 连接失败：$error';
+  }
+
+  @override
+  String get chatHistoryExpandAll => '展开全部日期';
+
+  @override
+  String get chatHistoryCollapseAll => '折叠全部日期';
+
+  @override
+  String chatHistoryMessageCount(Object count) {
+    return '$count 条消息';
+  }
+
+  @override
+  String get chatHistoryUntitled => '未命名对话';
+
+  @override
+  String authContinueTaskRequires(Object permissions) {
+    return '继续任务仅要求：$permissions';
+  }
+
+  @override
+  String get authSetPermissions => '设置权限';
+
+  @override
+  String get authPermissionsSafe => '请放心，这些权限你随时可以收回';
+
+  @override
+  String get authCheckingPermissions => '权限检查中...';
+
+  @override
+  String get authContinueTask => '继续任务';
+
+  @override
+  String get permissionAccessibility => '无障碍权限';
+
+  @override
+  String get permissionAccessibilityAndroidGui => 'Android GUI 无障碍权限';
 }

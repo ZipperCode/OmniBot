@@ -366,6 +366,15 @@ object DatabaseHelper {
         }
     }
 
+    private val MIGRATION_18_19 = object : Migration(18, 19) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_agent_conversation_entries_conversationId_createdAt_id " +
+                    "ON agent_conversation_entries (conversationId, createdAt, id)"
+            )
+        }
+    }
+
     internal val ALL_MIGRATIONS = arrayOf(
         MIGRATION_1_2,
         MIGRATION_2_3,
@@ -383,7 +392,8 @@ object DatabaseHelper {
         MIGRATION_14_15,
         MIGRATION_15_16,
         MIGRATION_16_17,
-        MIGRATION_17_18
+        MIGRATION_17_18,
+        MIGRATION_18_19
     )
 
     fun init(context: Context) {
@@ -470,14 +480,27 @@ object DatabaseHelper {
         return getDatabase().tokenUsageRecordDao().getRecordsSince(since)
     }
 
+    suspend fun getTokenUsageWeeklyBuckets(since: Long, until: Long): List<TokenUsageBucket> =
+        getDatabase().tokenUsageRecordDao().getWeeklyBuckets(since, until)
+
+    suspend fun getConversationActivityRows(since: Long, until: Long): List<ConversationActivityRow> =
+        getDatabase().conversationDao().getActivityRows(since, until)
+
     // Conversation相关方法
     suspend fun insertConversation(conversation: Conversation): Long {
         return getDatabase().conversationDao().insert(conversation)
     }
 
-    suspend fun updateConversation(conversation: Conversation) {
-        getDatabase().conversationDao().updatePreservingCheckpoint(conversation)
+    suspend fun updateConversation(conversation: Conversation, preserveLatestMetadata: Boolean = false) {
+        getDatabase().conversationDao().updatePreservingCheckpoint(conversation, preserveLatestMetadata)
     }
+
+    suspend fun updateCloudListMetadata(id: Long, at: Long, count: Int, preview: String?) {
+        getDatabase().conversationDao().updateCloudListMetadata(id, at, count, preview)
+    }
+
+    suspend fun getConversationDisplayPage(offset: Int, limit: Int, includeArchived: Boolean, archivedOnly: Boolean, mode: String?) =
+        getDatabase().conversationDao().getDisplayPage(offset, limit, includeArchived, archivedOnly, mode)
 
     fun observeAgentToolHeadersAfter(conversationId: Long, afterEntryId: Long):
         kotlinx.coroutines.flow.Flow<List<AgentConversationEntryHeader>> =
@@ -634,6 +657,8 @@ object DatabaseHelper {
 
     suspend fun getLogicalAgentConversationPage(conversationId: Long, modes: List<String>, limit: Int, offset: Int): List<AgentConversationEntry> =
         getDatabase().agentConversationEntryDao().getLogicalThreadPage(conversationId, modes, limit, offset)
+
+    fun getAgentConversationEntryDao(): AgentConversationEntryDao = getDatabase().agentConversationEntryDao()
 
     suspend fun getAgentConversationEntriesDescPaged(
         conversationId: Long,

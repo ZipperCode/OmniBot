@@ -213,6 +213,9 @@ class ImageGenerationToolHandler(
 
         val profile = profileId?.let(ModelProviderConfigStore::getProfile)
             ?: ModelProviderConfigStore.getEditingProfile()
+        require(!cn.com.omnimind.baselib.llm.ChatGptOAuthProvider.isOAuth(profile.sourceType)) {
+            "ChatGPT OAuth does not support image generation. Select an image API provider."
+        }
         val bundledImageConfig = bundledImageProviderConfig()
         val apiKey = profile.apiKey.trim()
         val useBundledImageProvider = shouldUseBundledImageProvider(

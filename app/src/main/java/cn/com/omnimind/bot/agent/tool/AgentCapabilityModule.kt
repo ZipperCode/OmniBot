@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.agent.tool
 
 import android.content.Context
+import cn.com.omnimind.bot.agent.personal.PersonalContextCapabilityModule
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.SubagentDispatcher
@@ -13,6 +14,7 @@ import cn.com.omnimind.bot.agent.tool.handlers.MemoryToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.PrivilegedToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.SharedHelper
 import cn.com.omnimind.bot.agent.tool.handlers.SkillsToolHandler
+import cn.com.omnimind.bot.agent.tool.handlers.StickerToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.SubagentToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.SystemToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.TerminalToolHandler
@@ -62,10 +64,9 @@ class BuiltInAgentCapabilityModule(
     private val privilegedHandler = PrivilegedToolHandler(
         helper,
         workspaceManager,
-        terminalHandler,
     )
 
-    override val handlers: List<ToolHandler> = listOfNotNull(
+    override val handlers: List<ToolHandler> = PersonalContextCapabilityModule(context).handlers + listOfNotNull(
         ContextToolHandler(helper),
         VlmToolHandler(context).takeIf { includeVlmTool },
         privilegedHandler,
@@ -73,6 +74,7 @@ class BuiltInAgentCapabilityModule(
         BrowserToolHandler(helper, workspaceManager),
         WebSearchToolHandler(),
         ImageGenerationToolHandler(helper, workspaceManager),
+        StickerToolHandler(helper, workspaceManager),
         FileToolHandler(helper, workspaceManager),
         SkillsToolHandler(helper, workspaceManager),
         SystemToolHandler(helper, scheduleToolBridge, workspaceManager),

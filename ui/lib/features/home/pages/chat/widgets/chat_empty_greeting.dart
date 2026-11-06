@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/features/home/widgets/home_quick_prompt_icon.dart';
-import 'package:ui/l10n/l10n.dart';
 import 'package:ui/services/home_greeting_settings_service.dart';
 import 'package:ui/theme/theme_context.dart';
 
@@ -64,7 +63,7 @@ class ChatEmptyGreeting extends StatelessWidget {
     final secondaryColor = secondaryTextColor ?? palette.textSecondary;
     final keywordColor = accentColor ?? palette.accentPrimary;
     final disableAnimations =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     final resolvedAgentName = agentName?.trim() ?? '';
     final displayAgentName = resolvedAgentName.isEmpty
         ? (isEnglish ? 'Omnibot' : '小万')
@@ -518,7 +517,7 @@ class _SlotWordRotatorState extends State<_SlotWordRotator>
       return const SizedBox.shrink();
     }
     final disableAnimations =
-        MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
     final textScaler = MediaQuery.textScalerOf(context);
     final fontSize = widget.style.fontSize ?? 20;
     final lineHeight = widget.style.height ?? 1.2;

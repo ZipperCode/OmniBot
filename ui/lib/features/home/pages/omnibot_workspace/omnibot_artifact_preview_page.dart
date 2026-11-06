@@ -2,14 +2,17 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:ui/widgets/flclash/popup.dart';
 import 'package:flutter/material.dart';
 import 'package:ui/services/chat_detail_sheet_preferences.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/glass_popup.dart';
 import 'package:ui/widgets/image_preview_overlay.dart';
 import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/omni_menu.dart';
 import 'package:ui/widgets/omnibot_markdown_body.dart';
 import 'package:ui/widgets/omnibot_resource_widgets.dart';
 
@@ -619,49 +622,63 @@ class _OmnibotArtifactPreviewPageState
     }
     if (widget.exists) {
       actions.add(
-        PopupMenuButton<_ArtifactPreviewAction>(
-          key: const ValueKey('artifact-preview-more-actions'),
-          tooltip: Localizations.localeOf(context).languageCode == 'en'
-              ? 'More actions'
-              : '更多操作',
-          splashRadius: 18,
-          onSelected: _handleToolbarAction,
-          itemBuilder: (context) => [
-            if (widget.previewKind == 'html')
-              PopupMenuItem<_ArtifactPreviewAction>(
-                value: _ArtifactPreviewAction.openInBrowser,
-                child: Text(
-                  Localizations.localeOf(context).languageCode == 'en'
-                      ? 'Open in browser'
-                      : '在浏览器打开',
-                ),
-              ),
-            PopupMenuItem<_ArtifactPreviewAction>(
-              value: _ArtifactPreviewAction.saveFile,
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Save to device'
-                    : '保存到设备',
-              ),
-            ),
-            PopupMenuItem<_ArtifactPreviewAction>(
-              value: _ArtifactPreviewAction.openWithSystem,
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Open with system'
-                    : '系统打开',
-              ),
-            ),
-            PopupMenuItem<_ArtifactPreviewAction>(
-              value: _ArtifactPreviewAction.shareFile,
-              child: Text(
-                Localizations.localeOf(context).languageCode == 'en'
-                    ? 'Share file'
-                    : '分享文件',
-              ),
-            ),
-          ],
-          icon: const Icon(Icons.more_horiz_rounded),
+        FlClashPopupSource(
+          glass: false,
+          color: Colors.transparent,
+          shape: const CircleBorder(),
+          builder: (anchorContext) => IconButton(
+            key: const ValueKey('artifact-preview-more-actions'),
+            tooltip: Localizations.localeOf(context).languageCode == 'en'
+                ? 'More actions'
+                : '更多操作',
+            splashRadius: 18,
+            onPressed: () async {
+              final anchor = glassPopupAnchorFromContext(anchorContext);
+              if (anchor == null) return;
+              final action = await showOmniMenu<_ArtifactPreviewAction>(
+                context: anchorContext,
+                sourceContext: anchorContext,
+                anchor: anchor,
+                items: [
+                  if (widget.previewKind == 'html')
+                    OmniPopupMenuItem<_ArtifactPreviewAction>(
+                      value: _ArtifactPreviewAction.openInBrowser,
+                      child: Text(
+                        Localizations.localeOf(context).languageCode == 'en'
+                            ? 'Open in browser'
+                            : '在浏览器打开',
+                      ),
+                    ),
+                  OmniPopupMenuItem<_ArtifactPreviewAction>(
+                    value: _ArtifactPreviewAction.saveFile,
+                    child: Text(
+                      Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Save to device'
+                          : '保存到设备',
+                    ),
+                  ),
+                  OmniPopupMenuItem<_ArtifactPreviewAction>(
+                    value: _ArtifactPreviewAction.openWithSystem,
+                    child: Text(
+                      Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Open with system'
+                          : '系统打开',
+                    ),
+                  ),
+                  OmniPopupMenuItem<_ArtifactPreviewAction>(
+                    value: _ArtifactPreviewAction.shareFile,
+                    child: Text(
+                      Localizations.localeOf(context).languageCode == 'en'
+                          ? 'Share file'
+                          : '分享文件',
+                    ),
+                  ),
+                ],
+              );
+              if (mounted && action != null) _handleToolbarAction(action);
+            },
+            icon: const Icon(Icons.more_horiz_rounded),
+          ),
         ),
       );
     }
@@ -723,7 +740,11 @@ Future<void> showOmnibotArtifactPreviewSheet(
     uri: sourceMetadata.uri,
     shellPath: sourceMetadata.shellPath,
     title: sourceMetadata.title,
-    previewKind: sourceMetadata.previewKind,
+    // A caller can deliberately request file actions for a large text record.
+    // Resolving its URI must not silently turn that into a full text read.
+    previewKind: metadata.previewKind == 'file'
+        ? 'file'
+        : sourceMetadata.previewKind,
     mimeType: sourceMetadata.mimeType,
   );
   if (!await OmnibotResourceService.ensureResourceAccess(
@@ -755,7 +776,7 @@ Future<void> showOmnibotArtifactPreviewSheet(
     return;
   }
 
-  await showModalBottomSheet<void>(
+  await showOmniGlassBottomSheet<void>(
     context: context,
     useRootNavigator: true,
     isScrollControlled: true,
@@ -880,10 +901,14 @@ class _OmnibotArtifactPreviewSheetFrameState
           mediaQuery.viewInsets.bottom,
     );
     final heightFactor = _resolveHeightFactor(mediaQuery);
-    final sheetHeight = availableHeight * heightFactor;
+    // Extend the same pane beneath the gesture bar while keeping the existing
+    // readable content height. The safe inset belongs inside the glass.
+    final sheetHeight =
+        availableHeight * heightFactor + mediaQuery.padding.bottom;
     const borderRadius = BorderRadius.vertical(top: Radius.circular(24));
     return SafeArea(
       top: false,
+      bottom: false,
       child: AnimatedPadding(
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOutCubic,
@@ -899,47 +924,52 @@ class _OmnibotArtifactPreviewSheetFrameState
               borderRadius: borderRadius,
               child: Material(
                 color: Colors.transparent,
-                child: Column(
-                  children: [
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onVerticalDragUpdate: (details) =>
-                          _handleDragUpdate(details, availableHeight),
-                      onVerticalDragEnd: (_) => _persistHeightFactor(),
-                      child: SizedBox(
-                        height: 22,
-                        width: double.infinity,
-                        child: Center(
-                          child: Container(
-                            width: 42,
-                            height: 4,
-                            decoration: BoxDecoration(
-                              color: palette.textSecondary.withValues(
-                                alpha: 0.34,
+                child: SafeArea(
+                  top: false,
+                  left: false,
+                  right: false,
+                  child: Column(
+                    children: [
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onVerticalDragUpdate: (details) =>
+                            _handleDragUpdate(details, availableHeight),
+                        onVerticalDragEnd: (_) => _persistHeightFactor(),
+                        child: SizedBox(
+                          height: 22,
+                          width: double.infinity,
+                          child: Center(
+                            child: Container(
+                              width: 42,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: palette.textSecondary.withValues(
+                                  alpha: 0.34,
+                                ),
+                                borderRadius: BorderRadius.circular(999),
                               ),
-                              borderRadius: BorderRadius.circular(999),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                    Expanded(
-                      child: OmnibotArtifactPreviewPage(
-                        path: widget.metadata.path,
-                        uri: widget.metadata.uri,
-                        title: widget.metadata.title,
-                        previewKind: widget.metadata.previewKind,
-                        mimeType: widget.metadata.mimeType,
-                        shellPath: widget.metadata.shellPath,
-                        exists: widget.metadata.exists,
-                        showPathBar: false,
-                        appBarPrimary: false,
-                        showLeading: false,
-                        glassSurface: true,
-                        onEditingChanged: _handleEditingChanged,
+                      Expanded(
+                        child: OmnibotArtifactPreviewPage(
+                          path: widget.metadata.path,
+                          uri: widget.metadata.uri,
+                          title: widget.metadata.title,
+                          previewKind: widget.metadata.previewKind,
+                          mimeType: widget.metadata.mimeType,
+                          shellPath: widget.metadata.shellPath,
+                          exists: widget.metadata.exists,
+                          showPathBar: false,
+                          appBarPrimary: false,
+                          showLeading: false,
+                          glassSurface: true,
+                          onEditingChanged: _handleEditingChanged,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             );

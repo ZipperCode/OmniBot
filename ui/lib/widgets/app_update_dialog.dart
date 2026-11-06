@@ -23,8 +23,8 @@ Future<void> showAppUpdateDialog(
         ? Color.lerp(palette.accentPrimary, palette.pageBackground, 0.42)!
         : palette.accentPrimary,
     content: _AppUpdateDialogContent(status: status),
+    fitsContent: true,
     barrierDismissible: true,
-    glassStyle: true,
   );
 
   if (confirmed != true || !context.mounted) {

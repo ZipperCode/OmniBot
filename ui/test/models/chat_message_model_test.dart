@@ -2,6 +2,49 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/models/chat_message_model.dart';
 
 void main() {
+  test(
+    'history preview identity and full-record attachment survive roundtrip',
+    () {
+      final message = ChatMessageModel.fromJson({
+        'id': 'history-preview',
+        'type': 2,
+        'user': 3,
+        'content': {
+          'id': 'history-preview',
+          'historyPayloadOffloaded': true,
+          'cardData': {
+            'type': 'deep_thinking',
+            'historyPayloadOffloaded': true,
+            'thinkingContent': 'preview',
+          },
+          'attachments': [
+            {'name': 'original.txt', 'path': '/workspace/original.txt'},
+            {
+              'name': '完整消息记录',
+              'path': '/workspace/full-history.json',
+              'historyPayloadOffloaded': true,
+            },
+          ],
+        },
+        'streamMeta': {'sessionId': 'session-1', 'turnId': 'turn-1'},
+      });
+
+      final restored = ChatMessageModel.fromJson(message.toJson());
+      expect(restored.isHistoryPayloadOffloaded, isTrue);
+      expect(restored.id, message.id);
+      expect(restored.sessionId, 'session-1');
+      expect(restored.turnId, 'turn-1');
+      expect(
+        restored.historyPayloadAttachments.single['path'],
+        '/workspace/full-history.json',
+      );
+      expect(
+        ChatMessageModel.userMessage('complete').isHistoryPayloadOffloaded,
+        isFalse,
+      );
+    },
+  );
+
   test('ChatMessageModel normalizes integer-like doubles recursively', () {
     final message = ChatMessageModel.fromJson({
       'id': 'history-message',
@@ -55,25 +98,6 @@ void main() {
     expect(message.createAt.millisecondsSinceEpoch, 1774600557281);
   });
 
-  test(
-    'ChatMessageModel strips persisted pure-chat json frames from assistant text',
-    () {
-      final message = ChatMessageModel.fromJson({
-        'id': 'chat-only-history',
-        'type': 1,
-        'user': 2,
-        'content': {
-          'text':
-              '{"choices":[{"delta":{"reasoning_content":"先分析一下"}}]}'
-              '这是最终回答。',
-        },
-        'createAt': '1774600557281',
-      });
-
-      expect(message.text, '这是最终回答。');
-    },
-  );
-
   test('ChatMessageModel preserves assistant replies that are raw JSON', () {
     final message = ChatMessageModel.fromJson({
       'id': 'assistant-json',
@@ -99,24 +123,35 @@ void main() {
   });
 
   test(
-    'ChatMessageModel preserves whitespace and punctuation from persisted transport frames',
+    'message display data is recursively immutable and detached from inputs',
     () {
-      final message = ChatMessageModel.fromJson({
-        'id': 'assistant-transport-whitespace',
-        'type': 1,
-        'user': 2,
-        'content': {
-          'text':
-              '{"choices":[{"delta":{"content":"Hello"}}]}'
-              '{"choices":[{"delta":{"content":","}}]}'
-              '{"choices":[{"delta":{"content":" "}}]}'
-              '{"choices":[{"delta":{"content":"world"}}]}'
-              '{"choices":[{"delta":{"content":"!"}}]}',
-        },
-        'createAt': '1774600557281',
-      });
-
-      expect(message.text, 'Hello, world!');
+      final nested = <String, dynamic>{
+        'text': 'original',
+        'attachments': <dynamic>[
+          {'name': 'one'},
+        ],
+      };
+      final message = ChatMessageModel(
+        id: '1',
+        type: 1,
+        user: 1,
+        content: nested,
+      );
+      nested['text'] = 'changed externally';
+      expect(message.text, 'original');
+      expect(
+        () => message.content!['text'] = 'mutated',
+        throwsUnsupportedError,
+      );
+      expect(
+        () => (message.content!['attachments'] as List).add({}),
+        throwsUnsupportedError,
+      );
+      expect(
+        () => message.content!['attachments'][0]['name'] = 'two',
+        throwsUnsupportedError,
+      );
+      expect(message.copyWith(content: {'text': 'edit'}).text, 'edit');
     },
   );
 

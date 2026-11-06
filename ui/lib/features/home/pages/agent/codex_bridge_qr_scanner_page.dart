@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
-import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 
 class CodexBridgeQrScanResult {
@@ -230,7 +229,6 @@ class _CodexBridgeQrScannerPageState extends State<CodexBridgeQrScannerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.omniPalette;
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -301,7 +299,7 @@ class _CodexBridgeQrScannerPageState extends State<CodexBridgeQrScannerPage> {
                 children: [
                   Icon(
                     LucideIcons.scanQrCode,
-                    color: palette.accentPrimary,
+                    color: Colors.white,
                     size: 18,
                   ),
                   const SizedBox(width: 10),

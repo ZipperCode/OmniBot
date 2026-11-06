@@ -11,7 +11,6 @@ import 'package:ui/features/home/pages/command_overlay/widgets/chat_input_area.d
 import 'package:ui/features/home/pages/command_overlay/widgets/message_bubble.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/services/storage_service.dart';
-import 'package:ui/services/screen_dialog_service.dart';
 import 'package:ui/theme/app_theme.dart';
 
 void main() {
@@ -66,9 +65,6 @@ void main() {
 
   void registerEarlyStopTests() {
     for (final blockedAt in <String>[
-      'status',
-      'status/disconnected',
-      'connect',
       'session/new',
     ]) {
       testWidgets(
@@ -76,28 +72,11 @@ void main() {
         (tester) async {
           final pending = Completer<Map<String, dynamic>>();
           final requests = <MethodCall>[];
-          final waitingForStatus = blockedAt.startsWith('status');
-          final blockedMethod = waitingForStatus ? 'status' : blockedAt;
-          final lateResponse = blockedAt != 'session/new'
-              ? <String, dynamic>{
-                  'connected': blockedAt != 'status/disconnected',
-                  'activeAgentId': 'test-agent',
-                }
-              : <String, dynamic>{'sessionId': 'late-session'};
+          final blockedMethod = blockedAt;
+          final lateResponse = <String, dynamic>{'sessionId': 'late-session'};
           messenger.setMockMethodCallHandler(runtimeChannel, (call) async {
             requests.add(call);
             switch (call.method) {
-              case 'status':
-                final count = requests
-                    .where((call) => call.method == 'status')
-                    .length;
-                if (waitingForStatus && count == 2) return pending.future;
-                return <String, dynamic>{
-                  'connected': blockedAt != 'connect' || pending.isCompleted,
-                  'activeAgentId': 'test-agent',
-                };
-              case 'connect':
-                return pending.future;
               case 'session/new':
                 if (blockedAt == 'session/new' && !pending.isCompleted)
                   return pending.future;
@@ -135,7 +114,7 @@ void main() {
             await tester.pump(const Duration(milliseconds: 100));
             expect(
               requests.where((call) => call.method == blockedMethod),
-              hasLength(waitingForStatus ? 2 : 1),
+              hasLength(1),
             );
             await tester.tap(
               find.byKey(const ValueKey('chat-input-send-or-stop-button')),
@@ -154,7 +133,7 @@ void main() {
             );
             expect(
               requests.where((call) => call.method == 'connect'),
-              hasLength(blockedAt == 'connect' ? 1 : 0),
+              isEmpty,
             );
             expect(
               requests.where((call) => call.method == 'session/new'),
@@ -163,7 +142,8 @@ void main() {
             final closes = requests
                 .where((call) => call.method == 'session/close')
                 .toList();
-            expect(closes, hasLength(blockedAt == 'session/new' ? 1 : 0));
+            expect(closes, hasLength(1));
+            expect((closes.single.arguments as Map)['agentId'], 'xiaowan-acp');
             if (closes.isNotEmpty)
               expect(
                 (closes.single.arguments as Map)['sessionId'],
@@ -246,9 +226,7 @@ void main() {
         await messenger.handlePlatformMessage(
           eventsChannel.name,
           const StandardMethodCodec().encodeSuccessEnvelope(<String, dynamic>{
-            'conversationId': 1001,
             'sessionId': 'overlay-session',
-            'turnId': 'overlay-turn',
             'agentId': 'test-agent',
             'allowImplicitTurnAdmission': true,
             'message': <String, dynamic>{
@@ -306,8 +284,13 @@ void main() {
                   ? prompt.future
                   : followup.future;
             case 'session/cancel':
-              if (scenario.cancelFails && requests.where((c) => c.method == 'session/cancel').length == 1) {
-                throw PlatformException(code: 'cancel_failed', message: 'Cancel transport failed');
+              if (scenario.cancelFails &&
+                  requests.where((c) => c.method == 'session/cancel').length ==
+                      1) {
+                throw PlatformException(
+                  code: 'cancel_failed',
+                  message: 'Cancel transport failed',
+                );
               }
               return <String, dynamic>{'ok': true, 'cancelled': true};
             case 'session/close':
@@ -343,6 +326,7 @@ void main() {
             mode: 'command_overlay',
           )!;
           expect(runtime.isAiResponding, isTrue);
+          expect(runtime.knownAcpSessionIds, contains('overlay-session'));
           await emitUpdate(<String, dynamic>{
             'sessionUpdate': 'tool_call',
             'toolCallId': 'read-document',
@@ -370,18 +354,35 @@ void main() {
               isTrue,
               reason: 'A cancellation acknowledgement is not PromptResponse.',
             );
-            expect(runtime.messages.singleWhere((m) => m.cardData?['toolCallId'] == 'read-document').cardData?['status'], 'running');
+            expect(
+              runtime.messages
+                  .singleWhere(
+                    (m) => m.cardData?['toolCallId'] == 'read-document',
+                  )
+                  .cardData?['status'],
+              'running',
+            );
             if (scenario.cancelFails) {
               // A failed request stays on the same live prompt. Only an
               // explicit second stop attempts cancellation again.
-              await tester.tap(find.byKey(const ValueKey('chat-input-send-or-stop-button')));
+              await tester.tap(
+                find.byKey(const ValueKey('chat-input-send-or-stop-button')),
+              );
               await tester.pump();
-              expect(requests.where((c) => c.method == 'session/cancel'), hasLength(2));
+              expect(
+                requests.where((c) => c.method == 'session/cancel'),
+                hasLength(2),
+              );
               expect(runtime.isAiResponding, isTrue);
             }
-            await tester.tap(find.byKey(const ValueKey('chat-input-send-or-stop-button')));
+            await tester.tap(
+              find.byKey(const ValueKey('chat-input-send-or-stop-button')),
+            );
             await tester.pump();
-            expect(requests.where((c) => c.method == 'session/cancel'), hasLength(scenario.cancelFails ? 2 : 1));
+            expect(
+              requests.where((c) => c.method == 'session/cancel'),
+              hasLength(scenario.cancelFails ? 2 : 1),
+            );
           }
 
           await emitUpdate(<String, dynamic>{

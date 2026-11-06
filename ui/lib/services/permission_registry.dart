@@ -136,23 +136,35 @@ class PermissionRegistry {
     ];
     final optionalPermissions = <PermissionSpec>[
       PermissionSpec(
-        id: 'privileged',
+        id: 'local_network',
+        iconPath: 'assets/welcome/permission_installed_apps.svg',
+        iconWidth: 32.0,
+        iconHeight: 32.0,
+        name: LegacyTextLocalizer.isEnglish ? 'Local network' : '局域网访问',
+        description: LegacyTextLocalizer.isEnglish
+            ? 'Connect to computers, model providers and MCP services on your network (Android 17+)'
+            : '连接局域网电脑、模型和 MCP 服务（Android 17 及以上）',
+        openMethod: 'requestLocalNetworkPermission',
+        checkMethod: 'isLocalNetworkPermissionGranted',
+      ),
+      PermissionSpec(
+        id: 'shizuku',
         iconPath: 'assets/welcome/permission_installed_apps.svg',
         iconWidth: 32.0,
         iconHeight: 32.0,
         name: LegacyTextLocalizer.isEnglish
-            ? 'Privileged Access'
-            : '特权访问',
+            ? 'Shizuku Permission'
+            : 'Shizuku 权限',
         description: LegacyTextLocalizer.isEnglish
             ? 'Optional advanced system actions for the agent'
             : '可选的高级系统能力，用于扩展 agent 的系统级操作边界',
-        openMethod: 'openPrivilegedSourceApp',
+        openMethod: 'openShizukuDownloadOrApp',
         customCheckMethod: () async {
-          final status = await getPrivilegedStatus();
+          final status = await getShizukuStatus();
           return status.isGranted;
         },
         customAuthMethod: (BuildContext context) async {
-          await ensurePrivilegedPermission(context);
+          await ensureShizukuPermission(context);
         },
       ),
     ];

@@ -23,8 +23,10 @@ internal fun acpProfileStoreTestContext(directory: File): Context {
         File("src/main/assets", call.getArgument<String>(0)).inputStream()
     }
     `when`(context.applicationContext).thenReturn(context)
+    stubAcpTestResources(context)
     `when`(context.assets).thenReturn(assets)
     `when`(context.filesDir).thenReturn(directory)
+    `when`(context.noBackupFilesDir).thenReturn(File(directory, "no-backup"))
     `when`(context.applicationInfo).thenReturn(ApplicationInfo().apply {
         dataDir = directory.absolutePath
     })
@@ -36,18 +38,22 @@ internal fun acpProfileStoreTestContext(directory: File): Context {
 
 private fun filePreferences(file: File): SharedPreferences {
     val gson = Gson()
-    fun read(): MutableMap<String, String> = if (file.exists()) {
-        gson.fromJson(file.readText(), object : TypeToken<MutableMap<String, String>>() {}.type)
+    fun read(): MutableMap<String, Any?> = if (file.exists()) {
+        gson.fromJson(file.readText(), object : TypeToken<MutableMap<String, Any?>>() {}.type)
     } else {
         linkedMapOf()
     }
     fun editor(): SharedPreferences.Editor {
-        val changes = linkedMapOf<String, String?>()
+        val changes = linkedMapOf<String, Any?>()
         lateinit var editor: SharedPreferences.Editor
         editor = mock(SharedPreferences.Editor::class.java) { call ->
             when (call.method.name) {
                 "putString" -> {
-                    changes[call.getArgument(0)] = call.getArgument(1)
+                    changes[call.getArgument(0)] = call.getArgument<String?>(1)
+                    editor
+                }
+                "putBoolean" -> {
+                    changes[call.getArgument(0)] = call.getArgument<Boolean>(1)
                     editor
                 }
                 "remove" -> {
@@ -69,7 +75,10 @@ private fun filePreferences(file: File): SharedPreferences {
     }
     return mock(SharedPreferences::class.java) { call ->
         when (call.method.name) {
-            "getString" -> read()[call.getArgument<String>(0)] ?: call.getArgument<String?>(1)
+            "getString" -> read()[call.getArgument<String>(0)] as? String ?: call.getArgument<String?>(1)
+            "getBoolean" -> read()[call.getArgument<String>(0)] as? Boolean ?: call.getArgument<Boolean>(1)
+            "getAll" -> read().toMap()
+            "contains" -> read().containsKey(call.getArgument<String>(0))
             "edit" -> editor()
             else -> error("Unexpected preferences call: ${call.method.name}")
         }

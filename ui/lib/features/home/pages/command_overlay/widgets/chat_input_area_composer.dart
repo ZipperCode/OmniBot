@@ -37,75 +37,63 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
-    final composer = switch ((
-      widget.useLargeComposerStyle,
-      widget.useFrostedGlass,
-    )) {
-      (true, _) => SafeArea(child: _buildLargeComposerShell()),
-      (false, true) => SafeArea(
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 2, sigmaY: 2),
-            child: Container(
-              height: 44,
-              padding: const EdgeInsets.fromLTRB(16, 0, 12, 0),
-              decoration: BoxDecoration(
-                color: context.isDarkTheme
-                    ? palette.surfacePrimary.withValues(alpha: 0.86)
-                    : const Color(0xE6F1F8FF),
-                borderRadius: BorderRadius.circular(8),
-                border: context.isDarkTheme
-                    ? Border.all(
-                        color: palette.borderSubtle.withValues(alpha: 0.72),
-                      )
-                    : null,
+    final composer = widget.minimalComposer
+        ? SafeArea(top: false, child: _buildMinimalComposer())
+        : switch ((widget.useLargeComposerStyle, widget.useFrostedGlass)) {
+            (true, _) => SafeArea(child: _buildLargeComposerShell()),
+            (false, _) when LiquidGlassScope.of(context) => SafeArea(
+              child: ChatComposerSurface(
+                expanded: false,
+                duration: _compactAnimationDuration,
+                child: SizedBox(
+                  height: 44,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 12, 0),
+                    child: _buildInputContent(),
+                  ),
+                ),
               ),
-              child: _buildInputContent(),
             ),
-          ),
-        ),
-      ),
-      (false, false) => SafeArea(
-        child: Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: context.isDarkTheme
-                ? [
-                    BoxShadow(
-                      color: palette.shadowColor.withValues(alpha: 0.22),
-                      blurRadius: 16,
-                      offset: const Offset(0, 6),
+            (false, _) => SafeArea(
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: context.isDarkTheme
+                      ? [
+                          BoxShadow(
+                            color: palette.shadowColor.withValues(alpha: 0.22),
+                            blurRadius: 16,
+                            offset: const Offset(0, 6),
+                          ),
+                        ]
+                      : [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.1),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    height: 44,
+                    padding: const EdgeInsets.fromLTRB(16, 0, 12, 0),
+                    decoration: BoxDecoration(
+                      color: context.isDarkTheme
+                          ? palette.surfacePrimary
+                          : Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: context.isDarkTheme
+                          ? Border.all(color: palette.borderSubtle)
+                          : null,
                     ),
-                  ]
-                : [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.1),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              height: 44,
-              padding: const EdgeInsets.fromLTRB(16, 0, 12, 0),
-              decoration: BoxDecoration(
-                color: context.isDarkTheme
-                    ? palette.surfacePrimary
-                    : Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: context.isDarkTheme
-                    ? Border.all(color: palette.borderSubtle)
-                    : null,
+                    child: _buildInputContent(),
+                  ),
+                ),
               ),
-              child: _buildInputContent(),
             ),
-          ),
-        ),
-      ),
-    };
+          };
     return TextFieldTapRegion(
       onTapOutside: widget.isEditingUserMessage
           ? (_) {
@@ -262,12 +250,8 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
   Widget _buildSelectedModelOverrideChip() {
     final modelId = (widget.selectedModelOverrideId ?? '').trim();
     final palette = context.omniPalette;
-    final chipColor = context.isDarkTheme
-        ? palette.surfaceSecondary
-        : const Color(0xFFF4F7FD);
-    final textColor = context.isDarkTheme
-        ? palette.textSecondary
-        : const Color(0xFF54627A);
+    final chipColor = palette.surfaceSecondary;
+    final textColor = palette.textSecondary;
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
@@ -329,7 +313,9 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
       icon: AnimatedRotation(
         key: const ValueKey('chat-input-add-or-cancel-edit-icon'),
         turns: widget.isEditingUserMessage ? 0.125 : 0,
-        duration: _buttonAnimationDuration,
+        duration: widget.minimalComposer
+            ? _compactAnimationDuration
+            : _buttonAnimationDuration,
         curve: _buttonAnimationCurve,
         child: _addSvg,
       ),
@@ -375,12 +361,32 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
       hasTextOverride: widget.controller.text.trim().isNotEmpty,
     );
     final canTap = action != ChatComposerPrimaryAction.disabled;
-    final icon = action == ChatComposerPrimaryAction.cancel
+    final icon = widget.minimalComposer
+        ? DecoratedBox(
+            decoration: BoxDecoration(
+              color: context.omniPalette.textPrimary,
+              shape: BoxShape.circle,
+            ),
+            child: SizedBox(
+              width: 36,
+              height: 36,
+              child: Icon(
+                action == ChatComposerPrimaryAction.cancel
+                    ? LucideIcons.square
+                    : LucideIcons.arrowUp,
+                size: action == ChatComposerPrimaryAction.cancel ? 14 : 20,
+                color: context.omniPalette.surfacePrimary,
+              ),
+            ),
+          )
+        : action == ChatComposerPrimaryAction.cancel
         ? _pauseSvg
         : _sendSvg;
 
     return AnimatedOpacity(
-      duration: _buttonAnimationDuration,
+      duration: widget.minimalComposer
+          ? _compactAnimationDuration
+          : _buttonAnimationDuration,
       curve: _buttonAnimationCurve,
       opacity: canTap ? 1 : 0.38,
       child: IconButton(
@@ -395,7 +401,9 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
         padding: EdgeInsets.zero,
         iconSize: 20,
         icon: AnimatedSwitcher(
-          duration: _buttonAnimationDuration,
+          duration: widget.minimalComposer
+              ? _compactAnimationDuration
+              : _buttonAnimationDuration,
           switchInCurve: _buttonAnimationCurve,
           switchOutCurve: _buttonAnimationCurve,
           transitionBuilder: (child, animation) {
@@ -430,7 +438,6 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
 
   Widget _buildLargeComposerShell() {
     final content = RepaintBoundary(child: _buildLargeComposer());
-    final useFrostedGlass = widget.useFrostedGlass;
     final palette = context.omniPalette;
     return MouseRegion(
       onEnter: (_) {
@@ -444,14 +451,6 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
         child: content,
         builder: (context, composerState, child) {
           final focused = composerState.hasFocus;
-          final inputSurfaceColor = context.isDarkTheme
-              ? palette.surfacePrimary
-              : const Color(0xFFF9FCFF);
-          final shellSurfaceColor = useFrostedGlass
-              ? (context.isDarkTheme
-                    ? palette.surfacePrimary.withValues(alpha: 0.82)
-                    : Colors.white.withValues(alpha: 0.76))
-              : inputSurfaceColor;
           final hovered = composerState.isHovered;
           const minShellHeight = 72.0;
           const shellRadius = 20.0;
@@ -459,9 +458,33 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
           final innerRadius = math.max(0.0, shellRadius - borderInset);
           const contentPadding = EdgeInsets.fromLTRB(14, 8, 12, 8);
           final shouldGlowStrong = focused || hovered;
-          final innerBorderColor =
-              (context.isDarkTheme ? palette.borderStrong : Colors.white)
-                  .withValues(alpha: context.isDarkTheme ? 0.42 : 0.1);
+          final innerBorderColor = palette.borderSubtle;
+
+          if (LiquidGlassScope.of(context)) {
+            return ChatComposerSurface(
+              // Multiline drafts and attachment rows keep their full content
+              // area even when an auxiliary control temporarily owns focus.
+              expanded:
+                  focused ||
+                  composerState.hasText ||
+                  widget.attachments.isNotEmpty,
+              duration: _compactAnimationDuration,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: minShellHeight),
+                child: Padding(
+                  padding: contentPadding + const EdgeInsets.all(borderInset),
+                  child: _compactAnimationDuration == Duration.zero
+                      ? child
+                      : AnimatedSize(
+                          duration: _compactAnimationDuration,
+                          curve: Curves.easeOutCubic,
+                          alignment: Alignment.bottomCenter,
+                          child: child,
+                        ),
+                ),
+              ),
+            );
+          }
 
           return AnimatedContainer(
             duration: const Duration(milliseconds: 220),
@@ -495,27 +518,20 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
                   padding: EdgeInsets.all(borderInset),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(innerRadius),
-                    child: BackdropFilter(
-                      enabled: useFrostedGlass,
-                      filter: ImageFilter.blur(
-                        sigmaX: useFrostedGlass ? 8 : 0,
-                        sigmaY: useFrostedGlass ? 8 : 0,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      padding: contentPadding,
+                      decoration: BoxDecoration(
+                        color: palette.surfacePrimary,
+                        borderRadius: BorderRadius.circular(innerRadius),
+                        border: Border.all(color: innerBorderColor, width: 1),
                       ),
-                      child: AnimatedContainer(
+                      child: AnimatedSize(
                         duration: const Duration(milliseconds: 220),
                         curve: Curves.easeOutCubic,
-                        padding: contentPadding,
-                        decoration: BoxDecoration(
-                          color: shellSurfaceColor,
-                          borderRadius: BorderRadius.circular(innerRadius),
-                          border: Border.all(color: innerBorderColor, width: 1),
-                        ),
-                        child: AnimatedSize(
-                          duration: const Duration(milliseconds: 220),
-                          curve: Curves.easeOutCubic,
-                          alignment: Alignment.bottomCenter,
-                          child: child ?? const SizedBox.shrink(),
-                        ),
+                        alignment: Alignment.bottomCenter,
+                        child: child ?? const SizedBox.shrink(),
                       ),
                     ),
                   ),

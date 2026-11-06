@@ -5,15 +5,27 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="database" path="personal_context_notifications.db" />
+        <exclude domain="sharedpref" path="personal_context_documents.xml" />
+        <exclude domain="sharedpref" path="personal_context_permissions.xml" />
+        <!-- Root access is explicitly authorized on this installation only. -->
+        <exclude domain="sharedpref" path="omni_root_access.xml" />
         <exclude domain="sharedpref" path="omni_account_tokens.xml" />
         <exclude domain="sharedpref" path="omni_model_provider_secrets.xml" />
+        <exclude domain="sharedpref" path="omni_chatgpt_oauth_secrets.xml" />
         <!-- TODO: Use <include> and <exclude> to control what is backed up.
         <include .../>
         <exclude .../>
         -->
     </cloud-backup>
     <device-transfer>
+        <exclude domain="database" path="personal_context_notifications.db" />
+        <exclude domain="sharedpref" path="personal_context_documents.xml" />
+        <exclude domain="sharedpref" path="personal_context_permissions.xml" />
+        <!-- Root access is explicitly authorized on this installation only. -->
+        <exclude domain="sharedpref" path="omni_root_access.xml" />
         <exclude domain="sharedpref" path="omni_account_tokens.xml" />
         <exclude domain="sharedpref" path="omni_model_provider_secrets.xml" />
+        <exclude domain="sharedpref" path="omni_chatgpt_oauth_secrets.xml" />
     </device-transfer>
 </data-extraction-rules>

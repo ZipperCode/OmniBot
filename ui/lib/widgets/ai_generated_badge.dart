@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
-import 'package:ui/theme/app_colors.dart';
+import 'package:ui/theme/theme_context.dart';
 
 /// AI 生成内容标识组件
 /// 用于显示 "内容由AI生成" 的提示标识，包含图标和文案
@@ -15,7 +15,7 @@ class AiGeneratedBadge extends StatelessWidget {
   /// 文字大小，默认 12
   final double fontSize;
 
-  /// 图标和文字颜色，默认使用 AppColors.text50
+  /// 图标和文字颜色，默认使用主题的次要提示色
   final Color? color;
 
   const AiGeneratedBadge({
@@ -28,7 +28,7 @@ class AiGeneratedBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveColor = color ?? AppColors.text50;
+    final effectiveColor = color ?? context.omniPalette.textTertiary;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -40,17 +40,18 @@ class AiGeneratedBadge extends StatelessWidget {
           colorFilter: ColorFilter.mode(effectiveColor, BlendMode.srcIn),
         ),
         const SizedBox(width: 4),
-        Text(
-          text ??
-              (LegacyTextLocalizer.isEnglish
-                  ? 'AI generated content'
-                  : '内容由Ai生成'),
-          style: TextStyle(
-            color: effectiveColor,
-            fontSize: fontSize,
-            fontFamily: 'PingFang SC',
-            fontWeight: FontWeight.w400,
-            height: 1.50,
+        Flexible(
+          child: Text(
+            text ??
+                (LegacyTextLocalizer.isEnglish
+                    ? 'AI generated content'
+                    : '内容由Ai生成'),
+            style: TextStyle(
+              color: effectiveColor,
+              fontSize: fontSize,
+              fontWeight: FontWeight.w400,
+              height: 1.50,
+            ),
           ),
         ),
       ],

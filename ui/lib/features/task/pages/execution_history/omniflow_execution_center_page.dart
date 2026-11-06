@@ -3,6 +3,11 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/utils/ui.dart';
+import 'package:ui/theme/theme_context.dart';
 import 'package:go_router/go_router.dart';
 import 'package:ui/features/home/pages/authorize/accessibility_permission_prompt.dart';
 import 'package:ui/features/task/pages/execution_history/widgets/function_detail_sheet.dart';
@@ -274,7 +279,7 @@ class _OmniFlowExecutionCenterPageState
     Map<String, dynamic> function, {
     bool refreshOnOpen = true,
   }) {
-    return showModalBottomSheet<void>(
+    return showOmniGlassBottomSheet<void>(
       context: context,
       useRootNavigator: true,
       isScrollControlled: true,
@@ -374,9 +379,9 @@ class _OmniFlowExecutionCenterPageState
         ? requiredValue.map((value) => value.toString()).toSet()
         : <String>{};
     final values = <String, String>{};
-    final result = await showDialog<Map<String, dynamic>>(
+    final result = await showOmniGlassCardSheet<Map<String, dynamic>>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      builder: (dialogContext) => OmniGlassAlertDialog(
         title: Text(_text(context, '填写执行参数', 'Run arguments')),
         content: SingleChildScrollView(
           child: Column(
@@ -433,9 +438,9 @@ class _OmniFlowExecutionCenterPageState
   Future<void> _deleteFunction(Map<String, dynamic> function) async {
     final functionId = _string(function['function_id']);
     if (functionId.isEmpty) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showOmniGlassCardSheet<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
+      builder: (dialogContext) => OmniGlassAlertDialog(
         title: Text(_text(context, '删除复用指令', 'Delete Function')),
         content: Text(_text(context, '删除后无法继续执行。', 'This cannot be undone.')),
         actions: [
@@ -522,23 +527,23 @@ class _OmniFlowExecutionCenterPageState
               _text(context, 'OmniFlow 操作失败', 'OmniFlow operation failed'),
         );
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(success)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(success)));
       if (reload) await _refreshActive();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(_omniFlowErrorText(error))));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(_omniFlowErrorText(error))));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_text(context, '执行中心', 'Execution Center')),
+      backgroundColor: context.omniPalette.pageBackground,
+      appBar: CommonAppBar(
+        primary: true,
+        title: _text(context, '执行中心', 'Execution Center'),
         actions: [
           IconButton(
             tooltip: _text(context, '刷新', 'Refresh'),
@@ -548,15 +553,25 @@ class _OmniFlowExecutionCenterPageState
             icon: const Icon(Icons.refresh_rounded),
           ),
         ],
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: [
-            Tab(text: _text(context, '复用指令', 'Functions')),
-            Tab(text: _text(context, '运行记录', 'Run Logs')),
-          ],
+      ),
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: OmniContentWidth(
+          child: Column(
+            children: [
+              TabBar(
+                controller: _tabController,
+                tabs: [
+                  Tab(text: _text(context, '复用指令', 'Functions')),
+                  Tab(text: _text(context, '运行记录', 'Run Logs')),
+                ],
+              ),
+              Expanded(child: _buildBody()),
+            ],
+          ),
         ),
       ),
-      body: _buildBody(),
     );
   }
 
@@ -685,7 +700,10 @@ class _FunctionsTab extends StatelessWidget {
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView.separated(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: edgeToEdgeScrollPadding(
+          context,
+          const EdgeInsets.symmetric(vertical: 6),
+        ),
         itemCount: functions.length + (hasMore ? 1 : 0),
         separatorBuilder: (_, __) =>
             const Divider(height: 1, indent: 16, endIndent: 16),
@@ -726,9 +744,8 @@ class _FunctionListItem extends StatelessWidget {
     final name = _string(function['name']).nullIfEmpty ?? functionId;
     final description = _string(function['description']);
     final steps = _mapList(function['steps']).length;
-    final parameters = _map(
-      _map(function['input_schema'])['properties'],
-    ).length;
+    final parameters = _map(_map(function['input_schema'])['properties'])
+        .length;
     final meta = _text(
       context,
       '$steps 个步骤 · $parameters 个参数',
@@ -750,9 +767,8 @@ class _FunctionListItem extends StatelessWidget {
                       name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w600),
                     ),
                     if (description.isNotEmpty && description != name) ...[
                       const SizedBox(height: 3),
@@ -844,7 +860,10 @@ class _RunLogsTab extends StatelessWidget {
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView.separated(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: edgeToEdgeScrollPadding(
+          context,
+          const EdgeInsets.symmetric(vertical: 6),
+        ),
         itemCount: runLogs.length + (hasMore ? 1 : 0),
         separatorBuilder: (_, __) =>
             const Divider(height: 1, indent: 16, endIndent: 16),
@@ -940,9 +959,8 @@ class _RunLogListItem extends StatelessWidget {
                       _string(runLog['goal']).nullIfEmpty ?? runId,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w600),
                     ),
                   ),
                   Text(
@@ -1108,8 +1126,8 @@ class _MessageState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
+      child: SingleChildScrollView(
+        padding: edgeToEdgeScrollPadding(context, const EdgeInsets.all(32)),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

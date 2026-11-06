@@ -21,6 +21,7 @@ class AssistsCoreChannel {
     @SuppressLint("StaticFieldLeak")
     private var assistsCoreManager: AssistsCoreManager? = null
     private var omniFlowToolChannel: OmniFlowToolChannel? = null
+    private val chatGptOAuthChannel = ChatGptOAuthChannel()
     fun onCreate(context: Context) {
         assistsCoreManager = AssistsCoreManager.sharedInstanceOrCreate(context)
         omniFlowToolChannel = OmniFlowToolChannel(context)
@@ -36,6 +37,7 @@ class AssistsCoreChannel {
         }
         channel!!.setMethodCallHandler { call, result ->
             OmniLog.d(TAG, "setMethodCallHandler " + call.method)
+            if (chatGptOAuthChannel.handle(call, result)) return@setMethodCallHandler
             if (omniFlowToolChannel?.handle(call, result) == true) {
                 return@setMethodCallHandler
             }
@@ -250,6 +252,18 @@ class AssistsCoreChannel {
                 }
                 "getTokenUsageRecords" -> {
                     assistsCoreManager!!.getTokenUsageRecords(call, result)
+                }
+                "getConversationActivitySummary", "getTokenUsageSummary" -> {
+                    assistsCoreManager!!.getUsageStatistics(call, result)
+                }
+                "manageConversation" -> {
+                    assistsCoreManager!!.manageConversation(call, result)
+                }
+                "conversationSelection", "getConversationTranscript" -> {
+                    assistsCoreManager!!.handleConversationStorage(call, result)
+                }
+                "reconcileChatLinkPreviews", "loadChatLinkPreview" -> {
+                    assistsCoreManager!!.handleChatLinkPreview(call, result)
                 }
                 "getConversations" -> {
                     assistsCoreManager!!.getConversations(call, result)

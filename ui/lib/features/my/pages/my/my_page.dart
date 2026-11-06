@@ -1,6 +1,5 @@
-import 'package:ui/widgets/predictive_back_route.dart';
+import 'package:ui/widgets/navigation/page_route.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_switch/flutter_switch.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/features/home/pages/edit_profile/edit_profile_page.dart';
 import 'package:ui/features/my/pages/my/widgets/profile_section.dart';
@@ -10,6 +9,7 @@ import 'package:ui/theme/app_colors.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/utils/cache_util.dart';
 import 'package:ui/utils/ui.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 class MyPage extends StatefulWidget {
   const MyPage({super.key});
@@ -130,15 +130,8 @@ class MyPageState extends State<MyPage> {
                             ),
                             SettingTile(
                               title: '震动反馈',
-                              trailing: FlutterSwitch(
-                                width: 44.8,
-                                height: 25.0,
-                                toggleSize: 15.3,
-                                padding: 4.8,
-                                activeColor: AppColors.primaryBlue,
-                                inactiveColor: AppColors.fillStandardSecondary,
+                              trailing: OmniSettingsSwitch(
                                 value: vibrationEnabled,
-                                borderRadius: 28.75,
                                 onToggle: (val) async {
                                   await CacheUtil.cacheBool("app_vibrate", val);
                                   setState(() {
@@ -163,9 +156,7 @@ class MyPageState extends State<MyPage> {
                           children: [
                             SettingTile(
                               title: '意见反馈',
-                              onTap: () {
-                                GoRouterManager.push('/my/feedback');
-                              },
+                              onTap: () => GoRouterManager.push('/my/feedback'),
                             ),
                             SettingTile(
                               title: '关于小万',
@@ -194,7 +185,7 @@ class MyPageState extends State<MyPage> {
                   onTap: () {
                     Navigator.push(
                       context,
-                      PredictiveBackMaterialPageRoute(
+                      OmniPageRoute(
                         builder: (context) => EditProfilePage(
                           initialAvatarIndex: avatarIndex,
                           initialNickname: displayName,

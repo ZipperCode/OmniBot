@@ -1,196 +1,213 @@
-import 'dart:convert';
-import 'dart:io';
 import 'dart:ui';
 
-import 'package:archive/archive.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ui/services/office_preview_service.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
+import 'package:ui/services/office_preview_service.dart';
 
 void main() {
-  late Directory tempDir;
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const channel = MethodChannel('cn.com.omnimind.bot/file_save');
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
-  setUp(() {
-    LegacyTextLocalizer.setResolvedLocale(const Locale('zh', 'CN'));
-    tempDir = Directory.systemTemp.createTempSync('office-preview-test-');
-  });
+  setUp(() => LegacyTextLocalizer.setResolvedLocale(const Locale('zh', 'CN')));
+  tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-  tearDown(() {
-    tempDir.deleteSync(recursive: true);
-  });
-
-  test('long Word paragraphs and the final paragraph remain complete', () async {
+  test('only the source identity crosses the channel and every paragraph is retained', () async {
     final paragraphs = List.generate(30, (i) => '$i:${'正文' * 200}:END-$i');
-    final path = await _writeArchiveFile(tempDir, 'long.docx', {
-      'word/document.xml':
-          '<document><body>${paragraphs.map((p) => '<p><r><t>$p</t></r></p>').join()}</body></document>',
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'loadOfficePreview');
+      expect(call.arguments, {
+        'path': '/workspace/long.docx',
+        'previewKind': 'office_word',
+      });
+      return {
+        'sections': [
+          {'lines': paragraphs, 'tableRows': []},
+        ],
+      };
     });
     final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
+      path: '/workspace/long.docx',
       previewKind: 'office_word',
     );
     expect(preview.sections.single.lines, paragraphs);
+    expect(preview.summary, '共提取 30 段正文');
     expect(preview.truncated, isFalse);
   });
 
-  test('every worksheet row column and long cell remains complete', () async {
-    final cell = '${'数据' * 80}:END';
-    final path = await _writeArchiveFile(tempDir, 'long.xlsx', {
-      'xl/workbook.xml':
-          '<workbook><sheets>${List.generate(5, (i) => '<sheet name="Sheet$i" id="r$i"/>').join()}</sheets></workbook>',
-      'xl/_rels/workbook.xml.rels':
-          '<Relationships>${List.generate(5, (i) => '<Relationship Id="r$i" Target="worksheets/sheet$i.xml"/>').join()}</Relationships>',
-      for (var i = 0; i < 5; i++)
-        'xl/worksheets/sheet$i.xml':
-            '<worksheet><sheetData>${List.generate(25, (r) => '<row>${List.generate(12, (c) => '<c r="${String.fromCharCode(65 + c)}${r + 1}" t="inlineStr"><is><t>$cell</t></is></c>').join()}</row>').join()}</sheetData></worksheet>',
-    });
-    final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
-      previewKind: 'office_sheet',
-    );
-    expect(preview.sections, hasLength(5));
-    for (final section in preview.sections) {
-      expect(section.tableRows, hasLength(25));
-      expect(section.tableRows.last, List.filled(12, cell));
-    }
-    expect(preview.truncated, isFalse);
-  });
-
-  test('every slide and long text line remains complete', () async {
-    final lines = List.generate(12, (i) => '$i:${'幻灯片' * 100}:END-$i');
-    final path = await _writeArchiveFile(tempDir, 'long.pptx', {
-      for (var i = 1; i <= 10; i++)
-        'ppt/slides/slide$i.xml':
-            '<sld>${lines.map((p) => '<p><r><t>$p</t></r></p>').join()}</sld>',
-    });
-    final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
-      previewKind: 'office_slide',
-    );
-    expect(preview.sections, hasLength(10));
-    expect(preview.sections.last.lines, lines);
-    expect(preview.truncated, isFalse);
-  });
-
-  test('parses docx body text into preview sections', () async {
-    final path = await _writeArchiveFile(tempDir, 'demo.docx', <String, String>{
-      'word/document.xml': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p><w:r><w:t>第一段</w:t></w:r></w:p>
-    <w:p><w:r><w:t>第二段</w:t></w:r></w:p>
-  </w:body>
-</w:document>
-''',
-    });
-
-    final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
-      previewKind: 'office_word',
+  for (final english in [false, true]) {
+    test(
+      'Word presentation retains its original localization english=$english',
+      () async {
+        LegacyTextLocalizer.setResolvedLocale(
+          english ? const Locale('en') : const Locale('zh', 'CN'),
+        );
+        messenger.setMockMethodCallHandler(
+          channel,
+          (_) async => {
+            'sections': [
+              {
+                'lines': ['第一段', '第二段'],
+                'tableRows': [],
+              },
+            ],
+          },
+        );
+        final preview = await OmnibotOfficePreviewService.loadPreview(
+          path: '/workspace/demo.docx',
+          previewKind: 'office_word',
+        );
+        expect(preview.kindLabel, english ? 'Word Preview' : 'Word 预览');
+        expect(
+          preview.summary,
+          english ? 'Extracted 2 paragraphs in total' : '共提取 2 段正文',
+        );
+        expect(preview.sections.single.title, english ? 'Body' : '正文');
+        expect(
+          preview.sections.single.subtitle,
+          english ? 'Scroll to view extracted document content' : '滚动查看文档提取内容',
+        );
+        expect(preview.sections.single.lines, ['第一段', '第二段']);
+      },
     );
 
-    expect(preview.kindLabel, 'Word 预览');
-    expect(preview.sections.single.lines, <String>['第一段', '第二段']);
-  });
-
-  test('parses xlsx sheet cells into preview table', () async {
-    final path = await _writeArchiveFile(tempDir, 'demo.xlsx', <String, String>{
-      'xl/workbook.xml': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
-    <sheet name="Sheet1" sheetId="1" r:id="rId1" />
-  </sheets>
-</workbook>
-''',
-      'xl/_rels/workbook.xml.rels': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml" />
-</Relationships>
-''',
-      'xl/sharedStrings.xml': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <si><t>标题</t></si>
-  <si><t>数值</t></si>
-</sst>
-''',
-      'xl/worksheets/sheet1.xml': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <sheetData>
-    <row r="1">
-      <c r="A1" t="s"><v>0</v></c>
-      <c r="B1" t="s"><v>1</v></c>
-    </row>
-    <row r="2">
-      <c r="A2"><v>42</v></c>
-      <c r="B2"><v>84</v></c>
-    </row>
-  </sheetData>
-</worksheet>
-''',
-    });
-
-    final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
-      previewKind: 'office_sheet',
+    test(
+      'sheet presentation retains names sparse tables and empty-state localization english=$english',
+      () async {
+        LegacyTextLocalizer.setResolvedLocale(
+          english ? const Locale('en') : const Locale('zh', 'CN'),
+        );
+        final rows = List.generate(
+          25,
+          (_) => List.filled(12, '${'数据' * 80}:END'),
+        );
+        messenger.setMockMethodCallHandler(
+          channel,
+          (_) async => {
+            'sections': [
+              {'title': '原工作表', 'lines': [], 'tableRows': rows},
+              {'title': '', 'lines': [], 'tableRows': []},
+            ],
+          },
+        );
+        final preview = await OmnibotOfficePreviewService.loadPreview(
+          path: '/workspace/demo.xlsx',
+          previewKind: 'office_sheet',
+        );
+        expect(preview.kindLabel, english ? 'Excel Preview' : 'Excel 预览');
+        expect(
+          preview.summary,
+          english ? 'Extracted 2 worksheets in total' : '共提取 2 个工作表',
+        );
+        expect(preview.sections.first.title, '原工作表');
+        expect(
+          preview.sections.first.subtitle,
+          english ? 'Extracted 25 rows in total' : '共提取 25 行',
+        );
+        expect(preview.sections.first.tableRows, rows);
+        expect(preview.sections.first.hasTable, isTrue);
+        expect(preview.sections.last.title, english ? 'Sheet 2' : '工作表 2');
+        expect(
+          preview.sections.last.subtitle,
+          english ? 'No cell content extracted' : '未提取到单元格内容',
+        );
+        expect(preview.sections.last.lines, [
+          english ? 'No previewable text in this worksheet' : '该工作表暂无可预览文本',
+        ]);
+        expect(preview.truncated, isFalse);
+      },
     );
 
-    expect(preview.kindLabel, 'Excel 预览');
-    expect(preview.sections.single.title, 'Sheet1');
-    expect(preview.sections.single.tableRows, <List<String>>[
-      <String>['标题', '数值'],
-      <String>['42', '84'],
-    ]);
-  });
-
-  test('parses pptx slide text into preview sections', () async {
-    final path = await _writeArchiveFile(tempDir, 'demo.pptx', <String, String>{
-      'ppt/slides/slide1.xml': '''
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
-  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-  <p:cSld>
-    <p:spTree>
-      <p:sp>
-        <p:txBody>
-          <a:p><a:r><a:t>第一页标题</a:t></a:r></a:p>
-          <a:p><a:r><a:t>第一页说明</a:t></a:r></a:p>
-        </p:txBody>
-      </p:sp>
-    </p:spTree>
-  </p:cSld>
-</p:sld>
-''',
-    });
-
-    final preview = await OmnibotOfficePreviewService.loadPreview(
-      path: path,
-      previewKind: 'office_slide',
+    test(
+      'slide presentation retains every line and empty slide localization english=$english',
+      () async {
+        LegacyTextLocalizer.setResolvedLocale(
+          english ? const Locale('en') : const Locale('zh', 'CN'),
+        );
+        final lines = List.generate(12, (i) => '$i:${'幻灯片' * 100}:END-$i');
+        messenger.setMockMethodCallHandler(
+          channel,
+          (_) async => {
+            'sections': [
+              {'lines': lines, 'tableRows': []},
+              {'lines': [], 'tableRows': []},
+            ],
+          },
+        );
+        final preview = await OmnibotOfficePreviewService.loadPreview(
+          path: '/workspace/demo.pptx',
+          previewKind: 'office_slide',
+        );
+        expect(
+          preview.kindLabel,
+          english ? 'PowerPoint Preview' : 'PowerPoint 预览',
+        );
+        expect(
+          preview.summary,
+          english ? 'Extracted 2 slides in total' : '共提取 2 页幻灯片',
+        );
+        expect(preview.sections.first.title, english ? 'Slide 1' : '第 1 页');
+        expect(preview.sections.first.lines, lines);
+        expect(preview.sections.last.title, english ? 'Slide 2' : '第 2 页');
+        expect(preview.sections.last.lines, [
+          english ? 'No extractable text on this slide' : '该页没有可提取文本',
+        ]);
+        expect(preview.truncated, isFalse);
+      },
     );
 
-    expect(preview.kindLabel, 'PowerPoint 预览');
-    expect(preview.sections.single.lines, <String>['第一页标题', '第一页说明']);
-  });
-}
-
-Future<String> _writeArchiveFile(
-  Directory directory,
-  String fileName,
-  Map<String, String> entries,
-) async {
-  final archive = Archive();
-  entries.forEach((entryPath, content) {
-    final bytes = utf8.encode(content);
-    archive.addFile(ArchiveFile(entryPath, bytes.length, bytes));
-  });
-  final encoded = ZipEncoder().encode(archive);
-
-  final file = File('${directory.path}/$fileName');
-  await file.writeAsBytes(encoded, flush: true);
-  return file.path;
+    test(
+      'native errors retain localized preview messages english=$english',
+      () async {
+        LegacyTextLocalizer.setResolvedLocale(
+          english ? const Locale('en') : const Locale('zh', 'CN'),
+        );
+        final cases = {
+          'OFFICE_UNSUPPORTED': english
+              ? 'This Office file type is not supported'
+              : '暂不支持该 Office 文件类型',
+          'OFFICE_MISSING_ENTRY': english
+              ? 'File missing: detail'
+              : '文件缺少 detail',
+          'OFFICE_EMPTY_WORD': english
+              ? 'No previewable Word text content found'
+              : '未找到可预览的 Word 文本内容',
+          'OFFICE_EMPTY_SHEETS': english
+              ? 'No previewable Excel worksheet content found'
+              : '未找到可预览的 Excel 工作表内容',
+          'OFFICE_EMPTY_SLIDES': english
+              ? 'No previewable PowerPoint slides found'
+              : '未找到可预览的 PowerPoint 页面',
+          'OFFICE_XML_ERROR': english
+              ? 'Failed to parse Office file structure: detail'
+              : 'Office 文件结构解析失败: detail',
+          'OFFICE_PREVIEW_FAILED': english
+              ? 'Office file preview failed: detail'
+              : 'Office 文件预览失败: detail',
+        };
+        for (final entry in cases.entries) {
+          messenger.setMockMethodCallHandler(
+            channel,
+            (_) async =>
+                throw PlatformException(code: entry.key, message: 'detail'),
+          );
+          await expectLater(
+            OmnibotOfficePreviewService.loadPreview(
+              path: '/workspace/broken.docx',
+              previewKind: 'office_word',
+            ),
+            throwsA(
+              isA<StateError>().having(
+                (error) => error.message,
+                'message',
+                entry.value,
+              ),
+            ),
+          );
+        }
+      },
+    );
+  }
 }

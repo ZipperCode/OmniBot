@@ -2,9 +2,11 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui';
 
+import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/flclash/liquid_glass.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_menu.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/command_overlay/state/chat_composer_state_machine.dart';
@@ -18,8 +20,12 @@ import 'package:ui/widgets/image_preview_overlay.dart';
 import 'package:ui/widgets/omni_glass.dart';
 import 'package:ui/widgets/text_input_context_menu.dart';
 
+import 'chat_composer_surface.dart';
+
 part 'chat_input_area_composer.dart';
+part 'chat_input_compact_composer.dart';
 part 'chat_input_area_popup.dart';
+part 'chat_input_compact_actions.dart';
 part 'chat_input_actions.dart';
 part 'chat_input_agent_controls.dart';
 part 'chat_input_agent_menus.dart';
@@ -50,8 +56,10 @@ const String _kAgentPermissionFullAccessIconAsset =
 
 enum AgentPermissionMode { readOnly, defaultMode, autoReview, fullAccess }
 
-typedef AgentRunSettingsChanged =
-    FutureOr<void> Function({String? modelId, String? reasoningEffort});
+typedef AgentRunSettingsChanged = FutureOr<void> Function({
+  String? modelId,
+  String? reasoningEffort,
+});
 
 class AgentRunSettings {
   const AgentRunSettings({
@@ -145,8 +153,10 @@ class ChatInputArea extends StatefulWidget {
   /// 是否使用毛玻璃效果（command_overlay 使用毛玻璃，chatbotsheet 使用白色+阴影）
   final bool useFrostedGlass;
   final bool useLargeComposerStyle;
+  final bool minimalComposer;
   final bool useAttachmentPickerForPlus;
   final Future<void> Function()? onPickAttachment;
+  final Future<void> Function()? onPickImages;
   final List<ChatInputAttachment> attachments;
   final bool hasExternalSendPayload;
   final bool isEditingUserMessage;
@@ -185,8 +195,10 @@ class ChatInputArea extends StatefulWidget {
     this.onTerminalTap,
     this.useFrostedGlass = false,
     this.useLargeComposerStyle = false,
+    this.minimalComposer = false,
     this.useAttachmentPickerForPlus = false,
     this.onPickAttachment,
+    this.onPickImages,
     this.attachments = const [],
     this.hasExternalSendPayload = false,
     this.isEditingUserMessage = false,
@@ -230,9 +242,15 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   final GlobalKey _agentPermissionButtonKey = GlobalKey(
     debugLabel: 'agent-permission-button',
   );
+  final GlobalKey _compactComposerSurfaceKey = GlobalKey(
+    debugLabel: 'compact-composer-surface',
+  );
   OverlayGlassPopupHandle<_AgentRunSettingsMenuAction>?
   _agentRunSettingsMenuHandle;
   OverlayGlassPopupHandle<AgentPermissionMode>? _agentPermissionMenuHandle;
+  OverlayGlassPopupHandle<_CompactComposerAction>? _compactActionsMenu;
+  bool _compactExpansionHeld = false;
+  bool _hadComposerPopup = false;
 
   final ScrollController _textFieldScrollController = ScrollController();
   final GlobalKey _textFieldKey = GlobalKey(
@@ -285,7 +303,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     _composerFlowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 8000),
-    )..repeat();
+    );
     _modelPickerSpinController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 520),
@@ -296,6 +314,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _syncComposerFlowAnimation();
     _syncKeyboardPhaseFromView();
     final palette = context.omniPalette;
     _terminalSvg = SvgPicture.asset(
@@ -412,6 +431,19 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     );
   }
 
+  /// Keeps the current composer layout while the existing runtime selector
+  /// temporarily owns focus. This is presentation state only.
+  void setAuxiliaryPopupVisible(bool visible) {
+    if (visible) {
+      _composerStateMachine.popupOpened(ChatComposerPopup.runtimeConfiguration);
+    } else {
+      _composerStateMachine.popupClosed(ChatComposerPopup.runtimeConfiguration);
+    }
+  }
+
+  Future<void> openAgentPermissionMenu(BuildContext anchorContext) =>
+      _openAgentPermissionMenu(anchorContext);
+
   Future<void> openTerminalFromInput() async {
     try {
       final handler = widget.onTerminalTap;
@@ -438,6 +470,15 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   }
 
   void _onComposerStateChanged() {
+    final state = _composerStateMachine.value;
+    final hasPopup =
+        state.openPopups.isNotEmpty || state.openingPopups.isNotEmpty;
+    if (hasPopup && !_hadComposerPopup) {
+      _compactExpansionHeld = state.hasFocus;
+    } else if (!hasPopup) {
+      _compactExpansionHeld = false;
+    }
+    _hadComposerPopup = hasPopup;
     final expandsTextField = _composerStateMachine.value.expandsTextField;
     if (expandsTextField == _lastComposerExpansionState) {
       return;
@@ -462,6 +503,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   @override
   void didUpdateWidget(covariant ChatInputArea oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _syncComposerFlowAnimation();
     if (oldWidget.attachments != widget.attachments ||
         oldWidget.useLargeComposerStyle != widget.useLargeComposerStyle ||
         oldWidget.useFrostedGlass != widget.useFrostedGlass ||
@@ -473,6 +515,8 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
 
   @override
   void dispose() {
+    unawaited(_compactActionsMenu?.dismiss());
+    _compactActionsMenu = null;
     unawaited(_agentRunSettingsMenuHandle?.dismiss());
     _agentRunSettingsMenuHandle = null;
     unawaited(_agentPermissionMenuHandle?.dismiss());

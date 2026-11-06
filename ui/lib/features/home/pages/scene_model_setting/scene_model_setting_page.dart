@@ -1,36 +1,29 @@
 import 'dart:async';
 
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/services/model_provider_config_service.dart';
+import 'package:ui/services/model_vendor_catalog.dart';
 import 'package:ui/services/scene_model_config_service.dart';
 import 'package:ui/services/voice_playback_coordinator.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
-import 'package:ui/utils/popup_menu_anchor_position.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/agent_avatar.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/omni_menu.dart';
+import 'package:ui/widgets/provider_vendor_icon.dart';
 import 'package:ui/l10n/l10n.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
-const double _kSceneSelectionPopupMaxHeight = 420;
+typedef _SceneModelChoice = ({String providerProfileId, String modelId});
 
-Widget _buildSceneModelIdTooltip({
-  required String modelId,
-  required Widget child,
-}) {
-  return Tooltip(
-    message: modelId,
-    triggerMode: TooltipTriggerMode.longPress,
-    waitDuration: Duration.zero,
-    showDuration: const Duration(seconds: 3),
-    preferBelow: false,
-    textAlign: TextAlign.start,
-    constraints: const BoxConstraints(maxWidth: 320),
-    child: child,
-  );
-}
+const _SceneModelChoice _defaultSceneModelChoice = (
+  providerProfileId: '',
+  modelId: '',
+);
 
 class SceneModelSettingPage extends StatefulWidget {
   const SceneModelSettingPage({super.key});
@@ -39,7 +32,8 @@ class SceneModelSettingPage extends StatefulWidget {
   State<SceneModelSettingPage> createState() => _SceneModelSettingPageState();
 }
 
-class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
+class _SceneModelSettingPageState extends State<SceneModelSettingPage>
+    with FlClashPageLoadMixin {
   static const List<String> _sceneOrder = [
     'scene.dispatch.model',
     'scene.voice',
@@ -110,16 +104,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
     return {for (final item in _bindings) item.sceneId: item};
   }
 
-  bool get _isDarkTheme => context.isDarkTheme;
   Color get _pageBackground => context.omniPalette.pageBackground;
-  Color get _cardColor =>
-      _isDarkTheme ? context.omniPalette.surfacePrimary : Colors.white;
-  Color get _primaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textPrimary : AppColors.text;
-  Color get _secondaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textSecondary : AppColors.text70;
-  Color get _tertiaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textTertiary : AppColors.text50;
+  Color get _primaryTextColor => context.omniPalette.textPrimary;
+  Color get _secondaryTextColor => context.omniPalette.textSecondary;
+  Color get _tertiaryTextColor => context.omniPalette.textTertiary;
   String _sceneDisplayName(String sceneId) {
     return _sceneDisplayNameMap[sceneId] ?? sceneId;
   }
@@ -194,6 +182,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
   }
 
   Future<void> _loadData({bool showLoading = true}) async {
+    if (!await waitForPageReady() || !mounted) return;
     if (showLoading && mounted) {
       setState(() => _isLoading = true);
     }
@@ -204,7 +193,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
         ModelProviderConfigService.listProfiles(),
         SceneModelConfigService.getSceneVoiceConfig(),
       ]);
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
 
       final catalog = results[0] as List<SceneCatalogItem>;
       final bindings = results[1] as List<SceneModelBindingEntry>;
@@ -226,6 +215,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
         bindings: bindings,
       );
 
+      if (!await waitForPageReady() || !mounted) return;
       setState(() {
         _catalog = catalog;
         _bindings = bindings;
@@ -241,10 +231,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       // Show saved bindings and manual IDs while querying the remote catalogs.
       unawaited(_refreshProviderModelsInBackground());
     } catch (_) {
-      if (!mounted) return;
+      if (!await waitForPageReady() || !mounted) return;
       showToast(context.l10n.sceneModelLoadFailed, type: ToastType.error);
     } finally {
-      if (showLoading && mounted) {
+      if (showLoading && await waitForPageReady() && mounted) {
         setState(() => _isLoading = false);
       }
     }
@@ -315,6 +305,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
     required List<ModelProviderProfileSummary> profiles,
     required Map<String, List<ProviderModelOption>> providerModelsByProfileId,
   }) async {
+    if (!await waitForPageReady() || !mounted) return;
     final enrichedEntries =
         await Future.wait<MapEntry<String, List<ProviderModelOption>>>(
           profiles.map((profile) async {
@@ -332,7 +323,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
             );
           }),
         );
-    if (!mounted ||
+    if (!await waitForPageReady() ||
         !identical(_providerModelsByProfileId, providerModelsByProfileId)) {
       return;
     }
@@ -345,6 +336,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
   }
 
   Future<void> _refreshProviderModelsInBackground() async {
+    if (!await waitForPageReady() || !mounted) return;
     if (_isRefreshingModels) {
       await _providerRefreshCompleter?.future;
       return;
@@ -420,7 +412,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       }
       await Future.wait(capabilityRefreshes.values);
 
-      if (!_isProviderRefreshActive(refreshGeneration)) return;
+      if (!await waitForPageReady() ||
+          !_isProviderRefreshActive(refreshGeneration)) {
+        return;
+      }
       final merged = _mergeBindingModels(
         providerModelsByProfileId: nextModels,
         bindings: _bindings,
@@ -602,51 +597,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
     }
   }
 
-  Future<void> _clearSceneBindingLocalized(SceneCatalogItem scene) async {
-    final sceneId = scene.sceneId;
-    if (!_bindingMap.containsKey(sceneId)) {
-      return;
-    }
-    setState(() {
-      _savingSceneIds = {..._savingSceneIds, sceneId};
-    });
-    try {
-      final bindings = await SceneModelConfigService.clearSceneModelBinding(
-        sceneId,
-      );
-      if (!mounted) return;
-      setState(() {
-        _bindings = bindings;
-      });
-      if (sceneId == VoicePlaybackCoordinator.sceneVoiceId) {
-        await VoicePlaybackCoordinator.instance.refreshConfiguration();
-      }
-      showToast(
-        context.l10n.sceneModelDefaultRestored(_sceneDisplayName(sceneId)),
-        type: ToastType.success,
-      );
-    } catch (e) {
-      if (!mounted) return;
-      showToast(
-        context.l10n.sceneModelClearFailed(
-          _sceneDisplayName(sceneId),
-          e.toString(),
-        ),
-        type: ToastType.error,
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _savingSceneIds = {..._savingSceneIds}..remove(sceneId);
-        });
-      }
-    }
-  }
-
-  Future<void> _openSceneSelector(
-    SceneCatalogItem scene,
-    BuildContext anchorContext,
-  ) async {
+  Future<void> _prepareSceneSelector(SceneCatalogItem scene) async {
     final sceneId = scene.sceneId;
     if (_loadingSceneModelIds.contains(sceneId)) {
       return;
@@ -665,72 +616,11 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
           });
         }
       }
-      if (!mounted || !anchorContext.mounted) {
-        return;
-      }
-    }
-    final binding = _bindingMap[scene.sceneId];
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox?;
-    final anchorBox = anchorContext.findRenderObject() as RenderBox?;
-    if (overlay == null || anchorBox == null || !anchorBox.hasSize) {
-      return;
-    }
-    final topLeft = anchorBox.localToGlobal(Offset.zero, ancestor: overlay);
-    final bottomRight = anchorBox.localToGlobal(
-      anchorBox.size.bottomRight(Offset.zero),
-      ancestor: overlay,
-    );
-    final anchorRect = Rect.fromPoints(topLeft, bottomRight);
-    final popupWidth = anchorBox.size.width
-        .clamp(160.0, overlay.size.width - 16.0)
-        .toDouble();
-    final position = PopupMenuAnchorPosition.fromAnchorRect(
-      anchorRect: anchorRect,
-      overlaySize: overlay.size,
-      estimatedMenuHeight: _kSceneSelectionPopupMaxHeight,
-      reservedBottom: (() {
-        final viewInsetBottom = MediaQuery.of(context).viewInsets.bottom;
-        return viewInsetBottom > 0 ? viewInsetBottom : 280.0;
-      })(),
-    );
-
-    final result = await showMenu<_SceneSelectionAction>(
-      context: context,
-      color: _cardColor,
-      elevation: 8,
-      constraints: BoxConstraints(minWidth: popupWidth, maxWidth: popupWidth),
-      position: position,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      items: [
-        _SceneSelectionPopupEntry(
-          width: popupWidth,
-          estimatedHeight: _kSceneSelectionPopupMaxHeight,
-          scene: scene,
-          profiles: _profiles,
-          providerModelsByProfileId: _modelsForScene(scene),
-          currentBinding: binding,
-        ),
-      ],
-    );
-    if (result == null) {
-      return;
-    }
-    if (result.restoreDefault) {
-      await _clearSceneBindingLocalized(scene);
-      return;
-    }
-    if (result.providerProfileId.isNotEmpty && result.modelId.isNotEmpty) {
-      await _saveSceneBinding(
-        scene: scene,
-        providerProfileId: result.providerProfileId,
-        modelId: result.modelId,
-      );
     }
   }
 
   Widget _buildCard({required Widget child}) {
-    return SizedBox(width: double.infinity, child: child);
+    return OmniSettingsCard(child: child);
   }
 
   String _selectionLabel(SceneCatalogItem scene) {
@@ -762,9 +652,8 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
               _sceneDisplayName(scene.sceneId),
               style: TextStyle(
                 color: _primaryTextColor,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                fontFamily: 'PingFang SC',
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
               ),
               overflow: TextOverflow.ellipsis,
             ),
@@ -784,45 +673,60 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
     SceneCatalogItem scene, {
     required bool isSaving,
   }) {
-    return Builder(
-      builder: (fieldContext) {
-        return InkWell(
-          key: Key('scene-model-selector-${scene.sceneId}'),
-          onTap: isSaving
-              ? null
-              : () => _openSceneSelector(scene, fieldContext),
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
-            decoration: BoxDecoration(
-              color: _cardColor,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _selectionLabel(scene),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: _primaryTextColor,
-                      fontSize: 13,
-                      fontFamily: 'PingFang SC',
+    final binding = _bindingMap[scene.sceneId];
+    final modelsByProfile = _modelsForScene(scene);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: OmniSettingsDropdown<_SceneModelChoice>(
+        dropdownKey: Key('scene-model-selector-${scene.sceneId}'),
+        value: binding == null
+            ? _defaultSceneModelChoice
+            : (
+                providerProfileId: binding.providerProfileId,
+                modelId: binding.modelId,
+              ),
+        selectedLabel: _selectionLabel(scene),
+        maxWidth: 164,
+        menuMinWidth: 188,
+        menuMaxWidth: 360,
+        searchHint: context.trLegacy('搜索模型或服务商'),
+        onBeforeOpen: () => _prepareSceneSelector(scene),
+        options: [
+          for (final profile in _profiles)
+            if (profile.configured && !profile.needsPresetCredentials)
+              for (final model
+                  in modelsByProfile[profile.id] ??
+                      const <ProviderModelOption>[])
+                OmniSettingsOption(
+                  value: (providerProfileId: profile.id, modelId: model.id),
+                  label: model.id,
+                  leading: ProviderVendorIcon(
+                    vendor: ModelVendorCatalog.resolve(
+                      model.id,
+                      ownedBy: model.ownedBy,
+                      providerId: model.modelsDevProviderId,
                     ),
+                    size: OmniMenuStyle.iconSize,
+                    forceMonochrome: true,
+                    monochromeColor: _primaryTextColor,
                   ),
+                  trailingLabel: profile.name,
+                  searchText: model.displayName,
                 ),
-                const SizedBox(width: 8),
-                Icon(
-                  LucideIcons.chevronDown,
-                  size: 18,
-                  color: _tertiaryTextColor,
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+        ],
+        onChanged: isSaving
+            ? null
+            : (selection) {
+                if (selection == null || !mounted) return;
+                unawaited(
+                  _saveSceneBinding(
+                    scene: scene,
+                    providerProfileId: selection.providerProfileId,
+                    modelId: selection.modelId,
+                  ),
+                );
+              },
+      ),
     );
   }
 
@@ -832,7 +736,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
     final isBusy = isSaving || isLoadingModels;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
           Expanded(flex: 4, child: _buildSceneLabel(scene)),
@@ -865,83 +769,58 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
       animation: coordinator,
       builder: (context, _) {
         final bound = coordinator.isVoiceSceneBound;
-        final statusColor = bound ? Colors.green.shade600 : _tertiaryTextColor;
+        final statusColor = bound
+            ? const Color(0xFF2EAF67)
+            : _tertiaryTextColor;
         final status = bound ? '已连接' : '未连接模型';
         return _buildCard(
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-            decoration: BoxDecoration(
-              color: _cardColor,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.volume_up_outlined,
-                      size: 18,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    LucideIcons.volume2,
+                    size: 18,
+                    color: _primaryTextColor.withValues(alpha: 0.78),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    context.trLegacy('语音回复'),
+                    style: TextStyle(
                       color: _primaryTextColor,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
                     ),
-                    const SizedBox(width: 8),
-                    Text(
-                      context.trLegacy('语音回复'),
-                      style: TextStyle(
-                        color: _primaryTextColor,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: statusColor.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        status,
-                        style: TextStyle(color: statusColor, fontSize: 11),
-                      ),
-                    ),
-                    const Spacer(),
-                    Switch.adaptive(
-                      key: const Key('scene-voice-autoplay-switch'),
-                      value: _voiceConfig.autoPlay,
-                      onChanged: bound
-                          ? (value) => _saveVoiceConfig(
-                              _voiceConfig.copyWith(autoPlay: value),
-                            )
-                          : null,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  bound
-                      ? context.trLegacy('开启后，助手回复会在当前消息旁显示播放按钮，并可自动朗读。')
-                      : context.trLegacy(
-                          '请先在上方“语音合成”中绑定 Provider 和模型，绑定后即可播放。',
-                        ),
-                  style: TextStyle(
-                    color: secondary,
-                    fontSize: 12,
-                    height: 1.45,
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  context.trLegacy(
-                    '声音：${_voiceConfig.voiceId}  ·  风格：${_voiceConfig.stylePreset}',
+                  const SizedBox(width: 10),
+                  OmniSettingsStatusBadge(label: status, color: statusColor),
+                  const Spacer(),
+                  OmniSettingsSwitch(
+                    key: const Key('scene-voice-autoplay-switch'),
+                    value: _voiceConfig.autoPlay,
+                    enabled: bound,
+                    onToggle: (value) => _saveVoiceConfig(
+                      _voiceConfig.copyWith(autoPlay: value),
+                    ),
                   ),
-                  style: TextStyle(color: secondary, fontSize: 12),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                bound
+                    ? context.trLegacy('开启后，助手回复会在当前消息旁显示播放按钮，并可自动朗读。')
+                    : context.trLegacy('请先在上方“语音合成”中绑定 Provider 和模型，绑定后即可播放。'),
+                style: TextStyle(color: secondary, fontSize: 12, height: 1.48),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                context.trLegacy(
+                  '声音：${_voiceConfig.voiceId}  ·  风格：${_voiceConfig.stylePreset}',
                 ),
-              ],
-            ),
+                style: TextStyle(color: secondary, fontSize: 12),
+              ),
+            ],
           ),
         );
       },
@@ -956,517 +835,75 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage> {
         title: context.l10n.settingsSceneModelTitle,
         primary: true,
       ),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: edgeToEdgeScrollPadding(
-                  context,
-                  const EdgeInsets.fromLTRB(18, 12, 18, 24),
-                ),
-                children: [
-                  SettingsSectionTitle(
-                    label: context.l10n.sceneModelMapping,
-                    subtitle: context.l10n.sceneModelMappingDesc,
+      body: OmniContentWidth(
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : ListView(
+                  padding: edgeToEdgeScrollPadding(
+                    context,
+                    const EdgeInsets.fromLTRB(22, 12, 22, 24),
                   ),
-                  _buildCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          context.trLegacy('点击右侧按钮后，可按 Provider 搜索、折叠并选择模型。'),
-                          style: TextStyle(
-                            color: _secondaryTextColor,
-                            fontSize: 12,
-                            height: 1.5,
-                            fontFamily: 'PingFang SC',
+                  children: [
+                    SettingsSectionTitle(
+                      label: context.l10n.sceneModelMapping,
+                      subtitle: context.l10n.sceneModelMappingDesc,
+                    ),
+                    _buildCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            context.trLegacy('点击右侧按钮选择模型，也可按模型名称、ID 或服务商搜索。'),
+                            style: TextStyle(
+                              color: _secondaryTextColor,
+                              fontSize: 12,
+                              height: 1.5,
+                              fontFamily: 'PingFang SC',
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 12),
-                        if (_orderedCatalog.isEmpty)
-                          Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12),
-                            child: Text(
-                              context.l10n.sceneModelNoScenes,
-                              style: TextStyle(
-                                color: _secondaryTextColor,
-                                fontSize: 12,
-                                fontFamily: 'PingFang SC',
+                          const SizedBox(height: 12),
+                          if (_orderedCatalog.isEmpty)
+                            Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: Text(
+                                context.l10n.sceneModelNoScenes,
+                                style: TextStyle(
+                                  color: _secondaryTextColor,
+                                  fontSize: 12,
+                                  fontFamily: 'PingFang SC',
+                                ),
+                              ),
+                            )
+                          else
+                            ListView.separated(
+                              physics: const NeverScrollableScrollPhysics(),
+                              shrinkWrap: true,
+                              itemCount: _orderedCatalog.length,
+                              itemBuilder: (context, index) {
+                                final scene = _orderedCatalog[index];
+                                return _buildSceneRow(scene);
+                              },
+                              separatorBuilder: (_, _) => Divider(
+                                height: 20,
+                                thickness: 0.6,
+                                color: context.omniPalette.borderSubtle
+                                    .withValues(alpha: 0.9),
                               ),
                             ),
-                          )
-                        else
-                          ListView.separated(
-                            physics: const NeverScrollableScrollPhysics(),
-                            shrinkWrap: true,
-                            itemCount: _orderedCatalog.length,
-                            itemBuilder: (context, index) {
-                              final scene = _orderedCatalog[index];
-                              return _buildSceneRow(scene);
-                            },
-                            separatorBuilder: (_, _) => Divider(
-                              height: 20,
-                              thickness: 0.6,
-                              color: context.omniPalette.borderSubtle
-                                  .withValues(alpha: 0.9),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SettingsSectionTitle(
-                    label: context.trLegacy('语音能力'),
-                    subtitle: context.trLegacy('统一由 ACP 语音场景提供播放和自动朗读。'),
-                  ),
-                  _buildVoiceCard(),
-                ],
-              ),
-      ),
-    );
-  }
-}
-
-class _SceneSelectionAction {
-  final bool restoreDefault;
-  final String providerProfileId;
-  final String modelId;
-
-  const _SceneSelectionAction.restore()
-    : restoreDefault = true,
-      providerProfileId = '',
-      modelId = '';
-
-  const _SceneSelectionAction.select({
-    required this.providerProfileId,
-    required this.modelId,
-  }) : restoreDefault = false;
-}
-
-class _SceneSelectionPopupEntry extends PopupMenuEntry<_SceneSelectionAction> {
-  const _SceneSelectionPopupEntry({
-    required this.width,
-    required this.estimatedHeight,
-    required this.scene,
-    required this.profiles,
-    required this.providerModelsByProfileId,
-    required this.currentBinding,
-  });
-
-  final double width;
-  final double estimatedHeight;
-  final SceneCatalogItem scene;
-  final List<ModelProviderProfileSummary> profiles;
-  final Map<String, List<ProviderModelOption>> providerModelsByProfileId;
-  final SceneModelBindingEntry? currentBinding;
-
-  @override
-  double get height => estimatedHeight;
-
-  @override
-  bool represents(_SceneSelectionAction? value) => false;
-
-  @override
-  State<_SceneSelectionPopupEntry> createState() =>
-      _SceneSelectionPopupEntryState();
-}
-
-class _SceneSelectionPopupEntryState extends State<_SceneSelectionPopupEntry> {
-  final TextEditingController _searchController = TextEditingController();
-  late final Set<String> _expandedProfileIds;
-
-  bool get _hasSearchQuery => _searchController.text.trim().isNotEmpty;
-
-  @override
-  void initState() {
-    super.initState();
-    _expandedProfileIds = <String>{
-      if (widget.currentBinding != null)
-        widget.currentBinding!.providerProfileId,
-    };
-    if (_expandedProfileIds.isEmpty && widget.profiles.isNotEmpty) {
-      _expandedProfileIds.add(widget.profiles.first.id);
-    }
-    _searchController.addListener(() {
-      setState(() {});
-    });
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
-  }
-
-  List<ProviderModelOption> _filteredModels(String profileId) {
-    final query = _searchController.text.trim().toLowerCase();
-    final models = widget.providerModelsByProfileId[profileId] ?? const [];
-    if (query.isEmpty) {
-      return models;
-    }
-    return models
-        .where((item) => item.id.toLowerCase().contains(query))
-        .toList();
-  }
-
-  List<ModelProviderProfileSummary> get _visibleProfiles {
-    if (!_hasSearchQuery) {
-      return widget.profiles;
-    }
-    return widget.profiles.where((profile) {
-      return _filteredModels(profile.id).isNotEmpty;
-    }).toList();
-  }
-
-  bool _isExpanded(String profileId) {
-    if (_hasSearchQuery) {
-      return true;
-    }
-    return _expandedProfileIds.contains(profileId);
-  }
-
-  bool get _isDarkTheme => context.isDarkTheme;
-  Color get _selectedSurfaceColor =>
-      _isDarkTheme ? context.omniPalette.segmentThumb : const Color(0xFFEAF3FF);
-  Color get _primaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textPrimary : AppColors.text;
-  Color get _secondaryTextColor => _isDarkTheme
-      ? context.omniPalette.textSecondary
-      : const Color(0xFF64748B);
-  Color get _tertiaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textTertiary : const Color(0xFF94A3B8);
-
-  Widget _buildSearchRow() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
-      child: Row(
-        children: [
-          Icon(LucideIcons.search, size: 18, color: _tertiaryTextColor),
-          const SizedBox(width: 8),
-          Expanded(
-            child: TextField(
-              controller: _searchController,
-              autofocus: false,
-              scrollPadding: EdgeInsets.zero,
-              textInputAction: TextInputAction.search,
-              onSubmitted: (_) => FocusManager.instance.primaryFocus?.unfocus(),
-              style: TextStyle(
-                fontSize: 13,
-                color: _primaryTextColor,
-                fontWeight: FontWeight.w500,
-                fontFamily: 'PingFang SC',
-              ),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Filter model ID',
-                hintStyle: TextStyle(
-                  fontSize: 13,
-                  color: _tertiaryTextColor,
-                  fontWeight: FontWeight.w500,
-                  fontFamily: 'PingFang SC',
-                ),
-                border: InputBorder.none,
-                focusedBorder: InputBorder.none,
-                enabledBorder: InputBorder.none,
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRestoreDefaultTile() {
-    final selected = widget.currentBinding == null;
-    final label = context.trLegacy('恢复默认（${widget.scene.defaultModel}）');
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 4),
-      child: InkWell(
-        onTap: () {
-          Navigator.of(context).pop(const _SceneSelectionAction.restore());
-        },
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: selected ? _selectedSurfaceColor : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _primaryTextColor,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              ),
-              if (selected)
-                Icon(
-                  LucideIcons.check,
-                  size: 15,
-                  color: _isDarkTheme
-                      ? context.omniPalette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSectionHeader(ModelProviderProfileSummary profile) {
-    final expanded = _isExpanded(profile.id);
-    final models = _filteredModels(profile.id);
-    final isCurrent = widget.currentBinding?.providerProfileId == profile.id;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: InkWell(
-        onTap: () {
-          if (_hasSearchQuery) {
-            return;
-          }
-          setState(() {
-            if (expanded) {
-              _expandedProfileIds.remove(profile.id);
-            } else {
-              _expandedProfileIds.add(profile.id);
-            }
-          });
-        },
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: isCurrent ? _selectedSurfaceColor : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  profile.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _secondaryTextColor,
-                    fontWeight: FontWeight.w600,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              ),
-              Text(
-                profile.configured ? '${models.length}' : 'Not configured',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _tertiaryTextColor,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'PingFang SC',
-                ),
-              ),
-              if (isCurrent) ...[
-                const SizedBox(width: 6),
-                Icon(
-                  LucideIcons.circleCheck,
-                  size: 13,
-                  color: _isDarkTheme
-                      ? context.omniPalette.accentPrimary
-                      : const Color(0xFF2C7FEB),
-                ),
-              ],
-              const SizedBox(width: 6),
-              Icon(
-                _hasSearchQuery
-                    ? LucideIcons.chevronsUpDown
-                    : expanded
-                    ? LucideIcons.chevronUp
-                    : LucideIcons.chevronDown,
-                size: 16,
-                color: _tertiaryTextColor,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildModelRow({
-    required ModelProviderProfileSummary profile,
-    required ProviderModelOption item,
-  }) {
-    final selected =
-        widget.currentBinding?.providerProfileId == profile.id &&
-        widget.currentBinding?.modelId == item.id;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 2, 10, 2),
-      child: _buildSceneModelIdTooltip(
-        modelId: item.id,
-        child: InkWell(
-          onTap: () {
-            Navigator.of(context).pop(
-              _SceneSelectionAction.select(
-                providerProfileId: profile.id,
-                modelId: item.id,
-              ),
-            );
-          },
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: selected ? _selectedSurfaceColor : Colors.transparent,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    item.id,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: _primaryTextColor,
-                      fontWeight: FontWeight.w500,
-                      fontFamily: 'PingFang SC',
-                    ),
-                  ),
-                ),
-                if (selected)
-                  Icon(
-                    LucideIcons.check,
-                    size: 15,
-                    color: _isDarkTheme
-                        ? context.omniPalette.accentPrimary
-                        : const Color(0xFF2C7FEB),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final mediaQuery = MediaQuery.of(context);
-    final dynamicMaxHeight =
-        (mediaQuery.size.height - mediaQuery.viewInsets.bottom - 96)
-            .clamp(220.0, _kSceneSelectionPopupMaxHeight)
-            .toDouble();
-    final visibleProfiles = _visibleProfiles;
-    return SizedBox(
-      width: widget.width,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: dynamicMaxHeight),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildSearchRow(),
-            _buildRestoreDefaultTile(),
-            if (widget.profiles.isEmpty)
-              Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'No available Providers yet. Please configure a model provider first.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _tertiaryTextColor,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              )
-            else if (visibleProfiles.isEmpty)
-              Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'No matching models',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _tertiaryTextColor,
-                    fontWeight: FontWeight.w500,
-                    fontFamily: 'PingFang SC',
-                  ),
-                ),
-              )
-            else
-              Flexible(
-                child: Scrollbar(
-                  child: ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    itemCount: visibleProfiles.length,
-                    itemBuilder: (context, index) {
-                      final profile = visibleProfiles[index];
-                      final expanded = _isExpanded(profile.id);
-                      final models = _filteredModels(profile.id);
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _buildSectionHeader(profile),
-                          if (expanded)
-                            profile.configured
-                                ? models.isEmpty
-                                      ? Padding(
-                                          padding: EdgeInsets.fromLTRB(
-                                            12,
-                                            4,
-                                            12,
-                                            8,
-                                          ),
-                                          child: Text(
-                                            'No selectable models for this Provider',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: _tertiaryTextColor,
-                                              fontFamily: 'PingFang SC',
-                                            ),
-                                          ),
-                                        )
-                                      : Column(
-                                          children: models.map((item) {
-                                            return _buildModelRow(
-                                              profile: profile,
-                                              item: item,
-                                            );
-                                          }).toList(),
-                                        )
-                                : Padding(
-                                    padding: EdgeInsets.fromLTRB(12, 4, 12, 8),
-                                    child: Text(
-                                      'Please configure this Provider in the model provider settings first',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: _tertiaryTextColor,
-                                        fontFamily: 'PingFang SC',
-                                      ),
-                                    ),
-                                  ),
-                          if (index != visibleProfiles.length - 1)
-                            const SizedBox(height: 6),
                         ],
-                      );
-                    },
-                  ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SettingsSectionTitle(
+                      label: context.trLegacy('语音能力'),
+                      subtitle: context.trLegacy('统一由 ACP 语音场景提供播放和自动朗读。'),
+                    ),
+                    _buildVoiceCard(),
+                  ],
                 ),
-              ),
-          ],
         ),
       ),
     );

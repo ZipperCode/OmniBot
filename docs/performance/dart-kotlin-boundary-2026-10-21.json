@@ -1,0 +1,775 @@
+{
+  "baselineCommit": "c6aa104947fc2cd75d4fedcc31e162c8256ce8de",
+  "device": {
+    "model": "PJD110",
+    "soc": "SM8650",
+    "android": "16",
+    "overrideResolution": "1080x2376",
+    "peakRefreshRateHz": 120,
+    "connection": "USB ADB"
+  },
+  "build": {
+    "flutter": "3.47.2",
+    "flutterMode": "Profile AOT arm64",
+    "nativeMode": "debug, unminified",
+    "buildJdk": 17,
+    "unitTestJdk": 21,
+    "applicationId": "cn.com.omnimind.bot.boundaryperf",
+    "legacyReferenceIncludedInBothApks": true
+  },
+  "dataset": {
+    "conversations": 10000,
+    "tokenRecords": 100000,
+    "startMs": 1782921600000,
+    "endMs": 1792598400000,
+    "documents": {
+      "slides.pptx": 16695,
+      "sheet.xlsx": 113902,
+      "word.docx": 26916
+    }
+  },
+  "warmupsDiscarded": 2,
+  "operations": {
+    "statistics": {
+      "before": {
+        "samples": [
+          {
+            "ms": 3593.081,
+            "maxTimerGapMs": 760.123
+          },
+          {
+            "ms": 3522.0,
+            "maxTimerGapMs": 714.239
+          },
+          {
+            "ms": 3584.831,
+            "maxTimerGapMs": 739.608
+          },
+          {
+            "ms": 3465.319,
+            "maxTimerGapMs": 744.498
+          },
+          {
+            "ms": 3518.452,
+            "maxTimerGapMs": 749.204
+          },
+          {
+            "ms": 3397.601,
+            "maxTimerGapMs": 691.878
+          },
+          {
+            "ms": 3468.059,
+            "maxTimerGapMs": 730.264
+          },
+          {
+            "ms": 3513.704,
+            "maxTimerGapMs": 741.986
+          },
+          {
+            "ms": 3454.987,
+            "maxTimerGapMs": 754.242
+          },
+          {
+            "ms": 3575.682,
+            "maxTimerGapMs": 739.803
+          },
+          {
+            "ms": 3434.976,
+            "maxTimerGapMs": 733.102
+          },
+          {
+            "ms": 3645.551,
+            "maxTimerGapMs": 778.74
+          }
+        ],
+        "medianMs": 3516.0780000000004,
+        "medianMaxTimerGapMs": 740.8945,
+        "sha256": "2595f3cc1f13387de758ed1302b6c68cdea6a3c336ce395de6d01290b2a46dbf",
+        "jsonBytes": 4565
+      },
+      "after": {
+        "samples": [
+          {
+            "ms": 296.21,
+            "maxTimerGapMs": 14.135
+          },
+          {
+            "ms": 322.014,
+            "maxTimerGapMs": 7.135
+          },
+          {
+            "ms": 282.386,
+            "maxTimerGapMs": 5.677
+          },
+          {
+            "ms": 306.83,
+            "maxTimerGapMs": 6.48
+          },
+          {
+            "ms": 298.388,
+            "maxTimerGapMs": 6.661
+          },
+          {
+            "ms": 307.804,
+            "maxTimerGapMs": 12.044
+          },
+          {
+            "ms": 285.258,
+            "maxTimerGapMs": 7.473
+          },
+          {
+            "ms": 263.991,
+            "maxTimerGapMs": 6.11
+          },
+          {
+            "ms": 293.948,
+            "maxTimerGapMs": 4.44
+          },
+          {
+            "ms": 299.818,
+            "maxTimerGapMs": 6.455
+          },
+          {
+            "ms": 298.987,
+            "maxTimerGapMs": 6.875
+          },
+          {
+            "ms": 298.59,
+            "maxTimerGapMs": 6.053
+          }
+        ],
+        "medianMs": 298.489,
+        "medianMaxTimerGapMs": 6.5705,
+        "sha256": "2595f3cc1f13387de758ed1302b6c68cdea6a3c336ce395de6d01290b2a46dbf",
+        "jsonBytes": 4565
+      },
+      "repeatBefore": {
+        "samples": [
+          {
+            "ms": 3553.697,
+            "maxTimerGapMs": 711.104
+          },
+          {
+            "ms": 3375.777,
+            "maxTimerGapMs": 739.544
+          },
+          {
+            "ms": 3540.285,
+            "maxTimerGapMs": 774.35
+          },
+          {
+            "ms": 3506.842,
+            "maxTimerGapMs": 758.136
+          },
+          {
+            "ms": 3551.613,
+            "maxTimerGapMs": 756.226
+          },
+          {
+            "ms": 3282.864,
+            "maxTimerGapMs": 720.385
+          }
+        ],
+        "medianMs": 3523.5635,
+        "medianMaxTimerGapMs": 747.885,
+        "sha256": "2595f3cc1f13387de758ed1302b6c68cdea6a3c336ce395de6d01290b2a46dbf",
+        "jsonBytes": 4565
+      },
+      "latencyReductionPercent": 91.51074009165895,
+      "timerGapReductionPercent": 99.11316658444623
+    },
+    "word": {
+      "before": {
+        "samples": [
+          {
+            "ms": 271.233,
+            "maxTimerGapMs": 267.009
+          },
+          {
+            "ms": 289.427,
+            "maxTimerGapMs": 286.45
+          },
+          {
+            "ms": 259.74,
+            "maxTimerGapMs": 257.585
+          },
+          {
+            "ms": 296.788,
+            "maxTimerGapMs": 294.404
+          },
+          {
+            "ms": 278.393,
+            "maxTimerGapMs": 275.976
+          },
+          {
+            "ms": 276.668,
+            "maxTimerGapMs": 273.214
+          },
+          {
+            "ms": 261.981,
+            "maxTimerGapMs": 259.432
+          },
+          {
+            "ms": 282.923,
+            "maxTimerGapMs": 280.5
+          }
+        ],
+        "medianMs": 277.53049999999996,
+        "medianMaxTimerGapMs": 274.595,
+        "sha256": "ccd57de0e289ee8ec3b0a4b77902961afe61645324e2c35a7d379b5e62357f9c",
+        "jsonBytes": 2238963
+      },
+      "after": {
+        "samples": [
+          {
+            "ms": 326.7,
+            "maxTimerGapMs": 43.215
+          },
+          {
+            "ms": 303.3,
+            "maxTimerGapMs": 31.901
+          },
+          {
+            "ms": 315.906,
+            "maxTimerGapMs": 50.71
+          },
+          {
+            "ms": 295.285,
+            "maxTimerGapMs": 40.495
+          },
+          {
+            "ms": 304.46,
+            "maxTimerGapMs": 30.911
+          },
+          {
+            "ms": 315.364,
+            "maxTimerGapMs": 36.723
+          },
+          {
+            "ms": 298.866,
+            "maxTimerGapMs": 31.794
+          },
+          {
+            "ms": 307.248,
+            "maxTimerGapMs": 27.35
+          }
+        ],
+        "medianMs": 305.854,
+        "medianMaxTimerGapMs": 34.312,
+        "sha256": "ccd57de0e289ee8ec3b0a4b77902961afe61645324e2c35a7d379b5e62357f9c",
+        "jsonBytes": 2238963
+      },
+      "repeatBefore": {
+        "samples": [
+          {
+            "ms": 269.233,
+            "maxTimerGapMs": 267.707
+          },
+          {
+            "ms": 263.307,
+            "maxTimerGapMs": 260.853
+          },
+          {
+            "ms": 288.865,
+            "maxTimerGapMs": 286.557
+          },
+          {
+            "ms": 303.219,
+            "maxTimerGapMs": 303.348
+          },
+          {
+            "ms": 294.44,
+            "maxTimerGapMs": 292.136
+          },
+          {
+            "ms": 265.388,
+            "maxTimerGapMs": 264.144
+          }
+        ],
+        "medianMs": 279.049,
+        "medianMaxTimerGapMs": 277.132,
+        "sha256": "ccd57de0e289ee8ec3b0a4b77902961afe61645324e2c35a7d379b5e62357f9c",
+        "jsonBytes": 2238963
+      },
+      "latencyReductionPercent": -10.20554497613777,
+      "timerGapReductionPercent": 87.50450663704729
+    },
+    "excel": {
+      "before": {
+        "samples": [
+          {
+            "ms": 709.526,
+            "maxTimerGapMs": 705.744
+          },
+          {
+            "ms": 720.493,
+            "maxTimerGapMs": 717.414
+          },
+          {
+            "ms": 773.412,
+            "maxTimerGapMs": 770.613
+          },
+          {
+            "ms": 676.897,
+            "maxTimerGapMs": 673.707
+          },
+          {
+            "ms": 688.301,
+            "maxTimerGapMs": 685.829
+          },
+          {
+            "ms": 717.035,
+            "maxTimerGapMs": 714.918
+          },
+          {
+            "ms": 691.459,
+            "maxTimerGapMs": 688.832
+          },
+          {
+            "ms": 719.458,
+            "maxTimerGapMs": 716.012
+          }
+        ],
+        "medianMs": 713.2805,
+        "medianMaxTimerGapMs": 710.331,
+        "sha256": "8099aca6e8e744baa24f3dcc8ba37670f2898844b6867a743dccd08d15976eda",
+        "jsonBytes": 2793871
+      },
+      "after": {
+        "samples": [
+          {
+            "ms": 594.857,
+            "maxTimerGapMs": 45.013
+          },
+          {
+            "ms": 577.441,
+            "maxTimerGapMs": 32.891
+          },
+          {
+            "ms": 568.69,
+            "maxTimerGapMs": 45.703
+          },
+          {
+            "ms": 600.783,
+            "maxTimerGapMs": 55.255
+          },
+          {
+            "ms": 583.579,
+            "maxTimerGapMs": 45.796
+          },
+          {
+            "ms": 596.064,
+            "maxTimerGapMs": 48.888
+          },
+          {
+            "ms": 601.746,
+            "maxTimerGapMs": 51.001
+          },
+          {
+            "ms": 581.627,
+            "maxTimerGapMs": 43.832
+          }
+        ],
+        "medianMs": 589.218,
+        "medianMaxTimerGapMs": 45.7495,
+        "sha256": "8099aca6e8e744baa24f3dcc8ba37670f2898844b6867a743dccd08d15976eda",
+        "jsonBytes": 2793871
+      },
+      "repeatBefore": {
+        "samples": [
+          {
+            "ms": 743.695,
+            "maxTimerGapMs": 740.901
+          },
+          {
+            "ms": 720.515,
+            "maxTimerGapMs": 718.039
+          },
+          {
+            "ms": 684.562,
+            "maxTimerGapMs": 680.982
+          },
+          {
+            "ms": 657.205,
+            "maxTimerGapMs": 654.99
+          },
+          {
+            "ms": 763.218,
+            "maxTimerGapMs": 758.991
+          },
+          {
+            "ms": 721.557,
+            "maxTimerGapMs": 718.44
+          }
+        ],
+        "medianMs": 721.0360000000001,
+        "medianMaxTimerGapMs": 718.2395,
+        "sha256": "8099aca6e8e744baa24f3dcc8ba37670f2898844b6867a743dccd08d15976eda",
+        "jsonBytes": 2793871
+      },
+      "latencyReductionPercent": 17.393227489045337,
+      "timerGapReductionPercent": 93.55941103513715
+    },
+    "powerpoint": {
+      "before": {
+        "samples": [
+          {
+            "ms": 134.748,
+            "maxTimerGapMs": 132.186
+          },
+          {
+            "ms": 127.775,
+            "maxTimerGapMs": 125.494
+          },
+          {
+            "ms": 131.391,
+            "maxTimerGapMs": 129.02
+          },
+          {
+            "ms": 130.42,
+            "maxTimerGapMs": 127.497
+          },
+          {
+            "ms": 121.936,
+            "maxTimerGapMs": 119.856
+          },
+          {
+            "ms": 135.206,
+            "maxTimerGapMs": 133.126
+          },
+          {
+            "ms": 119.705,
+            "maxTimerGapMs": 116.44
+          },
+          {
+            "ms": 128.154,
+            "maxTimerGapMs": 125.825
+          }
+        ],
+        "medianMs": 129.28699999999998,
+        "medianMaxTimerGapMs": 126.661,
+        "sha256": "08b945460604711431ec1c8be75040916102a806be2091530fcf4b7708e80c35",
+        "jsonBytes": 1205583
+      },
+      "after": {
+        "samples": [
+          {
+            "ms": 167.559,
+            "maxTimerGapMs": 21.807
+          },
+          {
+            "ms": 177.249,
+            "maxTimerGapMs": 27.699
+          },
+          {
+            "ms": 182.459,
+            "maxTimerGapMs": 25.878
+          },
+          {
+            "ms": 179.286,
+            "maxTimerGapMs": 24.926
+          },
+          {
+            "ms": 184.935,
+            "maxTimerGapMs": 33.122
+          },
+          {
+            "ms": 163.676,
+            "maxTimerGapMs": 19.175
+          },
+          {
+            "ms": 166.87,
+            "maxTimerGapMs": 26.437
+          },
+          {
+            "ms": 174.799,
+            "maxTimerGapMs": 23.349
+          }
+        ],
+        "medianMs": 176.024,
+        "medianMaxTimerGapMs": 25.402,
+        "sha256": "08b945460604711431ec1c8be75040916102a806be2091530fcf4b7708e80c35",
+        "jsonBytes": 1205583
+      },
+      "repeatBefore": {
+        "samples": [
+          {
+            "ms": 150.419,
+            "maxTimerGapMs": 147.867
+          },
+          {
+            "ms": 124.079,
+            "maxTimerGapMs": 121.771
+          },
+          {
+            "ms": 124.477,
+            "maxTimerGapMs": 122.243
+          },
+          {
+            "ms": 131.372,
+            "maxTimerGapMs": 129.461
+          },
+          {
+            "ms": 119.593,
+            "maxTimerGapMs": 117.076
+          },
+          {
+            "ms": 121.85,
+            "maxTimerGapMs": 120.544
+          }
+        ],
+        "medianMs": 124.27799999999999,
+        "medianMaxTimerGapMs": 122.007,
+        "sha256": "08b945460604711431ec1c8be75040916102a806be2091530fcf4b7708e80c35",
+        "jsonBytes": 1205583
+      },
+      "latencyReductionPercent": -36.1498062450208,
+      "timerGapReductionPercent": 79.94489227149636
+    }
+  },
+  "bridge": {
+    "beforeBytes": 28227790,
+    "afterBytes": 6324,
+    "conversationRows": 10000,
+    "tokenRows": 100000
+  },
+  "cold": {
+    "settleSeconds": 6,
+    "before": [
+      {
+        "totalTimeMs": 931,
+        "pssKiB": 398820,
+        "batteryC": 33.0,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 928,
+        "pssKiB": 396406,
+        "batteryC": 33.0,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 929,
+        "pssKiB": 376664,
+        "batteryC": 32.9,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 922,
+        "pssKiB": 377441,
+        "batteryC": 32.9,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 949,
+        "pssKiB": 377906,
+        "batteryC": 32.9,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 964,
+        "pssKiB": 376189,
+        "batteryC": 32.9,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 928,
+        "pssKiB": 395632,
+        "batteryC": 33.0,
+        "thermalStatus": 0
+      }
+    ],
+    "after": [
+      {
+        "totalTimeMs": 917,
+        "pssKiB": 254521,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 950,
+        "pssKiB": 254465,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 916,
+        "pssKiB": 253168,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 929,
+        "pssKiB": 251980,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 953,
+        "pssKiB": 254342,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 935,
+        "pssKiB": 256650,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      },
+      {
+        "totalTimeMs": 934,
+        "pssKiB": 256116,
+        "batteryC": 31.8,
+        "thermalStatus": 0
+      }
+    ],
+    "repeatBefore": [
+      {
+        "activityTotalTimeMs": 936,
+        "settledPssKiB": 395678,
+        "batteryC": 31.6,
+        "thermalStatus": 0
+      },
+      {
+        "activityTotalTimeMs": 1020,
+        "settledPssKiB": 399012,
+        "batteryC": 31.6,
+        "thermalStatus": 0
+      },
+      {
+        "activityTotalTimeMs": 927,
+        "settledPssKiB": 404313,
+        "batteryC": 31.6,
+        "thermalStatus": 0
+      }
+    ]
+  },
+  "apk": {
+    "before": "15f7cf37a303efdc537ce85b1ecd74872c81cf8910270cf42447fdbd67401622",
+    "after": "321c4a84e639008e066b06e7919ec2f0d804ae1801a12e606e48f73886a79536",
+    "deviceAfterMatches": true
+  },
+  "sourceManifestSha256": "002bff1015cd77b7a3a0d745844bfece6f99e7896617d505c5709a0be5733ac6",
+  "uiComparison": {
+    "content": {
+      "box": [
+        0,
+        120,
+        1080,
+        2250
+      ],
+      "differentPixels": 0,
+      "maxChannelDifference": 0
+    },
+    "dashboard": {
+      "box": [
+        30,
+        320,
+        1050,
+        1140
+      ],
+      "differentPixels": 0,
+      "maxChannelDifference": 0
+    }
+  },
+  "databaseIntegrity": {
+    "integrity": "ok",
+    "unchanged": true,
+    "tables": {
+      "conversations": {
+        "rows": 10000,
+        "sha256": "e8893014eaad8ae1b0dd5975f3d7d46a57bb9276b7b54f1a68a57ea5e0a9c731"
+      },
+      "token_usage_records": {
+        "rows": 100000,
+        "sha256": "98a81a8a06009ede20acaf93996e5c431ce0e38f251efd34d43b765c36eb3ed3"
+      }
+    }
+  },
+  "unicodeOracle": {
+    "seed": 20261021,
+    "uniqueCases": 1948,
+    "assertions": 3896,
+    "mismatches": 0,
+    "methods": [
+      "normalizeText",
+      "trim"
+    ],
+    "verification": "Reflection invoked the final Gradle Profile production Kotlin classes on JDK 21 and compared with fixed Dart outputs.",
+    "productionSourceSha256": "7f9ade88cb4586c2402889fe81bb7bac251cc118371deda50da9c7473eb47532"
+  },
+  "tests": {
+    "flutter": {
+      "passed": 1424
+    },
+    "kotlin": {
+      "java": "JDK 21",
+      "task": ":app:testDevelopStandardDebugUnitTest",
+      "status": "BUILD SUCCESSFUL",
+      "suiteCount": 185,
+      "tests": 1290,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "officeSuites": [
+        {
+          "suite": "cn.com.omnimind.bot.resource.OfficeDocumentPreviewRepositoryTest",
+          "tests": 18,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "suite": "cn.com.omnimind.bot.ui.channel.FileSaveChannelOfficePreviewTest",
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ]
+    },
+    "flutterAnalyze": {
+      "errors": 0,
+      "warningInfo": 523
+    },
+    "standardAndroidBuild": "BUILD SUCCESSFUL"
+  },
+  "accountSmoke": {
+    "before": {
+      "signedIn": false,
+      "configured": true,
+      "credentialStorageAvailable": true,
+      "cloudServiceAccessAllowed": true,
+      "aiReady": true,
+      "usesPlatform": false
+    },
+    "afterLogin": {
+      "signedIn": true,
+      "configured": true,
+      "credentialStorageAvailable": true,
+      "cloudServiceAccessAllowed": true,
+      "aiReady": true,
+      "usesPlatform": true
+    },
+    "afterLogout": {
+      "signedIn": false,
+      "configured": true,
+      "credentialStorageAvailable": true,
+      "cloudServiceAccessAllowed": true,
+      "aiReady": true,
+      "usesPlatform": false
+    },
+    "modelSelectionViaExistingUi": "qwen3.8-flash",
+    "initialUnconfiguredAdmissionRejected": true,
+    "minimalResponse": "OK",
+    "completionVisible": true,
+    "historyReopened": true
+  },
+  "cleanup": {
+    "signedOut": true,
+    "temporaryPackageRemoved": true,
+    "currentProcessCrashEntries": 0,
+    "formalPackageStillInstalled": true,
+    "privateVmConnectionRemoved": true
+  }
+}

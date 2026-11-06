@@ -2,17 +2,24 @@ import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:ui/widgets/omni_adaptive_layout.dart';
+import 'package:ui/widgets/omni_segmented_slider.dart';
+import 'package:ui/widgets/omni_glass.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/l10n/l10n.dart';
+import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/services/special_permission.dart';
 import 'package:ui/services/workspace_mount_service.dart';
-import 'package:ui/theme/app_colors.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
+import 'package:ui/widgets/flclash/page_activity.dart';
 import 'package:ui/widgets/settings_section_title.dart';
+import 'package:ui/widgets/settings_ui.dart';
+import 'package:ui/widgets/omni_circle_button.dart';
 
 class _EnvironmentDefinition {
   const _EnvironmentDefinition({
@@ -97,9 +104,9 @@ const List<_EnvironmentDefinition> _environmentDefinitions =
         groupKey: 'alpineAiAgent',
       ),
       _EnvironmentDefinition(
-        id: 'deepseek_harness',
-        title: 'DeepSeek Harness',
-        descriptionKey: 'alpineDeepSeekHarness',
+        id: 'pi',
+        title: 'Pi',
+        descriptionKey: 'alpinePi',
         groupKey: 'alpineAiAgent',
       ),
       _EnvironmentDefinition(
@@ -138,7 +145,7 @@ class TermuxSettingPage extends StatefulWidget {
 }
 
 class _TermuxSettingPageState extends State<TermuxSettingPage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, FlClashPageLoadMixin {
   bool _isOpeningSetup = false;
   bool _isDetecting = true;
   bool _isDistributionLoading = true;
@@ -198,49 +205,36 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       _detectError == null &&
       _selectedLostCount > 0;
 
-  bool get _isDarkTheme => context.isDarkTheme;
   bool get _isEnglish => Localizations.localeOf(context).languageCode == 'en';
-  Color get _pageBackground => _isDarkTheme
-      ? context.omniPalette.pageBackground
-      : const Color(0xFFF6F8FA);
-  Color get _primaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textPrimary : AppColors.text;
-  Color get _secondaryTextColor => _isDarkTheme
-      ? context.omniPalette.textSecondary
-      : const Color(0xFF64748B);
-  Color get _tertiaryTextColor =>
-      _isDarkTheme ? context.omniPalette.textTertiary : const Color(0xFF475569);
-  Color get _mutedSurfaceColor => _isDarkTheme
-      ? context.omniPalette.surfaceSecondary
-      : const Color(0xFFF8FAFC);
+  Color get _pageBackground => context.omniPalette.pageBackground;
+  Color get _primaryTextColor => context.omniPalette.textPrimary;
+  Color get _secondaryTextColor => context.omniPalette.textSecondary;
+  Color get _tertiaryTextColor => context.omniPalette.textTertiary;
+  Color get _mutedSurfaceColor => context.omniPalette.surfaceSecondary;
 
   String get _workspaceMountSectionTitle =>
-      _isEnglish ? 'Workspace mounts' : 'Workspace 挂载';
-  String get _workspaceMountSectionDesc => _isEnglish
-      ? 'Link a readable host directory into `/workspace`. The selected terminal system, chat resource previews, and the workspace browser will all see the same files. Unmount only removes the mount entry and never deletes the real directory.'
-      : '把一个可访问的宿主目录挂到 `/workspace` 下。当前终端系统、聊天资源预览和文件浏览器都会看到同一份文件。卸载只会删除挂载入口，不会删除真实目录。';
-  String get _workspaceMountAddLabel => _isEnglish ? 'Add mount' : '新增挂载';
+      LegacyTextLocalizer.localize('Workspace 挂载');
+  String get _workspaceMountSectionDesc =>
+      LegacyTextLocalizer.localize('把设备目录连接到工作区，终端和聊天可直接访问。移除挂载不会删除原文件。');
+  String get _workspaceMountAddLabel => LegacyTextLocalizer.localize('新增挂载');
   String get _workspaceMountEmptyDesc =>
-      _isEnglish ? 'No mounted directories yet.' : '还没有挂载任何宿主目录。';
+      LegacyTextLocalizer.localize('还没有挂载任何宿主目录。');
   String get _workspaceMountPickTitle =>
-      _isEnglish ? 'Select a host directory' : '选择宿主目录';
-  String get _workspaceMountAliasTitle => _isEnglish ? 'Mount name' : '挂载名称';
-  String get _workspaceMountAliasHint => _isEnglish
-      ? 'This will become `/workspace/<name>`'
-      : '会显示为 `/workspace/<名称>`';
-  String get _workspaceMountAliasSave => _isEnglish ? 'Mount' : '挂载';
+      LegacyTextLocalizer.localize('选择宿主目录');
+  String get _workspaceMountAliasTitle => LegacyTextLocalizer.localize('挂载名称');
+  String get _workspaceMountAliasHint =>
+      LegacyTextLocalizer.localize('会显示为 `/workspace/<名称>`');
+  String get _workspaceMountAliasSave => LegacyTextLocalizer.localize('挂载');
   String get _workspaceMountUnmountTitle =>
-      _isEnglish ? 'Unmount directory' : '卸载挂载';
-  String _workspaceMountUnmountMessage(String alias) => _isEnglish
-      ? 'Unmount `/workspace/$alias`? The original host directory and its files will remain untouched.'
-      : '确认卸载 `/workspace/$alias` 吗？原始宿主目录和里面的文件都不会被删除。';
-  String _workspaceMountBrokenMessage(String sourcePath) => _isEnglish
-      ? 'Source is missing or unreadable: $sourcePath'
-      : '原始目录不存在或当前不可读：$sourcePath';
+      LegacyTextLocalizer.localize('卸载挂载');
+  String _workspaceMountUnmountMessage(String alias) =>
+      LegacyTextLocalizer.localize('确认卸载 `/workspace/$alias` 吗？原始宿主目录和里面的文件都不会被删除。');
+  String _workspaceMountBrokenMessage(String sourcePath) =>
+      LegacyTextLocalizer.localize('原始目录不存在或当前不可读：$sourcePath');
   String _workspaceMountedToast(String alias) =>
-      _isEnglish ? 'Mounted as /workspace/$alias' : '已挂载到 /workspace/$alias';
+      LegacyTextLocalizer.localize('已挂载到 /workspace/$alias');
   String _workspaceUnmountedToast(String alias) =>
-      _isEnglish ? 'Unmounted /workspace/$alias' : '已卸载 /workspace/$alias';
+      LegacyTextLocalizer.localize('已卸载 /workspace/$alias');
 
   String _resolveL10nKey(String key) {
     // Returns the localized string for a given ARB key.
@@ -264,10 +258,10 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         return l10n.alpineClaudeCode;
       case 'alpineOpenCode':
         return l10n.alpineOpenCode;
-      case 'alpineDeepSeekHarness':
-        return l10n.alpineDeepSeekHarness;
       case 'alpineKimiCode':
         return l10n.alpineKimiCode;
+      case 'alpinePi':
+        return l10n.alpinePi;
       case 'alpineSshClient':
         return l10n.alpineSshClient;
       case 'alpineSshpass':
@@ -333,9 +327,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
     if (!_isDistributionSwitching || _isDistributionCancelling) return;
     setState(() {
       _isDistributionCancelling = true;
-      _distributionSwitchStage = _isEnglish
-          ? 'Cancelling download…'
-          : '正在取消下载…';
+      _distributionSwitchStage = LegacyTextLocalizer.localize('正在取消下载…');
     });
     try {
       await cancelEmbeddedTerminalInit();
@@ -351,12 +343,13 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   Future<void> _loadDistributionAndInventory({
     bool selectMissingByDefault = false,
   }) async {
+    if (!await waitForPageReady()) return;
     if (_isDistributionSwitching) return;
     final request = ++_distributionRequest;
     ++_inventoryRequest;
     try {
       final distribution = await getEmbeddedTerminalDistribution();
-      if (!mounted || request != _distributionRequest) return;
+      if (!await waitForPageReady() || request != _distributionRequest) return;
       final changed = distribution != _selectedDistribution;
       setState(() {
         _selectedDistribution = distribution;
@@ -368,7 +361,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         }
       });
     } catch (_) {
-      if (!mounted || request != _distributionRequest) return;
+      if (!await waitForPageReady() || request != _distributionRequest) return;
       setState(() {
         _isDistributionLoading = false;
       });
@@ -393,9 +386,8 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       _isDistributionCancelling = false;
       _switchingDistribution = distribution;
       _distributionSwitchProgress = null;
-      _distributionSwitchStage = _isEnglish
-          ? 'Preparing ${distribution == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}…'
-          : '正在准备 ${distribution == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}…';
+      _distributionSwitchStage = LegacyTextLocalizer.localize(
+          '正在准备 ${distribution == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}…');
       _hasInitializedSelection = false;
       _inventory = const <String, EmbeddedTerminalSetupInventoryItem>{};
       _selectedPackageIds = <String>{};
@@ -410,9 +402,8 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       await _refreshAutoStartTasks();
       if (!mounted) return;
       showToast(
-        _isEnglish
-            ? 'Terminal system switched to ${saved == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}'
-            : '终端系统已切换为 ${saved == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}',
+        LegacyTextLocalizer.localize(
+            '终端系统已切换为 ${saved == EmbeddedTerminalDistribution.ubuntu ? 'Ubuntu' : 'Alpine'}'),
       );
     } on PlatformException catch (error) {
       if (!mounted) return;
@@ -420,8 +411,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _selectedDistribution = previous;
       });
       showToast(
-        error.message ??
-            (_isEnglish ? 'Failed to switch terminal system' : '切换终端系统失败'),
+        error.message ?? LegacyTextLocalizer.localize('切换终端系统失败'),
         type: ToastType.error,
       );
       await _refreshInventory();
@@ -431,7 +421,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _selectedDistribution = previous;
       });
       showToast(
-        _isEnglish ? 'Failed to switch terminal system' : '切换终端系统失败',
+        LegacyTextLocalizer.localize('切换终端系统失败'),
         type: ToastType.error,
       );
       await _refreshInventory();
@@ -449,6 +439,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   }
 
   Future<void> _refreshInventory({bool selectMissingByDefault = false}) async {
+    if (!await waitForPageReady()) return;
     final request = ++_inventoryRequest;
     final distribution = _selectedDistribution;
     bool isCurrent() =>
@@ -479,7 +470,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
           nextSelected.add(definition.id);
         }
       }
-      if (!isCurrent()) {
+      if (!await waitForPageReady() || !isCurrent()) {
         return;
       }
       setState(() {
@@ -489,7 +480,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _isDetecting = false;
       });
     } on PlatformException catch (e) {
-      if (!isCurrent()) {
+      if (!await waitForPageReady() || !isCurrent()) {
         return;
       }
       setState(() {
@@ -500,7 +491,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _detectError = e.message ?? context.l10n.alpineDetectFailed;
       });
     } catch (_) {
-      if (!isCurrent()) {
+      if (!await waitForPageReady() || !isCurrent()) {
         return;
       }
       setState(() {
@@ -514,6 +505,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   }
 
   Future<void> _refreshAutoStartTasks() async {
+    if (!await waitForPageReady()) return;
     if (mounted) {
       setState(() {
         _isAutoStartLoading = true;
@@ -522,7 +514,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
     }
     try {
       final tasks = await getEmbeddedTerminalAutoStartTasks();
-      if (!mounted) {
+      if (!await waitForPageReady()) {
         return;
       }
       setState(() {
@@ -530,7 +522,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _isAutoStartLoading = false;
       });
     } on PlatformException catch (e) {
-      if (!mounted) {
+      if (!await waitForPageReady()) {
         return;
       }
       setState(() {
@@ -539,7 +531,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _autoStartError = e.message ?? context.l10n.alpineBootTasksLoadFailed;
       });
     } catch (_) {
-      if (!mounted) {
+      if (!await waitForPageReady()) {
         return;
       }
       setState(() {
@@ -551,6 +543,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   }
 
   Future<void> _refreshWorkspaceMounts() async {
+    if (!await waitForPageReady()) return;
     if (mounted) {
       setState(() {
         _isMountsLoading = true;
@@ -559,7 +552,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
     }
     try {
       final mounts = await WorkspaceMountService.listMountedDirectories();
-      if (!mounted) {
+      if (!await waitForPageReady()) {
         return;
       }
       setState(() {
@@ -567,7 +560,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
         _isMountsLoading = false;
       });
     } catch (error) {
-      if (!mounted) {
+      if (!await waitForPageReady()) {
         return;
       }
       setState(() {
@@ -645,7 +638,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       title: _workspaceMountUnmountTitle,
       content: _workspaceMountUnmountMessage(entry.alias),
       cancelText: context.trLegacy('取消'),
-      confirmText: _isEnglish ? 'Unmount' : '卸载',
+      confirmText: LegacyTextLocalizer.localize('卸载'),
     );
     if (confirmed != true || _isMountsBusy) {
       return;
@@ -704,7 +697,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
     final saveFailedMessage = context.l10n.alpineBootTaskSaveFailed;
     final addedMessage = context.l10n.alpineBootTaskAdded;
     final updatedMessage = context.l10n.alpineBootTaskUpdated;
-    final formResult = await showDialog<_AutoStartTaskFormResult>(
+    final formResult = await showOmniGlassCardSheet<_AutoStartTaskFormResult>(
       context: context,
       builder: (dialogContext) => _AutoStartTaskDialog(task: task),
     );
@@ -865,84 +858,72 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       groupedItems[group]!.add(item);
     }
 
+    final sections = <Widget Function()>[
+      _buildDistributionCard,
+      _buildIntroCard,
+      if (_detectError != null) () => _buildErrorCard(_detectError!),
+      for (final entry in groupedItems.entries)
+        () => OmniSettingsGroup(
+          title: entry.key,
+          dividerIndent: 54,
+          dividerEndIndent: 18,
+          children: entry.value.map(_buildEnvironmentTile).toList(),
+        ),
+      () => SizedBox(
+        width: double.infinity,
+        child: FilledButton.icon(
+          onPressed: _canStartSetup && !_isOpeningSetup
+              ? _handleOpenSetupPage
+              : null,
+          icon: _isOpeningSetup
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.2,
+                    color: Theme.of(context).colorScheme.onPrimary,
+                  ),
+                )
+              : const Icon(LucideIcons.squareTerminal),
+          label: Text(
+            _isDetecting
+                ? context.l10n.alpineDetecting
+                : _selectedLostCount > 0
+                ? context.l10n.alpineStartConfig(_selectedLostCount)
+                : context.l10n.alpineAllReady,
+          ),
+        ),
+      ),
+      _buildAutoStartSection,
+      _buildWorkspaceMountSection,
+    ];
+
     return Scaffold(
       backgroundColor: _pageBackground,
       appBar: CommonAppBar(
         title: context.l10n.settingsAlpineTitle,
         primary: true,
       ),
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: RefreshIndicator(
-          onRefresh: () async {
-            if (_isDistributionSwitching || _isDistributionLoading) return;
-            await _refreshInventory();
-            await _refreshAutoStartTasks();
-          },
-          child: ListView(
-            padding: edgeToEdgeScrollPadding(
-              context,
-              const EdgeInsets.fromLTRB(16, 12, 16, 24),
-            ),
-            children: [
-              _buildDistributionCard(),
-              const SizedBox(height: 14),
-              _buildIntroCard(),
-              const SizedBox(height: 14),
-              if (_detectError != null) ...[
-                _buildErrorCard(_detectError!),
-                const SizedBox(height: 14),
-              ],
-              for (final entry in groupedItems.entries) ...[
-                _buildSectionCard(
-                  title: entry.key,
-                  child: Column(
-                    children: [
-                      for (
-                        int index = 0;
-                        index < entry.value.length;
-                        index++
-                      ) ...[
-                        _buildEnvironmentTile(entry.value[index]),
-                        if (index != entry.value.length - 1)
-                          const Divider(height: 20, thickness: 0.6),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-              ],
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: _canStartSetup && !_isOpeningSetup
-                      ? _handleOpenSetupPage
-                      : null,
-                  icon: _isOpeningSetup
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Icon(LucideIcons.squareTerminal),
-                  label: Text(
-                    _isDetecting
-                        ? context.l10n.alpineDetecting
-                        : _selectedLostCount > 0
-                        ? context.l10n.alpineStartConfig(_selectedLostCount)
-                        : context.l10n.alpineAllReady,
-                  ),
-                ),
+      body: OmniContentWidth(
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: RefreshIndicator(
+            onRefresh: () async {
+              if (_isDistributionSwitching || _isDistributionLoading) return;
+              await _refreshInventory();
+              await _refreshAutoStartTasks();
+            },
+            child: ListView.separated(
+              scrollCacheExtent: const ScrollCacheExtent.pixels(0),
+              padding: edgeToEdgeScrollPadding(
+                context,
+                const EdgeInsets.fromLTRB(16, 16, 16, 24),
               ),
-              const SizedBox(height: 14),
-              _buildAutoStartSection(),
-              const SizedBox(height: 14),
-              _buildWorkspaceMountSection(),
-            ],
+              itemCount: sections.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 28),
+              itemBuilder: (context, index) => sections[index](),
+            ),
           ),
         ),
       ),
@@ -952,14 +933,12 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   Widget _buildDistributionCard() {
     final busy = _isDistributionLoading || _isDistributionSwitching;
     return _buildSectionCard(
-      title: _isEnglish ? 'Terminal system' : '终端系统',
+      title: LegacyTextLocalizer.localize('终端系统'),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            _isEnglish
-                ? 'Choose the Linux rootfs used by environment detection, commands, Agent tools, and ReTerminal.'
-                : '选择环境检测、命令执行、Agent 工具与 ReTerminal 共用的 Linux rootfs。',
+            LegacyTextLocalizer.localize('选择终端与 Agent 共用的 Linux 系统。'),
             style: TextStyle(
               color: _secondaryTextColor,
               fontSize: 13,
@@ -970,25 +949,23 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
           const SizedBox(height: 14),
           SizedBox(
             width: double.infinity,
-            child: SegmentedButton<EmbeddedTerminalDistribution>(
-              segments: const [
-                ButtonSegment(
+            child: OmniSegmentedSlider<EmbeddedTerminalDistribution>(
+              keyPrefix: 'terminal-distribution',
+              value: _selectedDistribution,
+              options: const [
+                OmniSegmentedOption(
                   value: EmbeddedTerminalDistribution.alpine,
-                  label: Text('Alpine'),
+                  label: 'Alpine',
                 ),
-                ButtonSegment(
+                OmniSegmentedOption(
                   value: EmbeddedTerminalDistribution.ubuntu,
-                  label: Text('Ubuntu'),
+                  label: 'Ubuntu',
                 ),
               ],
-              selected: <EmbeddedTerminalDistribution>{_selectedDistribution},
-              onSelectionChanged: busy
+              onChanged: busy
                   ? null
-                  : (selection) {
-                      if (selection.isNotEmpty) {
-                        unawaited(_switchDistribution(selection.first));
-                      }
-                    },
+                  : (distribution) =>
+                        unawaited(_switchDistribution(distribution)),
             ),
           ),
           if (busy) ...[
@@ -1007,9 +984,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
                   Expanded(
                     child: Text(
                       _distributionSwitchStage ??
-                          (_isEnglish
-                              ? 'Preparing terminal system…'
-                              : '正在准备终端系统…'),
+                          LegacyTextLocalizer.localize('正在准备终端系统…'),
                       style: TextStyle(
                         color: _secondaryTextColor,
                         fontSize: 12,
@@ -1022,7 +997,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
                     onPressed: _isDistributionCancelling
                         ? null
                         : () => unawaited(_cancelDistributionSwitch()),
-                    child: Text(_isEnglish ? 'Cancel' : '取消下载'),
+                    child: Text(LegacyTextLocalizer.localize('取消下载')),
                   ),
                 ],
               ),
@@ -1035,28 +1010,51 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
 
   Widget _buildIntroCard() {
     final readyCount = _items.where((item) => item.ready == true).length;
-    return _buildSectionCard(
-      title: context.l10n.alpineEnvConfig,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 18),
+      child: Row(
         children: [
-          Text(
-            _isDetecting
-                ? context.l10n.alpineDetectingDesc
-                : _detectError != null ||
-                      _items.any((item) => item.ready == null)
-                ? (_isEnglish
-                      ? 'Detection incomplete. Refresh to confirm component status.'
-                      : '检测未完成，请重新检测以确认组件状态。')
-                : context.l10n.alpineReadyCount(readyCount, _items.length),
-            style: TextStyle(
-              color: _secondaryTextColor,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              height: 1.6,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  context.l10n.alpineEnvConfig,
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: _primaryTextColor,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _isDetecting
+                      ? context.l10n.alpineDetectingDesc
+                      : _detectError != null ||
+                            _items.any((item) => item.ready == null)
+                      ? (_isEnglish
+                            ? 'Detection incomplete. Refresh to confirm component status.'
+                            : '检测未完成，请重新检测以确认组件状态。')
+                      : context.l10n.alpineReadyCount(
+                          readyCount,
+                          _items.length,
+                        ),
+                  style: TextStyle(
+                    color: _secondaryTextColor,
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 12),
+          OmniCircleButton(
+            tooltip: LegacyTextLocalizer.localize('刷新'),
+            onPressed: _isDetecting || _isDistributionSwitching
+                ? null
+                : () => _refreshInventory(),
+            icon: LucideIcons.refreshCw,
+          ),
         ],
       ),
     );
@@ -1103,25 +1101,14 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
               ),
             ),
           ] else if (_workspaceMounts.isEmpty) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: _mutedSurfaceColor,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _isDarkTheme
-                      ? context.omniPalette.borderSubtle
-                      : const Color(0xFFE2E8F0),
-                ),
-              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
                 _workspaceMountEmptyDesc,
                 style: TextStyle(
-                  color: _secondaryTextColor,
+                  color: _tertiaryTextColor,
                   fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  height: 1.6,
+                  height: 1.5,
                 ),
               ),
             ),
@@ -1138,18 +1125,19 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
   }
 
   Widget _buildErrorCard(String message) {
+    final colors = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFFFFFBEB),
+        color: colors.errorContainer,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFFCD34D)),
+        border: Border.all(color: colors.error.withValues(alpha: 0.22)),
       ),
       child: Text(
         message,
-        style: const TextStyle(
-          color: Color(0xFF92400E),
+        style: TextStyle(
+          color: colors.onErrorContainer,
           fontSize: 13,
           fontWeight: FontWeight.w600,
           height: 1.5,
@@ -1160,14 +1148,14 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
 
   Widget _buildWorkspaceMountTile(WorkspaceMountEntry entry) {
     final stateLabel = entry.isBroken
-        ? (_isEnglish ? 'broken' : '异常')
-        : (_isEnglish ? 'mounted' : '已挂载');
+        ? LegacyTextLocalizer.localize('异常')
+        : LegacyTextLocalizer.localize('已挂载');
     final stateBackground = entry.isBroken
         ? const Color(0xFFFFF7ED)
-        : const Color(0xFFEAF2FF);
+        : context.omniPalette.surfaceSecondary;
     final stateForeground = entry.isBroken
         ? const Color(0xFFC2410C)
-        : const Color(0xFF2563EB);
+        : context.omniPalette.textSecondary;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1222,7 +1210,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
                   darkBackgroundColor: context.omniPalette.surfaceSecondary,
                   darkForegroundColor: entry.isBroken
                       ? const Color(0xFFE7D2B6)
-                      : const Color(0xFFD7DADF),
+                      : context.omniPalette.textSecondary,
                 ),
                 const SizedBox(height: 10),
                 TextButton.icon(
@@ -1230,7 +1218,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
                       ? null
                       : () => _unmountWorkspaceDirectory(entry),
                   icon: const Icon(LucideIcons.unlink, size: 18),
-                  label: Text(_isEnglish ? 'Unmount' : '卸载'),
+                  label: Text(LegacyTextLocalizer.localize('卸载')),
                 ),
               ],
             ),
@@ -1290,25 +1278,14 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
               ),
             ),
           ] else if (_autoStartTasks.isEmpty) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: _mutedSurfaceColor,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _isDarkTheme
-                      ? context.omniPalette.borderSubtle
-                      : const Color(0xFFE2E8F0),
-                ),
-              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
                 context.l10n.alpineNoTasksDesc,
                 style: TextStyle(
-                  color: _secondaryTextColor,
+                  color: _tertiaryTextColor,
                   fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  height: 1.6,
+                  height: 1.5,
                 ),
               ),
             ),
@@ -1353,62 +1330,44 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
                         label: task.enabled
                             ? context.l10n.alpineBootOnAppOpen
                             : context.l10n.alpineNotEnabled,
-                        backgroundColor: task.enabled
-                            ? const Color(0xFFEAF2FF)
-                            : const Color(0xFFF1F5F9),
+                        backgroundColor: context.omniPalette.surfaceSecondary,
                         foregroundColor: task.enabled
-                            ? const Color(0xFF2563EB)
-                            : const Color(0xFF64748B),
-                        darkBackgroundColor: task.enabled
-                            ? Color.lerp(
-                                context.omniPalette.surfaceSecondary,
-                                context.omniPalette.accentPrimary,
-                                0.14,
-                              )
-                            : context.omniPalette.surfaceSecondary,
+                            ? context.omniPalette.textPrimary
+                            : context.omniPalette.textSecondary,
+                        darkBackgroundColor:
+                            context.omniPalette.surfaceSecondary,
                         darkForegroundColor: task.enabled
-                            ? Color.lerp(
-                                context.omniPalette.textPrimary,
-                                context.omniPalette.accentPrimary,
-                                0.38,
-                              )
+                            ? context.omniPalette.textPrimary
                             : context.omniPalette.textSecondary,
                       ),
                       _buildLegendTag(
                         label: task.running ? 'running' : 'idle',
                         backgroundColor: task.running
                             ? const Color(0xFFE8F7EE)
-                            : const Color(0xFFFFF7ED),
+                            : context.omniPalette.surfaceSecondary,
                         foregroundColor: task.running
                             ? const Color(0xFF17803D)
-                            : const Color(0xFFC2410C),
+                            : context.omniPalette.textSecondary,
                         darkBackgroundColor: task.running
                             ? Color.lerp(
                                 context.omniPalette.surfaceSecondary,
                                 const Color(0xFF72A778),
                                 0.22,
                               )
-                            : Color.lerp(
-                                context.omniPalette.surfaceSecondary,
-                                const Color(0xFFB88B61),
-                                0.18,
-                              ),
+                            : context.omniPalette.surfaceSecondary,
                         darkForegroundColor: task.running
                             ? const Color(0xFFD6E7D6)
-                            : const Color(0xFFE7D2B6),
+                            : context.omniPalette.textSecondary,
                       ),
                     ],
                   ),
                 ],
               ),
             ),
-            Switch.adaptive(
+            OmniSettingsSwitch(
               value: task.enabled,
-              onChanged: _isAutoStartBusy
-                  ? null
-                  : (value) => _toggleAutoStartTask(task, value),
-              activeTrackColor: const Color(0xFF93C5FD),
-              activeThumbColor: const Color(0xFF2563EB),
+              enabled: !_isAutoStartBusy,
+              onToggle: (value) => _toggleAutoStartTask(task, value),
             ),
           ],
         ),
@@ -1419,11 +1378,7 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
           decoration: BoxDecoration(
             color: _mutedSurfaceColor,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: _isDarkTheme
-                  ? context.omniPalette.borderSubtle
-                  : const Color(0xFFE2E8F0),
-            ),
+            border: Border.all(color: context.omniPalette.borderSubtle),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1452,7 +1407,8 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
           ),
         ),
         const SizedBox(height: 10),
-        Row(
+        Wrap(
+          spacing: 4,
           children: [
             TextButton.icon(
               onPressed: _isAutoStartBusy
@@ -1489,113 +1445,79 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
     final ready = item.ready == true;
     final unknown = item.ready == null;
     final selected = _selectedPackageIds.contains(item.definition.id);
+    final canToggle = !_isDetecting && !unknown && !_isDistributionSwitching;
     final versionText = item.version?.trim().isNotEmpty == true
         ? item.version!.trim()
         : (unknown
-              ? (_isEnglish ? 'Not confirmed' : '未确认')
+              ? LegacyTextLocalizer.localize('未确认')
               : ready
               ? context.l10n.alpineVersionDetected
               : context.l10n.alpineVersionNotFound);
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: ready
-              ? const Icon(
-                  LucideIcons.squareCheckBig,
-                  color: Color(0xFF16A34A),
-                  size: 22,
-                )
-              : Checkbox(
-                  value: selected,
-                  activeColor: const Color(0xFF2563EB),
-                  onChanged: _isDetecting || unknown || _isDistributionSwitching
-                      ? null
-                      : (value) => _togglePackage(item.definition.id, value),
-                ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                item.definition.title,
-                style: TextStyle(
-                  color: _primaryTextColor,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                ),
+    return InkWell(
+      onTap: !ready && canToggle
+          ? () => _togglePackage(item.definition.id, !selected)
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 14, 10, 14),
+        child: Row(
+          children: [
+            SizedBox.square(
+              dimension: 22,
+              child: Icon(
+                ready ? LucideIcons.circleCheck : LucideIcons.package,
+                size: 20,
+                color: ready ? const Color(0xFF16A34A) : _tertiaryTextColor,
               ),
-              const SizedBox(height: 4),
-              Text(
-                _resolveL10nKey(item.definition.descriptionKey),
-                style: TextStyle(
-                  color: _secondaryTextColor,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.definition.title,
+                    style: TextStyle(
+                      color: _primaryTextColor,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    _resolveL10nKey(item.definition.descriptionKey),
+                    style: TextStyle(
+                      color: _secondaryTextColor,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    versionText,
+                    style: TextStyle(
+                      color: _tertiaryTextColor,
+                      fontSize: 11,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            if (!ready)
+              Checkbox(
+                value: selected,
+                activeColor: context.omniPalette.accentPrimary,
+                checkColor: Theme.of(context).colorScheme.onPrimary,
+                onChanged: canToggle
+                    ? (value) => _togglePackage(item.definition.id, value)
+                    : null,
+              )
+            else
+              const SizedBox(width: 8),
+          ],
         ),
-        const SizedBox(width: 10),
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 150),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              if (_isDetecting && !_inventory.containsKey(item.definition.id))
-                const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                _buildLegendTag(
-                  label: unknown
-                      ? (_isEnglish ? 'Detection failed' : '检测失败')
-                      : ready
-                      ? 'ready'
-                      : 'lost',
-                  backgroundColor: ready
-                      ? const Color(0xFFE8F7EE)
-                      : const Color(0xFFEAF2FF),
-                  foregroundColor: ready
-                      ? const Color(0xFF17803D)
-                      : const Color(0xFF2563EB),
-                  darkBackgroundColor: ready
-                      ? Color.lerp(
-                          context.omniPalette.surfaceSecondary,
-                          const Color(0xFF72A778),
-                          0.22,
-                        )
-                      : Color.lerp(
-                          context.omniPalette.surfaceSecondary,
-                          const Color(0xFF79808A),
-                          0.16,
-                        ),
-                  darkForegroundColor: ready
-                      ? const Color(0xFFD6E7D6)
-                      : const Color(0xFFD7DADF),
-                ),
-              const SizedBox(height: 6),
-              Text(
-                versionText,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: _tertiaryTextColor,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  height: 1.4,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -1638,8 +1560,8 @@ class _TermuxSettingPageState extends State<TermuxSettingPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SettingsSectionTitle(label: title, bottomPadding: 10),
-          child,
+          SettingsSectionTitle(label: title, bottomPadding: 12),
+          OmniSettingsCard(padding: const EdgeInsets.all(18), child: child),
         ],
       ),
     );
@@ -1721,7 +1643,7 @@ class _AutoStartTaskDialogState extends State<_AutoStartTaskDialog> {
   @override
   Widget build(BuildContext context) {
     final editing = widget.task != null;
-    return AlertDialog(
+    return OmniGlassAlertDialog(
       title: Text(
         editing
             ? context.l10n.alpineEditBootTask
@@ -1759,16 +1681,28 @@ class _AutoStartTaskDialogState extends State<_AutoStartTaskDialog> {
                 hintText: '/workspace',
               ),
             ),
-            const SizedBox(height: 12),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              value: _enabled,
-              onChanged: (value) {
-                setState(() {
-                  _enabled = value;
-                });
-              },
-              title: Text(context.l10n.alpineBootAutoStart),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    context.l10n.alpineBootAutoStart,
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w500,
+                      color: context.omniPalette.textPrimary,
+                    ),
+                  ),
+                ),
+                OmniSettingsSwitch(
+                  value: _enabled,
+                  onToggle: (value) {
+                    setState(() {
+                      _enabled = value;
+                    });
+                  },
+                ),
+              ],
             ),
           ],
         ),

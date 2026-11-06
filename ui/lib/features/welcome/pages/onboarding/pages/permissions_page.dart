@@ -1,27 +1,27 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_switch/flutter_switch.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/theme/theme_context.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 import '../onboarding_l10n.dart';
 import '../onboarding_permission_controller.dart';
 import '../widgets/onboarding_page_scaffold.dart';
 
-/// Step 4: grant the app permissions that power floating reminders,
+/// Grant the app permissions that power floating reminders,
 /// background execution, and app detection.
 class OnboardingPermissionsPage extends StatelessWidget {
   const OnboardingPermissionsPage({
     super.key,
     required this.controller,
     required this.scrollController,
-    required this.onRequestPrivileged,
+    required this.onRequestShizuku,
   });
 
   final OnboardingPermissionController controller;
   final ScrollController scrollController;
-  final FutureOr<void> Function() onRequestPrivileged;
+  final FutureOr<void> Function() onRequestShizuku;
 
   @override
   Widget build(BuildContext context) {
@@ -95,13 +95,13 @@ class OnboardingPermissionsPage extends StatelessWidget {
           onTap: controller.openStorageSettings,
         ),
         _PermissionRow(
-          tapKey: const ValueKey('tutorial-permission-privileged'),
-          icon: LucideIcons.shieldCheck,
-          title: onbTr(context, '特权访问', 'Privileged access'),
-          subtitle: controller.privilegedStatus.localizedGuide,
-          granted: controller.privilegedStatus.isGranted,
-          actionLabel: controller.privilegedStatus.localizedStatusLabel,
-          onTap: onRequestPrivileged,
+          tapKey: const ValueKey('tutorial-permission-shizuku'),
+          icon: LucideIcons.shieldPlus,
+          title: onbTr(context, 'Shizuku 权限', 'Shizuku access'),
+          subtitle: controller.shizukuStatus.localizedGuide,
+          granted: controller.shizukuStatus.isGranted,
+          actionLabel: controller.shizukuStatus.localizedStatusLabel,
+          onTap: onRequestShizuku,
         ),
         const SizedBox(height: 26),
         _SectionLabel(label: onbTr(context, '通知与提醒', 'Notifications')),
@@ -385,24 +385,9 @@ class _NotificationRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 10),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => controller.setNotificationEnabled(
-                  !controller.notificationEnabled,
-                ),
-                child: AbsorbPointer(
-                  child: FlutterSwitch(
-                    width: 32,
-                    height: 18.67,
-                    toggleSize: 11.3,
-                    padding: 3,
-                    activeColor: palette.accentPrimary,
-                    inactiveColor: palette.borderStrong,
-                    borderRadius: 28.75,
-                    value: controller.notificationEnabled,
-                    onToggle: controller.setNotificationEnabled,
-                  ),
-                ),
+              OmniSettingsSwitch(
+                value: controller.notificationEnabled,
+                onToggle: controller.setNotificationEnabled,
               ),
             ],
           ),

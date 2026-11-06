@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -11,6 +12,8 @@ import 'package:ui/services/model_provider_config_service.dart';
 import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
+import 'package:ui/widgets/flclash/popup.dart';
+import 'package:ui/widgets/omni_glass.dart';
 
 final _discoveryModels = <String, List<ProviderModelOption>>{};
 
@@ -133,6 +136,120 @@ void main() {
     ModelsDevCatalogService.resetForTesting();
   });
 
+  testWidgets('model input sheet can swipe close and submit above keyboard', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 720);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetViewInsets);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        home: const ModelProviderSettingPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final addModel = find.byIcon(LucideIcons.plus).last;
+    await tester.ensureVisible(addModel);
+    await tester.pumpAndSettle();
+    await tester.tap(addModel);
+    await tester.pumpAndSettle();
+    final pane = find.byType(OmniGlassPanel);
+    await tester.dragFrom(
+      tester.getTopLeft(pane) + const Offset(100, 24),
+      const Offset(0, 500),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(OmniGlassAlertDialog), findsNothing);
+    expect(find.byType(ModelProviderSettingPage), findsOneWidget);
+
+    await tester.ensureVisible(addModel);
+    await tester.pumpAndSettle();
+    await tester.tap(addModel);
+    await tester.pumpAndSettle();
+    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+    await tester.pumpAndSettle();
+    final input = find.descendant(
+      of: find.byType(OmniGlassAlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(input, 'local-test-model');
+    final submit = find
+        .descendant(
+          of: find.byType(OmniGlassAlertDialog),
+          matching: find.byType(TextButton),
+        )
+        .last;
+    expect(tester.getRect(submit).bottom, lessThan(420));
+    await tester.tap(submit);
+    await tester.pumpAndSettle();
+    expect(find.byType(OmniGlassAlertDialog), findsNothing);
+    expect(find.byType(ModelProviderSettingPage), findsOneWidget);
+    expect(
+      await ModelProviderConfigService.getManualModelIds(
+        profileId: 'provider-1',
+      ),
+      contains('local-test-model'),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'ChatGPT provider shows account controls without editable credentials',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return profilePayload(
+              name: 'Personal ChatGPT',
+              sourceType: 'chatgpt_oauth',
+              wireApi: 'responses',
+            );
+          case 'getChatGptAccount':
+            return {
+              'connected': true,
+              'email': 'sample@example.com',
+              'planEnabled': true,
+            };
+          case 'fetchProviderModels':
+            return <Map<String, dynamic>>[];
+        }
+        return null;
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('chatgpt-account-section')), findsOneWidget);
+      expect(find.text('sample@example.com'), findsOneWidget);
+      expect(find.text('ChatGPT'), findsOneWidget);
+      expect(
+        find.widgetWithText(TextField, 'Personal ChatGPT'),
+        findsOneWidget,
+      );
+      expect(find.text('API Key'), findsNothing);
+      expect(find.text('Base URL'), findsNothing);
+      expect(
+        find.byKey(const Key('provider-api-key-visibility-button')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('provider-custom-headers-toggle')),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   for (final fieldLabel in ['API Key', 'Base URL']) {
     testWidgets(
       'refresh persists the $fieldLabel draft and reopening queries again',
@@ -220,43 +337,60 @@ void main() {
     );
   }
 
-  testWidgets('model discovery TLS failure stays visible and explicit retry recovers', (tester) async {
-    tester.view.physicalSize = const Size(1080, 2200);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    var calls = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(assistCoreChannel, (call) async {
-      if (call.method == 'listModelProviderProfiles') return profilePayload();
-      if (call.method == 'fetchProviderModels') {
-        calls++;
-        if (calls == 1) {
-          throw PlatformException(
-            code: 'FETCH_PROVIDER_MODELS_ERROR',
-            message: 'Trust anchor for private-server not found',
-            details: {'failureKind': 'provider_tls_certificate_failure'},
-          );
-        }
-        return [{'id': 'gpt-4o', 'displayName': 'gpt-4o'}];
-      }
-      return null;
-    });
-    await tester.pumpWidget(MaterialApp(
-      theme: AppTheme.lightTheme,
-      home: const ModelProviderSettingPage(),
-    ));
-    await tester.pumpAndSettle();
-    await tester.pump(const Duration(seconds: 10));
-    expect(calls, 1);
-    expect(find.textContaining('Check whether your network requires sign-in'), findsOneWidget);
-    expect(find.textContaining('private-server'), findsNothing);
-    await tester.tap(find.text('Retry'));
-    await tester.pumpAndSettle();
-    expect(calls, 2);
-    expect(find.byKey(const ValueKey('provider-model-gpt-4o')), findsOneWidget);
-    expect(find.textContaining('Check whether your network requires sign-in'), findsNothing);
-  });
+  testWidgets(
+    'model discovery TLS failure stays visible and explicit retry recovers',
+    (tester) async {
+      tester.view.physicalSize = const Size(1080, 2200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      var calls = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+            if (call.method == 'listModelProviderProfiles')
+              return profilePayload();
+            if (call.method == 'fetchProviderModels') {
+              calls++;
+              if (calls == 1) {
+                throw PlatformException(
+                  code: 'FETCH_PROVIDER_MODELS_ERROR',
+                  message: 'Trust anchor for private-server not found',
+                  details: {'failureKind': 'provider_tls_certificate_failure'},
+                );
+              }
+              return [
+                {'id': 'gpt-4o', 'displayName': 'gpt-4o'},
+              ];
+            }
+            return null;
+          });
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 10));
+      expect(calls, 1);
+      expect(
+        find.textContaining('Check whether your network requires sign-in'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('private-server'), findsNothing);
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
+      expect(
+        find.byKey(const ValueKey('provider-model-gpt-4o')),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Check whether your network requires sign-in'),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets('late refresh cannot display models for a changed draft', (
     tester,
@@ -335,13 +469,14 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('模型类型'), findsNothing);
-      final providerRight = tester
-          .getTopRight(find.byKey(const Key('provider-config-title')))
-          .dx;
-      final protocolLeft = tester
-          .getTopLeft(find.byKey(const Key('provider-protocol-type-button')))
-          .dx;
-      expect(protocolLeft - providerRight, 4);
+      final profileRect = tester.getRect(
+        find.byKey(const Key('provider-config-title')),
+      );
+      final presetRect = tester.getRect(
+        find.byKey(const Key('provider-protocol-type-button')),
+      );
+      expect(presetRect.top, greaterThan(profileRect.bottom));
+      expect(presetRect.width, greaterThan(176));
       expect(tester.takeException(), isNull);
     },
   );
@@ -404,18 +539,19 @@ void main() {
     messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
       if (call.method == 'listModelProviderProfiles') {
         final payload = profilePayload();
-        (payload['profiles'] as List<Map<String, dynamic>>)
-            .add(<String, dynamic>{
-              'id': 'omnibot-official-ai',
-              'name': 'OmniBot 官方 AI',
-              'baseUrl': 'https://official.example/ai',
-              'sourceType': 'omnibot_official',
-              'readOnly': true,
-              'ready': true,
-              'configured': true,
-              'protocolType': 'openai_compatible',
-              'wireApi': 'chat_completions',
-            });
+        (payload['profiles'] as List<Map<String, dynamic>>).add(
+          <String, dynamic>{
+            'id': 'omnibot-official-ai',
+            'name': 'OmniBot 官方 AI',
+            'baseUrl': 'https://official.example/ai',
+            'sourceType': 'omnibot_official',
+            'readOnly': true,
+            'ready': true,
+            'configured': true,
+            'protocolType': 'openai_compatible',
+            'wireApi': 'chat_completions',
+          },
+        );
         return payload;
       }
       return null;
@@ -437,9 +573,7 @@ void main() {
     expect(find.text('OmniBot 官方 AI'), findsNothing);
   });
 
-  testWidgets('provider page does not wait for metadata refresh', (
-    tester,
-  ) async {
+  testWidgets('metadata refresh preserves native capabilities', (tester) async {
     tester.view.physicalSize = const Size(1080, 2200);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
@@ -452,7 +586,12 @@ void main() {
     );
     ModelsDevCatalogService.resetForTesting();
     final loader = Completer<ModelsDevCatalog>();
+    const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(pathProvider, (_) async => null);
     addTearDown(() {
+      messenger.setMockMethodCallHandler(pathProvider, null);
       if (!loader.isCompleted) {
         loader.complete(const ModelsDevCatalog(providers: {}));
       }
@@ -495,10 +634,55 @@ void main() {
 
     expect(
       find.byKey(const Key('provider-model-reasoning-gpt-4o')),
-      findsOneWidget,
+      findsNothing,
     );
+    expect(find.text('128K'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final reasoning in <bool?>[true, false, null]) {
+    testWidgets('reasoning badge uses native capability: $reasoning', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(800, 1000);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      _discoveryModels['provider-1'] = [
+        ProviderModelOption(
+          id: 'gpt-4o',
+          displayName: 'gpt-4o',
+          reasoning: reasoning,
+          reasoningCapabilitySource: reasoning == null ? null : 'provider',
+        ),
+      ];
+      ModelsDevCatalogService.setCatalogForTesting(
+        ModelsDevCatalogService.parseCatalog(
+          reasoning == true
+              ? _modelsDevCatalogJson.replaceAll(
+                  '"reasoning": true',
+                  '"reasoning": false',
+                )
+              : _modelsDevCatalogJson,
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('provider-model-reasoning-gpt-4o')),
+        reasoning == true ? findsOneWidget : findsNothing,
+      );
+      expect(find.text('128K'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('provider labels stay bounded on narrow layout', (tester) async {
     tester.view.devicePixelRatio = 1.0;
@@ -578,6 +762,14 @@ void main() {
         ),
         findsOneWidget,
       );
+      expect(
+        tester
+            .renderObject<RenderParagraph>(
+              find.byKey(const Key('provider-config-title-text')),
+            )
+            .didExceedMaxLines,
+        isFalse,
+      );
       expect(tester.takeException(), isNull);
 
       await tester.pumpWidget(const SizedBox.shrink());
@@ -621,12 +813,18 @@ void main() {
       find.byKey(const Key('provider-protocol-type-menu')),
     );
     expect(menuRect.width, greaterThanOrEqualTo(200));
+    expect(find.text('ChatGPT'), findsOneWidget);
     expect(find.text('DeepSeek'), findsOneWidget);
     expect(find.text('Mimo'), findsOneWidget);
     expect(find.text('Kimi'), findsOneWidget);
     expect(find.text('MiniMax'), findsOneWidget);
     expect(find.text('阿里百炼'), findsOneWidget);
     expect(find.text('OpenAI'), findsAtLeastNWidgets(1));
+    await tester.drag(
+      find.byKey(const Key('provider-protocol-type-menu')),
+      const Offset(0, -180),
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Anthropic'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -734,6 +932,31 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('https://api.openai.com/v1/responses'), findsOneWidget);
+    final wireField = find.byKey(const Key('provider-wire-api-button'));
+    final fieldText = tester.element(
+      find.descendant(of: wireField, matching: find.text('Responses')),
+    );
+    final container = InputDecorator.containerOf(fieldText)!;
+    final expectedSource =
+        container.localToGlobal(Offset.zero) & container.size;
+    await tester.tap(wireField);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 80));
+    final transition = tester.widget<FlClashPopupTransition>(
+      find.byType(FlClashPopupTransition),
+    );
+    expect(transition.source!.rectIn(null), expectedSource);
+    expect(transition.source!.shape, isA<InputBorder>());
+    expect(transition.source!.glass, isFalse);
+    expect(
+      transition.source!.image.value!.height /
+          MediaQuery.devicePixelRatioOf(fieldText),
+      greaterThan(expectedSource.height),
+      reason: 'The floating label paints above the fixed input material',
+    );
+    Navigator.of(tester.element(find.byType(FlClashPopupTransition))).pop();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('selecting official provider saves builtin profile payload', (
@@ -792,6 +1015,62 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets(
+    'selecting ChatGPT clears credentials and fixes the official Responses endpoint',
+    (tester) async {
+      final saves = <Map<dynamic, dynamic>>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return profilePayload();
+          case 'saveModelProviderProfile':
+            final args = Map<dynamic, dynamic>.from(call.arguments as Map);
+            saves.add(args);
+            return savedProfileResponse(args);
+          case 'getChatGptAccount':
+            return {'connected': false};
+        }
+        return null;
+      });
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final keyField = find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == 'API Key',
+      );
+      await tester.enterText(keyField, 'unsaved-api-key');
+      await tester.tap(find.byKey(const Key('provider-protocol-type-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('ChatGPT'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 1));
+      final saved = saves
+          .where((args) => args['sourceType'] == 'chatgpt_oauth')
+          .single;
+      final saveCount = saves.length;
+      expect(saved['sourceType'], 'chatgpt_oauth');
+      expect(saved['baseUrl'], 'https://api.openai.com/v1');
+      expect(saved['protocolType'], 'openai_compatible');
+      expect(saved['wireApi'], 'responses');
+      expect(saved['clearApiKey'], isTrue);
+      expect(saved['clearCustomHeaders'], isTrue);
+      expect(saved.containsKey('apiKey'), isFalse);
+      expect(saved.containsKey('customHeaders'), isFalse);
+      expect(find.byKey(const Key('chatgpt-login-button')), findsOneWidget);
+      expect(find.text('API Key'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+      expect(saves, hasLength(saveCount));
+    },
+  );
 
   testWidgets('provider fields do not auto-save while focused', (tester) async {
     var saveCalls = 0;
@@ -918,6 +1197,10 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
 
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('provider-model-group-toggle-button')),
+    );
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('provider-logo')), findsNothing);
     expect(
       find.byKey(const ValueKey('provider-model-group-toggle-button')),
@@ -942,7 +1225,7 @@ void main() {
     );
     expect(
       find.byKey(const Key('provider-model-reasoning-gpt-4o')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(find.text('Context 128K'), findsNothing);
     expect(find.text('Tools'), findsNothing);
@@ -1075,6 +1358,10 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
 
+      await tester.ensureVisible(
+        find.byKey(const Key('provider-chat-model-visibility-button')),
+      );
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('provider-chat-model-visibility-button')),
         findsOneWidget,

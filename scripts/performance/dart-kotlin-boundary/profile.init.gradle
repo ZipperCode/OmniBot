@@ -1,0 +1,25 @@
+// This init script applies only to the opt-in standalone measurement build.
+gradle.beforeProject { p ->
+    p.plugins.withId('com.android.application') {
+        if (p.path == ':app') {
+            p.extensions.getByName('androidComponents').finalizeDsl { android ->
+                android.defaultConfig.applicationId = 'cn.com.omnimind.bot.boundaryperf'
+                android.productFlavors.all { flavor ->
+                    flavor.applicationId = 'cn.com.omnimind.bot.boundaryperf'
+                    flavor.applicationIdSuffix = ''
+                }
+                def profile = android.buildTypes.maybeCreate('profile')
+                profile.initWith(android.buildTypes.getByName('debug'))
+                profile.applicationIdSuffix = ''
+                profile.matchingFallbacks = ['debug']
+                profile.debuggable = true
+                profile.minifyEnabled = false
+                profile.shrinkResources = false
+                profile.buildConfigField('boolean', 'ENABLE_LLMTHU_BOOTSTRAP', 'false')
+                ['DEBUG_LLMTHU_API_KEY', 'DEBUG_LLMTHU_API_BASE', 'DEBUG_LLMTHU_MODEL'].each {
+                    profile.buildConfigField('String', it, '""')
+                }
+            }
+        }
+    }
+}

@@ -2,8 +2,9 @@ package cn.com.omnimind.bot.agent
 
 import android.content.Context
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
+import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
+import cn.com.omnimind.baselib.shizuku.ShizukuBackend
 import cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
-import cn.com.omnimind.baselib.privileged.PrivilegedSource
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.tool.AgentCapabilityToolDefinition
 import cn.com.omnimind.bot.plugin.OmniPluginToolDefinition
@@ -55,36 +56,49 @@ class AgentToolRegistry(
                 includeVlmTool = includeVlmTool,
             )
         )
-        if (privilegedStatus.selected != PrivilegedSource.NONE) {
-            val privilegedVisibleActions = privilegedStatus.availableActions
+        if (privilegedStatus.isGranted()) {
+            val privilegedVisibleActions = privilegedStatus.availableActions.ifEmpty {
+                PrivilegedActionPolicy.visibleAgentActions(
+                    if (privilegedStatus.backend == ShizukuBackend.ROOT) {
+                        ShizukuBackend.ROOT
+                    } else {
+                        ShizukuBackend.ADB
+                    }
+                )
+            }
             runtimeDefinitions.add(
                 AgentToolDefinitions.androidPrivilegedActionTool(
                     visibleActions = privilegedVisibleActions,
-                    backend = privilegedStatus.authority,
+                    backend = privilegedStatus.backend,
+                    provider = privilegedStatus.provider,
                     locale = locale
                 )
             )
             runtimeDefinitions.add(
                 AgentToolDefinitions.androidPrivilegedSessionStartTool(
-                    backend = privilegedStatus.authority,
+                    backend = privilegedStatus.backend,
+                    provider = privilegedStatus.provider,
                     locale = locale
                 )
             )
             runtimeDefinitions.add(
                 AgentToolDefinitions.androidPrivilegedSessionExecTool(
-                    backend = privilegedStatus.authority,
+                    backend = privilegedStatus.backend,
+                    provider = privilegedStatus.provider,
                     locale = locale
                 )
             )
             runtimeDefinitions.add(
                 AgentToolDefinitions.androidPrivilegedSessionReadTool(
-                    backend = privilegedStatus.authority,
+                    backend = privilegedStatus.backend,
+                    provider = privilegedStatus.provider,
                     locale = locale
                 )
             )
             runtimeDefinitions.add(
                 AgentToolDefinitions.androidPrivilegedSessionStopTool(
-                    backend = privilegedStatus.authority,
+                    backend = privilegedStatus.backend,
+                    provider = privilegedStatus.provider,
                     locale = locale
                 )
             )

@@ -30,10 +30,15 @@ class _SvgTestAssetBundle extends CachingAssetBundle {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const assistChannel = MethodChannel('cn.com.omnimind.bot/AssistCoreEvent');
+  const agentEventsChannel = MethodChannel(
+    'cn.com.omnimind.bot/AgentRuntimeEvents',
+  );
 
   setUp(() async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     await StorageService.init();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(agentEventsChannel, (call) async => null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(assistChannel, (call) async {
           switch (call.method) {
@@ -51,6 +56,8 @@ void main() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(assistChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(agentEventsChannel, null);
   });
 
   testWidgets('keeps only five primary drawer shortcuts', (tester) async {

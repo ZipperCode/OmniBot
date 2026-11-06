@@ -7,15 +7,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
-import cn.com.omnimind.baselib.permission.PermissionRequest
-import kotlinx.coroutines.suspendCancellableCoroutine
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
-import kotlin.coroutines.resume
 
 data class CalendarEventCreateRequest(
     val title: String,
@@ -34,7 +31,8 @@ data class CalendarEventListRequest(
     val startAt: String?,
     val endAt: String?,
     val query: String?,
-    val limit: Int?
+    val limit: Int?,
+    val offset: Int = 0
 )
 
 /** An omitted limit means that the Android calendar provider decides the result size. */
@@ -56,8 +54,15 @@ data class CalendarEventUpdateRequest(
 )
 
 class AgentCalendarToolService(
-    private val context: Context
+    private val context: Context,
+    private val cancellation: android.os.CancellationSignal? = null
 ) {
+
+    private fun query(uri: android.net.Uri, projection: Array<String>, selection: String?, arguments: Array<String>?, order: String?): android.database.Cursor {
+        cancellation?.throwIfCanceled()
+        return context.contentResolver.query(uri, projection, selection, arguments, order, cancellation)
+            ?: throw IllegalStateException("Calendar provider is unavailable")
+    }
 
     private data class EventSnapshot(
         val eventId: Long,
@@ -71,7 +76,7 @@ class AgentCalendarToolService(
         val allDay: Boolean
     )
 
-    fun hasCalendarPermissions(): Boolean {
+    fun hasCalendarPermissions(write: Boolean = false): Boolean {
         val readGranted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.READ_CALENDAR
@@ -80,25 +85,7 @@ class AgentCalendarToolService(
             context,
             Manifest.permission.WRITE_CALENDAR
         ) == PackageManager.PERMISSION_GRANTED
-        return readGranted && writeGranted
-    }
-
-    suspend fun requestCalendarPermissions(): Boolean {
-        return suspendCancellableCoroutine { continuation ->
-            PermissionRequest.requestPermissions(
-                context,
-                arrayOf(
-                    Manifest.permission.READ_CALENDAR,
-                    Manifest.permission.WRITE_CALENDAR
-                )
-            ) { result ->
-                if (!continuation.isCompleted) {
-                    val granted = result[Manifest.permission.READ_CALENDAR] == true &&
-                        result[Manifest.permission.WRITE_CALENDAR] == true
-                    continuation.resume(granted)
-                }
-            }
-        }
+        return readGranted && (!write || writeGranted)
     }
 
     fun listCalendars(
@@ -131,7 +118,7 @@ class AgentCalendarToolService(
         val orderBy = "${CalendarContract.Calendars.IS_PRIMARY} DESC, ${CalendarContract.Calendars.CALENDAR_DISPLAY_NAME} ASC"
 
         val items = mutableListOf<Map<String, Any?>>()
-        val cursor = context.contentResolver.query(
+        val cursor = query(
             CalendarContract.Calendars.CONTENT_URI,
             projection,
             selection,
@@ -139,7 +126,7 @@ class AgentCalendarToolService(
             orderBy
         )
 
-        cursor?.use {
+        cursor.use {
             while (it.moveToNext()) {
                 val id = it.getLong(0)
                 val displayName = it.getString(1).orEmpty()
@@ -179,7 +166,7 @@ class AgentCalendarToolService(
             put(CalendarContract.Events.TITLE, request.title.trim())
             put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
             put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
-            put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
+            put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
             put(CalendarContract.Events.ALL_DAY, if (request.allDay) 1 else 0)
             if (!request.description.isNullOrBlank()) {
                 put(CalendarContract.Events.DESCRIPTION, request.description.trim())
@@ -190,6 +177,7 @@ class AgentCalendarToolService(
             put(CalendarContract.Events.HAS_ALARM, if (request.reminderMinutes.isNotEmpty()) 1 else 0)
         }
 
+        cancellation?.throwIfCanceled()
         val insertedUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
             ?: throw IllegalStateException("创建日程失败")
         val eventId = insertedUri.lastPathSegment?.toLongOrNull()
@@ -206,7 +194,7 @@ class AgentCalendarToolService(
             "title" to request.title.trim(),
             "startAt" to normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
             "endAt" to normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "timezone" to zone.id,
+            "timezone" to normalizedStart.zone.id,
             "allDay" to request.allDay,
             "reminderMinutes" to request.reminderMinutes,
             "summary" to "已创建日程“${request.title.trim()}”"
@@ -215,6 +203,7 @@ class AgentCalendarToolService(
 
     fun listEvents(request: CalendarEventListRequest): Map<String, Any?> {
         val limit = resolveCalendarListLimit(request.limit)
+        require(request.offset >= 0) { "offset must not be negative" }
         val defaultZone = ZoneId.systemDefault()
         val now = ZonedDateTime.now(defaultZone)
 
@@ -264,10 +253,10 @@ class AgentCalendarToolService(
         }
 
         val selection = selectionParts.takeIf { it.isNotEmpty() }?.joinToString(" AND ")
-        val orderBy = "${CalendarContract.Instances.BEGIN} ASC"
+        val orderBy = "${CalendarContract.Instances.BEGIN} ASC, ${CalendarContract.Instances.EVENT_ID} ASC"
 
         val items = mutableListOf<Map<String, Any?>>()
-        val cursor = context.contentResolver.query(
+        val cursor = query(
             builder.build(),
             projection,
             selection,
@@ -275,8 +264,11 @@ class AgentCalendarToolService(
             orderBy
         )
 
-        cursor?.use {
-            while (it.moveToNext() && (limit == null || items.size < limit)) {
+        cursor.use {
+            var skipped = 0
+            while (it.moveToNext() && (limit == null || items.size <= limit)) {
+                cancellation?.throwIfCanceled()
+                if (skipped++ < request.offset) continue
                 val eventId = it.getLong(0)
                 val calendarId = it.getLong(1)
                 val title = it.getString(2).orEmpty()
@@ -304,11 +296,14 @@ class AgentCalendarToolService(
 
         return mapOf(
             "success" to true,
-            "count" to items.size,
+            "count" to if (limit == null) items.size else minOf(items.size, limit),
             "limit" to limit,
+            "offset" to request.offset,
+            "hasMore" to (limit != null && items.size > limit),
+            "nextOffset" to if (limit != null && items.size > limit) request.offset + limit else null,
             "rangeStart" to rangeStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
             "rangeEnd" to rangeEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "items" to items
+            "items" to (limit?.let(items::take) ?: items)
         )
     }
 
@@ -341,13 +336,14 @@ class AgentCalendarToolService(
             )
             put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
             put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
-            put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
+            put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
             put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
             if (request.reminderMinutes != null) {
                 put(CalendarContract.Events.HAS_ALARM, if (request.reminderMinutes.isNotEmpty()) 1 else 0)
             }
         }
 
+        cancellation?.throwIfCanceled()
         val updated = context.contentResolver.update(
             ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
             values,
@@ -368,7 +364,7 @@ class AgentCalendarToolService(
             "title" to (request.title?.trim()?.ifBlank { current.title } ?: current.title),
             "startAt" to normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
             "endAt" to normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "timezone" to zone.id,
+            "timezone" to normalizedStart.zone.id,
             "allDay" to allDay,
             "reminderMinutes" to (request.reminderMinutes ?: loadReminderMinutes(eventId)),
             "summary" to "已更新日程“${request.title?.trim()?.ifBlank { current.title } ?: current.title}”"
@@ -381,6 +377,7 @@ class AgentCalendarToolService(
         val snapshot = loadEventSnapshot(eventId)
             ?: throw IllegalArgumentException("未找到对应日程")
 
+        cancellation?.throwIfCanceled()
         val deleted = context.contentResolver.delete(
             ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
             null,
@@ -410,7 +407,7 @@ class AgentCalendarToolService(
             CalendarContract.Events.ALL_DAY
         )
 
-        val cursor = context.contentResolver.query(
+        val cursor = query(
             ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
             projection,
             null,
@@ -418,7 +415,7 @@ class AgentCalendarToolService(
             null
         )
 
-        cursor?.use {
+        cursor.use {
             if (it.moveToFirst()) {
                 return EventSnapshot(
                     eventId = it.getLong(0),
@@ -462,7 +459,7 @@ class AgentCalendarToolService(
 
         val selection = "${CalendarContract.Calendars._ID} = ?"
         val args = arrayOf(calendarId.toString())
-        val cursor = context.contentResolver.query(
+        val cursor = query(
             CalendarContract.Calendars.CONTENT_URI,
             projection,
             selection,
@@ -470,7 +467,7 @@ class AgentCalendarToolService(
             null
         )
 
-        cursor?.use {
+        cursor.use {
             if (it.moveToFirst()) {
                 val accessLevel = it.getInt(1)
                 val visible = it.getInt(2) == 1
@@ -506,7 +503,7 @@ class AgentCalendarToolService(
         val projection = arrayOf(
             CalendarContract.Reminders.MINUTES
         )
-        val cursor = context.contentResolver.query(
+        val cursor = query(
             CalendarContract.Reminders.CONTENT_URI,
             projection,
             "${CalendarContract.Reminders.EVENT_ID} = ?",
@@ -515,7 +512,7 @@ class AgentCalendarToolService(
         )
 
         val result = mutableListOf<Int>()
-        cursor?.use {
+        cursor.use {
             while (it.moveToNext()) {
                 result += it.getInt(0)
             }
@@ -532,8 +529,12 @@ class AgentCalendarToolService(
         val normalizedEnd: ZonedDateTime
 
         if (allDay) {
-            normalizedStart = start.toLocalDate().atStartOfDay(start.zone)
-            normalizedEnd = end.toLocalDate().plusDays(1).atStartOfDay(start.zone)
+            // Calendar Provider 的全天日期使用 UTC 午夜，结束日期不包含在事件内。
+            val firstDate = start.toLocalDate()
+            val endDate = end.toLocalDate()
+            normalizedStart = firstDate.atStartOfDay(ZoneId.of("UTC"))
+            normalizedEnd = (if (endDate == firstDate) firstDate.plusDays(1) else endDate)
+                .atStartOfDay(ZoneId.of("UTC"))
         } else {
             normalizedStart = start
             normalizedEnd = end

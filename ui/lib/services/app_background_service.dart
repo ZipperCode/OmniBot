@@ -199,7 +199,7 @@ class AppBackgroundConfig {
     required this.focalX,
     required this.focalY,
     this.imageScale = 1,
-    this.chatTextSize = 14,
+    this.chatTextSize = 15,
     this.chatTextColorMode = AppBackgroundTextColorMode.auto,
     this.chatTextHexColor = '',
   });
@@ -215,7 +215,7 @@ class AppBackgroundConfig {
     focalX: 0,
     focalY: 0,
     imageScale: 1,
-    chatTextSize: 14,
+    chatTextSize: 15,
     chatTextColorMode: AppBackgroundTextColorMode.auto,
     chatTextHexColor: '',
   );

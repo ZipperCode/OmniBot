@@ -15,7 +15,13 @@ extension ChatComposerKeyboardPhaseBehavior on ChatComposerKeyboardPhase {
   }
 }
 
-enum ChatComposerPopup { legacyActions, agentRunSettings, agentPermission }
+enum ChatComposerPopup {
+  legacyActions,
+  agentRunSettings,
+  agentPermission,
+  compactActions,
+  runtimeConfiguration,
+}
 
 enum ChatComposerPrimaryAction { cancel, send, addAttachment, disabled }
 

@@ -1,5 +1,7 @@
 package cn.com.omnimind.bot.agent.tool.search
 
+import cn.com.omnimind.baselib.i18n.PromptLocale
+import cn.com.omnimind.bot.agent.AgentToolDefinitions
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.contentOrNull
@@ -45,6 +47,15 @@ class WebSearchToolDefinitionsTest {
         assertEquals(3, tools.size)
         assertEquals(WebSearchToolDefinitions.toolNames, tools.map { it.functionName() }.toSet())
         tools.forEach { assertTrue(it["type"]?.jsonPrimitive?.contentOrNull == "function") }
+    }
+
+    @Test
+    fun `上游工具目录保留联网搜索入口和名称预留`() {
+        // 合并个人上下文工具后，联网搜索仍须进入统一目录并防止插件名称冲突。
+        val staticNames = AgentToolDefinitions.staticTools(PromptLocale.EN_US)
+            .map { it.functionName() }.toSet()
+        assertTrue(staticNames.containsAll(WebSearchToolDefinitions.toolNames))
+        assertTrue(AgentToolDefinitions.reservedToolNames().containsAll(WebSearchToolDefinitions.toolNames))
     }
 
     @Test

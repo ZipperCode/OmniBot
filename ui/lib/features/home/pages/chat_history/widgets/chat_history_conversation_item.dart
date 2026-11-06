@@ -57,28 +57,11 @@ class ChatHistoryConversationItem extends StatelessWidget {
           child: Container(
             padding: contentPadding,
             decoration: BoxDecoration(
-              color: context.isDarkTheme
-                  ? palette.surfacePrimary
-                  : Colors.white,
+              color: palette.surfacePrimary,
               borderRadius: borderRadius,
               border: context.isDarkTheme
                   ? Border.all(color: palette.borderSubtle)
                   : null,
-              boxShadow: context.isDarkTheme
-                  ? [
-                      BoxShadow(
-                        color: palette.shadowColor.withValues(alpha: 0.18),
-                        blurRadius: 14,
-                        offset: const Offset(0, 6),
-                      ),
-                    ]
-                  : [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: compact ? 8 : 10,
-                        offset: Offset(0, compact ? 1.5 : 2),
-                      ),
-                    ],
             ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -88,25 +71,7 @@ class ChatHistoryConversationItem extends StatelessWidget {
                     width: compact ? 36 : 40,
                     height: compact ? 36 : 40,
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: context.isDarkTheme
-                            ? <Color>[
-                                Color.lerp(
-                                  palette.surfaceElevated,
-                                  palette.accentPrimary,
-                                  0.18,
-                                )!,
-                                Color.lerp(
-                                  palette.surfaceSecondary,
-                                  palette.accentPrimary,
-                                  0.3,
-                                )!,
-                              ]
-                            : const <Color>[
-                                Color(0xFF1930D9),
-                                Color(0xFF2CA5F0),
-                              ],
-                      ),
+                      color: palette.textPrimary,
                       borderRadius: BorderRadius.all(
                         Radius.circular(compact ? 7 : 8),
                       ),
@@ -116,9 +81,7 @@ class ChatHistoryConversationItem extends StatelessWidget {
                     ),
                     child: Icon(
                       Icons.chat_bubble_outline,
-                      color: context.isDarkTheme
-                          ? palette.textPrimary
-                          : Colors.white,
+                      color: palette.pageBackground,
                       size: compact ? 18 : 20,
                     ),
                   ),
@@ -138,7 +101,7 @@ class ChatHistoryConversationItem extends StatelessWidget {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                fontSize: compact ? 15 : 16,
+                                fontSize: 15,
                                 fontWeight: FontWeight.w500,
                                 color: context.isDarkTheme
                                     ? palette.textPrimary

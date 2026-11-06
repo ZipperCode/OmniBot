@@ -2,6 +2,8 @@ package cn.com.omnimind.baselib.llm
 
 import cn.com.omnimind.baselib.util.RuntimeLogEntry
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.FieldNamingPolicy
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import org.junit.Assert.assertEquals
@@ -12,6 +14,35 @@ import org.junit.Test
 
 class PersistedJsonCompatibilityTest {
     private val gson = Gson()
+
+    @Test
+    fun providerModelCatalogUsesStableJsonNamesForFlutterEvenUnderADifferentNamingPolicy() {
+        val model = ProviderModelOption(
+            id = "fixture-model", displayName = "Fixture Model", ownedBy = "fixture",
+            contextLimit = 128000, inputLimit = 96000, outputLimit = 32000,
+            inputModalities = listOf("text", "image"), outputModalities = listOf("text"),
+            modelsDevProviderId = "fixture", modelsDevProviderName = "Fixture Provider",
+            providerLogoUrl = "https://example.invalid/logo.svg", family = "fixture", group = "chat",
+            attachment = true, reasoning = true, supportedReasoningLevels = listOf("low", "high"),
+            defaultReasoningLevel = "low", reasoningCanDisable = true, reasoningDefaultEnabled = false,
+            reasoningSupportsAdaptive = true, reasoningCapabilitySource = "provider",
+            reasoningWireFormat = "deepseek", reasoningEffortSupported = true, reasoningContentRequired = true,
+            toolCall = true, structuredOutput = true, temperature = false,
+        )
+        val namingIndependentGson = GsonBuilder()
+            .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES).create()
+        val encoded = namingIndependentGson.toJsonTree(model).asJsonObject
+        assertEquals(setOf(
+            "id", "displayName", "ownedBy", "contextLimit", "inputLimit", "outputLimit",
+            "inputModalities", "outputModalities", "modelsDevProviderId", "modelsDevProviderName",
+            "providerLogoUrl", "family", "group", "attachment", "reasoning", "supportedReasoningLevels",
+            "defaultReasoningLevel", "toolCall", "structuredOutput", "temperature",
+            "reasoningCanDisable", "reasoningDefaultEnabled", "reasoningCapabilitySource",
+            "reasoningSupportsAdaptive",
+            "reasoningWireFormat", "reasoningEffortSupported", "reasoningContentRequired",
+        ), encoded.keySet())
+        assertEquals(model, gson.fromJson(encoded, ProviderModelOption::class.java))
+    }
 
     @Test
     fun providerProfiles_ignoreUnknownEntriesAndKeepRecognizedProfiles() {

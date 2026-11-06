@@ -11,7 +11,7 @@ void main() {
       'safHandle': {'uri': 'content://documents/42', 'access': 'read'},
     });
     expect(pickedAttachmentMetadata(file), (
-      path: '/nonexistent/report.pdf',
+      path: Uri.file('/nonexistent/report.pdf').toFilePath(),
       size: 42,
     ));
   });
@@ -55,7 +55,7 @@ void main() {
           bytesLength: 0,
         ),
       ),
-      (path: '/empty', size: null),
+      (path: Uri.file('/empty').toFilePath(), size: null),
     );
   });
 }

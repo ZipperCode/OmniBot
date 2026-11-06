@@ -9,16 +9,70 @@ import org.junit.Test
 /** Exercise the actual shipped catalog, so a new profile cannot bypass mapping coverage. */
 class AgentAdapterCatalogTest {
     @Test
+    fun shippedCatalogLocalizesLabelsWhilePreservingChineseAndRuntimeDefinitions() {
+        val source = File("src/main/assets/acp/agents.json").readText()
+        val assetReader = { path: String -> File("src/main/assets/$path").readText() }
+        val english = AcpAgentCatalog.parse(source, isEnglishLocale = true, assetReader = assetReader)
+        val chinese = AcpAgentCatalog.parse(source, assetReader = assetReader)
+
+        val englishXiaowan = requireNotNull(english.definition("xiaowan-acp"))
+        assertEquals("Omnibot", englishXiaowan.name)
+        assertEquals(
+            "Omnibot's built-in capabilities through the official ACP Agent interface",
+            englishXiaowan.description,
+        )
+        val englishNa = requireNotNull(english.definition("na-cloud"))
+        assertEquals("Na", englishNa.name)
+        assertEquals(
+            "Cloud personal assistant with its own models, long-term memory, and tasks",
+            englishNa.description,
+        )
+
+        val chineseXiaowan = requireNotNull(chinese.definition("xiaowan-acp"))
+        assertEquals("小万", chineseXiaowan.name)
+        assertEquals("小万内置能力通过官方 ACP Agent 接口提供", chineseXiaowan.description)
+        val chineseNa = requireNotNull(chinese.definition("na-cloud"))
+        assertEquals("Na", chineseNa.name)
+        assertEquals("云端个人助手 · 独立模型、长期记忆与任务", chineseNa.description)
+
+        assertEquals(chinese.officialIds, english.officialIds)
+        assertEquals(chinese.retiredAgentIds, english.retiredAgentIds)
+        english.agents.forEach { translated ->
+            val original = requireNotNull(chinese.definition(translated.id))
+            assertEquals(
+                translated.id,
+                original,
+                translated.copy(name = original.name, description = original.description),
+            )
+        }
+    }
+
+    @Test
     fun everyShippedHarnessHasAnExplicitConfigurationOwner() {
+        val evidenceDirectory = File("build/reports/harness-adapters")
+        evidenceDirectory.mkdirs()
+        // This owner publishes a complete snapshot. Retired adapters must not
+        // survive in old reports consumed by the installed-Harness verifiers.
+        evidenceDirectory.listFiles { file -> file.isFile && file.extension == "json" }
+            .orEmpty().forEach { file ->
+                check(file.delete()) { "Unable to remove stale adapter report: ${file.name}" }
+            }
         val profiles = AcpAgentCatalog.parse(File("src/main/assets/acp/agents.json").readText()) {
             File("src/main/assets/$it").readText()
         }.agents
-        assertEquals(6, profiles.size)
+        assertEquals(7, profiles.size)
         for (profile in profiles) {
             val runtime = requireNotNull(AcpAgentProfileStore.officialRuntime(profile))
             val adapter = runtime.harnessAdapter
-            if (profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
-                assertNull(adapter.configAdapterId) // In-process Provider execution, no deployment file.
+            if (profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID || profile.id == NA_AGENT_ID) {
+                // Embedded agents own configuration in-process (Xiaowan) or in the cloud (Na).
+                assertTrue(profile.id, runtime.embedded)
+                assertNull(profile.id, adapter.configAdapterId)
+                assertEquals(
+                    profile.id,
+                    profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID,
+                    runtime.usesSharedProvider,
+                )
                 continue
             }
             assertNotNull(profile.id, adapter.configAdapterId)
@@ -45,8 +99,7 @@ class AgentAdapterCatalogTest {
                 val files = AgentConfigAdapterRegistry.launchConfigWrites(input, mapping, catalog, "{}")
                 val refreshFiles = AgentConfigAdapterRegistry.launchConfigWrites(input, mapping,
                     catalog + ProviderModelOption(id = "org/new-model"), "{}")
-                val evidence = File("build/reports/harness-adapters/${adapter.configAdapterId}-$protocol-$wire.json")
-                evidence.parentFile.mkdirs()
+                val evidence = File(evidenceDirectory, "${adapter.configAdapterId}-$protocol-$wire.json")
                 evidence.writeText(com.google.gson.Gson().toJson(mapOf(
                     "harness" to adapter.configAdapterId, "protocol" to protocol, "wire" to wire,
                     "environment" to mapping.environment, "files" to files, "refreshFiles" to refreshFiles,
@@ -61,11 +114,11 @@ class AgentAdapterCatalogTest {
                 when (adapter.configAdapterId) {
                     "open-code" -> {
                         val sdk = JsonParser.parseString(files.single().content).asJsonObject
-                            .getAsJsonObject("provider").getAsJsonObject("omnibot")["npm"].asString
+                            .getAsJsonObject("providers").getAsJsonObject("omnibot")["package"].asString
                         assertEquals(when {
-                            protocol == "anthropic" -> "@ai-sdk/anthropic"
-                            wire == "responses" -> "@ai-sdk/openai"
-                            else -> "@ai-sdk/openai-compatible"
+                            protocol == "anthropic" -> "@opencode/ai/providers/anthropic-compatible"
+                            wire == "responses" -> "@opencode/ai/providers/openai-compatible/responses"
+                            else -> "@opencode/ai/providers/openai-compatible"
                         }, sdk)
                     }
                     "kimi-code" -> {
@@ -79,7 +132,7 @@ class AgentAdapterCatalogTest {
                     }
                     "claude-code" -> assertEquals("fixture-key", mapping.environment["ANTHROPIC_API_KEY"])
                     "codex" -> assertEquals("responses", mapping.codexWireApi)
-                    "deepseek-harness" -> assertTrue(files.single().content.contains(when {
+                    "pi" -> assertTrue(files.single().content.contains(when {
                         protocol == "anthropic" -> "anthropic-messages"
                         wire == "responses" -> "openai-responses"
                         else -> "openai-completions"

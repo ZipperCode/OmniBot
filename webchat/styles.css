@@ -538,18 +538,29 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.archive-popover {
+.archive-popover-anchor.expanded,
+.new-conversation-anchor.expanded {
+  z-index: 11;
+}
+
+.archive-popover,
+.new-conversation-menu {
+  --menu-anchor-x: calc(100% - 16px);
   position: absolute;
-  top: calc(100% + 8px);
-  right: -42px;
-  width: 228px;
-  overflow: hidden;
+  top: 0;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 20px;
   background: var(--surface);
-  box-shadow: 0 16px 40px rgb(26 36 51 / 16%);
-  transform-origin: top right;
-  animation: menu-in 160ms cubic-bezier(.22, 1, .36, 1) both;
+  box-shadow: 0 6px 16px rgb(26 36 51 / 5%), 0 18px 44px rgb(26 36 51 / 12%);
+  transform-origin: var(--menu-anchor-x) 16px;
+  animation: anchored-menu-in 220ms cubic-bezier(.22, 1, .36, 1) both;
+}
+
+.archive-popover {
+  --menu-anchor-x: calc(100% - 58px);
+  right: -42px;
+  width: min(228px, calc(80vw - 32px));
+  overflow: hidden;
 }
 
 .archive-popover-header {
@@ -701,17 +712,12 @@ button:disabled {
 }
 
 .new-conversation-menu {
-  position: absolute;
-  top: calc(100% + 8px);
   right: 0;
-  width: 164px;
+  width: min(180px, calc(80vw - 32px));
+  max-height: calc(100svh - 100px);
+  overflow-y: auto;
+  scrollbar-width: thin;
   padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
-  box-shadow: 0 14px 36px rgb(26 36 51 / 14%);
-  transform-origin: top right;
-  animation: menu-in 160ms cubic-bezier(.22, 1, .36, 1) both;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -2696,6 +2702,11 @@ button.conversation-section-header:hover {
 @keyframes menu-in {
   from { opacity: 0; transform: translateY(-4px) scale(.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes anchored-menu-in {
+  from { opacity: 0; transform: scale(.9); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 @keyframes fade-in {

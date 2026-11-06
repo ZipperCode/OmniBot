@@ -1,332 +1,231 @@
 package cn.com.omnimind.baselib.privileged
 
-import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
-import android.content.pm.PackageManager
-import android.os.IBinder
-import com.tencent.mmkv.MMKV
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CancellationException
+import android.os.Process
+import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runInterruptible
-import kotlinx.serialization.json.Json
-import rikka.shizuku.Shizuku
+import java.io.File
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+import cn.com.omnimind.baselib.privileged.PrivilegedSessionRegistry.Binding as SessionBinding
 
-class PrivilegedCapabilityManager private constructor(context: Context) {
-    private val app = context.applicationContext
-    private val admission = Mutex()
-    private val authorizationLock = Mutex()
-    private val launcher = StandardPrivilegedShellLauncher()
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val sessionSources = ConcurrentHashMap<String, PrivilegedSource>()
-    @Volatile private var grant: Grant? = null
-    @Volatile private var service: IOmnibotPrivilegedUserService? = null
-    @Volatile private var pending: CompletableDeferred<IOmnibotPrivilegedUserService?>? = null
-    @Volatile private var binderDead = false
-    @Volatile private var authorizationFailure: PrivilegedStatusCode? = null
-    private data class Grant(val source: PrivilegedSource, val authority: PrivilegedAuthority, val uid: Int, val path: String?)
-
-    private val args = Shizuku.UserServiceArgs(ComponentName(app, OmnibotPrivilegedUserService::class.java))
-        .daemon(false).processNameSuffix("omnibot_privileged").tag("omnibot-privileged-agent").version(4)
-    private val connection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = binder?.let(IOmnibotPrivilegedUserService.Stub::asInterface)
-            pending?.takeIf { !it.isCompleted }?.complete(service)
-        }
-        override fun onServiceDisconnected(name: ComponentName?) = clearService()
-        override fun onBindingDied(name: ComponentName?) = clearService()
-        override fun onNullBinding(name: ComponentName?) = clearService()
-        private fun clearService() { service = null; pending?.takeIf { !it.isCompleted }?.complete(null) }
+data class PrivilegedStatus(
+    val provider: PrivilegedProvider = PrivilegedProvider.NONE,
+    val backend: PrivilegedBackend = PrivilegedBackend.NONE,
+    val generation: Long = 0,
+    val availableActions: List<String> = emptyList(),
+) {
+    fun isGranted(): Boolean = provider != PrivilegedProvider.NONE && backend != PrivilegedBackend.NONE
+    val label: String get() = when (provider) {
+        PrivilegedProvider.ROOT -> "Root"
+        PrivilegedProvider.SHIZUKU -> "Shizuku (${backend.name})"
+        PrivilegedProvider.NONE -> "Unavailable"
     }
+    companion object {
+        fun selectBackend(root: RootAccessSnapshot, shizuku: PrivilegedStatus): PrivilegedStatus = if (root.granted) {
+            PrivilegedStatus(PrivilegedProvider.ROOT, PrivilegedBackend.ROOT, root.generation,
+                PrivilegedActionPolicy.visibleAgentActions(PrivilegedBackend.ROOT))
+        } else shizuku
+    }
+
+}
+
+/** 只选择执行后端，Agent 的会话、确认和工具生命周期仍由 ACP 持有。 */
+class PrivilegedCapabilityManager private constructor(context: Context) {
+    private val appContext = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val shizuku = ShizukuCapabilityManager.get(appContext)
+    private val sessions = PrivilegedSessionRegistry()
+    private val userId = Process.myUid() / 100000
+    private lateinit var root: RootAccessController
+    private val runner = PrivilegedProcessRunner(
+        root = true,
+        leaseDirectory = File(appContext.cacheDir, "privileged-processes"),
+        ownerPid = Process.myPid(),
+        admission = { root.snapshot.enabled },
+        accessDenied = { root.markDenied() },
+    )
+    private val rootExecutor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT, runner)
+    private val device = PrivilegedDeviceController(appContext, userId)
 
     init {
-        runCatching {
-            Shizuku.addBinderReceivedListenerSticky { binderDead = false }
-            Shizuku.addBinderDeadListener { binderDead = true; service = null; grant = null }
-        }
+        // 进程恢复时撤销上次进程遗留的租约，不启动 su，也不保留跨进程 shell。
+        File(appContext.cacheDir, "privileged-processes").listFiles()
+            ?.filter { it.name.startsWith("process-") && it.name.endsWith(".lease") }
+            ?.forEach { it.delete() }
+        val prefs = appContext.getSharedPreferences("omni_root_access", Context.MODE_PRIVATE)
+        root = RootAccessController(
+            preferences = object : RootAccessPreferences {
+                override var enabled: Boolean
+                    get() = prefs.getBoolean("enabled", false)
+                    set(value) { prefs.edit().putBoolean("enabled", value).apply() }
+                override var previouslyGranted: Boolean
+                    get() = prefs.getBoolean("previously_granted", false)
+                    set(value) { prefs.edit().putBoolean("previously_granted", value).apply() }
+            },
+            scope = scope,
+            probe = {
+                val result = runInterruptible {
+                    runner.execute("root-probe", listOf("/system/bin/id", "-u"), 30)
+                }
+                when {
+                    result.success && result.stdout.trim() == "0" -> RootAccessStatus.GRANTED
+                    result.timedOut -> RootAccessStatus.TIMED_OUT
+                    result.errorCode == "root_denied" -> RootAccessStatus.DENIED
+                    else -> RootAccessStatus.UNAVAILABLE
+                }
+            },
+            revoke = {
+                rootExecutor.shutdown()
+                sessions.removeProvider(PrivilegedProvider.ROOT)
+            },
+        )
     }
 
-    fun selectedSource(): PrivilegedSource = runCatching {
-        PrivilegedSource.valueOf(MMKV.defaultMMKV()?.decodeString(SOURCE_KEY, "none").orEmpty().uppercase())
-    }.getOrDefault(PrivilegedSource.NONE)
+    fun initialize() { root.initialize() }
+    fun rootStatus(): RootAccessSnapshot = root.snapshot
+    suspend fun setRootEnabled(enabled: Boolean): RootAccessSnapshot = root.setEnabled(enabled)
+    suspend fun requestRootAccess(): RootAccessSnapshot = root.requestAccess()
 
-    /** 被动读取不启动进程，也不检查 su 文件。 */
     fun getStatus(): PrivilegedStatus {
-        val selected = selectedSource()
-        grant?.takeIf { it.source == selected }?.let {
-            return PrivilegedStatus(selected, PrivilegedStatusCode.GRANTED, it.authority, it.uid,
-                "Privileged source is authorized.", PrivilegedActionPolicy.visibleAgentActions(it.authority),
-                if (selected == PrivilegedSource.SHIZUKU) shizukuDetail() else null, it.path)
-        }
-        return when (selected) {
-            PrivilegedSource.NONE -> PrivilegedStatus(selected, PrivilegedStatusCode.NOT_SELECTED, message = "No privileged source selected.")
-            PrivilegedSource.SU -> {
-                val code = authorizationFailure ?: PrivilegedStatusCode.SU_NOT_AUTHORIZED
-                PrivilegedStatus(selected, code, message = code.wireValue)
-            }
-            PrivilegedSource.SHIZUKU -> {
-                val detail = shizukuDetail()
-                val code = when {
-                    authorizationFailure == PrivilegedStatusCode.AUTHORITY_UNEXPECTED -> PrivilegedStatusCode.AUTHORITY_UNEXPECTED
-                    !detail.installed -> PrivilegedStatusCode.SHIZUKU_NOT_INSTALLED
-                    !detail.running -> if (binderDead) PrivilegedStatusCode.SHIZUKU_BINDER_DEAD else PrivilegedStatusCode.SHIZUKU_NOT_RUNNING
-                    else -> PrivilegedStatusCode.SHIZUKU_PERMISSION_DENIED
-                }
-                PrivilegedStatus(selected, code, message = code.wireValue, shizuku = detail)
-            }
+        val other = shizuku.getStatus()
+        val shizukuStatus = if (other.isGranted()) status(PrivilegedProvider.SHIZUKU, other.backend, shizuku.generation) else PrivilegedStatus()
+        return PrivilegedStatus.selectBackend(root.snapshot, shizukuStatus)
+    }
+
+    fun reserve(ownerId: String, sessionId: String? = null, acpSessionId: String? = null): Access {
+        val selected = if (sessionId == null) getStatus() else sessions.selection(sessionId, ownerId, acpSessionId) ?: PrivilegedStatus()
+        return Access(ownerId, acpSessionId, selected)
+    }
+
+    suspend fun closeAcpSession(acpSessionId: String) {
+        sessions.forSession(acpSessionId).forEach { (sessionId, binding) ->
+            val result = Access(binding.ownerId, acpSessionId, binding.status).stopPrivilegedSession(sessionId)
+            check(result.success || result.code == "session_not_found") { "Could not close privileged shell: ${result.code}" }
         }
     }
 
-    suspend fun setSource(value: String): PrivilegedStatus = admission.withLock {
-        val source = runCatching { PrivilegedSource.valueOf(value.trim().uppercase()) }
-            .getOrElse { throw IllegalArgumentException("Unsupported privileged source: $value") }
-        stopSessionsForSource(selectedSource())
-        grant = null
-        authorizationFailure = null
-        MMKV.defaultMMKV()?.encode(SOURCE_KEY, source.name.lowercase())
-        getStatus()
-    }
-
-    suspend fun authorize(): PrivilegedStatus = authorizationLock.withLock {
-        admission.withLock {
-            grant = null
-            authorizationFailure = null
-            when (selectedSource()) {
-                PrivilegedSource.NONE -> Unit
-                PrivilegedSource.SU -> authorizeSu()
-                PrivilegedSource.SHIZUKU -> authorizeShizuku()
-            }
-            getStatus()
-        }
-    }
-
-    fun openSelectedSourceApp(): Boolean {
-        if (selectedSource() != PrivilegedSource.SHIZUKU) return false
-        return runCatching {
-            val intent = app.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE) ?: return false
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); app.startActivity(intent); true
-        }.getOrDefault(false)
-    }
-
-    suspend fun executeAgentAction(action: String, arguments: Map<String, String>, requiresConfirmation: Boolean = false) = execute(
-        PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.normalizeAction(action), arguments, requiresConfirmation)
+    private fun status(provider: PrivilegedProvider, backend: PrivilegedBackend, generation: Long) = PrivilegedStatus(
+        provider, backend, generation, PrivilegedActionPolicy.visibleAgentActions(backend)
     )
-    suspend fun executeRawShell(command: String, timeoutSeconds: Int? = null, workingDirectory: String? = null, environment: Map<String, String> = emptyMap(), confirmed: Boolean = false) = execute(
-        PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SHELL_EXEC, confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds, workingDirectory = workingDirectory, environment = environment)
-    )
-    suspend fun startPrivilegedSession(sessionId: String? = null, sessionName: String? = null, workingDirectory: String? = null, environment: Map<String, String> = emptyMap(), confirmed: Boolean = false): PrivilegedResult {
-        val values = confirmation(confirmed).toMutableMap(); sessionName?.let { values["sessionName"] = it }
-        return execute(PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_START, values, workingDirectory = workingDirectory, environment = environment, sessionId = sessionId))
+
+    private fun valid(status: PrivilegedStatus): Boolean = when (status.provider) {
+        PrivilegedProvider.ROOT -> root.snapshot.let { it.granted && it.generation == status.generation }
+        PrivilegedProvider.SHIZUKU -> shizuku.getStatus().let {
+            it.isGranted() && it.backend == status.backend && shizuku.generation == status.generation
+        }
+        PrivilegedProvider.NONE -> false
     }
-    suspend fun execPrivilegedSession(sessionId: String, command: String, timeoutSeconds: Int? = null, workingDirectory: String? = null, environment: Map<String, String> = emptyMap(), confirmed: Boolean = false) = execute(
-        PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_EXEC, confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds, workingDirectory = workingDirectory, environment = environment, sessionId = sessionId)
-    )
-    suspend fun readPrivilegedSession(sessionId: String, maxChars: Int? = null) = execute(
-        PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_READ, maxChars?.let { mapOf("maxChars" to it.toString()) }.orEmpty(), sessionId = sessionId)
-    )
-    suspend fun stopPrivilegedSession(sessionId: String): PrivilegedResult {
-        val request = PrivilegedRequest(UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_STOP, sessionId = sessionId)
-        return admission.withLock {
-            val normalizedId = sessionId.trim()
-            val source = sessionSources[normalizedId]
-                ?: return@withLock failure(request, PrivilegedSource.NONE, "session_not_found", "The privileged shell session does not exist.")
-            val result = when (source) {
-                PrivilegedSource.NONE -> failure(request, source, "session_not_found", "The privileged shell session does not exist.")
-                PrivilegedSource.SU -> runInterruptible(Dispatchers.IO) {
-                    PrivilegedCommandExecutor(source, launcher).execute(request)
+
+    inner class Access internal constructor(private val ownerId: String, private val acpSessionId: String?, val status: PrivilegedStatus) {
+        fun isValid(): Boolean = valid(status)
+
+        suspend fun executeAgentAction(action: String, arguments: Map<String, String>, requiresConfirmation: Boolean): PrivilegedResult =
+            execute(PrivilegedRequest(UUID.randomUUID().toString(), action, arguments, requiresConfirmation, userId = userId))
+
+        suspend fun executeRawShell(
+            command: String, timeoutSeconds: Int? = null, workingDirectory: String? = null,
+            environment: Map<String, String> = emptyMap(), confirmed: Boolean = false,
+        ): PrivilegedResult = execute(PrivilegedRequest(
+            UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SHELL_EXEC,
+            confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds,
+            workingDirectory = workingDirectory, environment = environment, userId = userId,
+        ))
+
+        suspend fun startPrivilegedSession(
+            sessionName: String? = null, workingDirectory: String? = null,
+            environment: Map<String, String> = emptyMap(), confirmed: Boolean = false,
+        ): PrivilegedResult {
+            require(!acpSessionId.isNullOrBlank()) { "An ACP session is required for a persistent privileged shell." }
+            val sessionId = UUID.randomUUID().toString()
+            val result = execute(PrivilegedRequest(
+                UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_START,
+                confirmation(confirmed) + mapOf("sessionName" to sessionName.orEmpty()),
+                workingDirectory = workingDirectory, environment = environment, sessionId = sessionId, userId = userId,
+            ), checkSession = false)
+            if (result.success) {
+                sessions.register(sessionId, SessionBinding(ownerId, acpSessionId, status))
+                if (!isValid()) {
+                    stopPrivilegedSession(sessionId)
+                    return failure(PrivilegedRequest(result.requestId, result.action), "privileged_access_changed")
                 }
-                PrivilegedSource.SHIZUKU -> executeRemoteTeardown(request)
             }
-            if (result.success || result.code == "session_not_found") sessionSources.remove(normalizedId, source)
-            result
+            return result
         }
-    }
 
-    private suspend fun execute(request: PrivilegedRequest): PrivilegedResult {
-        if (PrivilegedActionPolicy.normalizeAction(request.action) == PrivilegedActionPolicy.ACTION_SESSION_START) {
-            // 会话创建和路由登记共用来源准入锁，切源不能越过尚未登记的会话。
-            return admission.withLock { executeAdmitted(request, selectedSource()) }
-        }
-        val admitted = admission.withLock {
-            val source = selectedSource()
-            val current = grant?.takeIf { it.source == source }
-                ?: return@withLock null
-            source to current
-        } ?: return failure(request, selectedSource(), "permission_required", "Privileged source authorization is required.")
-        val (source, current) = admitted
-        return executeWithGrant(request, source, current, admissionHeld = false)
-    }
+        suspend fun execPrivilegedSession(sessionId: String, command: String, timeoutSeconds: Int?, confirmed: Boolean): PrivilegedResult =
+            execute(PrivilegedRequest(
+                UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_EXEC,
+                confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds, sessionId = sessionId, userId = userId,
+            ))
 
-    private suspend fun executeAdmitted(request: PrivilegedRequest, source: PrivilegedSource): PrivilegedResult {
-        val current = grant?.takeIf { it.source == source }
-            ?: return failure(request, source, "permission_required", "Privileged source authorization is required.")
-        return executeWithGrant(request, source, current, admissionHeld = true).also { result ->
-            if (result.success) result.sessionId?.trim()?.takeIf { it.isNotEmpty() }?.let { sessionSources[it] = source }
-        }
-    }
+        suspend fun readPrivilegedSession(sessionId: String): PrivilegedResult = execute(PrivilegedRequest(
+            UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_READ, sessionId = sessionId, userId = userId,
+        ))
 
-    private suspend fun executeWithGrant(request: PrivilegedRequest, source: PrivilegedSource, current: Grant, admissionHeld: Boolean): PrivilegedResult {
-        val result = when (source) {
-            PrivilegedSource.NONE -> failure(request, source, "permission_required", "No privileged source selected.")
-            PrivilegedSource.SU -> runInterruptible(Dispatchers.IO) {
-                PrivilegedCommandExecutor(source, launcher).execute(request)
+        suspend fun stopPrivilegedSession(sessionId: String): PrivilegedResult {
+            val request = PrivilegedRequest(
+                UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_STOP, sessionId = sessionId, userId = userId,
+            )
+            val binding = SessionBinding(ownerId, acpSessionId, status)
+            if (!sessions.owns(sessionId, binding)) return failure(request, "session_not_found")
+            // 关闭只释放已存在的进程，撤销权限之后仍然必须能够清理。
+            val result = when (status.provider) {
+                PrivilegedProvider.ROOT -> runInterruptible(Dispatchers.IO) { rootExecutor.execute(request) }
+                PrivilegedProvider.SHIZUKU -> shizuku.stopExistingSession(request, status.generation)
+                PrivilegedProvider.NONE -> failure(request, "session_not_found")
             }
-            PrivilegedSource.SHIZUKU -> executeRemote(request, current.authority)
+            if (result.success || result.code == "session_not_found") sessions.remove(sessionId, binding)
+            return result.copy(provider = status.provider, backend = status.backend)
         }
-        if (result.code in AUTHORIZATION_FAILURES) {
-            if (admissionHeld) {
-                if (grant == current) grant = null
-            } else admission.withLock {
-                if (grant == current) grant = null
+
+        private suspend fun execute(request: PrivilegedRequest, checkSession: Boolean = true): PrivilegedResult {
+            if (checkSession && request.sessionId != null && !sessions.owns(request.sessionId, SessionBinding(ownerId, acpSessionId, status))) {
+                return failure(request, "session_not_found")
             }
-        }
-        return result
-    }
-
-    private fun authorizeSu() {
-        val launched = runCatching { launcher.launch(PrivilegedSource.SU) }.getOrElse {
-            authorizationFailure = when (it) {
-                is SuUnavailableException -> PrivilegedStatusCode.SU_UNAVAILABLE
-                is SuDeniedException -> PrivilegedStatusCode.SU_DENIED
-                is AuthorityUnexpectedException -> PrivilegedStatusCode.AUTHORITY_UNEXPECTED
-                else -> PrivilegedStatusCode.SU_DENIED
+            if (!isValid()) return failure(request, "privileged_access_changed")
+            if (PrivilegedActionPolicy.requiresConfirmation(request.action) && request.arguments["confirmed"] != "true") {
+                return failure(request, "confirmation_required").copy(requiresConfirmation = true)
             }
-            return
-        }
-        grant = Grant(PrivilegedSource.SU, launched.authority, launched.uid, launched.binaryPath)
-        PrivilegedProcessCleanup.closeAndDestroy(launched.process)
-    }
-
-    private suspend fun authorizeShizuku() {
-        var detail = shizukuDetail(); if (!detail.installed || !detail.running) return
-        if (!detail.permissionGranted) {
-            val result = CompletableDeferred<Int>(); val code = (System.currentTimeMillis() % 100000).toInt()
-            val listener = Shizuku.OnRequestPermissionResultListener { id, value -> if (id == code) result.complete(value) }
-            withContext(Dispatchers.Main) { Shizuku.addRequestPermissionResultListener(listener); Shizuku.requestPermission(code) }
-            withTimeoutOrNull(10_000) { result.await() }
-            withContext(Dispatchers.Main) { Shizuku.removeRequestPermissionResultListener(listener) }
-            detail = shizukuDetail(); if (!detail.permissionGranted) return
-        }
-        val remote = ensureBound() ?: return
-        val probe = try {
-            withContext(Dispatchers.IO) { remote.probeIdentity() }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Throwable) {
-            service = null
-            grant = null
-            authorizationFailure = PrivilegedStatusCode.SHIZUKU_BINDER_DEAD
-            return
-        }
-        if (probe.startsWith(PROBE_ERROR_PREFIX)) {
-            grant = null
-            authorizationFailure = PrivilegedStatusCode.AUTHORITY_UNEXPECTED
-            return
-        }
-        val uid = probe.substringBefore('|').toIntOrNull()
-        if (uid == null) {
-            authorizationFailure = PrivilegedStatusCode.AUTHORITY_UNEXPECTED
-            grant = null
-            return
-        }
-        val authority = StandardPrivilegedShellLauncher.authorityForUid(uid)
-        if (authority != PrivilegedAuthority.NONE) {
-            grant = Grant(PrivilegedSource.SHIZUKU, authority, uid, null)
-        } else {
-            authorizationFailure = PrivilegedStatusCode.AUTHORITY_UNEXPECTED
-        }
-    }
-
-    private suspend fun executeRemote(request: PrivilegedRequest, authority: PrivilegedAuthority): PrivilegedResult {
-        val remote = ensureBound() ?: return failure(request, PrivilegedSource.SHIZUKU, "service_bind_failed", "Failed to bind Shizuku service.")
-        // 分派后异常不得重新绑定或重放请求。
-        return try {
-            val value = withTimeoutOrNull(remoteTimeout(request)) { withContext(Dispatchers.IO) { remote.execute(json.encodeToString(PrivilegedRequest.serializer(), request)) } }
-                ?: return failure(request, PrivilegedSource.SHIZUKU, "service_timeout", "Timed out waiting for Shizuku service.", authority)
-            json.decodeFromString(PrivilegedResult.serializer(), value)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            service = null
-            failure(request, PrivilegedSource.SHIZUKU, "service_call_failed", error.message ?: "Shizuku service call failed.", authority)
-        }
-    }
-
-    private suspend fun executeRemoteTeardown(request: PrivilegedRequest): PrivilegedResult {
-        val remote = service
-            ?: return failure(request, PrivilegedSource.SHIZUKU, "service_not_available", "The Shizuku session service is not available.")
-        return try {
-            val value = withTimeoutOrNull(remoteTimeout(request)) {
-                withContext(Dispatchers.IO) { remote.execute(json.encodeToString(PrivilegedRequest.serializer(), request)) }
-            } ?: return failure(request, PrivilegedSource.SHIZUKU, "service_timeout", "Timed out waiting for Shizuku service.")
-            json.decodeFromString(PrivilegedResult.serializer(), value)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            service = null
-            failure(request, PrivilegedSource.SHIZUKU, "service_call_failed", error.message ?: "Shizuku service call failed.")
-        }
-    }
-
-    private suspend fun ensureBound(): IOmnibotPrivilegedUserService? {
-        service?.let { return it }
-        val deferred = pending?.takeIf { !it.isCompleted } ?: CompletableDeferred<IOmnibotPrivilegedUserService?>().also { pending = it }
-        withContext(Dispatchers.Main) { runCatching { Shizuku.bindUserService(args, connection) }.onFailure { deferred.complete(null) } }
-        return try { awaitShizukuUserService(deferred) } finally { if (pending === deferred) pending = null }
-    }
-
-    private suspend fun stopSessionsForSource(source: PrivilegedSource): Boolean {
-        return when (source) {
-            PrivilegedSource.NONE -> true
-            PrivilegedSource.SU -> PrivilegedShellSessionManager.shutdown(source)
-            PrivilegedSource.SHIZUKU -> {
-                val remote = service
-                val stopped = if (remote == null) true else try {
-                    withContext(Dispatchers.IO) { remote.closeSessions() }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    false
+            val result = if (device.handles(request.action)) {
+                device.execute(request, status.backend, ::isValid) { command ->
+                    dispatch(request.copy(action = PrivilegedActionPolicy.ACTION_DEVICE_COMMAND, command = command, requiresConfirmation = false, timeoutSeconds = 8))
                 }
-                try {
-                    withContext(Dispatchers.Main) { Shizuku.unbindUserService(args, connection, true) }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Throwable) {
-                    // 解绑失败不恢复旧路由；远端进程是否残留由 stopped 如实表达。
-                }
-                service = null
-                stopped
-            }
-        }.also { sessionSources.entries.removeIf { it.value == source } }
-    }
+            } else dispatch(request)
+            if (result.code == "root_denied") root.markDenied()
+            if (result.code == "root_unavailable") root.markUnavailable()
+            if (result.code == "session_not_found" && request.sessionId != null) sessions.remove(request.sessionId)
+            return result.copy(provider = status.provider, backend = status.backend)
+        }
 
-    private fun shizukuDetail(): ShizukuDetail {
-        val ready = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
-        val installed = runCatching { app.packageManager.getPackageInfo(SHIZUKU_PACKAGE, 0); true }.getOrDefault(false) || ready
-        return ShizukuDetail(installed, ready, ready, service != null,
-            ready && runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false),
-            if (ready) runCatching { Shizuku.getVersion() }.getOrNull() else null)
+        private suspend fun dispatch(request: PrivilegedRequest): PrivilegedResult {
+            if (!isValid()) return failure(request, "privileged_access_changed")
+            return when (status.provider) {
+                PrivilegedProvider.ROOT -> runInterruptible(Dispatchers.IO) { rootExecutor.execute(request, ::isValid) }
+                PrivilegedProvider.SHIZUKU -> shizuku.execute(request, status.generation, status.backend)
+                PrivilegedProvider.NONE -> failure(request, "permission_denied")
+            }
+        }
+
+        private fun failure(request: PrivilegedRequest, code: String) = PrivilegedResult(
+            request.requestId, request.action, false, code, when (code) {
+                "session_not_found" -> "The privileged session is unavailable or belongs to another conversation."
+                "confirmation_required" -> "This action requires ACP client permission."
+                else -> "Privileged access changed or is unavailable; no action was executed."
+            }, backend = status.backend, provider = status.provider,
+        )
     }
-    private fun failure(request: PrivilegedRequest, source: PrivilegedSource, code: String, message: String, authority: PrivilegedAuthority = PrivilegedAuthority.NONE) =
-        PrivilegedResult(request.requestId, request.action, false, code, message, authority, source)
-    private fun confirmation(value: Boolean) = if (value) mapOf("confirmed" to "true") else emptyMap()
-    private fun remoteTimeout(request: PrivilegedRequest) = ((request.timeoutSeconds?.coerceIn(5, 600) ?: 60) + 8L) * 1000L
 
     companion object {
-        private const val SOURCE_KEY = "privileged_source_v1"
-        private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
-        private const val PROBE_ERROR_PREFIX = "ERROR:"
-        private val AUTHORIZATION_FAILURES = setOf("authority_unexpected", "permission_denied")
         @Volatile private var instance: PrivilegedCapabilityManager? = null
-        fun get(context: Context) = instance ?: synchronized(this) { instance ?: PrivilegedCapabilityManager(context).also { instance = it } }
+        suspend fun closeExistingAcpSession(acpSessionId: String) {
+            instance?.closeAcpSession(acpSessionId)
+        }
+        fun get(context: Context): PrivilegedCapabilityManager = instance ?: synchronized(this) {
+            instance ?: PrivilegedCapabilityManager(context).also { instance = it }
+        }
+        private fun confirmation(confirmed: Boolean) = if (confirmed) mapOf("confirmed" to "true") else emptyMap()
     }
 }
