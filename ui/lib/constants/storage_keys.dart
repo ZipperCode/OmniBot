@@ -5,10 +5,6 @@ class StorageKeys {
   /// 引导页是否已完成
   static const String welcomeCompleted = 'welcome_completed';
 
-  /// 启动时未登录账号提示是否已选择不再提醒
-  static const String startupAccountPromptDismissed =
-      'startup_account_prompt_dismissed';
-
   /// 自启动权限是否已手动确认完成
   static const String autoStartPermissionGranted =
       'auto_start_permission_granted';

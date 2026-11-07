@@ -26,13 +26,7 @@ internal class UsageStatisticsService(
         val tomorrow = Instant.ofEpochMilli(todayMs).atZone(zone).toLocalDate()
             .plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         val rows = if (startDateMs > todayMs) emptyList() else readActivity(startDateMs, tomorrow)
-        val summary = conversationActivitySummary(rows, startDateMs, todayMs, zone)
-        val localSummary = if (rows.none { it.isNa }) summary else
-            conversationActivitySummary(rows.filterNot { it.isNa }, startDateMs, todayMs, zone)
-        return summary + mapOf(
-            // The Flutter engine also fences replies queued across an account change.
-            "localSummary" to localSummary,
-        )
+        return conversationActivitySummary(rows, startDateMs, todayMs, zone)
     }
 
     suspend fun tokenSummary(alignedStartMs: Long, weekStartsMs: List<Long>): Map<String, Any?> {

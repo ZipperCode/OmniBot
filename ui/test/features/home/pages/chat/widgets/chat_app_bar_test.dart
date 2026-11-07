@@ -35,7 +35,6 @@ Widget _app({
   List<ChatAcpAgentModeOption> agents = const [
     ChatAcpAgentModeOption(id: 'xiaowan-acp', name: 'OmniBot Agent'),
     ChatAcpAgentModeOption(id: 'codex-acp', name: 'Codex'),
-    ChatAcpAgentModeOption(id: 'na-cloud', name: 'Na'),
   ],
   VoidCallback? onBack,
   VoidCallback? onTerminal,
@@ -688,7 +687,6 @@ void main() {
     (tester) async {
       for (final agent in [
         'xiaowan-acp',
-        'na-cloud',
         'codex-acp',
         'custom-harness',
       ]) {
@@ -698,20 +696,6 @@ void main() {
           tester.widget<AgentBrandIcon>(find.byType(AgentBrandIcon)).agentId,
           agent,
         );
-        if (agent == 'na-cloud') {
-          final avatar = tester.widget<Image>(
-            find.descendant(
-              of: find.byType(AgentBrandIcon),
-              matching: find.byType(Image),
-            ),
-          );
-          expect(
-            (avatar.image as AssetImage).assetName,
-            'assets/agents/na.png',
-          );
-          expect(avatar.color, isNull);
-          expect(find.text('N'), findsNothing);
-        }
         expect(
           find.byKey(const ValueKey('chat-app-bar-pure-chat-button')),
           findsNothing,
@@ -724,14 +708,13 @@ void main() {
   testWidgets(
     'pure chat has its own static mark even with a remembered Agent',
     (tester) async {
-      await tester.pumpWidget(_app(pure: true, selectedAgent: 'na-cloud'));
+      await tester.pumpWidget(_app(pure: true, selectedAgent: 'xiaowan-acp'));
       await tester.pumpAndSettle();
       expect(find.byType(AgentBrandIcon), findsNothing);
       expect(find.byIcon(LucideIcons.messageCircle), findsOneWidget);
       expect(find.text('Pure chat'), findsNothing);
       await _openActions(tester);
       expect(find.text('Pure chat'), findsNothing);
-      expect(find.text('Na'), findsNothing);
       expect(find.text('OmniBot Agent'), findsNothing);
     },
   );
@@ -742,7 +725,7 @@ void main() {
       var browsers = 0;
       await tester.pumpWidget(
         _app(
-          selectedAgent: 'na-cloud',
+          selectedAgent: 'xiaowan-acp',
           showTerminalActions: false,
           onBrowser: () => browsers++,
         ),

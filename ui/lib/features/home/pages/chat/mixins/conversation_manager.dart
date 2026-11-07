@@ -341,9 +341,8 @@ mixin ConversationManager<T extends StatefulWidget> on State<T> {
       } catch (_) {
         conversation = null;
       }
-      // Na history must still be admitted by the native account-aware list.
-      // A stale local cache cannot restore a conversation hidden after logout.
-      if (conversation == null && inMemoryConversation?.agentId == 'na-cloud') {
+      // 已退役的持久化 Na 会话不得重新准入或向其他账号暴露，直接判定为会话缺失
+      if (conversation?.agentId == 'na-cloud' || inMemoryConversation?.agentId == 'na-cloud') {
         onConversationMissing(operationMode, conversationId);
         return;
       }

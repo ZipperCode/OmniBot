@@ -116,7 +116,6 @@ class OnboardingProviderController extends ChangeNotifier {
             models = await ModelProviderConfigService.fetchModels(
               profileId: profile.id,
               providerName: profile.name,
-              capability: 'text',
             );
           } catch (_) {
             // Keep the empty state; the user can still add a model manually.

@@ -119,7 +119,6 @@ void main() {
       );
     }
 
-    expect(find.text('账号与 AI 服务'), findsOneWidget);
 
     await expectEntryIcon('模型提供商', LucideIcons.box);
     await expectEntryIcon('场景模型配置', LucideIcons.fileBox);

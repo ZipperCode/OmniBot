@@ -2,13 +2,12 @@ package cn.com.omnimind.bot
 
 import BaseApplication
 import android.app.Application
+import android.app.NotificationManager
 import android.os.SystemClock
-import cn.com.omnimind.baselib.account.AccountCredentialStorageException
-import cn.com.omnimind.baselib.account.OmniAccount
+import androidx.work.WorkManager
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.util.AppSecretStore
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
 import cn.com.omnimind.baselib.util.OmniLog
@@ -103,15 +102,6 @@ class App : BaseApplication() {
             cn.com.omnimind.baselib.llm.chatgpt.ChatGptOAuthManager.initialize(this)
             DebugOmniMindProviderBootstrap.install(this)
             OfficialOmniPluginProviders.register()
-            OmniAccount.initialize(
-                context = this,
-                baseUrl = BuildConfig.BASE_URL,
-                platformGatewayUrl = BuildConfig.AI_GATEWAY_URL,
-                allowInsecureLoopback = BuildConfig.DEBUG,
-                cloudServiceAccessProvider = {
-                    AppUpdateManager.getCloudServiceAccessState(this)
-                },
-            )
         }
         AgentPromptSettingsStore.initializeAndCleanupLegacyFiles(this)
         LegacyLocalModelDataCleanup.start(this)
@@ -138,7 +128,12 @@ class App : BaseApplication() {
         }
 
         NestedBackgroundStateUtil.init(this)
-        cn.com.omnimind.bot.notifications.NaMessageService.initialize(this)
+        // 仅停止已退役的后台接收，不删除历史、偏好或凭据。
+        WorkManager.getInstance(this).cancelUniqueWork("na_notification_recovery")
+        getSystemService(NotificationManager::class.java)?.apply {
+            deleteNotificationChannel("na_message_connection")
+            deleteNotificationChannel("na_personal_messages")
+        }
         cn.com.omnimind.baselib.llm.ModelSceneRegistry.init(this)
         measureStartupStep("Workspace and built-in skills") {
             runCatching {
@@ -240,25 +235,7 @@ class App : BaseApplication() {
             runCatching {
                 AppUpdateManager.checkNow(this@App, force = true)
             }.onFailure {
-                OmniLog.w("AppStartup", "Cloud-service version policy check failed: ${it.message}")
-            }
-            val signedIn = runCatching {
-                OmniAccount.isConfigured() && OmniAccount.repository().isSignedIn()
-            }.onFailure { error ->
-                if (error is AccountCredentialStorageException) {
-                    OmniLog.w(
-                        "AppStartup",
-                        "Secure account storage is temporarily unavailable; deferring AI sync",
-                    )
-                } else {
-                    OmniLog.w("AppStartup", "Account session state check failed: ${error.message}")
-                }
-            }.getOrDefault(false)
-            if (signedIn && OmniAccount.currentCloudServiceAccess().allowed) {
-                runCatching {
-                    val settings = OmniAccount.repository().getAiSettings()
-                    PlatformAiProvisioner.synchronize(settings)
-                }
+                OmniLog.w("AppStartup", "应用更新检查失败: ${it.message}")
             }
         }
         OmniLog.d("AppStartup", "initSDKsAfterPrivacyConsent completed")

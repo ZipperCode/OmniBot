@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "retiredAgentIds": ["gemini-cli-acp", "deepseek-harness-acp"],
+  "retiredAgentIds": ["gemini-cli-acp", "deepseek-harness-acp", "na-cloud"],
   "agents": [
     {
       "id": "xiaowan-acp",
@@ -14,26 +14,6 @@
         "discoveryCommand": "omnibot-xiaowan-acp",
         "usesSharedProvider": true,
         "embedded": true
-      }
-    },
-    {
-      "id": "na-cloud",
-      "name": "Na",
-      "nameEn": "Na",
-      "description": "云端个人助手 · 独立模型、长期记忆与任务",
-      "descriptionEn": "Cloud personal assistant with its own models, long-term memory, and tasks",
-      "command": "na-cloud",
-      "arguments": [],
-      "enabled": true,
-      "builtIn": true,
-      "runtime": {
-        "discoveryCommand": "na-cloud",
-        "embedded": true,
-        "usesSharedProvider": false,
-        "declaredCapabilities": {
-          "cloudModelManaged": true,
-          "transport": "http"
-        }
       }
     },
     {

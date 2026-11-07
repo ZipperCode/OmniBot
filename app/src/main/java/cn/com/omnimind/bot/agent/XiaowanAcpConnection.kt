@@ -8,7 +8,6 @@ import android.content.Context
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.SceneModelBindingEntry
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
@@ -544,7 +543,6 @@ private class XiaowanAgentSupport(
             configuredProfile = usableBinding.providerProfileId
                 .let(ModelProviderConfigStore::getProfile),
             editingProfile = ModelProviderConfigStore.getEditingProfile(),
-            officialProfile = PlatformAiProvisioner.officialProfileOrNull(),
         ) ?: throw IllegalStateException(
             "Dispatch Model Provider is not configured. Configure the default Provider and retry."
         )
@@ -1070,7 +1068,7 @@ private class XiaowanAgentSession(
 
     suspend fun refreshModels() {
         val catalog = cn.com.omnimind.bot.agent.runtime.fetchAgentProviderModels(
-            providerProfile, forceRefresh = true,
+            providerProfile,
         )
         ModelProviderConfigStore.rememberModels(context, providerProfile, catalog)
         availableModels = (catalog.map { ModelInfo(ModelId(it.id), it.displayName.ifBlank { it.id }) } +

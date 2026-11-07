@@ -59,24 +59,17 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     'scene.memory.embedding': '负责 workspace 记忆向量检索的嵌入模型',
     'scene.memory.rollup': '负责夜间记忆整理策略模型',
   };
-  static const String _officialSourceType = 'omnibot_official';
-  static const String _textCapability = 'text';
-  static const String _embeddingCapability = 'embedding';
 
   bool _isLoading = true;
   bool _isRefreshingModels = false;
   Completer<void>? _providerRefreshCompleter;
-  Map<String, Future<void>> _officialCapabilityRefreshes = {};
   int _providerRefreshGeneration = 0;
   List<SceneCatalogItem> _catalog = const [];
   List<SceneModelBindingEntry> _bindings = const [];
   List<ModelProviderProfileSummary> _profiles = const [];
   SceneVoiceConfig _voiceConfig = const SceneVoiceConfig();
   Map<String, List<ProviderModelOption>> _providerModelsByProfileId = {};
-  Map<String, Map<String, List<ProviderModelOption>>>
-  _officialProviderModelsByCapability = {};
   Set<String> _savingSceneIds = <String>{};
-  Set<String> _loadingSceneModelIds = <String>{};
   @override
   void initState() {
     super.initState();
@@ -131,54 +124,14 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     return sceneId == 'scene.dispatch.model';
   }
 
-  String _modelCapabilityForScene(String sceneId) {
-    if (sceneId == 'scene.memory.embedding') {
-      return _embeddingCapability;
-    }
-    return _textCapability;
-  }
-
-  Set<String> get _requiredOfficialCapabilities => {
-    for (final scene in _catalog) _modelCapabilityForScene(scene.sceneId),
-  };
-
-  bool _isOfficialProfile(ModelProviderProfileSummary profile) =>
-      profile.sourceType == _officialSourceType;
-
   Map<String, List<ProviderModelOption>> _modelsForScene(
     SceneCatalogItem scene,
   ) {
-    final capability = _modelCapabilityForScene(scene.sceneId);
     return {
       for (final profile in _profiles)
-        profile.id: _isOfficialProfile(profile)
-            ? (_officialProviderModelsByCapability[capability]?[profile.id] ??
-                  const <ProviderModelOption>[])
-            : (_providerModelsByProfileId[profile.id] ??
-                  const <ProviderModelOption>[]),
+        profile.id: _providerModelsByProfileId[profile.id] ??
+            const <ProviderModelOption>[],
     };
-  }
-
-  bool _isOfficialCapabilityLoaded(String capability) {
-    final officialProfiles = _profiles.where(_isOfficialProfile).toList();
-    if (officialProfiles.isEmpty) {
-      return true;
-    }
-    final loaded = _officialProviderModelsByCapability[capability];
-    return loaded != null &&
-        officialProfiles.every((profile) => loaded.containsKey(profile.id));
-  }
-
-  Future<void> _ensureOfficialCapabilityLoaded(String capability) async {
-    if (_isOfficialCapabilityLoaded(capability)) {
-      return;
-    }
-    final capabilityRefresh = _officialCapabilityRefreshes[capability];
-    if (capabilityRefresh != null) {
-      await capabilityRefresh;
-      return;
-    }
-    await _refreshProviderModelsInBackground();
   }
 
   Future<void> _loadData({bool showLoading = true}) async {
@@ -201,13 +154,12 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
       final voiceConfig = results[3] as SceneVoiceConfig;
       final providerModelsByProfileId = <String, List<ProviderModelOption>>{};
       for (final profile in profilesPayload.profiles) {
-        providerModelsByProfileId[profile.id] = _isOfficialProfile(profile)
-            ? const <ProviderModelOption>[]
-            : await ModelProviderConfigService.getStoredModelOptionsForProfile(
-                profile.id,
-                profile: profile,
-                enrichMetadata: false,
-              );
+        providerModelsByProfileId[profile.id] =
+            await ModelProviderConfigService.getStoredModelOptionsForProfile(
+              profile.id,
+              profile: profile,
+              enrichMetadata: false,
+            );
       }
 
       final enriched = _mergeBindingModels(
@@ -222,7 +174,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         _profiles = profilesPayload.profiles;
         _voiceConfig = voiceConfig;
         _providerModelsByProfileId = enriched;
-        _officialProviderModelsByCapability = {};
       });
       _scheduleMetadataRefresh(
         profiles: profilesPayload.profiles,
@@ -351,34 +302,9 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         for (final entry in _providerModelsByProfileId.entries)
           entry.key: List<ProviderModelOption>.from(entry.value),
       };
-      final nextOfficialModels = {
-        for (final capabilityEntry
-            in _officialProviderModelsByCapability.entries)
-          capabilityEntry.key: {
-            for (final profileEntry in capabilityEntry.value.entries)
-              profileEntry.key: List<ProviderModelOption>.from(
-                profileEntry.value,
-              ),
-          },
-      };
-      final officialProfiles = snapshots.where(_isOfficialProfile).toList();
-      final capabilityRefreshes = <String, Future<void>>{
-        for (final capability in _requiredOfficialCapabilities)
-          capability: _refreshOfficialCapability(
-            capability: capability,
-            profiles: officialProfiles,
-            refreshGeneration: refreshGeneration,
-            target: nextOfficialModels,
-          ),
-      };
-      _officialCapabilityRefreshes = capabilityRefreshes;
       for (final profile in snapshots) {
         if (!_isProviderRefreshActive(refreshGeneration)) return;
-        final isOfficial = _isOfficialProfile(profile);
-        if (!isOfficial && !profile.configured) {
-          continue;
-        }
-        if (isOfficial) {
+        if (!profile.configured) {
           continue;
         }
         try {
@@ -410,7 +336,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
           }
         }
       }
-      await Future.wait(capabilityRefreshes.values);
 
       if (!await waitForPageReady() ||
           !_isProviderRefreshActive(refreshGeneration)) {
@@ -422,7 +347,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
       );
       setState(() {
         _providerModelsByProfileId = merged;
-        _officialProviderModelsByCapability = nextOfficialModels;
       });
       _scheduleMetadataRefresh(
         profiles: snapshots,
@@ -435,7 +359,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     } finally {
       if (refreshGeneration == _providerRefreshGeneration) {
         _isRefreshingModels = false;
-        _officialCapabilityRefreshes = {};
       }
       if (!refreshCompleter.isCompleted) {
         refreshCompleter.complete();
@@ -446,47 +369,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     }
   }
 
-  Future<void> _refreshOfficialCapability({
-    required String capability,
-    required List<ModelProviderProfileSummary> profiles,
-    required int refreshGeneration,
-    required Map<String, Map<String, List<ProviderModelOption>>> target,
-  }) async {
-    final capabilityModels = <String, List<ProviderModelOption>>{
-      for (final entry
-          in (target[capability] ?? const <String, List<ProviderModelOption>>{})
-              .entries)
-        entry.key: List<ProviderModelOption>.from(entry.value),
-    };
-    for (final profile in profiles) {
-      if (!_isProviderRefreshActive(refreshGeneration)) return;
-      try {
-        capabilityModels[profile.id] = await _fetchModelsForSnapshot(
-          profile,
-          refreshGeneration: refreshGeneration,
-          capability: capability,
-        );
-      } catch (_) {
-        capabilityModels[profile.id] = const [];
-      }
-    }
-    if (!_isProviderRefreshActive(refreshGeneration)) return;
-    target[capability] = capabilityModels;
-    setState(() {
-      _officialProviderModelsByCapability = {
-        ..._officialProviderModelsByCapability,
-        capability: {
-          for (final entry in capabilityModels.entries)
-            entry.key: List<ProviderModelOption>.from(entry.value),
-        },
-      };
-    });
-  }
 
   Future<List<ProviderModelOption>> _fetchModelsForSnapshot(
     ModelProviderProfileSummary snapshot, {
     required int refreshGeneration,
-    String? capability,
   }) async {
     if (!_isProviderRefreshActive(refreshGeneration)) return const [];
     final current = _findProfile(_profiles, snapshot.id);
@@ -497,8 +383,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
       apiBase: snapshot.baseUrl,
       profileId: snapshot.id,
       providerName: snapshot.name,
-      capability: capability,
-      forceRefresh: true,
     );
     if (!_isProviderRefreshActive(refreshGeneration)) return const [];
     final latestPayload = await ModelProviderConfigService.listProfiles();
@@ -597,27 +481,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     }
   }
 
-  Future<void> _prepareSceneSelector(SceneCatalogItem scene) async {
-    final sceneId = scene.sceneId;
-    if (_loadingSceneModelIds.contains(sceneId)) {
-      return;
-    }
-    final capability = _modelCapabilityForScene(sceneId);
-    if (!_isOfficialCapabilityLoaded(capability)) {
-      setState(() {
-        _loadingSceneModelIds = {..._loadingSceneModelIds, sceneId};
-      });
-      try {
-        await _ensureOfficialCapabilityLoaded(capability);
-      } finally {
-        if (mounted) {
-          setState(() {
-            _loadingSceneModelIds = {..._loadingSceneModelIds}..remove(sceneId);
-          });
-        }
-      }
-    }
-  }
 
   Widget _buildCard({required Widget child}) {
     return OmniSettingsCard(child: child);
@@ -690,7 +553,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         menuMinWidth: 188,
         menuMaxWidth: 360,
         searchHint: context.trLegacy('搜索模型或服务商'),
-        onBeforeOpen: () => _prepareSceneSelector(scene),
         options: [
           for (final profile in _profiles)
             if (profile.configured && !profile.needsPresetCredentials)
@@ -732,8 +594,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
 
   Widget _buildDefaultSceneRow(SceneCatalogItem scene) {
     final isSaving = _isSavingScene(scene.sceneId);
-    final isLoadingModels = _loadingSceneModelIds.contains(scene.sceneId);
-    final isBusy = isSaving || isLoadingModels;
+    final isBusy = isSaving;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),

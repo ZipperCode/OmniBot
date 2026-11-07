@@ -13,10 +13,9 @@ is labelled “小万官网” / “Omnibot website”.
   caches and their stale-cache fallback are retained.
 - `/my/feedback`: an app-owned Flutter page opened by both Settings feedback
   and About → Send feedback. It posts the title, description, selected native
-  file-picker attachments, optional contact and signed-in account email directly
-  to `/api/feedback`. Contact is prefilled but editable; the account email is
-  stored separately. No browser or WebView is opened. Signed-out users can
-  supply contact details manually. `OMNIBOT_FEEDBACK_API_URL` optionally overrides
+  file-picker attachments, and optional contact details directly
+  to `/api/feedback`. Contact is editable; no browser or WebView is opened.
+  `OMNIBOT_FEEDBACK_API_URL` optionally overrides
   the first-party endpoint at build time.
 - The official VLM operation cache migrates the old product Worker origin to
   the website origin and preserves the URL path. Custom model Provider profiles
@@ -77,8 +76,8 @@ the production scheduler. Keep both repository workflows manual-only when this
 feature branch is merged.
 
 ## Scope
+This change replaces the product Worker service with the website backend.
 
-This change replaces the product Worker service. Account and AI gateway
-services (`account.omnimind.com.cn`, `model-api.omnimind.com.cn`), image
-providers, and user-configured Cloudflare/model proxies keep their configured
-endpoints because they are independent services.
+- **Account & AI Gateway Retirement**: The standalone Xiaowan account service (`account.omnimind.com.cn`) and official AI gateway (`model-api.omnimind.com.cn`) have been retired from the client application. The app no longer connects to or depends on these endpoints.
+- **Retained Endpoints**: App update checks and APK delivery (`/updates`, `/downloads`), model catalog mirror (`/catalog/models-dev/api.json`), feedback submission (`/my/feedback`), and the independent device VLM operation tool (`OfficialVlmOperation`) are **not** deleted in this change and remain supported by the website backend.
+- **Worker Scope**: The deployment scope of the Worker service is not expanded. User-configured model Providers, third-party proxies, and local tools remain fully decoupled and client-directed.

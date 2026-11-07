@@ -69,14 +69,6 @@
     <init>(...);
     <fields>;
 }
--keep class cn.com.omnimind.bot.agent.PlatformEmbeddingGateway$EmbeddingResponse {
-    <init>(...);
-    <fields>;
-}
--keep class cn.com.omnimind.bot.agent.PlatformEmbeddingGateway$EmbeddingItem {
-    <init>(...);
-    <fields>;
-}
 -keep class cn.com.omnimind.bot.mcp.RemoteMcpServerConfig {
     <init>(...);
     <fields>;

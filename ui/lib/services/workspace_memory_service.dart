@@ -9,7 +9,6 @@ class WorkspaceMemoryEmbeddingConfig {
   final String? modelId;
   final String? apiBase;
   final bool hasApiKey;
-  final bool usesPlatform;
 
   const WorkspaceMemoryEmbeddingConfig({
     required this.enabled,
@@ -20,7 +19,6 @@ class WorkspaceMemoryEmbeddingConfig {
     this.modelId,
     this.apiBase,
     this.hasApiKey = false,
-    this.usesPlatform = false,
   });
 
   factory WorkspaceMemoryEmbeddingConfig.fromMap(Map<dynamic, dynamic> raw) {
@@ -33,7 +31,6 @@ class WorkspaceMemoryEmbeddingConfig {
       modelId: raw['modelId']?.toString(),
       apiBase: raw['apiBase']?.toString(),
       hasApiKey: raw['hasApiKey'] == true,
-      usesPlatform: raw['usesPlatform'] == true,
     );
   }
 }

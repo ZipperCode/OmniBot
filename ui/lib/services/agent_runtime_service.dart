@@ -213,54 +213,6 @@ const _agentUserErrors = <String, ({String zh, String en})>{
     zh: '模型服务商拒绝了本次请求，请检查模型及请求配置。',
     en: 'The model provider rejected this request. Check the model and request configuration.',
   ),
-  'naConnectionFailed': (
-    zh: '无法连接 Na 服务，请检查网络后重试。',
-    en: 'Could not connect to Na. Check your connection and try again.',
-  ),
-  'naRequestTimeout': (
-    zh: '连接 Na 服务超时，请稍后重试。',
-    en: 'The connection to Na timed out. Try again shortly.',
-  ),
-  'naCertificate': (
-    zh: 'Na 安全连接验证失败，请检查网络和设备时间。',
-    en: 'Could not verify the secure connection to Na. Check your network and device time.',
-  ),
-  'naAuthentication': (
-    zh: 'Na 连接验证已失效，请重新登录或检查连接设置。',
-    en: 'The Na connection is no longer authenticated. Sign in again or check the connection settings.',
-  ),
-  'naPermission': (
-    zh: '当前账号没有此 Na 操作的权限，请检查账号授权。',
-    en: 'Your account does not have permission for this Na action. Check its authorization.',
-  ),
-  'naConnectionChanged': (
-    zh: 'Na 连接已变化，请重新打开此对话。',
-    en: 'The Na connection changed. Reopen this conversation.',
-  ),
-  'naOwnerConflict': (
-    zh: '此 Na 对话属于其他账号或连接，请切回原账号或新建对话。',
-    en: 'This Na conversation belongs to another account or connection. Switch back or start a new conversation.',
-  ),
-  'naServiceUnavailable': (
-    zh: 'Na 服务暂时不可用，请稍后重试。',
-    en: 'Na is temporarily unavailable. Try again later.',
-  ),
-  'naRateLimited': (
-    zh: 'Na 请求过于频繁，请稍后重试。',
-    en: 'Na is rate limiting requests. Try again later.',
-  ),
-  'naRequestRejected': (
-    zh: 'Na 未接受此请求，请重新打开对话后重试。',
-    en: 'Na did not accept this request. Reopen the conversation and try again.',
-  ),
-  'naResponseInvalid': (
-    zh: 'Na 返回了无法识别的响应，请稍后重试。',
-    en: 'Na returned an invalid response. Try again later.',
-  ),
-  'naAdmissionUnconfirmed': (
-    zh: '尚未确认 Na 是否已受理，请重新打开对话查看状态。',
-    en: 'It is not yet confirmed whether Na accepted this request. Reopen the conversation to check its status.',
-  ),
   'unknown': (
     zh: '助手暂时无法完成操作，请重试。',
     en: 'The assistant could not complete this action. Please try again.',
@@ -301,23 +253,6 @@ String formatAgentRuntimeErrorForUser(
     return text('agentRetired');
   }
 
-  // Na connection failures belong to the cloud service, not the model Provider.
-  final naError = switch (failureKind) {
-    'na_connection_failed' => 'naConnectionFailed',
-    'na_request_timeout' => 'naRequestTimeout',
-    'na_tls_certificate_failure' => 'naCertificate',
-    'na_authentication_required' => 'naAuthentication',
-    'na_permission_denied' => 'naPermission',
-    'na_connection_changed' => 'naConnectionChanged',
-    'na_owner_conflict' => 'naOwnerConflict',
-    'na_service_unavailable' => 'naServiceUnavailable',
-    'na_rate_limited' => 'naRateLimited',
-    'na_request_rejected' => 'naRequestRejected',
-    'na_response_invalid' => 'naResponseInvalid',
-    'na_admission_unconfirmed' => 'naAdmissionUnconfirmed',
-    _ => null,
-  };
-  if (naError != null) return text(naError);
 
   // Package maintenance errors belong to the host, not a model request. Use
   // their structured kind before inspecting diagnostics such as "timeout".
@@ -745,7 +680,7 @@ class AcpAgentProfile {
     this.uninstallable = false,
     this.packageVersion,
     bool? configurationAvailable,
-  }) : configurationAvailable = configurationAvailable ?? id != 'na-cloud';
+  }) : configurationAvailable = configurationAvailable ?? true;
 
   final String id;
   final String name;
@@ -767,8 +702,7 @@ class AcpAgentProfile {
   final bool uninstallable;
   final AgentPackageVersion? packageVersion;
 
-  /// Native build policy owns whether this Agent exposes a configuration page.
-  /// Na is account managed unless the native develop flavor opts in.
+  /// 是否提供配置页面由原生 Agent 目录决定。
   final bool configurationAvailable;
 
   factory AcpAgentProfile.fromMap(Map<dynamic, dynamic> map) {
@@ -1002,7 +936,6 @@ class CodexRemoteDirectoryList {
     this.parent,
     this.cwd,
     this.home,
-    this.workspaceOwner,
     this.error,
     this.entries = const <CodexRemoteDirectoryEntry>[],
   });
@@ -1012,7 +945,6 @@ class CodexRemoteDirectoryList {
   final String? parent;
   final String? cwd;
   final String? home;
-  final String? workspaceOwner;
   final String? error;
   final List<CodexRemoteDirectoryEntry> entries;
 
@@ -1025,7 +957,6 @@ class CodexRemoteDirectoryList {
       parent: _stringOrNull(source['parent']),
       cwd: _stringOrNull(source['cwd']),
       home: _stringOrNull(source['home']),
-      workspaceOwner: _stringOrNull(source['workspaceOwner']),
       error: _stringOrNull(source['error']),
       entries: rawEntries is List
           ? rawEntries
@@ -1112,25 +1043,6 @@ typedef _AgentPackageTask = ({
   Future<Map<String, dynamic>> future,
 });
 
-/// Response attributed to one captured Na account and service endpoint.
-class NaPersonalResponse {
-  const NaPersonalResponse({required this.owner, required this.data});
-  final String owner;
-  final Map<String, dynamic> data;
-
-  factory NaPersonalResponse.fromMap(Map<String, dynamic> value) {
-    final owner = value['owner'];
-    if (owner is! String || owner.isEmpty) {
-      throw StateError('Na 返回了无效的连接归属。');
-    }
-    final raw = value['data'];
-    if (raw is! Map) throw StateError('Na 返回了无效的资源。');
-    return NaPersonalResponse(
-      owner: owner,
-      data: Map<String, dynamic>.from(raw),
-    );
-  }
-}
 
 class AgentRuntimeService {
   AgentRuntimeService._();
@@ -1191,66 +1103,6 @@ class AgentRuntimeService {
     return normalized;
   }
 
-  /// Bounded Na resource bridge. Only status may discover a fresh owner;
-  /// native validates every operation against that captured connection.
-  static Future<NaPersonalResponse> requestNaPersonal({
-    required String operation,
-    String? owner,
-    String? id,
-    Map<String, dynamic> payload = const {},
-  }) async {
-    if (operation.trim().isEmpty ||
-        (operation != 'status' && (owner == null || owner.isEmpty))) {
-      throw ArgumentError(
-        'Na resource operation requires its connection owner',
-      );
-    }
-    final result = await _invokeMap('config/na/personal', {
-      'agentId': 'na-cloud',
-      'operation': operation,
-      if (owner != null) 'owner': owner,
-      if (id != null) 'id': id,
-      'payload': payload,
-    });
-    final response = NaPersonalResponse.fromMap(result);
-    if (owner != null && response.owner != owner) {
-      throw StateError('Na 连接已更改，请重新载入连接。');
-    }
-    return response;
-  }
-
-  /// Pure IANA calendar conversion; never connects or starts an Agent turn.
-  static Future<Map<String, dynamic>> requestNaLocalTime({
-    String? localTime,
-    String? at,
-    required String timezone,
-  }) => _invokeMap('config/na/local-time', {
-    'agentId': 'na-cloud',
-    if (localTime != null) 'localTime': localTime,
-    if (at != null) 'at': at,
-    'timezone': timezone,
-  });
-
-  /// Local device delivery preferences; private connector/project keys never
-  /// enter this API. Native captures the same Na account/endpoint owner.
-  static Future<NaPersonalResponse> requestNaNotifications({
-    String? owner,
-    bool? enabled,
-  }) async {
-    if (enabled != null && (owner == null || owner.isEmpty)) {
-      throw ArgumentError('Na notification changes require their connection owner');
-    }
-    final response = NaPersonalResponse.fromMap(await _invokeMap('config/na/notifications', {
-      'agentId': 'na-cloud',
-      'operation': enabled == null ? 'read' : 'write',
-      if (owner != null) 'owner': owner,
-      if (enabled != null) 'enabled': enabled,
-    }));
-    if (owner != null && response.owner != owner) {
-      throw StateError('Na 连接已更改，请重新载入通知设置。');
-    }
-    return response;
-  }
 
   static Future<AgentRuntimeStatus> status({required String agentId}) async {
     final result = await _invokeMap('status', {
@@ -1444,7 +1296,6 @@ class AgentRuntimeService {
 
   static Future<Map<String, dynamic>> writeAgentConfig(
     String agentId, {
-    String? connectionMode,
     String? baseUrl,
     String? model,
     String? apiKey,
@@ -1453,7 +1304,6 @@ class AgentRuntimeService {
   }) {
     return _invokeMap('agent/config/write', {
       'agentId': agentId.trim(),
-      if (connectionMode != null) 'connectionMode': connectionMode,
       if (baseUrl != null) 'baseUrl': baseUrl,
       if (model != null) 'model': model,
       if (apiKey != null) 'apiKey': apiKey,
@@ -1608,12 +1458,6 @@ class AgentRuntimeService {
     });
   }
 
-  static Future<void> setNaHistorySyncEnabled(bool enabled) async {
-    await _invokeMap('config/na/historySync', {
-      'agentId': 'na-cloud',
-      'enabled': enabled,
-    });
-  }
 
   static Future<Map<String, dynamic>> listSessions({
     required String agentId,
@@ -2032,7 +1876,6 @@ class AgentRuntimeService {
 
   static Future<CodexRemoteDirectoryList> listRemoteDirectories({
     String? agentId,
-    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -2040,7 +1883,6 @@ class AgentRuntimeService {
   }) async {
     final result = await _invokeMap('config/remote/fs/list', {
       if (agentId != null) 'agentId': agentId,
-      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -2054,7 +1896,6 @@ class AgentRuntimeService {
   static Future<CodexRemoteFilePayload> readRemoteFile({
     String? agentId,
     String? sessionId,
-    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -2063,7 +1904,6 @@ class AgentRuntimeService {
     final result = await _invokeMap('config/remote/fs/read', {
       if (agentId != null) 'agentId': agentId,
       if (sessionId != null) 'sessionId': sessionId,
-      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -2077,7 +1917,6 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> writeRemoteFile({
     String? agentId,
     String? sessionId,
-    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -2087,7 +1926,6 @@ class AgentRuntimeService {
     return _invokeMap('config/remote/fs/write', {
       if (agentId != null) 'agentId': agentId,
       if (sessionId != null) 'sessionId': sessionId,
-      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -2100,7 +1938,6 @@ class AgentRuntimeService {
 
   static Future<Map<String, dynamic>> deleteRemotePath({
     String? agentId,
-    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -2109,7 +1946,6 @@ class AgentRuntimeService {
   }) {
     return _invokeMap('config/remote/fs/delete', {
       if (agentId != null) 'agentId': agentId,
-      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)
@@ -2122,7 +1958,6 @@ class AgentRuntimeService {
 
   static Future<Map<String, dynamic>> moveRemotePath({
     String? agentId,
-    String? workspaceOwner,
     String remoteBridgeUrl = '',
     String remoteBridgeToken = '',
     String remoteCwd = '',
@@ -2131,7 +1966,6 @@ class AgentRuntimeService {
   }) {
     return _invokeMap('config/remote/fs/move', {
       if (agentId != null) 'agentId': agentId,
-      if (workspaceOwner != null) 'workspaceOwner': workspaceOwner,
       if (remoteBridgeUrl.trim().isNotEmpty)
         'remoteBridgeUrl': remoteBridgeUrl.trim(),
       if (remoteBridgeToken.trim().isNotEmpty)

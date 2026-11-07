@@ -4,14 +4,15 @@ import 'package:ui/services/model_provider_config_service.dart';
 import 'package:ui/widgets/conversation_model_selector.dart';
 
 void main() {
-  const officialProfile = ModelProviderProfileSummary(
-    id: 'official',
-    name: 'OmniBot 官方 AI',
-    baseUrl: '',
-    apiKey: '',
+  const standardProfile = ModelProviderProfileSummary(
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    apiKey: 'sk-test',
+    hasApiKey: true,
     customHeaders: <String, String>{},
-    sourceType: 'omnibot_official',
-    readOnly: true,
+    sourceType: 'deepseek',
+    readOnly: false,
     ready: true,
     statusText: '',
     configured: true,
@@ -27,12 +28,12 @@ void main() {
           body: ConversationModelSelectorContent(
             width: 320,
             maxHeight: 360,
-            profiles: const <ModelProviderProfileSummary>[officialProfile],
+            profiles: const <ModelProviderProfileSummary>[standardProfile],
             providerModelsByProfileId: <String, List<ProviderModelOption>>{
-              officialProfile.id: <ProviderModelOption>[model],
+              standardProfile.id: <ProviderModelOption>[model],
             },
             currentSelection: ConversationModelSelection(
-              providerProfileId: officialProfile.id,
+              providerProfileId: standardProfile.id,
               modelId: model.id,
             ),
             showSearchField: false,
@@ -78,9 +79,9 @@ void main() {
           body: ConversationModelSelectorContent(
             width: 320,
             maxHeight: 360,
-            profiles: const [officialProfile],
+            profiles: const [standardProfile],
             providerModelsByProfileId: const {
-              'official': [
+              'deepseek': [
                 ProviderModelOption(id: 'GLM-5.2', displayName: 'GLM-5.2'),
               ],
             },
@@ -95,7 +96,7 @@ void main() {
     final model = find.bySemanticsLabel(RegExp(r'^GLM-5\.2$'));
     expect(model, findsOneWidget);
     await tester.tap(model);
-    expect(selected?.providerProfileId, 'official');
+    expect(selected?.providerProfileId, 'deepseek');
       expect(selected?.modelId, 'GLM-5.2');
       semantics.dispose();
   });
@@ -121,13 +122,13 @@ void main() {
           body: ConversationModelSelectorContent(
             width: 320,
             maxHeight: 360,
-            profiles: const [other, officialProfile],
+            profiles: const [other, standardProfile],
             currentSelection: const ConversationModelSelection(
-              providerProfileId: 'official',
+              providerProfileId: 'deepseek',
               modelId: 'model',
             ),
             providerModelsByProfileId: const {
-              'official': [
+              'deepseek': [
                 ProviderModelOption(id: 'model', displayName: 'Selected model'),
               ],
             },
@@ -137,7 +138,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(
-      tester.getTopLeft(find.text('OmniBot 官方 AI')).dy,
+      tester.getTopLeft(find.text('DeepSeek')).dy,
       lessThan(tester.getTopLeft(find.text('Other connection')).dy),
     );
     expect(find.text('Selected model').hitTestable(), findsOneWidget);

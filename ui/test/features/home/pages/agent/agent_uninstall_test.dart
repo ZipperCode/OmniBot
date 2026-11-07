@@ -111,7 +111,6 @@ void main() {
         agent('version-only', installed: null, versionKnown: true),
         agent('missing', installed: false),
         agent('xiaowan-acp', managed: false, uninstallable: false),
-        agent('na-cloud', managed: false, uninstallable: false),
         agent('custom', managed: false, builtIn: false, uninstallable: false),
         agent('old-catalog')..remove('uninstallable'),
       ];
@@ -128,7 +127,6 @@ void main() {
       for (final id in [
         'missing',
         'xiaowan-acp',
-        'na-cloud',
         'custom',
         'old-catalog',
       ]) {

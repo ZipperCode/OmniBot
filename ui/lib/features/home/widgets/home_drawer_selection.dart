@@ -117,8 +117,6 @@ extension _HomeDrawerSelection on HomeDrawerState {
         .where((row) => _selectedConversationKeys.contains(row.threadKey))
         .toList(growable: false);
     if (targets.isEmpty) return;
-    final visibilityRevision =
-        AssistsMessageService.conversationVisibilityRevision;
     // Lock before confirmation too, so repeated taps cannot stack dialogs.
     setState(() {
       _isBatchConversationActionRunning = true;
@@ -175,9 +173,6 @@ extension _HomeDrawerSelection on HomeDrawerState {
       });
       for (final conversation in targets) {
         if (!mounted ||
-            (conversation.agentId == 'na-cloud' &&
-                visibilityRevision !=
-                    AssistsMessageService.conversationVisibilityRevision) ||
             !_allConversations.any(
               (row) => row.threadKey == conversation.threadKey,
             )) {

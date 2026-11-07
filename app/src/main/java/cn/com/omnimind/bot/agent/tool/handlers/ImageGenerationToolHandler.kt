@@ -1,27 +1,24 @@
 package cn.com.omnimind.bot.agent.tool.handlers
 
-import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.http.OkHttpManager
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 import cn.com.omnimind.baselib.util.ContentEndpointSecurity
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
-import cn.com.omnimind.bot.BuildConfig
 import cn.com.omnimind.bot.agent.AgentCallback
 import cn.com.omnimind.bot.agent.AgentExecutionEnvironment
 import cn.com.omnimind.bot.agent.AgentToolExecutionHandle
 import cn.com.omnimind.bot.agent.AgentToolRegistry
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.ToolExecutionResult
-import cn.com.omnimind.bot.media.PlatformMediaGatewayExecutor
-import cn.com.omnimind.bot.media.PlatformGatewayException
-import cn.com.omnimind.bot.media.PlatformMediaProtocol
-import cn.com.omnimind.bot.media.awaitResponse
-import java.net.InetAddress
-import java.net.UnknownHostException
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -30,8 +27,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -49,30 +44,6 @@ class ImageGenerationToolHandler(
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
-    private val platformDownloadClient = httpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .dns(object : Dns {
-            override fun lookup(hostname: String): List<InetAddress> {
-                val addresses = Dns.SYSTEM.lookup(hostname)
-                if (addresses.isEmpty() || addresses.any { !isPublicPlatformAddress(it) }) {
-                    throw UnknownHostException(
-                        "official image host resolved to a non-public address"
-                    )
-                }
-                return addresses
-            }
-        })
-        .build()
-    private val platformExecutor = PlatformMediaGatewayExecutor(
-        executeRequest = { request ->
-            OkHttpManager.sensitiveContentCall(
-                client = httpClient,
-                request = request,
-                allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
-            ).awaitResponse()
-        },
-    )
 
     override suspend fun execute(
         toolCall: cn.com.omnimind.baselib.llm.AssistantToolCall,
@@ -176,11 +147,7 @@ class ImageGenerationToolHandler(
             throw error
         } catch (error: Exception) {
             helper.workspacePermissionResult(error, callback)?.let { return it }
-            val safeMessage = if (error is PlatformGatewayException) {
-                error.message
-            } else {
-                "Image generation failed (${error.javaClass.simpleName})"
-            }
+            val safeMessage = "Image generation failed (${error.javaClass.simpleName})"
             helper.errorResult(toolName, safeMessage, "Image generation failed")
         }
     }
@@ -189,72 +156,43 @@ class ImageGenerationToolHandler(
         args: JsonObject,
         env: AgentExecutionEnvironment,
     ): ImageGenerationRoute {
-        val profileId = args["providerProfileId"]?.jsonPrimitive?.contentOrNull?.trim()
+        val explicitProfileId = args["providerProfileId"]?.jsonPrimitive?.contentOrNull?.trim()
             ?.takeIf(String::isNotEmpty)
             ?: env.modelProviderProfileId?.trim()?.takeIf(String::isNotEmpty)
-            ?: SceneModelBindingStore.getBinding("scene.dispatch.model")?.providerProfileId
-        val access = OmniAccount.currentAiRequestAccess()
-        if (OmniOfficialProvider.isOfficialProfile(profileId)) {
-            access.unavailableReason?.let { throw IllegalStateException(it) }
-            check(access.usesPlatform) { "官方 AI 账号未登录或服务暂不可用" }
-            val status = PlatformAiProvisioner.ensureReadyStatus()
-            val model = status.defaultImageModelId
-                ?: throw IllegalStateException("官方图片生成能力暂不可用")
-            return ImageGenerationRoute(
-                platform = true,
-                endpoint = "",
-                apiKey = "",
-                customHeaders = emptyMap(),
-                model = model,
-                providerProfileId = OmniOfficialProvider.PROFILE_ID,
-                providerProfileName = OmniOfficialProvider.PROFILE_NAME,
-            )
+            ?: SceneModelBindingStore.getBinding("scene.dispatch.model")?.providerProfileId?.trim()?.takeIf(String::isNotEmpty)
+        val profile = if (explicitProfileId != null) {
+            ModelProviderConfigStore.getProfile(explicitProfileId)
+                ?: throw IllegalStateException(
+                    "Image provider profile '$explicitProfileId' not found. Check image provider configuration."
+                )
+        } else {
+            ModelProviderConfigStore.getEditingProfile()
         }
-
-        val profile = profileId?.let(ModelProviderConfigStore::getProfile)
-            ?: ModelProviderConfigStore.getEditingProfile()
         require(!cn.com.omnimind.baselib.llm.ChatGptOAuthProvider.isOAuth(profile.sourceType)) {
             "ChatGPT OAuth does not support image generation. Select an image API provider."
         }
-        val bundledImageConfig = bundledImageProviderConfig()
-        val apiKey = profile.apiKey.trim()
-        val useBundledImageProvider = shouldUseBundledImageProvider(
-            profileApiKey = apiKey,
-            bundledApiKey = bundledImageConfig.apiKey,
-        )
-        if (!useBundledImageProvider) {
-            require(!profile.readOnly && !OmniOfficialProvider.isOfficialProfile(profile.id)) {
-                "The current provider is read-only and cannot generate images. Select a BYOK provider profile."
-            }
-            require(profile.isConfigured()) {
-                "Confirm the BYOK provider destination before generating images."
-            }
+        require(!profile.readOnly) {
+            "The current provider is read-only and cannot generate images. Select a BYOK provider profile."
         }
-        val effectiveApiKey = if (useBundledImageProvider) bundledImageConfig.apiKey else apiKey
-        require(effectiveApiKey.isNotEmpty()) {
+        require(profile.isConfigured()) {
+            "Confirm the BYOK provider destination before generating images."
+        }
+        val apiKey = profile.apiKey.trim()
+        require(apiKey.isNotEmpty()) {
             "Image provider apiKey is empty. Configure a BYOK OpenAI-compatible provider profile."
         }
         val requestedModel = normalizeImageModelId(args["model"]?.jsonPrimitive?.contentOrNull)
+        val model = requestedModel ?: DEFAULT_IMAGE_MODEL
         return ImageGenerationRoute(
-            platform = false,
             endpoint = resolveImageGenerationEndpoint(
-                baseUrl = if (useBundledImageProvider) bundledImageConfig.baseUrl else profile.baseUrl,
-                apiKey = effectiveApiKey,
+                baseUrl = profile.baseUrl,
+                apiKey = apiKey,
             ),
-            apiKey = effectiveApiKey,
-            customHeaders = if (useBundledImageProvider) emptyMap() else profile.customHeaders,
-            model = requestedModel
-                ?: if (useBundledImageProvider) bundledImageConfig.model else DEFAULT_IMAGE_MODEL,
-            providerProfileId = if (useBundledImageProvider) {
-                BUNDLED_IMAGE_PROVIDER_ID
-            } else {
-                profile.id
-            },
-            providerProfileName = if (useBundledImageProvider) {
-                BUNDLED_IMAGE_PROVIDER_NAME
-            } else {
-                profile.name
-            },
+            apiKey = apiKey,
+            customHeaders = profile.customHeaders,
+            model = model,
+            providerProfileId = profile.id,
+            providerProfileName = profile.name,
         )
     }
 
@@ -274,49 +212,30 @@ class ImageGenerationToolHandler(
             put("quality", quality)
             put("output_format", outputFormat)
             put("background", background)
-            if (route.platform) {
-                put("response_format", "b64_json")
-            }
         }
 
-        val response = if (route.platform) {
-            platformExecutor.execute { credentials ->
-                buildRequest(
-                    endpoint = PlatformMediaProtocol.endpoint(
-                        credentials,
-                        "/v1/images/generations",
-                    ),
-                    apiKey = credentials.bearerToken,
-                    customHeaders = emptyMap(),
-                    requestJson = requestJson,
-                )
-            }
-        } else {
-            val request = buildRequest(
-                endpoint = route.endpoint,
-                apiKey = route.apiKey,
-                customHeaders = route.customHeaders,
-                requestJson = requestJson,
-                allowInsecureTransport = true,
-            )
-            OkHttpManager.sensitiveContentCall(
-                client = httpClient,
-                request = request,
-                allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
-                allowInsecureTransport = true,
-            ).awaitResponse()
-        }
+        val request = buildRequest(
+            endpoint = route.endpoint,
+            apiKey = route.apiKey,
+            customHeaders = route.customHeaders,
+            requestJson = requestJson,
+            allowInsecureTransport = true,
+        )
+        val response = OkHttpManager.sensitiveContentCall(
+            client = httpClient,
+            request = request,
+            allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
+            allowInsecureTransport = true,
+        ).awaitResponse()
 
         response.use {
             val bytes = it.body?.bytes() ?: ByteArray(0)
-            if (route.platform) {
-                PlatformMediaProtocol.requireSuccessfulResponse(it.code, bytes)
-            } else if (!it.isSuccessful) {
+            if (!it.isSuccessful) {
                 throw IllegalStateException("image generation request failed (${it.code})")
             }
             val payload = runCatching { JSONObject(bytes.toString(Charsets.UTF_8)) }
                 .getOrElse { throw IllegalStateException("image generation returned invalid JSON") }
-            return extractGeneratedImage(payload, route.platform)
+            return extractGeneratedImage(payload)
                 ?: throw IllegalStateException(
                     "image generation response did not contain b64_json or image url"
                 )
@@ -352,14 +271,14 @@ class ImageGenerationToolHandler(
             .build()
     }
 
-    private suspend fun extractGeneratedImage(payload: JSONObject, platform: Boolean): ByteArray? {
+    private suspend fun extractGeneratedImage(payload: JSONObject): ByteArray? {
         val data = payload.optJSONArray("data")
         if (data != null && data.length() > 0) {
             val first = data.optJSONObject(0) ?: JSONObject()
             first.optString("b64_json").takeIf(String::isNotBlank)
                 ?.let(::decodeBase64Image)?.let { return it }
             first.optString("url").takeIf(String::isNotBlank)
-                ?.let { return downloadImage(it, platform) }
+                ?.let { return downloadImage(it) }
         }
         val responseFormat = payload.optString("format").takeIf(String::isNotBlank)
         val output = payload.optJSONArray("output") ?: return null
@@ -367,7 +286,7 @@ class ImageGenerationToolHandler(
             val item = output.optJSONObject(index) ?: continue
             extractImageFromOutputItem(item, responseFormat)?.let { return it }
             item.optString("url").takeIf(String::isNotBlank)
-                ?.let { return downloadImage(it, platform) }
+                ?.let { return downloadImage(it) }
         }
         return null
     }
@@ -397,22 +316,18 @@ class ImageGenerationToolHandler(
         return null
     }
 
-    private suspend fun downloadImage(url: String, platform: Boolean): ByteArray {
-        if (platform && !isSafePlatformDownloadUrl(url)) {
-            throw IllegalStateException("official image response contained an unsafe download URL")
-        }
+    private suspend fun downloadImage(url: String): ByteArray {
         val safeUrl = ContentEndpointSecurity.requireSafe(
             rawUrl = url,
             allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
-            allowInsecureTransport = !platform,
+            allowInsecureTransport = true,
         )
         val request = Request.Builder().url(safeUrl).get().build()
-        val client = if (platform) platformDownloadClient else httpClient
         return OkHttpManager.sensitiveContentCall(
-            client = client,
+            client = httpClient,
             request = request,
             allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
-            allowInsecureTransport = !platform,
+            allowInsecureTransport = true,
         ).awaitResponse().use { response ->
             if (!response.isSuccessful) {
                 throw IllegalStateException("image download failed (${response.code})")
@@ -424,21 +339,7 @@ class ImageGenerationToolHandler(
     private fun normalizeImageModelId(rawModel: String?): String? =
         rawModel?.trim()?.takeIf(String::isNotEmpty)?.replace(Regex("\\s+"), "")
 
-    private data class BundledImageProviderConfig(
-        val baseUrl: String,
-        val model: String,
-        val apiKey: String,
-    )
-
-    private fun bundledImageProviderConfig(): BundledImageProviderConfig =
-        BundledImageProviderConfig(
-            baseUrl = BuildConfig.IMAGE_BASE_URL.trim().ifBlank { DEFAULT_IMAGE_BASE_URL },
-            model = BuildConfig.IMAGE_MODEL.trim().ifBlank { DEFAULT_IMAGE_MODEL },
-            apiKey = BuildConfig.IMAGE_API_KEY.trim(),
-        )
-
     private data class ImageGenerationRoute(
-        val platform: Boolean,
         val endpoint: String,
         val apiKey: String,
         val customHeaders: Map<String, String>,
@@ -448,9 +349,6 @@ class ImageGenerationToolHandler(
     )
 
     companion object {
-        private const val BUNDLED_IMAGE_PROVIDER_ID = "bundled-image-provider"
-        private const val BUNDLED_IMAGE_PROVIDER_NAME = "Xiaowan Image Provider"
-        internal const val DEFAULT_IMAGE_BASE_URL = "https://cloud.omnimind.com.cn"
         internal const val DEFAULT_IMAGE_MODEL = "gpt-image-2"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val SUPPORTED_OUTPUT_FORMATS = setOf("png", "webp", "jpeg")
@@ -458,11 +356,6 @@ class ImageGenerationToolHandler(
             "/v1/images/generations",
             "/images/generations",
         )
-
-        internal fun shouldUseBundledImageProvider(
-            profileApiKey: String,
-            bundledApiKey: String,
-        ): Boolean = bundledApiKey.isNotBlank() && profileApiKey.isBlank()
 
         /**
          * The configured image provider owns prompt capacity.  The runtime only
@@ -503,62 +396,6 @@ class ImageGenerationToolHandler(
             return decoded
         }
 
-        internal fun isSafePlatformDownloadUrl(url: String): Boolean {
-            val parsed = url.toHttpUrlOrNull() ?: return false
-            if (!parsed.isHttps || parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) {
-                return false
-            }
-            val host = parsed.host.lowercase()
-            if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
-                return false
-            }
-            val ipv4 = host.split('.').mapNotNull(String::toIntOrNull)
-            if (ipv4.size == 4 && ipv4.all { it in 0..255 }) {
-                val first = ipv4[0]
-                val second = ipv4[1]
-                return !(first == 0 || first == 10 || first == 127 ||
-                    first >= 224 ||
-                    (first == 100 && second in 64..127) ||
-                    (first == 169 && second == 254) ||
-                    (first == 172 && second in 16..31) ||
-                    (first == 192 && second == 168) ||
-                    (first == 198 && second in 18..19))
-            }
-            if (host.contains(':')) {
-                return host != "::" && host != "::1" &&
-                    !host.startsWith("fc") && !host.startsWith("fd") &&
-                    !host.startsWith("fe8") && !host.startsWith("fe9") &&
-                    !host.startsWith("fea") && !host.startsWith("feb")
-            }
-            return true
-        }
-
-        internal fun isPublicPlatformAddress(address: InetAddress): Boolean {
-            if (address.isAnyLocalAddress ||
-                address.isLoopbackAddress ||
-                address.isLinkLocalAddress ||
-                address.isSiteLocalAddress ||
-                address.isMulticastAddress
-            ) {
-                return false
-            }
-            val bytes = address.address
-            if (bytes.size == 4) {
-                val first = bytes[0].toInt() and 0xFF
-                val second = bytes[1].toInt() and 0xFF
-                return !(first == 0 || first == 10 || first == 127 || first >= 224 ||
-                    (first == 100 && second in 64..127) ||
-                    (first == 169 && second == 254) ||
-                    (first == 172 && second in 16..31) ||
-                    (first == 192 && second == 168) ||
-                    (first == 198 && second in 18..19))
-            }
-            if (bytes.size == 16) {
-                val first = bytes[0].toInt() and 0xFF
-                return first != 0xFC && first != 0xFD
-            }
-            return false
-        }
 
         internal fun requireSupportedImage(bytes: ByteArray) {
             require(bytes.isNotEmpty()) { "image generation returned empty image data" }
@@ -575,3 +412,22 @@ class ImageGenerationToolHandler(
         }
     }
 }
+private suspend fun Call.awaitResponse(): Response =
+    suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { cancel() }
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (!continuation.isCompleted) {
+                    continuation.resumeWithException(error)
+                }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (continuation.isCompleted) {
+                    response.close()
+                } else {
+                    continuation.resume(response)
+                }
+            }
+        })
+    }

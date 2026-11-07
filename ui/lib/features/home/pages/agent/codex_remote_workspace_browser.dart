@@ -131,7 +131,6 @@ class CodexRemoteWorkspaceBrowserState
     try {
       final listing = await AgentRuntimeService.listRemoteDirectories(
         agentId: widget.agentId,
-        workspaceOwner: _listing?.workspaceOwner,
         remoteBridgeUrl: widget.remoteBridgeUrl,
         remoteBridgeToken: widget.remoteBridgeToken,
         remoteCwd: _rootPath,
@@ -209,12 +208,10 @@ class CodexRemoteWorkspaceBrowserState
     CodexRemoteDirectoryEntry entry, {
     bool startInEditMode = false,
   }) async {
-    final workspaceOwner = _listing?.workspaceOwner;
     await Navigator.of(context).push(
       OmniPageRoute<void>(
         builder: (_) => CodexRemoteFilePreviewPage(
           agentId: widget.agentId,
-          workspaceOwner: workspaceOwner,
           path: entry.path,
           title: entry.name,
           remoteBridgeUrl: widget.remoteBridgeUrl,
@@ -281,8 +278,7 @@ class CodexRemoteWorkspaceBrowserState
                           action: _RemoteWorkspaceEntryAction.edit,
                         ),
                       ],
-                      if (widget.allowFileMutations &&
-                          !(widget.agentId == 'na-cloud' && isDirectory))
+                      if (widget.allowFileMutations)
                         _buildActionTile(
                           context: sheetContext,
                           icon: Icons.drive_file_rename_outline_rounded,
@@ -295,8 +291,7 @@ class CodexRemoteWorkspaceBrowserState
                         label: _isEnglish ? 'Copy path' : '复制路径',
                         action: _RemoteWorkspaceEntryAction.copyPath,
                       ),
-                      if (widget.allowFileMutations &&
-                          !(widget.agentId == 'na-cloud' && isDirectory))
+                      if (widget.allowFileMutations)
                         _buildActionTile(
                           context: sheetContext,
                           icon: Icons.delete_outline_rounded,
@@ -347,7 +342,6 @@ class CodexRemoteWorkspaceBrowserState
   }
 
   Future<void> _promptRenameEntry(CodexRemoteDirectoryEntry entry) async {
-    final workspaceOwner = _listing?.workspaceOwner;
     final oldName = entry.name;
     final nextName = (await AppDialog.input(
       context,
@@ -381,7 +375,6 @@ class CodexRemoteWorkspaceBrowserState
     try {
       final result = await AgentRuntimeService.moveRemotePath(
         agentId: widget.agentId,
-        workspaceOwner: workspaceOwner,
         remoteBridgeUrl: widget.remoteBridgeUrl,
         remoteBridgeToken: widget.remoteBridgeToken,
         remoteCwd: _rootPath,
@@ -403,15 +396,14 @@ class CodexRemoteWorkspaceBrowserState
   }
 
   Future<void> _confirmAndDeleteEntry(CodexRemoteDirectoryEntry entry) async {
-    final workspaceOwner = _listing?.workspaceOwner;
     final confirmed = await AppDialog.confirm(
       context,
       title: entry.isDirectory
           ? (_isEnglish ? 'Delete folder' : '删除文件夹')
           : (_isEnglish ? 'Delete file' : '删除文件'),
       content: _isEnglish
-          ? 'Delete "${entry.name}" from ${widget.agentId == 'na-cloud' ? 'cloud storage' : 'the remote PC'}? This cannot be undone.'
-          : '确认从${widget.agentId == 'na-cloud' ? '云端空间' : '远程 PC'}删除“${entry.name}”？删除后不可恢复。',
+          ? 'Delete "${entry.name}" from the remote PC? This cannot be undone.'
+          : '确认从远程 PC 删除“${entry.name}”？删除后不可恢复。',
       cancelText: _isEnglish ? 'Cancel' : '取消',
       confirmText: _isEnglish ? 'Delete' : '删除',
       confirmButtonColor: const Color(0xFFE53935),
@@ -420,7 +412,6 @@ class CodexRemoteWorkspaceBrowserState
     try {
       final result = await AgentRuntimeService.deleteRemotePath(
         agentId: widget.agentId,
-        workspaceOwner: workspaceOwner,
         remoteBridgeUrl: widget.remoteBridgeUrl,
         remoteBridgeToken: widget.remoteBridgeToken,
         remoteCwd: _rootPath,

@@ -1,9 +1,5 @@
 package cn.com.omnimind.bot.agent
 
-import cn.com.omnimind.bot.agent.runtime.NaRuntimeFailure
-import cn.com.omnimind.bot.agent.runtime.naRuntimeFailureKinds
-import cn.com.omnimind.bot.agent.runtime.naRuntimeFailureMessage
-import cn.com.omnimind.bot.agent.runtime.naRuntimeFailurePhases
 import com.agentclientprotocol.protocol.JsonRpcException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -45,7 +41,6 @@ internal object AgentRuntimeErrorSupport {
 
     fun userFacingMessage(error: Throwable): String? {
         val kind = failureKind(error)
-        if (kind in naRuntimeFailureKinds) return naRuntimeFailureMessage(kind!!)
         return when (kind) {
             PROVIDER_QUOTA_EXCEEDED ->
                 "模型服务商额度不足，请检查账户余额或配额后再试。"
@@ -91,10 +86,6 @@ internal object AgentRuntimeErrorSupport {
     }
 
     fun failureKind(error: Throwable): String? {
-        generateSequence(error) { it.cause }.take(16)
-            .filterIsInstance<NaRuntimeFailure>()
-            .firstOrNull { it.failureKind in naRuntimeFailureKinds }
-            ?.let { return it.failureKind }
         providerResponseFailureKind(error)?.let { return it }
         return when {
             errorMessages(error).any { it.contains("agent_identity_required:") } -> AGENT_IDENTITY_REQUIRED
@@ -124,7 +115,7 @@ internal object AgentRuntimeErrorSupport {
             kind?.let { JsonObject(mapOf("failureKind" to JsonPrimitive(it))) })
     }
 
-    private val knownFailureKinds = naRuntimeFailureKinds + setOf(
+    private val knownFailureKinds = setOf(
         PROVIDER_QUOTA_EXCEEDED, PROVIDER_RATE_LIMITED, PROVIDER_REQUEST_LIMITED,
         PROVIDER_AUTHENTICATION_FAILED, PROVIDER_SERVICE_UNAVAILABLE, PROVIDER_REQUEST_REJECTED,
         PROVIDER_MODEL_UNAVAILABLE, PROVIDER_TLS_CERTIFICATE_FAILURE, PROVIDER_NOT_BOUND,
@@ -141,10 +132,6 @@ internal object AgentRuntimeErrorSupport {
         error.cause?.let { put("causeType", it.javaClass.name) }
         failureKind(error)?.let { put("failureKind", it) }
         val causes = generateSequence(error) { it.cause }.take(16).toList()
-        causes.filterIsInstance<NaRuntimeFailure>().firstOrNull()?.let { failure ->
-            failure.phase?.takeIf { it in naRuntimeFailurePhases }?.let { put("phase", it) }
-            failure.statusCode?.takeIf { it in 100..599 }?.let { put("httpStatus", it) }
-        }
         val callSites = causes.asSequence().flatMap { it.stackTrace.asSequence() }
             .filter { it.className.startsWith("cn.com.omnimind.bot.") }
             .map { "${it.className}.${it.methodName}:${it.lineNumber}" }
@@ -157,7 +144,7 @@ internal object AgentRuntimeErrorSupport {
         "collaborationMode/list", "config/read", "agent/list", "agent/refresh",
         "agent/checkUpdates", "agent/save", "agent/delete", "agent/test", "agent/prepare",
         "agent/uninstall", "agent/config/read", "agent/config/write", "agent/config/rollback",
-        "config/na/personal", "config/remote/read", "config/remote/write", "config/remote/test",
+        "config/remote/read", "config/remote/write", "config/remote/test",
         "config/remote/fs/list", "config/remote/fs/read", "config/remote/fs/write",
         "config/remote/fs/move", "config/remote/fs/delete", "providers/list", "providers/set",
         "providers/disable", "session/new", "session/load", "session/resume", "session/read",

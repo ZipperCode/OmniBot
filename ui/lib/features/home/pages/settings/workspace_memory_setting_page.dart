@@ -234,9 +234,7 @@ class _WorkspaceMemorySettingPageState extends State<WorkspaceMemorySettingPage>
                             : context.l10n.workspaceEmbeddingNotReady,
                         value: _embeddingEnabled,
                         onChanged: _toggleEmbedding,
-                        footer: _embeddingConfig?.usesPlatform == true
-                            ? null
-                            : TextButton(
+                        footer: TextButton(
                                 style: TextButton.styleFrom(
                                   foregroundColor: palette.accentPrimary,
                                   padding: EdgeInsets.zero,

@@ -35,25 +35,6 @@ test("editing Harness configuration never restarts active sessions or reuses a s
   assert.match(writes, /recordAgentConfigRevision/);
 });
 
-test("Xiaowan session startup uses the Provider cache and restores session-owned selection", async () => {
-  const content = await source("app/src/main/java/cn/com/omnimind/bot/agent/XiaowanAcpConnection.kt");
-  const startup = content.slice(
-    content.indexOf("private suspend fun loadXiaowanModels()"),
-    content.indexOf("private fun hasUsableSharedProviderBinding"),
-  );
-  assert.match(startup, /ModelProviderConfigStore\.cachedModels/);
-  assert.doesNotMatch(startup, /fetchProviderModels|fetchAgentProviderModels|refreshAndGetModels/);
-  const refresh = content.slice(content.indexOf("suspend fun refreshModels()"), content.indexOf("override val configOptions"));
-  assert.match(refresh, /fetchAgentProviderModels\(\s*providerProfile, forceRefresh = true/);
-  const manager = await source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt");
-  const fetch = manager.slice(manager.indexOf("internal suspend fun fetchAgentProviderModels("),
-    manager.indexOf("internal fun shouldRouteLocalAcpRequest("));
-  assert.match(fetch, /if \(forceRefresh\) PlatformAiProvisioner\.refreshAndGetModels\(\)/);
-  assert.match(fetch, /HttpController\.fetchProviderModels\(/);
-  assert.match(refresh, /sessionConfig\.replaceModels/);
-  assert.match(content, /profileStore\.sessionConfiguration\(sessionId\.value\)/);
-  assert.match(content, /saveSessionConfiguration\(sessionId\.value/);
-});
 
 test("request forwarding and prompt completion do not invent variants or tool outcomes", async () => {
   const llm = await source("app/src/main/java/cn/com/omnimind/bot/agent/llm/AgentLlmClient.kt");
@@ -145,41 +126,8 @@ test("installed Skills are not hidden by an OmniBot platform keyword policy", as
   assert.doesNotMatch(systemPrompt, /SkillCompatibilityChecker/);
 });
 
-test("image generation leaves prompt and image capacity to the configured provider", async () => {
-  const handler = await source(
-    "app/src/main/java/cn/com/omnimind/bot/agent/tool/handlers/ImageGenerationToolHandler.kt",
-  );
 
-  assert.doesNotMatch(handler, /MAX_IMAGE_(?:PROMPT|JSON|BYTES)/);
-  assert.doesNotMatch(handler, /image prompt exceeds|generated image exceeds/);
-  assert.doesNotMatch(handler, /readBodyLimited\(.*MAX_IMAGE/);
-  assert.match(handler, /requireImageGenerationPrompt/);
-  assert.match(handler, /it\.body\?\.bytes\(\) \?: ByteArray\(0\)/);
-});
 
-test("platform routes do not add a second request-size policy before the provider", async () => {
-  const [mediaProtocol, llmClient, embeddingGateway] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/media/PlatformMediaGateway.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/llm/AgentLlmClient.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/workspace/memory/PlatformEmbeddingGateway.kt"),
-  ]);
-
-  assert.doesNotMatch(mediaProtocol, /MAX_PLATFORM_JSON_UTF8_BYTES|request_too_large|发送上限 15/);
-  assert.doesNotMatch(llmClient, /requirePlatformJsonRequestWithinLimit/);
-  assert.doesNotMatch(embeddingGateway, /requirePlatformJsonRequestWithinLimit/);
-});
-
-test("provider diagnostics preserve the complete response after credential redaction", async () => {
-  const [llmClient, errorSupport] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/agent/llm/AgentLlmClient.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/AgentRuntimeErrorSupport.kt"),
-  ]);
-
-  assert.doesNotMatch(llmClient, /responseBody\s*=\s*responseBody\?\.take\(4000\)/);
-  assert.doesNotMatch(errorSupport, /maxLength:\s*Int\s*=\s*300|redacted\.take\(maxLength\)/);
-  assert.match(errorSupport, /Bearer \*\*\*/);
-  assert.match(errorSupport, /api\[_-\]\?key\|token\|authorization/);
-});
 
 test("automatic compaction cannot create a private ACP lifecycle update", async () => {
   const [connection, reducer] = await Promise.all([

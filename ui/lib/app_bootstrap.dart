@@ -17,7 +17,6 @@ import 'package:ui/theme/app_theme_mode.dart';
 import 'package:ui/theme/app_theme.dart';
 import 'package:ui/theme/liquid_glass_controller.dart';
 import 'package:ui/widgets/flclash/liquid_glass.dart';
-import 'package:ui/widgets/startup_account_prompt.dart';
 import 'package:ui/widgets/startup_environment_notice.dart';
 import 'package:ui/widgets/omnibot_error_widget.dart';
 
@@ -220,10 +219,7 @@ class _MyAppState extends ConsumerState<MyApp> {
                   fit: StackFit.expand,
                   children: [
                     StartupEnvironmentNotice(
-                      child: StartupAccountPrompt(
-                        routeListenable: _router.routeInformationProvider,
-                        child: child ?? const SizedBox.shrink(),
-                      ),
+                      child: child ?? const SizedBox.shrink(),
                     ),
                   ],
                 ),

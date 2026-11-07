@@ -1,11 +1,11 @@
 package cn.com.omnimind.bot.agent.runtime
 
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import com.google.gson.JsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class AgentRuntimeManagerConfigTest {
@@ -26,24 +26,6 @@ class AgentRuntimeManagerConfigTest {
     }
 
     @Test
-    fun `official provider binding resolves when it is absent from persisted profiles`() {
-        val officialProfile = ModelProviderProfile(
-            id = OmniOfficialProvider.PROFILE_ID,
-            name = OmniOfficialProvider.PROFILE_NAME,
-            baseUrl = "https://gateway.example",
-        )
-
-        assertEquals(
-            officialProfile,
-            resolveAgentProviderProfile(
-                boundProviderProfileId = OmniOfficialProvider.PROFILE_ID,
-                configuredProfile = null,
-                officialProfile = officialProfile,
-            ),
-        )
-    }
-
-    @Test
     fun `Dispatch Provider falls back to the editing profile without a scene binding`() {
         val editingProfile = ModelProviderProfile(
             id = "editing-provider",
@@ -57,7 +39,67 @@ class AgentRuntimeManagerConfigTest {
                 boundProviderProfileId = null,
                 configuredProfile = null,
                 editingProfile = editingProfile,
-                officialProfile = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `explicit missing mismatched or unconfigured binding never falls back to editing profile`() {
+        val editingProfile = ModelProviderProfile(
+            id = "editing-provider",
+            name = "Editing Provider",
+            baseUrl = "https://gateway.example/v1",
+        )
+        val validProfile = ModelProviderProfile(
+            id = "bound-provider",
+            name = "Bound Provider",
+            baseUrl = "https://bound.example/v1",
+            apiKey = "key-123",
+        )
+        val unconfiguredProfile = ModelProviderProfile(
+            id = "bound-provider",
+            name = "Bound Provider",
+            baseUrl = "",
+        )
+
+        // Missing binding (e.g. retired official provider) must not fall back
+        assertNull(
+            resolveDispatchAgentProviderProfile(
+                boundProviderProfileId = "retired-official-provider",
+                configuredProfile = null,
+                editingProfile = editingProfile,
+            ),
+        )
+
+        // Mismatched provider ID must not fall back
+        assertNull(
+            resolveDispatchAgentProviderProfile(
+                boundProviderProfileId = "bound-provider",
+                configuredProfile = ModelProviderProfile(
+                    id = "other-provider",
+                    name = "Other",
+                    baseUrl = "https://other.example/v1",
+                ),
+                editingProfile = editingProfile,
+            ),
+        )
+
+        // Unconfigured bound provider must not fall back
+        assertNull(
+            resolveDispatchAgentProviderProfile(
+                boundProviderProfileId = "bound-provider",
+                configuredProfile = unconfiguredProfile,
+                editingProfile = editingProfile,
+            ),
+        )
+
+        // Explicit matching and configured binding resolves successfully
+        assertEquals(
+            validProfile,
+            resolveDispatchAgentProviderProfile(
+                boundProviderProfileId = "bound-provider",
+                configuredProfile = validProfile,
+                editingProfile = editingProfile,
             ),
         )
     }
@@ -81,20 +123,6 @@ class AgentRuntimeManagerConfigTest {
     }
 
     @Test
-    fun `official provider uses the account bearer token as harness credential`() {
-        val officialProfile = ModelProviderProfile(
-            id = OmniOfficialProvider.PROFILE_ID,
-            name = OmniOfficialProvider.PROFILE_NAME,
-            baseUrl = "https://gateway.example",
-        )
-
-        assertEquals(
-            "account-token",
-            resolveAgentProviderApiKey(officialProfile, " account-token "),
-        )
-    }
-
-    @Test
     fun `custom provider keeps its configured api key`() {
         val customProfile = ModelProviderProfile(
             id = "custom-provider",
@@ -105,7 +133,7 @@ class AgentRuntimeManagerConfigTest {
 
         assertEquals(
             "configured-key",
-            resolveAgentProviderApiKey(customProfile, "account-token"),
+            resolveAgentProviderApiKey(customProfile),
         )
     }
 

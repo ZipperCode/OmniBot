@@ -343,20 +343,6 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
     final isEnglish = Localizations.localeOf(context).languageCode == 'en';
     return [
       _SettingSection(
-        label: isEnglish ? 'Account' : '账号',
-        isAccount: true,
-        items: [
-          _SettingItem(
-            icon: LucideIcons.userRoundCog,
-            title: isEnglish ? 'Account & AI service' : '账号与 AI 服务',
-            subtitle: isEnglish
-                ? 'Sign in, view platform quota'
-                : '注册登录、查看平台额度',
-            route: '/my/account',
-          ),
-        ],
-      ),
-      _SettingSection(
         label: context.l10n.settingsSectionModelMemory,
         items: [
           _SettingItem(
@@ -475,7 +461,7 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
 
   Widget _buildSettingsSection(_SettingSection section) {
     return OmniSettingsGroup(
-      title: section.isAccount ? null : section.label,
+      title: section.label,
       translateTitle: false,
       children: [
         for (final item in section.items) _buildSettingsItem(item, section),
@@ -493,9 +479,9 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
         trailing: item.trailing,
         onTap: onTap,
         translateText: false,
-        padding: EdgeInsets.symmetric(
+        padding: const EdgeInsets.symmetric(
           horizontal: 18,
-          vertical: section.isAccount ? 22 : 16,
+          vertical: 16,
         ),
       ),
     );
@@ -533,12 +519,10 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
 class _SettingSection {
   final String label;
   final List<_SettingItem> items;
-  final bool isAccount;
 
   const _SettingSection({
     required this.label,
     required this.items,
-    this.isAccount = false,
   });
 }
 

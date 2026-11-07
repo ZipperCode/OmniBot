@@ -466,17 +466,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     try {
       final files = await FilePicker.pickFiles(type: type);
       if (files.isEmpty || !mounted) return;
-      var rejectedNaAttachment = false;
       setState(() {
         for (final file in files) {
           final metadata = pickedAttachmentMetadata(file);
           if (metadata == null) continue;
-          if (_activeConversationMode == ChatPageMode.agent &&
-              _activeAcpAgentId == 'na-cloud' &&
-              (metadata.size ?? 0) > 10 * 1024 * 1024) {
-            rejectedNaAttachment = true;
-            continue;
-          }
           final path = metadata.path;
           final exists = _pendingAttachments.any((item) => item.path == path);
           if (exists) continue;
@@ -498,9 +491,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
           );
         }
       });
-      if (rejectedNaAttachment) {
-        _showSnackBar('Na 附件单个不能超过 10 MiB，请重新选择。');
-      }
     } catch (e) {
       _showSnackBar('添加附件失败：$e');
     }
@@ -870,14 +860,6 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     final generation = _conversationTargetRequestId;
     bool isCurrent() => mounted && generation == _conversationTargetRequestId;
     if ((messageText.isEmpty && attachments.isEmpty) || _isAiResponding) {
-      return;
-    }
-    if (_activeConversationMode == ChatPageMode.agent &&
-        _activeAcpAgentId == 'na-cloud' &&
-        attachments.any(
-          (item) => (item['size'] as num? ?? 0) > 10 * 1024 * 1024,
-        )) {
-      _showSnackBar('Na 附件单个不能超过 10 MiB，请重新选择。');
       return;
     }
 

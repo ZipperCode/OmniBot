@@ -5,7 +5,6 @@ import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
-import cn.com.omnimind.bot.agent.runtime.NaConversationAccess
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -82,7 +81,6 @@ internal class WebAgentRunBridge(
     private val appContext = context.applicationContext
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val conversationService = ConversationDomainService(appContext)
-    private val historyAccess = NaConversationAccess(appContext)
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val events = Channel<Map<String, Any?>>(Channel.UNLIMITED)
@@ -545,12 +543,9 @@ internal class WebAgentRunBridge(
         state: WebAgentRunState,
         finalizeInterruptedEntries: Boolean
     ) {
-        val owner = historyAccess.captureOwner()
-        // Visibility is separate from ACP completion. An account switch hides
-        // this mirror without aborting the run's journal/terminal cleanup.
         RealtimeHub.publishSnapshot(
             event = "messages_replaced",
-            isVisible = { historyAccess.canRead(state.conversationId, owner) },
+            isVisible = { conversationService.canReadConversation(state.conversationId) },
         ) {
             val messages = historyRepository.listConversationMessages(
                 conversationId = state.conversationId,
@@ -570,7 +565,6 @@ internal class WebAgentRunBridge(
         kind: String,
         error: String? = null
     ) {
-        val owner = historyAccess.captureOwner()
         RealtimeHub.publish(
             "chat_task_event",
             linkedMapOf<String, Any?>(
@@ -582,7 +576,6 @@ internal class WebAgentRunBridge(
                 "turnId" to state.turnId,
                 "error" to error
             ).filterValues { it != null },
-            isVisible = { historyAccess.canRead(state.conversationId, owner) },
         )
     }
 

@@ -20,13 +20,6 @@ fun buildConfigString(value: String): String {
     return "\"$escaped\""
 }
 
-val omnibotImageBaseUrl = prop("OMNIBOT_IMAGE_BASE_URL")
-    .ifBlank { "https://cloud.omnimind.com.cn" }
-val omnibotImageModel = prop("OMNIBOT_IMAGE_MODEL")
-    .ifBlank { "gpt-image-2" }
-val omnibotImageApiKey = prop("OMNIBOT_IMAGE_API_KEY")
-val omnibotBaseUrl = prop("OMNIBOT_BASE_URL")
-val omnibotCloudUrl = prop("OMNIBOT_CLOUD_URL").ifBlank { "https://na.omnimind.com.cn" }
 val appUpdateWorkerUrl = prop("OMNIBOT_UPDATE_WORKER_URL")
     .ifBlank { "https://omnibot.omnimind.com.cn" }
 val llmThuApiBase = prop("LLMTHU_API_BASE")
@@ -42,11 +35,6 @@ require(omnibotProfile in setOf("main", "investor")) {
 val isInvestorProfile = omnibotProfile == "investor"
 val preferPackagedOmniFlowRuntime =
     prop("OOB_PREFER_PACKAGED_OMNIFLOW_RUNTIME") == "1"
-val omnibotAiGatewayUrl = prop("OMNIBOT_AI_GATEWAY_URL")
-val resolvedOmnibotBaseUrl = omnibotBaseUrl
-    .ifBlank { "https://account.omnimind.com.cn" }
-val resolvedOmnibotAiGatewayUrl = omnibotAiGatewayUrl
-    .ifBlank { "https://model-api.omnimind.com.cn" }
 
 val webChatSourceDir = rootProject.file("webchat")
 val webChatDistDir = File(webChatSourceDir, "dist")
@@ -208,10 +196,6 @@ android {
         // Keep the Android version code monotonic for installable updates.
         versionCode = 21
         versionName = "0.7.0.4"
-        buildConfigField("String", "IMAGE_BASE_URL", buildConfigString(omnibotImageBaseUrl))
-        buildConfigField("String", "CLOUD_URL", buildConfigString(omnibotCloudUrl))
-        buildConfigField("String", "IMAGE_MODEL", buildConfigString(omnibotImageModel))
-        buildConfigField("String", "IMAGE_API_KEY", buildConfigString(omnibotImageApiKey))
         buildConfigField("String", "DEBUG_OMNIMIND_API_BASE", buildConfigString(""))
         buildConfigField("String", "DEBUG_OMNIMIND_API_KEY", buildConfigString(""))
         buildConfigField("String", "DEBUG_OMNIMIND_MODEL", buildConfigString(""))
@@ -237,15 +221,11 @@ android {
     productFlavors {
         create("develop") {
             dimension = "version"
-            buildConfigField("String", "BASE_URL", buildConfigString(resolvedOmnibotBaseUrl))
-            buildConfigField("String", "AI_GATEWAY_URL", buildConfigString(resolvedOmnibotAiGatewayUrl))
             buildConfigField("String", "APP_UPDATE_WORKER_URL", buildConfigString(appUpdateWorkerUrl))
         }
 
         create("production") {
             dimension = "version"
-            buildConfigField("String", "BASE_URL", buildConfigString(resolvedOmnibotBaseUrl))
-            buildConfigField("String", "AI_GATEWAY_URL", buildConfigString(resolvedOmnibotAiGatewayUrl))
             buildConfigField("String", "APP_UPDATE_WORKER_URL", buildConfigString(appUpdateWorkerUrl))
         }
 

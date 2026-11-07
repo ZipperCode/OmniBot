@@ -75,7 +75,6 @@ class UsageStatisticsService {
     required DateTime startDate,
     required DateTime today,
   }) async {
-    final visibility = AssistsMessageService.conversationVisibilityRevision;
     final result = await _channel.invokeMapMethod<dynamic, dynamic>(
       'getConversationActivitySummary',
       {
@@ -86,10 +85,7 @@ class UsageStatisticsService {
     if (result == null) {
       throw StateError('Conversation activity summary is unavailable');
     }
-    final summary =
-        visibility == AssistsMessageService.conversationVisibilityRevision
-        ? result
-        : result['localSummary'];
+    final summary = result;
     return summary is Map
         ? ConversationActivitySummary.fromMap(summary)
         : const ConversationActivitySummary();

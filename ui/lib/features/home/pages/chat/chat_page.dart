@@ -415,7 +415,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     final rememberedAgentId = conversationId == null
         ? ''
         : (_agentIdByConversationId[conversationId]?.trim() ?? '');
-    if (rememberedAgentId.isNotEmpty) {
+    if (rememberedAgentId.isNotEmpty && rememberedAgentId != 'na-cloud') {
       return rememberedAgentId;
     }
     return null;
@@ -451,11 +451,23 @@ abstract class _ChatPageStateBase extends State<ChatPage>
         target?.agentRuntime == 'remote') {
       return _kRemoteCodexModeAgentId;
     }
+    // 已退役的持久化 Na 会话保留其原始标识，防止被篡改为小万会话造成历史 ownership 漂移
+    if ((target?.conversationId != null && target?.agentId?.trim() == 'na-cloud') ||
+        _currentConversation?.agentId?.trim() == 'na-cloud') {
+      return 'na-cloud';
+    }
     final targetAgentId = target?.agentId?.trim() ?? '';
-    if (targetAgentId.isNotEmpty) return targetAgentId;
-    return _currentConversation?.agentId?.trim().isNotEmpty == true
-        ? _currentConversation!.agentId!.trim()
-        : _conversationBoundAcpAgentId;
+    if (targetAgentId.isNotEmpty && targetAgentId != 'na-cloud') return targetAgentId;
+    final bound = _conversationBoundAcpAgentId;
+    if (bound != null && bound != 'na-cloud') return bound;
+    if (target?.isNewConversation != true &&
+        (target?.conversationId != null ||
+            target?.isAgentSessionTarget == true ||
+            _currentConversation != null)) {
+      return null;
+    }
+    // 仅未绑定的新会话草稿回退到默认本地 Agent。
+    return _kXiaowanAcpAgentId;
   }
 
   String? get _activeAgentUnavailableMessage {
@@ -1475,9 +1487,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
     ConversationModel? conversation,
     List<ChatMessageModel> messages,
   ) {
-    if (conversation != null) {
-      _runtimeCoordinator.restoreNaHistoryView(conversation);
-    }
     final pageMode = _pageModeForConversationMode(mode);
     final runtime = _runtimeCoordinator.runtimeFor(
       conversationId: conversationId,

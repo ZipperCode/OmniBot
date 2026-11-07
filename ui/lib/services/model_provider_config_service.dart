@@ -434,9 +434,6 @@ class ProviderModelGroup {
 }
 
 class ModelProviderConfigService {
-  static const String _kOfficialProfileId = 'omnibot-official-ai';
-  static const String _kOfficialSourceType = 'omnibot_official';
-  static const String _kOfficialProfileName = 'OmniBot 官方 AI';
   static const String _kManualModelIdsKey = 'manual_provider_model_ids_v2';
   static const String _kHiddenChatModelIdsKey =
       'hidden_chat_provider_model_ids_v1';
@@ -708,8 +705,6 @@ class ModelProviderConfigService {
     Map<String, String>? customHeaders,
     String? profileId,
     String providerName = '',
-    String? capability,
-    bool forceRefresh = false,
   }) async {
     // Capture the persisted profile before starting the network request. A
     // response obtained for an older profile revision must never replace the
@@ -728,9 +723,6 @@ class ModelProviderConfigService {
           if (customHeaders != null) 'useProvidedCustomHeaders': true,
           if (profileId != null && profileId.trim().isNotEmpty)
             'profileId': profileId.trim(),
-          if (capability != null && capability.trim().isNotEmpty)
-            'capability': capability.trim(),
-          if (forceRefresh) 'forceRefresh': true,
           if (profileSnapshot != null)
             'expectedProfileRevision': profileSnapshot.revision,
           if (profileSnapshot != null)
@@ -807,10 +799,8 @@ class ModelProviderConfigService {
   }) async {
     final normalizedProfileId = _canonicalProfileId(profileId);
     final resolvedProfile = profile ?? await _findProfileById(profileId);
-    final isOfficial = resolvedProfile?.sourceType == 'omnibot_official';
-    final manualModelIds = isOfficial
-        ? const <String>[]
-        : await getManualModelIds(profileId: normalizedProfileId);
+    final manualModelIds =
+        await getManualModelIds(profileId: normalizedProfileId);
     const remoteModels = <ProviderModelOption>[];
     final merged = mergeModelOptions(
       remoteModels: remoteModels,
@@ -835,9 +825,6 @@ class ModelProviderConfigService {
       profileId,
       profile: profile,
     );
-    if (profile?.sourceType == 'omnibot_official') {
-      return storedModels;
-    }
     final hiddenModelIds = await getHiddenChatModelIds(profileId: profileId);
     return filterChatModelOptions(
       models: storedModels,
@@ -866,16 +853,12 @@ class ModelProviderConfigService {
       return const <ProviderModelOption>[];
     }
 
-    final manualIds = profile.sourceType == _kOfficialSourceType
-        ? const <String>[]
-        : await getManualModelIds(profileId: profile.id);
+    final manualIds = await getManualModelIds(profileId: profile.id);
     final hiddenIds = await getHiddenChatModelIds(profileId: profile.id);
     final remote = refresh
         ? await fetchModels(
             profileId: profile.id,
             providerName: profile.name,
-            capability: 'text',
-            forceRefresh: true,
           )
         : const <ProviderModelOption>[];
     return filterChatModelOptions(
@@ -912,17 +895,6 @@ class ModelProviderConfigService {
   static Future<List<ProviderModelGroup>> refreshChatModelGroups() =>
       loadChatModelGroups(refresh: true);
 
-  static Future<ProviderModelGroup?> refreshOfficialChatModelGroup() async {
-    final fetched = await fetchModels(
-      profileId: _kOfficialProfileId,
-      providerName: _kOfficialProfileName,
-      capability: 'text',
-      forceRefresh: true,
-    );
-    final profile = await _findProfileById(_kOfficialProfileId);
-    if (profile == null || !profile.configured) return null;
-    return ProviderModelGroup(profile: profile, models: fetched);
-  }
 
   static List<ProviderModelOption> mergeModelOptions({
     required List<ProviderModelOption> remoteModels,

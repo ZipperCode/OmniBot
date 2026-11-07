@@ -290,10 +290,6 @@ void main() {
             catalogReads++;
             return {
               'agents': [
-                {
-                  ..._agent('na-cloud', 'Na', 'na-cloud', 'online'),
-                  'configurationAvailable': false,
-                },
                 _agent('codex-acp', 'Codex', 'codex-acp', 'online'),
               ],
             };
@@ -320,10 +316,6 @@ void main() {
             builder: (_, _) => const AgentModeSettingPage(embedded: true),
           ),
           GoRoute(
-            path: '/home/na/personal',
-            pageBuilder: (_, state) => destination(state),
-          ),
-          GoRoute(
             path: '/home/agent_config/:agentId',
             pageBuilder: (_, state) => destination(state),
           ),
@@ -342,12 +334,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(catalogReads, 1);
       for (final scenario in [
-        (
-          id: 'na-cloud',
-          path: '/home/na/personal',
-          result: false,
-          reload: true,
-        ),
         (
           id: 'codex-acp',
           path: '/home/agent_config/codex-acp',
@@ -506,69 +492,6 @@ void main() {
     }
   }
 
-  for (final configurationAvailable in [false, true]) {
-    testWidgets(
-      'Na personal resources remain available under native configuration policy: $configurationAvailable',
-      (tester) async {
-        final calls = <MethodCall>[];
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
-              calls.add(call);
-              if (call.method == 'agent/list') {
-                return {
-                  'agents': [
-                    {
-                      ..._agent('na-cloud', 'Na', 'na-cloud', 'offline'),
-                      'configurationAvailable': configurationAvailable,
-                    },
-                    _agent('codex-acp', 'Codex', 'codex-acp', 'online'),
-                  ],
-                };
-              }
-              if (call.method == 'agent/test') {
-                return {'ok': true, 'connected': true};
-              }
-              return null;
-            });
-        await tester.pumpWidget(
-          MaterialApp(
-            theme: AppTheme.lightTheme,
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            locale: const Locale('zh'),
-            home: const AgentModeSettingPage(),
-          ),
-        );
-        await tester.pumpAndSettle();
-        final row = find.byKey(const Key('agent-config-na-cloud'));
-        await tester.ensureVisible(row);
-        expect(find.text('Na'), findsOneWidget);
-        expect(
-          find.byKey(const Key('agent-navigation-na-cloud')),
-          findsOneWidget,
-        );
-        expect(tester.widget<InkWell>(row).onTap, isNotNull);
-        expect(
-          find.byKey(const Key('agent-navigation-codex-acp')),
-          findsOneWidget,
-        );
-        await tester.tap(find.byKey(const Key('agent-check-na-cloud')));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 400));
-        expect(find.text('助手检查通过'), findsOneWidget);
-        expect(
-          calls.where((call) => call.method == 'agent/test'),
-          hasLength(1),
-        );
-        expect(
-          calls.where((call) => call.method.startsWith('agent/config/')),
-          isEmpty,
-        );
-        await tester.binding.handlePopRoute();
-        await tester.pumpAndSettle();
-      },
-    );
-  }
 
   testWidgets('installer exceptions remain in a readable result sheet', (
     tester,
@@ -766,10 +689,6 @@ void main() {
     expect(find.byType(OmniSettingsGroup), findsNWidgets(3));
     expect(find.text('4 位 Agent'), findsNothing);
     expect(find.text('版本未检测'), findsNothing);
-    expect(
-      find.text('Na · 云端个人助手'),
-      findsNothing,
-    ); // No separate Na route tile.
     expect(
       tester.getCenter(find.byKey(const Key('agent-check-kimi-code-acp'))).dy,
       closeTo(

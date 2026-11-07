@@ -118,7 +118,6 @@ class ChatAppBar extends StatelessWidget {
       if (agent.id == activeAcpAgentId) return agent.name;
     }
     final id = activeAcpAgentId?.trim();
-    if (id == 'na-cloud') return 'Na';
     if (id == 'openclaw') return 'OpenClaw';
     if (id != null &&
         id.isNotEmpty &&

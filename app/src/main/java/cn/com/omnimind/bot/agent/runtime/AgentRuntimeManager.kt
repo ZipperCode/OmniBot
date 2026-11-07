@@ -14,9 +14,7 @@ import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ChatGptOAuthProvider
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
@@ -83,47 +81,31 @@ internal fun resolveSharedAgentModel(
 internal fun resolveAgentProviderProfile(
     boundProviderProfileId: String?,
     configuredProfile: ModelProviderProfile?,
-    officialProfile: ModelProviderProfile?,
 ): ModelProviderProfile? {
     val normalizedId = boundProviderProfileId?.trim().orEmpty()
     return configuredProfile?.takeIf { it.id == normalizedId }
-        ?: officialProfile?.takeIf {
-            it.id == normalizedId && OmniOfficialProvider.isOfficialProfile(normalizedId)
-        }
 }
 
 internal fun resolveAgentProviderApiKey(
     profile: ModelProviderProfile,
-    officialBearerToken: String?,
 ): String? {
-    val key = if (OmniOfficialProvider.isOfficialProfile(profile.id)) {
-        officialBearerToken
-    } else {
-        profile.apiKey
-    }
-    return key?.trim()?.takeIf(String::isNotEmpty)
+    return profile.apiKey?.trim()?.takeIf(String::isNotEmpty)
 }
 
 internal suspend fun fetchAgentProviderModels(
     profile: ModelProviderProfile,
-    forceRefresh: Boolean = false,
 ): List<ProviderModelOption> {
-    return if (OmniOfficialProvider.isOfficialProfile(profile.id)) {
-        if (forceRefresh) PlatformAiProvisioner.refreshAndGetModels()
-        else PlatformAiProvisioner.ensureReadyAndGetModels()
-    } else {
-        if (Build.VERSION.SDK_INT >= 37) {
-            LocalNetworkPermission.requireForEndpoint(App.instance, profile.baseUrl)
-        }
-        HttpController.fetchProviderModels(
-            apiBase = profile.baseUrl,
-            apiKey = profile.apiKey,
-            customHeaders = profile.customHeaders,
-            protocolType = profile.protocolType,
-            wireApi = profile.wireApi,
-            providerProfile = profile,
-        )
+    if (Build.VERSION.SDK_INT >= 37) {
+        LocalNetworkPermission.requireForEndpoint(App.instance, profile.baseUrl)
     }
+    return HttpController.fetchProviderModels(
+        apiBase = profile.baseUrl,
+        apiKey = profile.apiKey,
+        customHeaders = profile.customHeaders,
+        protocolType = profile.protocolType,
+        wireApi = profile.wireApi,
+        providerProfile = profile,
+    )
 }
 
 /** Availability and distribution-scoped connectivity are owned by the host probe. */
@@ -225,7 +207,6 @@ class AgentRuntimeManager private constructor(
         execute = ::executeManagedAgentUninstall,
         refresh = ::refreshManagedAgentAfterUninstall,
     )
-    private val naRuntime by lazy { NaCloudRuntime(appContext, scope, bindingRepository, acpAgentProfileStore, ::emitEvent) }
     private val scheduledTaskScheduler by lazy {
         WorkspaceScheduledTaskScheduler(appContext)
     }
@@ -287,7 +268,6 @@ class AgentRuntimeManager private constructor(
 
     private fun localRuntimeFor(agentId: String): LocalAcpRuntime {
         val profile = acpAgentProfileStore.requireProfile(agentId)
-        require(profile.id != NA_AGENT_ID) { "Na owns its cloud transport." }
         return localAcpRuntimes.computeIfAbsent(profile.id, ::createLocalAcpRuntime)
     }
 
@@ -478,7 +458,6 @@ class AgentRuntimeManager private constructor(
 
     /** A status belongs to one explicitly addressed endpoint, never a global selection. */
     private suspend fun status(agentId: String): Map<String, Any?> {
-        if (agentId == NA_AGENT_ID) return naRuntime.status()
         val remoteConfig = remoteConfigStore.read()
         val remote = agentId == REMOTE_CODEX_AGENT_ID
         val profile = if (remote) null else acpAgentProfileStore.requireProfile(agentId)
@@ -670,7 +649,6 @@ class AgentRuntimeManager private constructor(
         if (method == "session/prompt") {
             return executePromptWithResponseProjection(identity, ownedArgs)
         }
-        if (identity.agentId == NA_AGENT_ID) return naRuntime.handle(method, ownedArgs)
         if (identity.agentId != REMOTE_CODEX_AGENT_ID) {
             when (method) {
                 "agent/config/read" -> return readAgentConfig(ownedArgs)
@@ -742,7 +720,7 @@ class AgentRuntimeManager private constructor(
                     managedAgentUpdates.check(acpAgentProfileStore.list(), distributionId)
                 }
                 if (EmbeddedRuntimeInstaller.isCurrentDistributionReady(appContext)) {
-                    acpAgentProfileStore.list().filter { it.id != NA_AGENT_ID }.forEach { profile ->
+                    acpAgentProfileStore.list().forEach { profile ->
                         localRuntimeFor(profile.id).refreshAvailability()
                     }
                     managedAgentUpdates.check(acpAgentProfileStore.list(), distributionId, remote = false)
@@ -778,7 +756,6 @@ class AgentRuntimeManager private constructor(
         }
         val id = args.stringValue("agentId") ?: throw IllegalArgumentException("agent_identity_required: agentId is required.")
         val profile = acpAgentProfileStore.requireProfile(id)
-        if (id == NA_AGENT_ID) return naRuntime.handle(method, args)
         if (method == "agent/prepare") {
             require(args.stringValue("distributionId")?.let { it == distributionId } != false) {
                 "Terminal environment changed. Refresh Agent settings before installing."
@@ -1189,7 +1166,6 @@ class AgentRuntimeManager private constructor(
         val rawResult: Any?
         try {
             rawResult = when {
-                identity.agentId == NA_AGENT_ID -> naRuntime.handle("session/prompt", promptArgs)
                 identity.agentId != REMOTE_CODEX_AGENT_ID -> {
                     val runtime = localRuntimeFor(identity.agentId)
                     val operation = runtime.prepareRequest("session/prompt", promptArgs)
@@ -1199,15 +1175,12 @@ class AgentRuntimeManager private constructor(
                 else -> promptRemoteAcpSession(promptArgs)
             }
         } catch (error: Throwable) {
-            val admittedIdentity = error as? NaAdmittedPromptException
-            val rawError = admittedIdentity?.cause ?: error
-            val admittedTurnId = admittedIdentity?.turnId
-                ?: lookupAdmittedTurnId(identity.agentId, requestSessionId, hostRequestId)
-            val resolvedConversationId = admittedIdentity?.conversationId
-                ?: identity.conversationId
+            val rawError = error
+            val admittedTurnId = lookupAdmittedTurnId(identity.agentId, requestSessionId, hostRequestId)
+            val resolvedConversationId = identity.conversationId
                 ?: requestSessionId?.let { conversationIdForSession(it) }
                 ?: requestSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
-            val resolvedSessionId = admittedIdentity?.sessionId ?: requestSessionId
+            val resolvedSessionId = requestSessionId
             val failureKind = AgentRuntimeErrorSupport.failureKind(rawError)
             val safeDetail = AgentRuntimeErrorSupport.userFacingMessage(rawError)
                 ?: AgentRuntimeErrorSupport.safeDiagnosticMessage(rawError)
@@ -1221,7 +1194,6 @@ class AgentRuntimeManager private constructor(
             val profile = if (identity.agentId == REMOTE_CODEX_AGENT_ID) null else runCatching { acpAgentProfileStore.requireProfile(identity.agentId) }.getOrNull()
             val agentName = profile?.name ?: when (identity.agentId) {
                 REMOTE_CODEX_AGENT_ID -> "Codex Remote"
-                NA_AGENT_ID -> "Na"
                 else -> identity.agentId
             }
 
@@ -1284,7 +1256,6 @@ class AgentRuntimeManager private constructor(
             val profile = if (identity.agentId == REMOTE_CODEX_AGENT_ID) null else runCatching { acpAgentProfileStore.requireProfile(identity.agentId) }.getOrNull()
             val agentName = profile?.name ?: when (identity.agentId) {
                 REMOTE_CODEX_AGENT_ID -> "Codex Remote"
-                NA_AGENT_ID -> "Na"
                 else -> identity.agentId
             }
 
@@ -2604,7 +2575,7 @@ class AgentRuntimeManager private constructor(
             // still use the saved binding and never require a /models request.
             check(!targetRuntime.hasActiveTurns()) { "本轮结束后可刷新模型列表" }
             val provider = checkNotNull(currentAgentProviderProfile()) { "请先配置模型提供商" }
-            val models = fetchAgentProviderModels(provider, forceRefresh = true)
+            val models = fetchAgentProviderModels(provider)
             check(currentAgentProviderProfile() == provider) { "模型配置已更改，请重新打开模型列表" }
             check(!targetRuntime.hasActiveTurns()) { "本轮结束后可刷新模型列表" }
             ModelProviderConfigStore.rememberModels(appContext, provider, models)
@@ -3400,24 +3371,27 @@ internal fun terminalStatusFromAcpParams(
 }
 
 /**
- * Resolves the Provider that currently drives Dispatch Model execution.
+ * 解析驱动 Dispatch 模型执行的提供商配置。
  *
- * The scene binding is an optional override, not a prerequisite for running a
- * Harness. If it is missing or stale, use the Provider settings page's editing
- * profile as the Dispatch default.
+ * 当显式指定了绑定的提供商 ID（boundProviderProfileId 非空）时，必须只返回匹配且已完成配置
+ * 的提供商；如果绑定的提供商不存在、不匹配、已退役或未完成配置，必须返回 null，绝不能错误回退
+ * 到编辑中的其他提供商，避免将旧绑定的模型错误发送给无关提供商。
+ * 仅在完全未绑定提供商（boundProviderProfileId 为空）时，才回退到当前合法配置的编辑中提供商。
  */
 internal fun resolveDispatchAgentProviderProfile(
     boundProviderProfileId: String?,
     configuredProfile: ModelProviderProfile?,
     editingProfile: ModelProviderProfile?,
-    officialProfile: ModelProviderProfile?,
 ): ModelProviderProfile? {
-    return resolveAgentProviderProfile(
-        boundProviderProfileId = boundProviderProfileId,
-        configuredProfile = configuredProfile,
-        officialProfile = officialProfile,
-    )?.takeIf { it.isConfigured() }
-        ?: editingProfile?.takeIf { it.isConfigured() }
+    val normalizedBoundId = boundProviderProfileId?.trim().orEmpty()
+    return if (normalizedBoundId.isNotEmpty()) {
+        resolveAgentProviderProfile(
+            boundProviderProfileId = boundProviderProfileId,
+            configuredProfile = configuredProfile,
+        )?.takeIf { it.isConfigured() }
+    } else {
+        editingProfile?.takeIf { it.isConfigured() }
+    }
 }
 
 // A foreground Agent switch must not leave the chat in an indefinite

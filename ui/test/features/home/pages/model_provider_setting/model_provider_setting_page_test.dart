@@ -531,48 +531,6 @@ void main() {
     expect(saveCalls, 0);
   });
 
-  testWidgets('provider page filters the runtime OmniBot official channel', (
-    tester,
-  ) async {
-    final messenger =
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
-      if (call.method == 'listModelProviderProfiles') {
-        final payload = profilePayload();
-        (payload['profiles'] as List<Map<String, dynamic>>).add(
-          <String, dynamic>{
-            'id': 'omnibot-official-ai',
-            'name': 'OmniBot 官方 AI',
-            'baseUrl': 'https://official.example/ai',
-            'sourceType': 'omnibot_official',
-            'readOnly': true,
-            'ready': true,
-            'configured': true,
-            'protocolType': 'openai_compatible',
-            'wireApi': 'chat_completions',
-          },
-        );
-        return payload;
-      }
-      return null;
-    });
-
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.lightTheme,
-        darkTheme: AppTheme.darkTheme,
-        home: const ModelProviderSettingPage(),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
-
-    expect(find.text('Provider 1'), findsWidgets);
-    await tester.tap(find.byKey(const Key('provider-config-title')));
-    await tester.pumpAndSettle();
-    expect(find.text('OmniBot 官方 AI'), findsNothing);
-  });
-
   testWidgets('metadata refresh preserves native capabilities', (tester) async {
     tester.view.physicalSize = const Size(1080, 2200);
     tester.view.devicePixelRatio = 1.0;

@@ -82,8 +82,7 @@ internal object RemoteHistoryCompatibility {
                 val user = RemoteHistoryUserContent.extract(first(item, "content", "text", "message", "input", "text_elements", "parts"))
                 val attachments = if (user.attachments.isNotEmpty()) user.attachments else
                     (item["attachments"] as? List<*>)?.filterIsInstance<Map<*, *>>()?.filter { row ->
-                        row["isImage"] == true || (row["source"] == "na-cloud" &&
-                            row["sessionId"] is String && row["path"]?.toString()?.startsWith("/workspace/") == true)
+                        row["isImage"] == true
                     }.orEmpty()
                 item + mapOf("content" to user.text, "attachments" to attachments)
             }

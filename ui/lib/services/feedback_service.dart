@@ -1,6 +1,5 @@
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:ui/services/account_service.dart';
 
 class FeedbackAttachment {
   const FeedbackAttachment({
@@ -54,15 +53,6 @@ class FeedbackService {
   static const maxTotalSize = 25 * 1024 * 1024;
   final Dio _client;
 
-  static Future<String> loadAccountEmail() async {
-    try {
-      return await AccountService.getFeedbackEmail().timeout(
-        const Duration(seconds: 5),
-      );
-    } catch (_) {
-      return '';
-    }
-  }
 
   static void validateAttachments(List<FeedbackAttachment> files) {
     if (files.length > maxFiles) {
@@ -102,7 +92,6 @@ class FeedbackService {
     required String title,
     required String description,
     required String contact,
-    required String accountEmail,
     required String languageCode,
     Map<String, dynamic>? versionInfo,
     List<FeedbackAttachment> attachments = const [],
@@ -125,7 +114,6 @@ class FeedbackService {
       'contact': contact,
       'source': 'android',
       'locale': languageCode == 'en' ? 'en' : 'zh',
-      if (accountEmail.trim().isNotEmpty) 'accountEmail': accountEmail.trim(),
       if (versionInfo?['versionName'] != null)
         'versionName': versionInfo!['versionName'].toString(),
       'deviceInfo': '{"platform":"android"}',

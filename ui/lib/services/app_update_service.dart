@@ -30,12 +30,6 @@ class AppUpdateStatus {
   final String releaseNotes;
   final String apkName;
   final String apkDownloadUrl;
-  final bool cloudServicePolicyKnown;
-  final bool cloudServicePolicyEnabled;
-  final bool cloudServiceAccessAllowed;
-  final String cloudServiceMinimumVersion;
-  final String cloudServicePolicyMessage;
-  final int cloudServicePolicyCheckedAt;
 
   const AppUpdateStatus({
     required this.currentVersion,
@@ -47,12 +41,6 @@ class AppUpdateStatus {
     required this.releaseNotes,
     required this.apkName,
     required this.apkDownloadUrl,
-    this.cloudServicePolicyKnown = false,
-    this.cloudServicePolicyEnabled = false,
-    this.cloudServiceAccessAllowed = false,
-    this.cloudServiceMinimumVersion = '',
-    this.cloudServicePolicyMessage = '',
-    this.cloudServicePolicyCheckedAt = 0,
   });
 
   bool get canInstall => apkDownloadUrl.trim().isNotEmpty;
@@ -74,14 +62,6 @@ class AppUpdateStatus {
       releaseNotes: (map['releaseNotes'] as String? ?? '').trim(),
       apkName: (map['apkName'] as String? ?? '').trim(),
       apkDownloadUrl: (map['apkDownloadUrl'] as String? ?? '').trim(),
-      cloudServicePolicyKnown: map['cloudServicePolicyKnown'] == true,
-      cloudServicePolicyEnabled: map['cloudServicePolicyEnabled'] == true,
-      cloudServiceAccessAllowed: map['cloudServiceAccessAllowed'] == true,
-      cloudServiceMinimumVersion:
-          (map['cloudServiceMinimumVersion'] as String? ?? '').trim(),
-      cloudServicePolicyMessage:
-          (map['cloudServicePolicyMessage'] as String? ?? '').trim(),
-      cloudServicePolicyCheckedAt: _readInt(map['cloudServicePolicyCheckedAt']),
     );
   }
 

@@ -1,9 +1,6 @@
 package cn.com.omnimind.assists.controller.http
 
 import cn.com.omnimind.assists.api.bean.ResultBean
-import cn.com.omnimind.baselib.account.AiRequestTransportPolicy
-import cn.com.omnimind.baselib.account.AiTransportRoute
-import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.llm.AssistantToolCall
 import cn.com.omnimind.baselib.llm.AssistantToolCallFunction
 import cn.com.omnimind.baselib.llm.AiRequestLogEntry
@@ -28,8 +25,6 @@ import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.OpenAIResponsesRequest
 import cn.com.omnimind.baselib.llm.OpenAiResponsesCallIdCodec
 import cn.com.omnimind.baselib.llm.OpenAiResponsesFunctionNameCodec
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.ProviderModelCapabilities
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
@@ -72,6 +67,15 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import org.json.JSONObject
 import org.json.JSONArray
+
+data class AiTransportRoute(
+    val apiBase: String?,
+    val apiKey: String?,
+    val customHeaders: Map<String, String>,
+    val protocolType: String,
+    val wireApi: String,
+    val routeTag: String?,
+)
 
 /**
  * AI HTTP 控制器，用于处理模型网络请求
@@ -955,9 +959,7 @@ object HttpController {
         }
         fun resolveBindingProfile(binding: cn.com.omnimind.baselib.llm.SceneModelBindingEntry?) =
             binding?.providerProfileId?.let { profileId ->
-            ModelProviderConfigStore.getProfile(profileId)
-                ?: PlatformAiProvisioner.officialProfileOrNull()
-                    ?.takeIf { OmniOfficialProvider.isOfficialProfile(profileId) }
+                ModelProviderConfigStore.getProfile(profileId)
             }
         val sharedAgentBoundProfile = resolveBindingProfile(sharedAgentBinding)
         val sharedAgentModel = sharedAgentBinding
@@ -1053,26 +1055,13 @@ object HttpController {
             ModelSceneRegistry.SceneTransport.OPENAI_COMPATIBLE,
             ModelSceneRegistry.SceneTransport.CONVERSATION_CHAT -> ModelSceneRegistry.ResponseParser.TEXT_CONTENT
         }
-        val aiAccess = OmniAccount.currentAiRequestAccess()
-        val explicitOfficialProvider =
-            explicitBase != null &&
-                explicitKey == null &&
-                explicitHeaders.isEmpty() &&
-                aiAccess.platformGatewayUrl?.let(::normalizeApiBase) == explicitBase
-        val officialProviderSelected =
-            (bindingApplied && OmniOfficialProvider.isOfficialProfile(boundProfile?.id)) ||
-                explicitOfficialProvider
         val routeTag = when {
-            officialProviderSelected -> AiRequestTransportPolicy.PLATFORM_ROUTE_TAG
             overrideApplied -> ROUTE_CUSTOM_OPENAI_COMPAT
             effectiveTransport == ModelSceneRegistry.SceneTransport.OPENAI_COMPATIBLE -> "openai_compatible"
             effectiveTransport == ModelSceneRegistry.SceneTransport.CONVERSATION_CHAT -> "conversation_chat"
             else -> null
         }
 
-        if (officialProviderSelected && oauthProfile == null) {
-            aiAccess.unavailableReason?.let { throw IllegalStateException(it) }
-        }
         val transportRoute = if (oauthProfile != null) {
             // OAuth credentials belong to this selected profile. Never use caller URL,
             // key, headers, or protocol overrides to move them to another destination.
@@ -1084,17 +1073,16 @@ object HttpController {
                 wireApi = OpenAiWireApi.RESPONSES,
                 routeTag = ChatGptOAuthProvider.SOURCE_TYPE,
             )
-        } else AiRequestTransportPolicy.apply(
-            access = aiAccess,
-            byokRoute = AiTransportRoute(
+        } else {
+            AiTransportRoute(
                 apiBase = providerBase,
                 apiKey = providerKey,
                 customHeaders = providerHeaders,
                 protocolType = protocolType,
                 wireApi = wireApi,
                 routeTag = routeTag,
-            ),
-        )
+            )
+        }
 
         return ResolvedSceneRequest(
             requestedModel = requestedModel,

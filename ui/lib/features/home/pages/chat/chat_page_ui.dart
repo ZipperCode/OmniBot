@@ -16,8 +16,7 @@ enum _UserMessageQuickAction { copy, edit, retry }
 
 mixin _ChatPageUiMixin on _ChatPageStateBase {
   bool get _showLocalTerminalActions =>
-      !(_activeMode == ChatPageMode.normal && _isPureChatSelected) &&
-      !(_activeMode == ChatPageMode.agent && _activeAcpAgentId == 'na-cloud');
+      !(_activeMode == ChatPageMode.normal && _isPureChatSelected);
 
   String? get _composerModelLabel {
     if (_activeMode == ChatPageMode.agent) {
@@ -95,13 +94,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     final english = LegacyTextLocalizer.isEnglish;
     return [
       if (_isInputAreaVisible) ...[
-        if (_activeMode == ChatPageMode.agent &&
-            _activeAcpAgentId == 'na-cloud')
-          ChatAppBarAction(
-            label: english ? 'Personal assistant' : '个人助理',
-            icon: LucideIcons.userRound,
-            onSelected: (_) => GoRouterManager.push('/home/na/personal'),
-          ),
         ChatAppBarAction(
           label: english ? 'Commands' : '命令',
           icon: LucideIcons.command,
@@ -374,7 +366,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     final query = _messageController.text.trimLeft().toLowerCase();
     final planModeEnabled = _isAgentPlanMode(_activeAgentCollaborationMode);
     final commands = <Map<String, dynamic>>[
-      if (_activeAcpAgentId != 'na-cloud')
         _buildAgentCommandCard(
           cardId: 'slash-command-agent-model',
           toolTitle: '/model',
@@ -418,7 +409,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
               ? 'Runs an Agent review on the active thread'
               : '在当前线程中启动 Agent review',
         ),
-      if (_activeAcpAgentId != 'na-cloud')
         _buildAgentCommandCard(
           cardId: 'slash-command-agent-init',
           toolTitle: '/init',
@@ -1123,7 +1113,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     if (_activeMode != ChatPageMode.agent) {
       return false;
     }
-    return _activeAcpAgentId == 'na-cloud' || _activeAgentTargetIsRemote;
+    return _activeAgentTargetIsRemote;
   }
 
   Widget _buildRemoteCodexWorkspaceBrowser({
@@ -1131,18 +1121,15 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
     required bool translucentSurfaces,
     required bool enableSystemBackHandler,
   }) {
-    final workspacePath = _activeAcpAgentId == 'na-cloud'
-        ? '/workspace'
-        : (_agentRuntimeStatus.remoteCwd ?? _agentRuntimeStatus.cwd ?? '')
-              .trim();
+    final workspacePath =
+        (_agentRuntimeStatus.remoteCwd ?? _agentRuntimeStatus.cwd ?? '')
+            .trim();
     final bridgeUrl = (_agentRuntimeStatus.remoteBridgeUrl ?? '').trim();
     if (workspacePath.isEmpty) {
       return _buildRemoteCodexWorkspaceUnavailable();
     }
     return CodexRemoteWorkspaceBrowser(
-      agentId: _activeAcpAgentId == 'na-cloud'
-          ? 'na-cloud'
-          : _kRemoteCodexModeAgentId,
+      agentId: _kRemoteCodexModeAgentId,
       allowFileMutations: true,
       key: key,
       workspacePath: workspacePath,
@@ -1449,20 +1436,15 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                           ? null
                           : this._handleContextUsageRingLongPress,
                       modelPickerSettings: null,
-                      runtimeConfigButton:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId == 'na-cloud'
-                          ? null
-                          : KeyedSubtree(
-                              key: _firstUseTourModelAnchorKey,
-                              child: _buildAcpConfigButton(),
-                            ),
+                      runtimeConfigButton: KeyedSubtree(
+                        key: _firstUseTourModelAnchorKey,
+                        child: _buildAcpConfigButton(),
+                      ),
                       agentRunSettings: null,
                       onAgentRunSettingsOpened: null,
                       onAgentRunSettingsChanged: null,
                       agentPermissionMode:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId != 'na-cloud'
+                          _activeMode == ChatPageMode.agent
                           ? _agentPermissionMode
                           : null,
                       agentPermissionModes:
@@ -1475,8 +1457,7 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                             ]
                           : AgentPermissionMode.values,
                       onAgentPermissionModeChanged:
-                          _activeMode == ChatPageMode.agent &&
-                              _activeAcpAgentId != 'na-cloud'
+                          _activeMode == ChatPageMode.agent
                           ? _selectAgentPermissionMode
                           : null,
                       onInputHeightChanged: _handleInputAreaHeightChanged,

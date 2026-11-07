@@ -45,11 +45,11 @@ class UsageStatisticsServiceTest {
     @Test fun `conversation summary excludes out of range local dates and retains streak`() {
         val today = ms("2026-10-20T16:00:00Z")
         val result = conversationActivitySummary(listOf(
-            VisibleConversationActivity(today + day - 1, false),
-            VisibleConversationActivity(today + 1, true),
-            VisibleConversationActivity(today - 1, false),
-            VisibleConversationActivity(today - 3 * day, false),
-            VisibleConversationActivity(today + day, false),
+            VisibleConversationActivity(today + day - 1),
+            VisibleConversationActivity(today + 1),
+            VisibleConversationActivity(today - 1),
+            VisibleConversationActivity(today - 3 * day),
+            VisibleConversationActivity(today + day),
         ), today - 2 * day, today, zone)
         assertEquals(mapOf("2026-10-21" to 2, "2026-10-20" to 1), result["activityMap"])
         assertEquals(3, result["totalConversations"])
@@ -60,22 +60,22 @@ class UsageStatisticsServiceTest {
         val newYork = ZoneId.of("America/New_York")
         val today = ms("2026-03-09T04:00:00Z") // First midnight after spring-forward.
         val result = conversationActivitySummary(listOf(
-            VisibleConversationActivity(ms("2026-03-09T16:00:00Z"), false),
-            VisibleConversationActivity(ms("2026-03-08T16:00:00Z"), false),
-            VisibleConversationActivity(ms("2026-03-07T17:00:00Z"), false),
+            VisibleConversationActivity(ms("2026-03-09T16:00:00Z")),
+            VisibleConversationActivity(ms("2026-03-08T16:00:00Z")),
+            VisibleConversationActivity(ms("2026-03-07T17:00:00Z")),
         ), today - 3 * day, today, newYork)
         // today - 24h is March 7 at 23:00. Dart's existing streak skips March 8.
         assertEquals(2, result["currentStreak"])
         assertEquals(3, result["totalConversations"])
     }
 
-    @Test fun `host read ranges and local account fallback are independent`() = runBlocking {
+    @Test fun `host read ranges aggregate conversation activity and tokens`() = runBlocking {
         val today = ms("2026-10-20T16:00:00Z")
         val service = UsageStatisticsService(
             readActivity = { since, until ->
                 assertEquals(today - day, since)
                 assertEquals(today + day, until)
-                listOf(VisibleConversationActivity(today + 1, false), VisibleConversationActivity(today + 2, true))
+                listOf(VisibleConversationActivity(today + 1), VisibleConversationActivity(today + 2))
             },
             readTokens = { since, until ->
                 assertEquals(today - 7 * day, since)
@@ -86,7 +86,7 @@ class UsageStatisticsServiceTest {
         )
         val conversation = service.conversationSummary(today - day, today)
         assertEquals(2, conversation["totalConversations"])
-        assertEquals(1, (conversation["localSummary"] as Map<*, *>)["totalConversations"])
+        assertFalse(conversation.containsKey("localSummary"))
         assertEquals(2, (service.tokenSummary(today - 7 * day, listOf(today - 7 * day, today))["weeklyData"] as List<*>).size)
     }
 }

@@ -2,8 +2,7 @@ package cn.com.omnimind.baselib.llm
 
 object SceneModelCatalogResolver {
     fun listCatalogItems(): List<SceneCatalogItem> {
-        val profiles = ModelProviderConfigStore.listProfiles().toMutableList()
-        PlatformAiProvisioner.officialProfileOrNull()?.let { profiles.add(it) }
+        val profiles = ModelProviderConfigStore.listProfiles()
         val profilesById = profiles.associateBy { it.id }
         val bindings = SceneModelBindingStore.getBindingMap()
         return ModelSceneRegistry.listRuntimeProfiles()

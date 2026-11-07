@@ -1771,7 +1771,7 @@ internal class LocalAcpRuntime(
         val profiles = listOf(profileStore.requireProfile(ownerAgentId))
         val distribution = currentDistribution()
         val externalProfiles = profiles.filterNot {
-            it.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID || it.id == NA_AGENT_ID
+            it.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID
         }
         val command = MANAGED_NPM_PATH_PREFIX + "\n" + externalProfiles.flatMap { profile ->
             val id = shellQuoteAcp(profile.id)
@@ -1831,7 +1831,6 @@ internal class LocalAcpRuntime(
         }
         val checkedAt = System.currentTimeMillis()
         profiles.forEach { profile ->
-            if (profile.id == NA_AGENT_ID) return@forEach
             val builtIn = profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID
             val availability = availabilityById[profile.id].orEmpty()
                 .associate { it.second to it.third }

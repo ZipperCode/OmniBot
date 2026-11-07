@@ -88,15 +88,11 @@ void main() {
   late String providerSourceType;
   late bool providerReadOnly;
   late bool providerReady;
-  late bool includeOfficialProvider;
+  late bool includeSecondProvider;
   late int providerFetchCount;
   late List<Map<String, dynamic>> sceneBindings;
   late List<Map<String, dynamic>> providerFetchResponse;
-  late List<Map<String, dynamic>> officialFetchResponse;
-  late Map<String, List<Map<String, dynamic>>>
-  officialFetchResponsesByCapability;
-  late Map<String, Completer<List<Map<String, dynamic>>>>
-  officialFetchCompletersByCapability;
+  late List<Map<String, dynamic>> secondProviderFetchResponse;
   late Completer<List<Map<String, dynamic>>>? providerFetchCompleter;
   late Object? providerFetchError;
   late Map<dynamic, dynamic>? lastProviderFetchArguments;
@@ -122,14 +118,11 @@ void main() {
     providerSourceType = 'custom';
     providerReadOnly = false;
     providerReady = true;
-    includeOfficialProvider = false;
+    includeSecondProvider = false;
     providerFetchCount = 0;
     sceneBindings = <Map<String, dynamic>>[];
     providerFetchResponse = <Map<String, dynamic>>[];
-    officialFetchResponse = <Map<String, dynamic>>[];
-    officialFetchResponsesByCapability = <String, List<Map<String, dynamic>>>{};
-    officialFetchCompletersByCapability =
-        <String, Completer<List<Map<String, dynamic>>>>{};
+    secondProviderFetchResponse = <Map<String, dynamic>>[];
     providerFetchCompleter = null;
     providerFetchError = null;
     lastProviderFetchArguments = null;
@@ -226,16 +219,16 @@ void main() {
                     'revision': providerRevision,
                     'protocolType': 'openai_compatible',
                   },
-                  if (includeOfficialProvider)
+                  if (includeSecondProvider)
                     <String, dynamic>{
-                      'id': 'omnibot-official-ai',
-                      'name': 'OmniBot 官方 AI',
-                      'baseUrl': 'https://official.example/ai',
+                      'id': 'provider-2',
+                      'name': 'Provider Two',
+                      'baseUrl': 'https://example2.com/v1',
                       'configured': true,
-                      'sourceType': 'omnibot_official',
-                      'readOnly': true,
+                      'sourceType': 'custom',
+                      'readOnly': false,
                       'ready': true,
-                      'revision': 0,
+                      'revision': 1,
                       'protocolType': 'openai_compatible',
                     },
                 ],
@@ -254,23 +247,10 @@ void main() {
                 );
               }
               final pending = providerFetchCompleter;
-              final isOfficialRequest =
-                  arguments['profileId'] == 'omnibot-official-ai' ||
-                  (arguments['profileId'] == 'provider-1' &&
-                      providerSourceType == 'omnibot_official');
-              if (isOfficialRequest) {
-                final capability = arguments['capability']?.toString() ?? '';
-                final capabilityPending =
-                    officialFetchCompletersByCapability[capability];
-                if (capabilityPending != null) {
-                  return capabilityPending.future;
-                }
-                return officialFetchResponsesByCapability[capability] ??
-                    (arguments['profileId'] == 'omnibot-official-ai'
-                        ? officialFetchResponse
-                        : providerFetchResponse);
-              }
               if (pending != null) return pending.future;
+              if (arguments['profileId'] == 'provider-2') {
+                return secondProviderFetchResponse;
+              }
               return providerFetchResponse;
             case 'getSceneOperationConfig':
               return savedOperationConfig;
@@ -304,11 +284,6 @@ void main() {
     final pending = providerFetchCompleter;
     if (pending != null && !pending.isCompleted) {
       pending.complete(<Map<String, dynamic>>[]);
-    }
-    for (final pending in officialFetchCompletersByCapability.values) {
-      if (!pending.isCompleted) {
-        pending.complete(<Map<String, dynamic>>[]);
-      }
     }
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
@@ -453,169 +428,6 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('official catalog refreshes automatically', (tester) async {
-    providerBaseUrl = 'https://official.example/ai';
-    providerSourceType = 'omnibot_official';
-    providerReadOnly = true;
-    providerFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'official-model'},
-    ];
-
-    await pumpSceneSettings(tester);
-    expect(providerFetchCount, 2);
-    await tester.tap(
-      find.byKey(
-        const Key('scene-model-selector-scene.compactor.context.chat'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('official-model'), findsOneWidget);
-  });
-
-  testWidgets('scene selector shows BYOK and official channels together', (
-    tester,
-  ) async {
-    includeOfficialProvider = true;
-    providerFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'byok-model'},
-    ];
-    officialFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'official-model'},
-    ];
-
-    await pumpSceneSettings(tester);
-    expect(providerFetchCount, 3);
-
-    await tester.tap(
-      find.byKey(
-        const Key('scene-model-selector-scene.compactor.context.chat'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Provider One'), findsOneWidget);
-    expect(find.text('OmniBot 官方 AI'), findsOneWidget);
-    expect(find.text('byok-model'), findsOneWidget);
-
-    expect(find.text('official-model'), findsOneWidget);
-  });
-
-  testWidgets(
-    'embedding scene filters official capability but keeps BYOK models open',
-    (tester) async {
-      includeOfficialProvider = true;
-      providerFetchResponse = <Map<String, dynamic>>[
-        <String, dynamic>{'id': 'unknown-byok-model'},
-      ];
-      officialFetchResponsesByCapability = <String, List<Map<String, dynamic>>>{
-        'text': <Map<String, dynamic>>[
-          <String, dynamic>{'id': 'official-text-model'},
-        ],
-        'embedding': <Map<String, dynamic>>[
-          <String, dynamic>{'id': 'official-embedding-model'},
-        ],
-      };
-
-      await pumpSceneSettings(tester);
-      expect(providerFetchCount, 3);
-      expect(
-        providerFetchArguments.any(
-          (arguments) =>
-              arguments['profileId'] == 'provider-1' &&
-              !arguments.containsKey('capability'),
-        ),
-        isTrue,
-      );
-      expect(
-        providerFetchArguments.any(
-          (arguments) =>
-              arguments['profileId'] == 'omnibot-official-ai' &&
-              arguments['capability'] == 'embedding',
-        ),
-        isTrue,
-      );
-
-      await tester.tap(
-        find.byKey(const Key('scene-model-selector-scene.memory.embedding')),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('unknown-byok-model'), findsOneWidget);
-
-      expect(find.text('official-embedding-model'), findsOneWidget);
-      expect(find.text('official-text-model'), findsNothing);
-    },
-  );
-
-  testWidgets('text selector does not wait for a pending embedding catalog', (
-    tester,
-  ) async {
-    includeOfficialProvider = true;
-    providerFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'byok-model'},
-    ];
-    officialFetchResponsesByCapability = <String, List<Map<String, dynamic>>>{
-      'text': <Map<String, dynamic>>[
-        <String, dynamic>{'id': 'official-text-model'},
-      ],
-    };
-    final embeddingPending = Completer<List<Map<String, dynamic>>>();
-    officialFetchCompletersByCapability['embedding'] = embeddingPending;
-
-    await pumpSceneSettings(tester);
-    expect(providerFetchCount, 3);
-
-    await tester.tap(
-      find.byKey(
-        const Key('scene-model-selector-scene.compactor.context.chat'),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.text('OmniBot 官方 AI'), findsOneWidget);
-    expect(find.text('official-text-model'), findsOneWidget);
-
-    embeddingPending.complete(<Map<String, dynamic>>[
-      <String, dynamic>{'id': 'official-embedding-model'},
-    ]);
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets('first embedding selector tap waits for official models', (
-    tester,
-  ) async {
-    includeOfficialProvider = true;
-    providerFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'unknown-byok-model'},
-    ];
-    officialFetchResponsesByCapability = <String, List<Map<String, dynamic>>>{
-      'text': <Map<String, dynamic>>[
-        <String, dynamic>{'id': 'official-text-model'},
-      ],
-    };
-    final embeddingPending = Completer<List<Map<String, dynamic>>>();
-    officialFetchCompletersByCapability['embedding'] = embeddingPending;
-
-    await pumpSceneSettings(tester);
-    expect(providerFetchCount, 3);
-
-    await tester.tap(
-      find.byKey(const Key('scene-model-selector-scene.memory.embedding')),
-    );
-    await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
-    expect(find.text('OmniBot 官方 AI'), findsNothing);
-
-    embeddingPending.complete(<Map<String, dynamic>>[
-      <String, dynamic>{'id': 'official-embedding-model'},
-    ]);
-    await tester.pumpAndSettle();
-
-    expect(find.text('OmniBot 官方 AI'), findsOneWidget);
-    expect(find.text('official-embedding-model'), findsOneWidget);
-    expect(find.text('official-text-model'), findsNothing);
-  });
-
   testWidgets('background refresh errors do not leak endpoint details', (
     tester,
   ) async {
@@ -648,18 +460,18 @@ void main() {
   testWidgets(
     'GUI switches providers through the shared scene binding and restores it',
     (tester) async {
-      includeOfficialProvider = true;
+      includeSecondProvider = true;
       providerFetchResponse = <Map<String, dynamic>>[
         {'id': 'custom-gui-model'},
       ];
-      officialFetchResponse = <Map<String, dynamic>>[
-        {'id': 'official-gui-model'},
+      secondProviderFetchResponse = <Map<String, dynamic>>[
+        {'id': 'provider-2-gui-model'},
       ];
       sceneBindings = <Map<String, dynamic>>[
         {
           'sceneId': 'scene.vlm.operation.primary',
-          'providerProfileId': 'omnibot-official-ai',
-          'modelId': 'official-gui-model',
+          'providerProfileId': 'provider-2',
+          'modelId': 'provider-2-gui-model',
         },
       ];
       await pumpSceneSettings(tester);
@@ -686,12 +498,12 @@ void main() {
   testWidgets(
     'model IDs and icons preserve channel selection without a restore entry',
     (tester) async {
-      includeOfficialProvider = true;
+      includeSecondProvider = true;
       providerFetchResponse = [
         {'id': 'gpt-5.4', 'displayName': 'Custom Choice'},
       ];
-      officialFetchResponse = [
-        {'id': 'gpt-5.4', 'displayName': 'Official Choice'},
+      secondProviderFetchResponse = [
+        {'id': 'gpt-5.4', 'displayName': 'Second Choice'},
       ];
       await pumpSceneSettings(tester);
       final fetchCountBeforeOpen = providerFetchCount;
@@ -720,16 +532,16 @@ void main() {
         everyElement('openai'),
       );
       // Display names remain searchable, but the visible primary label is ID.
-      await tester.enterText(find.byType(TextField), 'Official');
+      await tester.enterText(find.byType(TextField), 'Second');
       await tester.pumpAndSettle();
       expect(find.text('Custom Choice'), findsNothing);
-      expect(find.text('Official Choice'), findsNothing);
+      expect(find.text('Second Choice'), findsNothing);
       await tester.tap(find.text('gpt-5.4'));
       await tester.pumpAndSettle();
       expect(sceneBindings.single, containsPair('modelId', 'gpt-5.4'));
       expect(
         sceneBindings.single,
-        containsPair('providerProfileId', 'omnibot-official-ai'),
+        containsPair('providerProfileId', 'provider-2'),
       );
       expect(providerFetchCount, fetchCountBeforeOpen);
 
@@ -737,7 +549,7 @@ void main() {
       await tester.pumpAndSettle();
       final selectedRow = tester.widget<OmniMenuItem>(
         find.ancestor(
-          of: find.text('OmniBot 官方 AI'),
+          of: find.text('Provider Two'),
           matching: find.byType(OmniMenuItem),
         ),
       );

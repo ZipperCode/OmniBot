@@ -10,7 +10,7 @@ import org.junit.Test
 
 class WorkspaceMemoryEmbeddingIndexTest {
     @Test
-    fun `explicit BYOK binding is preferred but official binding is not`() {
+    fun `explicit BYOK binding is resolved by matching profile id`() {
         val byok = ModelProviderProfile(
             id = "provider-a",
             name = "Provider A",
@@ -20,10 +20,95 @@ class WorkspaceMemoryEmbeddingIndexTest {
 
         assertEquals(byok, explicitByokEmbeddingProfile("provider-a", byok))
         assertEquals(null, explicitByokEmbeddingProfile("other-provider", byok))
-        assertEquals(
-            null,
-            explicitByokEmbeddingProfile("omnibot-official-ai", byok),
+        assertEquals(null, explicitByokEmbeddingProfile("", byok))
+        assertEquals(null, explicitByokEmbeddingProfile(null, byok))
+    }
+
+    @Test
+    fun `invalid explicit binding does not fall back to editing profile and remains not configured`() {
+        val editingProfile = ModelProviderProfile(
+            id = "editing-provider",
+            name = "Editing Provider",
+            baseUrl = "https://editing.example.com/v1",
+            apiKey = "editing-secret",
         )
+        val invalidConfig = resolveEmbeddingConfigForBinding(
+            enabled = true,
+            bindingProviderProfileId = "provider-missing",
+            bindingModelId = "custom-model",
+            boundProfile = null,
+            fallbackEditingProfile = editingProfile,
+            fallbackModelId = "fallback-model",
+        )
+
+        assertFalse(invalidConfig.configured)
+        assertEquals("provider-missing", invalidConfig.providerProfileId)
+        assertEquals(null, invalidConfig.apiBase)
+        assertFalse(invalidConfig.hasApiKey)
+    }
+
+    @Test
+    fun `no explicit binding falls back to editing profile default`() {
+        val editingProfile = ModelProviderProfile(
+            id = "editing-provider",
+            name = "Editing Provider",
+            baseUrl = "https://editing.example.com/v1",
+            apiKey = "editing-secret",
+        )
+        val defaultConfig = resolveEmbeddingConfigForBinding(
+            enabled = true,
+            bindingProviderProfileId = null,
+            bindingModelId = null,
+            boundProfile = null,
+            fallbackEditingProfile = editingProfile,
+            fallbackModelId = "text-embedding-3-small",
+        )
+
+        assertTrue(defaultConfig.configured)
+        assertEquals("editing-provider", defaultConfig.providerProfileId)
+        assertEquals("https://editing.example.com/v1", defaultConfig.apiBase)
+        assertEquals("text-embedding-3-small", defaultConfig.modelId)
+        assertTrue(defaultConfig.hasApiKey)
+    }
+
+    @Test
+    fun `request profile resolution rejects missing or changed endpoint profile without leaking editing key`() {
+        val config = embeddingConfig().copy(
+            providerProfileId = "target-provider",
+            apiBase = "https://original.example.com/v1",
+        )
+
+        val missingError = runCatching {
+            resolveEmbeddingProfileForRequest(config) { null }
+        }.exceptionOrNull()
+        assertTrue(missingError is IllegalStateException)
+        assertTrue(missingError?.message.orEmpty().contains("unavailable"))
+
+        val changedEndpointProfile = ModelProviderProfile(
+            id = "target-provider",
+            name = "Target Provider",
+            baseUrl = "https://new-host.example.com/v1",
+            apiKey = "target-secret",
+        )
+        val mismatchError = runCatching {
+            resolveEmbeddingProfileForRequest(config) { id ->
+                if (id == "target-provider") changedEndpointProfile else null
+            }
+        }.exceptionOrNull()
+        assertTrue(mismatchError is IllegalStateException)
+        assertTrue(mismatchError?.message.orEmpty().contains("endpoint changed"))
+
+        val matchingProfile = ModelProviderProfile(
+            id = "target-provider",
+            name = "Target Provider",
+            baseUrl = "https://original.example.com/v1",
+            apiKey = "target-secret",
+        )
+        val resolved = resolveEmbeddingProfileForRequest(config) { id ->
+            if (id == "target-provider") matchingProfile else null
+        }
+        assertEquals("target-provider", resolved.id)
+        assertEquals("target-secret", resolved.apiKey)
     }
 
     @Test
@@ -42,12 +127,7 @@ class WorkspaceMemoryEmbeddingIndexTest {
             base.embeddingConfigId(),
             base.copy(apiBase = "https://other.example.com/v1").embeddingConfigId(),
         )
-        assertNotEquals(
-            base.embeddingConfigId(),
-            base.copy(usesPlatform = true).embeddingConfigId(),
-        )
     }
-
     @Test
     fun `index reuse requires matching identity and dimensions`() {
         val config = embeddingConfig()
@@ -154,6 +234,5 @@ class WorkspaceMemoryEmbeddingIndexTest {
             modelId = "embedding-model-a",
             apiBase = "https://example.com/v1",
             hasApiKey = true,
-            usesPlatform = false,
         )
 }

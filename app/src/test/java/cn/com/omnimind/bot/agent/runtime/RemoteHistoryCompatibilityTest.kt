@@ -64,4 +64,23 @@ class RemoteHistoryCompatibilityTest {
         val response = mapOf("sessionId" to "s", "configOptions" to listOf("option"))
         assertSame(response, RemoteHistoryCompatibility.normalizeResponse(response))
     }
+
+    @Test fun naCloudAttachmentsAreNotProjectedWhileImageAttachmentsAreRetained() {
+        val turn = mapOf(
+            "items" to listOf(
+                mapOf(
+                    "type" to "userMessage",
+                    "content" to "Hello",
+                    "attachments" to listOf(
+                        mapOf("isImage" to true, "name" to "photo.jpg"),
+                        mapOf("source" to "na-cloud", "sessionId" to "s", "path" to "/workspace/doc.pdf"),
+                    ),
+                ),
+            ),
+        )
+        val item = RemoteHistoryCompatibility.items(turn).single()
+        val attachments = item["attachments"] as List<*>
+        assertEquals(1, attachments.size)
+        assertEquals("photo.jpg", (attachments.single() as Map<*, *>)["name"])
+    }
 }

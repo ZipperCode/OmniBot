@@ -116,11 +116,7 @@ class SkillRuntimeBehaviorTest {
     }
 
     @Test
-    fun imageGenerationDefaultsUseOmnimindImageProvider() {
-        assertEquals(
-            "https://cloud.omnimind.com.cn",
-            ImageGenerationToolHandler.DEFAULT_IMAGE_BASE_URL
-        )
+    fun imageGenerationDefaultsUseStandardImageModel() {
         assertEquals("gpt-image-2", ImageGenerationToolHandler.DEFAULT_IMAGE_MODEL)
         assertTrue(AgentToolDefinitions.imageGenerateTool.toString().contains("gpt-image-2"))
     }
@@ -173,27 +169,6 @@ class SkillRuntimeBehaviorTest {
         )
     }
 
-    @Test
-    fun imageGenerationUsesBundledProviderOnlyWhenUserProviderHasNoKey() {
-        assertFalse(
-            ImageGenerationToolHandler.shouldUseBundledImageProvider(
-                profileApiKey = "dashscope-user-key",
-                bundledApiKey = "sk-bundled"
-            )
-        )
-        assertTrue(
-            ImageGenerationToolHandler.shouldUseBundledImageProvider(
-                profileApiKey = "",
-                bundledApiKey = "sk-bundled"
-            )
-        )
-        assertFalse(
-            ImageGenerationToolHandler.shouldUseBundledImageProvider(
-                profileApiKey = "",
-                bundledApiKey = ""
-            )
-        )
-    }
 
     @Test
     fun decodeImageWriteContentAcceptsBase64DataUriForBinaryPetImages() {

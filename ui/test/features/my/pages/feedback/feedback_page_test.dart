@@ -21,7 +21,6 @@ class FormService extends FeedbackService {
     required String title,
     required String description,
     required String contact,
-    required String accountEmail,
     required String languageCode,
     Map<String, dynamic>? versionInfo,
     List<FeedbackAttachment> attachments = const [],
@@ -32,7 +31,6 @@ class FormService extends FeedbackService {
       'title': title,
       'description': description,
       'contact': contact,
-      'accountEmail': accountEmail,
       'locale': languageCode,
       'attachments': attachments,
     };
@@ -56,17 +54,12 @@ Future<void> tapVisible(WidgetTester tester, Key key) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  const account = MethodChannel('cn.com.omnimind.bot/account');
   const device = MethodChannel('device_info');
   late FormService service;
   setUp(() {
     service = FormService();
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(
-      account,
-      (call) async => 'user@example.com',
-    );
     messenger.setMockMethodCallHandler(
       device,
       (call) async => {'versionName': '0.6.3.3'},
@@ -75,7 +68,6 @@ void main() {
   tearDown(() {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(account, null);
     messenger.setMockMethodCallHandler(device, null);
   });
 
@@ -106,18 +98,17 @@ void main() {
   }
 
   testWidgets(
-    'native form prefills email and preserves it when contact is edited',
+    'native form submits user-entered contact info',
     (tester) async {
       await open(tester);
       expect(find.text('我要反馈'), findsOneWidget);
       expect(
         tester.widget<TextFormField>(find.byKey(contactKey)).controller!.text,
-        'user@example.com',
+        isEmpty,
       );
       await fill(tester);
       await tester.enterText(find.byKey(contactKey), '微信:sample');
       await tapVisible(tester, submitKey);
-      expect(service.submitted!['accountEmail'], 'user@example.com');
       expect(service.submitted!['contact'], '微信:sample');
       expect(find.text('反馈已收到'), findsOneWidget);
       expect(find.text('feedback-reference-123'), findsOneWidget);
@@ -141,11 +132,16 @@ void main() {
       service.failure = FeedbackFailure.network;
       await open(tester);
       await fill(tester);
+      await tester.enterText(find.byKey(contactKey), 'wechat:sample');
       await tapVisible(tester, submitKey);
       expect(find.textContaining('填写的内容已保留'), findsOneWidget);
       expect(
         tester.widget<TextFormField>(find.byKey(titleKey)).controller!.text,
         '应用问题',
+      );
+      expect(
+        tester.widget<TextFormField>(find.byKey(contactKey)).controller!.text,
+        'wechat:sample',
       );
       service.failure = null;
       await tapVisible(tester, submitKey);
@@ -158,7 +154,7 @@ void main() {
       );
       expect(
         tester.widget<TextFormField>(find.byKey(contactKey)).controller!.text,
-        'user@example.com',
+        isEmpty,
       );
     },
   );
@@ -211,10 +207,8 @@ void main() {
   });
 
   testWidgets(
-    'signed-out users get an English native form with optional contact',
+    'form works in English with optional contact',
     (tester) async {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(account, (call) async => '');
       await open(tester, language: 'en');
       expect(find.text('Send feedback'), findsOneWidget);
       expect(
@@ -223,7 +217,6 @@ void main() {
       );
       await fill(tester);
       await tapVisible(tester, submitKey);
-      expect(service.submitted!['accountEmail'], '');
       expect(service.submitted!['contact'], '');
       expect(service.submitted!['locale'], 'en');
       expect(find.text('Feedback received'), findsOneWidget);

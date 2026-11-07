@@ -54,6 +54,8 @@ OmniBot 是一个基于 Android 原生 Kotlin 与 Flutter 构建的端侧 AI Age
 <summary id="quick-start"><strong>快速开始</strong></summary>
 
 ### 配置应用
+> **说明**：当前应用无需注册或登录小万账号，无需官方额度，亦不再内置 Na 云端助手。用户在设置中配置自定义模型提供商（Provider）或第三方 Provider OAuth（如 ChatGPT OAuth）即可直接开始对话。
+
 
 从左侧栏打开设置页面：
 

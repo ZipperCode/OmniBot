@@ -46,7 +46,7 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   ) {
     HomeDrawerState._hasConversationSnapshotCache = true;
     HomeDrawerState._conversationSnapshotCache = List<ConversationModel>.from(
-      conversations.where((row) => row.agentId != 'na-cloud'),
+      conversations,
     );
     _rememberConversationImagePreviewCacheSnapshot();
   }
@@ -60,9 +60,7 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
   }
 
   void _scheduleDrawerSnapshotPersist(List<ConversationModel> conversations) {
-    final snapshot = List<ConversationModel>.from(
-      conversations.where((row) => row.agentId != 'na-cloud'),
-    );
+    final snapshot = List<ConversationModel>.from(conversations);
     unawaited(
       Future<void>(() async {
         await _persistDrawerSnapshot(snapshot);
@@ -72,9 +70,7 @@ extension _HomeDrawerImagePreviews on HomeDrawerState {
 
   void _restoreDrawerSnapshotFromMemory() {
     _allConversations = ConversationService.filterSidebarSnapshot(
-      HomeDrawerState._conversationSnapshotCache
-          .where((row) => row.agentId != 'na-cloud')
-          .toList(),
+      HomeDrawerState._conversationSnapshotCache,
     );
     _conversationImagePreviewCache
       ..clear()

@@ -11,4 +11,5 @@ test("retirement follows the server catalog without rewriting historical ownersh
   assert.equal(isRetiredAgentConversation({ id: 8, agentId: "codex-acp" }, [conversation.agentId]), false);
   assert.equal(isRetiredAgentConversation(null, [conversation.agentId]), false);
   assert.equal(isRetiredAgentConversation({ ...conversation, mode: "chat_only" }, [conversation.agentId]), false);
+  assert.equal(isRetiredAgentConversation({ id: 9, mode: "codex", agentId: "na-cloud" }, ["na-cloud"]), true);
 });

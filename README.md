@@ -54,6 +54,8 @@ OmniBot is an on-device AI agent built with native Android Kotlin and Flutter. I
 <summary id="quick-start"><strong>Quick Start</strong></summary>
 
 ### Configure the app
+> **说明**：当前应用无需注册或登录小万账号，无需官方额度，亦不再内置 Na 云端助手。用户在设置中配置自定义模型提供商（Provider）或第三方 Provider OAuth（如 ChatGPT OAuth）即可直接开始对话。
+
 
 Open the settings page from the left sidebar:
 

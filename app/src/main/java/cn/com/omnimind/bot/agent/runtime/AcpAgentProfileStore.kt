@@ -10,6 +10,8 @@ import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import java.util.UUID
 
+internal const val NA_AGENT_ID = "na-cloud"
+
 internal data class AcpAgentConfigAuditEntry(
     val revision: Long,
     val operation: String,
@@ -43,7 +45,7 @@ internal data class AcpAgentProfile(
             "enabled" to enabled,
             "builtIn" to builtIn,
             "source" to if (builtIn) "official" else "custom",
-            "configurationAvailable" to (id != NA_AGENT_ID || NaCloudEnvironment.developmentAvailable),
+            "configurationAvailable" to true,
             "installed" to agentHealth.installed,
             "status" to agentHealth.status,
             "lastCheckError" to agentHealth.error,
@@ -100,7 +102,7 @@ internal data class AcpAgentHealth(
 ) {
     /** In-app ACP implementations are present before environment/cloud preparation. */
     fun forAgent(agentId: String): AcpAgentHealth {
-        if (agentId != NA_AGENT_ID && agentId != AcpAgentProfileStore.XIAOWAN_AGENT_ID) return this
+        if (agentId != AcpAgentProfileStore.XIAOWAN_AGENT_ID) return this
         return if (status == STATUS_MISSING) {
             // External command discovery cannot describe bundled ACP code.
             // Correct presence without claiming its dependencies are ready or
@@ -193,7 +195,7 @@ internal class AcpAgentProfileStore(context: Context) {
         }
     }
 
-    val retiredAgentIds: Set<String> get() = catalog.retiredAgentIds
+    val retiredAgentIds: Set<String> get() = catalog.retiredAgentIds + NA_AGENT_ID
 
     fun requireProfile(id: String): AcpAgentProfile {
         val normalizedId = id.trim()
@@ -358,15 +360,6 @@ internal class AcpAgentProfileStore(context: Context) {
     fun naOwnerForConversation(conversationId: Long): String? =
         preferences.getString("na_owner:$conversationId", null)
 
-    @Synchronized
-    fun bindNaConversationOwner(conversationId: Long, prefix: String) {
-        require(NaConversationAccess.sessionOwner(prefix) == prefix)
-        val existing = naOwnerForConversation(conversationId)
-        check(existing == null || existing == prefix) { "Cloud conversation ownership cannot change." }
-        check(preferences.edit().putString("na_owner:$conversationId", prefix).commit()) {
-            "Unable to persist Cloud conversation ownership."
-        }
-    }
 
     @Synchronized
     fun unbindConversation(conversationId: Long) {

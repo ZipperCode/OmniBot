@@ -152,14 +152,6 @@ public final class ReleaseArtifactInstrumentation extends Instrumentation {
             require("user".equals(field(value, "source")), "Skill source default lost");
             require("installed".equals(field(value, "installState")), "Skill installation default lost");
         });
-        check("memory_embedding_response", () -> {
-            Object value = decode("{\"data\":[{\"embedding\":[0.125,0.25]}]}",
-                    type(AGENT + "PlatformEmbeddingGateway$EmbeddingResponse"));
-            List<?> entries = (List<?>) field(value, "data");
-            List<?> vector = (List<?>) field(entries.get(0), "embedding");
-            require(vector.size() == 2 && Double.valueOf(0.125).equals(vector.get(0))
-                    && Double.valueOf(0.25).equals(vector.get(1)), "Embedding vector lost");
-        });
         check("quicklog_widget_missing_field_defaults", () -> {
             Object value = decode("{}", type(TARGET + ".quicklog.QuickLogWidgetSettings"));
             require("tasks".equals(field(value, "selectedListId")), "Widget list default lost");

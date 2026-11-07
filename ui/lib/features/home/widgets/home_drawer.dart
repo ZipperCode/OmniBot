@@ -159,9 +159,8 @@ class HomeDrawer extends ConsumerStatefulWidget {
   /// Search, history mutations and running-session status remain shared.
   final bool homePage;
 
-  /// Reuses the modern home surface inside a narrow conversation pane.
-  /// It starts with all Agents so opening a Codex/Na conversation does not
-  /// hide it behind the standalone home's remembered default category.
+  /// 在窄会话栏中复用首页，默认展示所有 Agent，
+  /// 避免首页记住的分类隐藏当前会话。
   final bool conversationSidebar;
 
   /// Presentation selection supplied by the conversation host; never owns
@@ -281,25 +280,6 @@ class HomeDrawerState extends ConsumerState<HomeDrawer>
     _conversationListChangedSubscription = AssistsMessageService
         .conversationListChangedStream
         .listen((event) {
-          if (event['reason'] == 'na_history_owner_changed') {
-            setState(() {
-              _selectedConversationKeys.removeAll(
-                _allConversations
-                    .where((row) => row.agentId == 'na-cloud')
-                    .map((row) => row.threadKey),
-              );
-              _allConversations = _allConversations
-                  .where((row) => row.agentId != 'na-cloud')
-                  .toList();
-              _searchGeneration++;
-              _searchResults = _searchResults
-                  .where((result) => result.conversation.agentId != 'na-cloud')
-                  .toList();
-              _conversationSearchCache.clear();
-              _reconcileConversationSelection();
-            });
-            _syncConversationSnapshotCache();
-          }
           unawaited(_loadConversations());
         });
     _sidebarPolicyChangedSubscription = ConversationService

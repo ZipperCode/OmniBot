@@ -20,13 +20,12 @@ import 'pages/completion_page.dart';
 import 'pages/model_inventory_page.dart';
 import 'pages/permissions_page.dart';
 import 'pages/provider_connection_page.dart';
-import 'pages/provider_page.dart';
 import 'pages/provider_selection_page.dart';
 import 'pages/scene_models_page.dart';
 import 'widgets/onboarding_common.dart';
 import 'widgets/onboarding_footer.dart';
 
-/// First-use tutorial: permissions, account access, model roles, and chat.
+/// First-use tutorial: permissions, model providers, model roles, and chat.
 ///
 /// This widget is a thin orchestration layer — page content lives in
 /// `pages/`, reusable UI in `widgets/`, and state in the controllers.
@@ -134,8 +133,8 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
 
   VoidCallback? get _tutorialNextAction {
     return switch (_flow.page) {
-      TutorialPage.permissions => () => _goToPage(TutorialPage.provider),
-      TutorialPage.provider => () => unawaited(_openChatTour()),
+      TutorialPage.permissions =>
+        () => _goToPage(TutorialPage.providerSelection),
       TutorialPage.providerSelection when !_provider.loading => () => _goToPage(
         TutorialPage.providerConnection,
       ),
@@ -150,19 +149,14 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
   }
 
   String get _tutorialNextTooltip {
-    return switch (_flow.page) {
-      TutorialPage.provider => _t('了解聊天界面', 'Learn the chat interface first'),
-      _ =>
-        _tutorialNextAction == null
-            ? _t('请先完成本页操作', 'Complete this page first')
-            : _t('下一步', 'Next'),
-    };
+    return _tutorialNextAction == null
+        ? _t('请先完成本页操作', 'Complete this page first')
+        : _t('下一步', 'Next');
   }
 
   Key get _tutorialNextKey {
     return switch (_flow.page) {
       TutorialPage.permissions => const ValueKey('tutorial-permissions-next'),
-      TutorialPage.provider => const ValueKey('tutorial-skip-models'),
       TutorialPage.providerSelection => const ValueKey(
         'tutorial-provider-selection-next',
       ),
@@ -282,66 +276,43 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
                   key: const ValueKey('tutorial-page-swipe-surface'),
                   behavior: HitTestBehavior.translucent,
                   onHorizontalDragStart:
-                      _flow.isOnNavigationPage &&
-                          _flow.page != TutorialPage.provider
-                      ? _handleTutorialDragStart
-                      : null,
+                      _flow.isOnNavigationPage ? _handleTutorialDragStart : null,
                   onHorizontalDragUpdate:
-                      _flow.isOnNavigationPage &&
-                          _flow.page != TutorialPage.provider
-                      ? _handleTutorialDragUpdate
-                      : null,
+                      _flow.isOnNavigationPage ? _handleTutorialDragUpdate : null,
                   onHorizontalDragEnd:
-                      _flow.isOnNavigationPage &&
-                          _flow.page != TutorialPage.provider
-                      ? _handleTutorialDragEnd
-                      : null,
-                  child: IndexedStack(
-                    sizing: StackFit.expand,
-                    index: _flow.page == TutorialPage.provider ? 0 : 1,
-                    children: [
-                      // Keep in-progress sign-in/registration (including the
-                      // verification request) alive while exploring model setup.
-                      TickerMode(
-                        enabled: _flow.page == TutorialPage.provider,
-                        child: _flow.isVisited(TutorialPage.provider)
-                            ? const OnboardingProviderPage()
-                            : const SizedBox.shrink(),
-                      ),
-                      AnimatedSwitcher(
-                        duration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 240),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        transitionBuilder: (child, animation) {
-                          final slide =
-                              Tween<Offset>(
-                                begin: Offset(
-                                  0.06 * _flow.transitionDirection,
-                                  0,
-                                ),
-                                end: Offset.zero,
-                              ).animate(
-                                CurvedAnimation(
-                                  parent: animation,
-                                  curve: Curves.easeOutCubic,
-                                ),
-                              );
-                          return FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: slide,
-                              child: child,
+                      _flow.isOnNavigationPage ? _handleTutorialDragEnd : null,
+                  child: AnimatedSwitcher(
+                    duration: reduceMotion
+                        ? Duration.zero
+                        : const Duration(milliseconds: 240),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) {
+                      final slide =
+                          Tween<Offset>(
+                            begin: Offset(
+                              0.06 * _flow.transitionDirection,
+                              0,
+                            ),
+                            end: Offset.zero,
+                          ).animate(
+                            CurvedAnimation(
+                              parent: animation,
+                              curve: Curves.easeOutCubic,
                             ),
                           );
-                        },
-                        child: KeyedSubtree(
-                          key: ValueKey<TutorialPage>(_flow.page),
-                          child: _buildCurrentPage(),
+                      return FadeTransition(
+                        opacity: animation,
+                        child: SlideTransition(
+                          position: slide,
+                          child: child,
                         ),
-                      ),
-                    ],
+                      );
+                    },
+                    child: KeyedSubtree(
+                      key: ValueKey<TutorialPage>(_flow.page),
+                      child: _buildCurrentPage(),
+                    ),
                   ),
                 ),
               ),
@@ -362,7 +333,6 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
         scrollController: _scrollController,
         onRequestShizuku: _requestShizuku,
       ),
-      TutorialPage.provider => const SizedBox.shrink(),
       TutorialPage.providerSelection => OnboardingProviderSelectionPage(
         controller: _provider,
         scrollController: _scrollController,
@@ -419,22 +389,12 @@ class _OnboardingChoicePageState extends State<OnboardingChoicePage> {
       nextTooltip: _tutorialNextTooltip,
       onNext: _tutorialNextAction == null ? null : _goToNextTutorialPage,
       onJumpToPage: _jumpToVisitedTutorialPage,
-      primaryAction:
-          MediaQuery.viewInsetsOf(context).bottom > 0 &&
-              _flow.page == TutorialPage.provider
-          ? null
-          : _buildTutorialPrimaryAction(),
+      primaryAction: _buildTutorialPrimaryAction(),
     );
   }
 
   Widget? _buildTutorialPrimaryAction() {
     return switch (_flow.page) {
-      TutorialPage.provider => TextButton.icon(
-        key: const ValueKey('tutorial-provider-next'),
-        onPressed: () => _goToPage(TutorialPage.providerSelection),
-        icon: const Icon(LucideIcons.settings2, size: 17),
-        label: Text(_t('可选：配置自己的模型', 'Optional: configure your own model')),
-      ),
       TutorialPage.providerConnection => OnboardingPrimaryButton(
         buttonKey: const ValueKey('tutorial-provider-connect'),
         label: _provider.busy

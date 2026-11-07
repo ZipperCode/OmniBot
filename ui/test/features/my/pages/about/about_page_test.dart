@@ -19,7 +19,6 @@ void main() {
 
   const deviceChannel = MethodChannel('device_info');
   const updateChannel = MethodChannel('cn.com.omnimind.bot/app_update');
-  const accountChannel = MethodChannel('cn.com.omnimind.bot/account');
 
   setUp(() async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -35,8 +34,6 @@ void main() {
         .setMockMethodCallHandler(deviceChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(updateChannel, null);
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(accountChannel, null);
   });
 
   testWidgets('renders version and update hint from services', (tester) async {
@@ -196,8 +193,6 @@ void main() {
           return null;
         });
 
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(accountChannel, (call) async => '');
     final router = GoRouter(
       navigatorKey: GoRouterManager.rootNavigatorKey,
       initialLocation: '/my/about',

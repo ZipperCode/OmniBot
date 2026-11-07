@@ -260,15 +260,6 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
         <service
-            android:name="cn.com.omnimind.bot.notifications.NaMessageService"
-            android:exported="false"
-            android:foregroundServiceType="remoteMessaging" />
-        <activity
-            android:name="cn.com.omnimind.bot.notifications.NaNotificationOpenActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:theme="@style/Theme.OmnibotApp.Transparent" />
-        <service
             android:name="cn.com.omnimind.bot.task.runtime.TaskRuntimeService"
             android:enabled="true"
             android:exported="false"

@@ -97,23 +97,34 @@ class AgentSessionBindingOwnershipTest {
     }
 
     @Test
-    fun aReservedNaSessionCannotCreateHistoryUnderANewAccount() = runBlocking {
+    fun aRetiredNaSessionCannotCreateNewHistoryAndExistingNaHistoryIsIsolated() = runBlocking {
         val context = context()
+        val domain = ConversationDomainService(context)
         val before = DatabaseHelper.getConversationCount()
-        Mockito.mockConstruction(NaConversationAccess::class.java) { access, _ ->
-            Mockito.`when`(access.captureOwner()).thenReturn("na:2222222222222222:")
-        }.use {
-            val failure = runCatching {
-                AgentSessionBindingRepository(context).ensureBinding(
-                    threadId = "na:1111111111111111:reserved-session",
-                    agentId = NA_AGENT_ID,
-                    title = "Private old-account title",
-                )
-            }.exceptionOrNull()
-            assertTrue(failure is IllegalArgumentException)
-            assertTrue(failure?.message.orEmpty().startsWith("agent_owner_conflict:"))
-        }
+        val failure = runCatching {
+            AgentSessionBindingRepository(context).ensureBinding(
+                threadId = "na:1111111111111111:reserved-session",
+                agentId = NA_AGENT_ID,
+                title = "Private old-account title",
+            )
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalStateException)
+        assertTrue(failure?.message?.contains("agent_retired") == true)
         assertEquals(before, DatabaseHelper.getConversationCount())
         assertNull(DatabaseHelper.getAgentSessionBindingByThreadId("na:1111111111111111:reserved-session"))
+
+        // An existing legacy Na conversation row on disk remains isolated from listing and reading
+        val legacyId = DatabaseHelper.insertConversation(
+            cn.com.omnimind.baselib.database.Conversation(
+                title = "Legacy Cloud Chat",
+                mode = "agent",
+                createdAt = 100L,
+            )
+        )
+        AcpAgentProfileStore(context).bindConversation(legacyId, NA_AGENT_ID)
+        assertFalse(domain.canReadConversation(legacyId))
+        assertNull(domain.getConversationPayload(legacyId))
+        val listed = domain.listConversationPayloads()
+        assertFalse(listed.any { (it["id"] as Number).toLong() == legacyId })
     }
 }

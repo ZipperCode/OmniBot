@@ -31,8 +31,6 @@ import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelSceneRegistry
 import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.SceneModelCatalogResolver
 import cn.com.omnimind.baselib.llm.SceneCatalogItem
 import cn.com.omnimind.baselib.llm.SceneModelBindingEntry
@@ -250,8 +248,6 @@ class AssistsCoreManager(private val context: Context) {
 
     private fun lookupRuntimeProviderProfile(profileId: String): ModelProviderProfile? =
         ModelProviderConfigStore.getProfile(profileId)
-            ?: PlatformAiProvisioner.officialProfileOrNull()
-                ?.takeIf { OmniOfficialProvider.isOfficialProfile(profileId) }
 
     companion object {
         private const val SUMMARY_TASK_PREFIX_TASK = "task-summary-"
@@ -343,15 +339,14 @@ class AssistsCoreManager(private val context: Context) {
     private var currentConversationMode: String = "agent"
 
     private fun ModelProviderConfig.toMap(): Map<String, Any?> {
-        val official = OmniOfficialProvider.isOfficialProfile(id)
         return mapOf(
             "id" to id,
             "name" to name,
-            "baseUrl" to if (official) "" else baseUrl,
-            "apiKey" to if (official) "" else apiKey,
+            "baseUrl" to baseUrl,
+            "apiKey" to apiKey,
             "customHeaders" to emptyMap<String, String>(),
-            "hasApiKey" to (!official && apiKey.isNotBlank()),
-            "hasCustomHeaders" to (!official && customHeaders.isNotEmpty()),
+            "hasApiKey" to apiKey.isNotBlank(),
+            "hasCustomHeaders" to customHeaders.isNotEmpty(),
             "source" to source,
             "providerType" to providerType,
             "readOnly" to readOnly,
@@ -363,15 +358,14 @@ class AssistsCoreManager(private val context: Context) {
     }
 
     private fun ModelProviderProfile.toMap(): Map<String, Any?> {
-        val official = OmniOfficialProvider.isOfficialProfile(id)
         return mapOf(
             "id" to id,
             "name" to name,
-            "baseUrl" to if (official) "" else baseUrl,
-            "apiKey" to if (official) "" else apiKey,
+            "baseUrl" to baseUrl,
+            "apiKey" to apiKey,
             "customHeaders" to emptyMap<String, String>(),
-            "hasApiKey" to (!official && apiKey.isNotBlank()),
-            "hasCustomHeaders" to (!official && customHeaders.isNotEmpty()),
+            "hasApiKey" to apiKey.isNotBlank(),
+            "hasCustomHeaders" to customHeaders.isNotEmpty(),
             "sourceType" to sourceType,
             "readOnly" to readOnly,
             "ready" to ready,
@@ -1091,19 +1085,7 @@ class AssistsCoreManager(private val context: Context) {
     fun getModelProviderConfig(call: MethodCall, result: MethodChannel.Result) {
         workJob.launch {
             try {
-                val config = PlatformAiProvisioner.officialProfileOrNull()?.let { profile ->
-                    ModelProviderConfig(
-                        id = profile.id,
-                        name = profile.name,
-                        baseUrl = profile.baseUrl,
-                        source = "platform",
-                        providerType = profile.sourceType,
-                        readOnly = profile.readOnly,
-                        ready = profile.ready,
-                        statusText = profile.statusText,
-                        wireApi = profile.wireApi,
-                    )
-                } ?: ModelProviderConfigStore.getConfig()
+                val config = ModelProviderConfigStore.getConfig()
                 withContext(Dispatchers.Main) {
                     result.success(config.toMap())
                 }
@@ -1375,12 +1357,7 @@ class AssistsCoreManager(private val context: Context) {
     fun listModelProviderProfiles(call: MethodCall, result: MethodChannel.Result) {
         workJob.launch {
             try {
-                val allProfiles = ModelProviderConfigStore.listProfiles()
-                val official = PlatformAiProvisioner.officialProfileOrNull()
-                val profiles = allProfiles
-                    .filterNot { OmniOfficialProvider.isOfficialProfile(it.id) }
-                    .toMutableList()
-                    .apply { if (official != null) add(official) }
+                val profiles = ModelProviderConfigStore.listProfiles()
                 withContext(Dispatchers.Main) {
                     result.success(
                         mapOf(
@@ -1618,24 +1595,11 @@ class AssistsCoreManager(private val context: Context) {
         val useProvidedApiKey = call.argument<Boolean>("useProvidedApiKey") == true
         val useProvidedCustomHeaders = call.argument<Boolean>("useProvidedCustomHeaders") == true
         val profileId = call.argument<String>("profileId")?.trim()
-        val capability = call.argument<String>("capability")?.trim()
-        val forceRefresh = call.argument<Boolean>("forceRefresh") == true
         val expectedProfileRevision = call.argument<Number>("expectedProfileRevision")?.toLong()
         val expectedProfileBaseUrl = call.argument<String>("expectedProfileBaseUrl")?.trim().orEmpty()
 
         workJob.launch {
             try {
-                if (OmniOfficialProvider.isOfficialProfile(profileId)) {
-                    val models = if (forceRefresh) {
-                        PlatformAiProvisioner.refreshAndGetModels(capability)
-                    } else {
-                        PlatformAiProvisioner.ensureReadyAndGetModels(capability)
-                    }
-                    withContext(Dispatchers.Main) {
-                        result.success(models.map { it.toMap() })
-                    }
-                    return@launch
-                }
                 val profile = if (profileId != null) {
                     requireNotNull(ModelProviderConfigStore.getProfile(profileId)) { "provider profile changed" }
                 } else ModelProviderConfigStore.getEditingProfile()
@@ -1724,24 +1688,9 @@ class AssistsCoreManager(private val context: Context) {
         val useProvidedApiKey = call.argument<Boolean>("useProvidedApiKey") == true
         val useProvidedCustomHeaders = call.argument<Boolean>("useProvidedCustomHeaders") == true
         val profileId = call.argument<String>("profileId")?.trim()
-        val capability = call.argument<String>("capability")?.trim()
 
         workJob.launch {
             try {
-                if (OmniOfficialProvider.isOfficialProfile(profileId)) {
-                    val available = PlatformAiProvisioner.ensureReadyAndGetModels(capability)
-                        .any { it.id == model }
-                    withContext(Dispatchers.Main) {
-                        result.success(
-                            mapOf(
-                                "available" to available,
-                                "code" to if (available) 200 else 404,
-                                "message" to if (available) "OK" else "该模型不在当前官方模型列表中"
-                            )
-                        )
-                    }
-                    return@launch
-                }
                 val profile = if (profileId != null) {
                     requireNotNull(ModelProviderConfigStore.getProfile(profileId)) { "provider profile changed" }
                 } else ModelProviderConfigStore.getEditingProfile()
@@ -2311,7 +2260,6 @@ class AssistsCoreManager(private val context: Context) {
                             "modelId" to config.modelId,
                             "apiBase" to config.apiBase,
                             "hasApiKey" to config.hasApiKey,
-                            "usesPlatform" to config.usesPlatform
                         )
                     )
                 }
@@ -2345,7 +2293,6 @@ class AssistsCoreManager(private val context: Context) {
                             "modelId" to config.modelId,
                             "apiBase" to config.apiBase,
                             "hasApiKey" to config.hasApiKey,
-                            "usesPlatform" to config.usesPlatform
                         )
                     )
                 }

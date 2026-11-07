@@ -208,95 +208,14 @@ class AcpAgentProfileStoreTest {
     }
 
     @Test
-    fun `fresh and reset Na remain available before the first cloud check`() {
+    fun `Na is retired and excluded from profile list while preserving catalog retired status`() {
         val store = AcpAgentProfileStore(acpProfileStoreTestContext(directory.root))
-        val profile = store.list().single { it.id == NA_AGENT_ID }
-        repeat(2) {
-            val payload = profile.toPayload(health = store.health(NA_AGENT_ID))
-            assertEquals(true, payload["enabled"])
-            assertEquals(NaCloudEnvironment.developmentAvailable, payload["configurationAvailable"])
-            assertEquals(true, payload["installed"])
-            assertEquals(AcpAgentHealth.STATUS_UNCHECKED, payload["status"])
-            store.clearHealth(NA_AGENT_ID)
+        assertTrue(store.retiredAgentIds.contains(NA_AGENT_ID))
+        assertFalse(store.list().any { it.id == NA_AGENT_ID })
+        val error = assertThrows(IllegalStateException::class.java) {
+            store.requireProfile(NA_AGENT_ID)
         }
-    }
-
-    @Test
-    fun `legacy missing Na is repaired durably without changing external agents`() {
-        val context = acpProfileStoreTestContext(directory.root)
-        val missing = AcpAgentHealth(
-            status = AcpAgentHealth.STATUS_MISSING,
-            installed = false,
-            error = "Agent command not found: na-cloud",
-            checkedAt = 123L,
-            latencyMs = 10L,
-        )
-        context.getSharedPreferences("acp_agent_profiles", Context.MODE_PRIVATE).edit()
-            .putString("health", Gson().toJson(mapOf(
-                NA_AGENT_ID to missing,
-                AcpAgentProfileStore.CODEX_AGENT_ID to missing.copy(error = "codex not found"),
-            )))
-            .commit()
-
-        val store = AcpAgentProfileStore(context)
-        val payload = store.list().single { it.id == NA_AGENT_ID }
-            .toPayload(health = store.health(NA_AGENT_ID))
-        assertEquals(true, payload["installed"])
-        assertEquals(AcpAgentHealth.STATUS_UNCHECKED, payload["status"])
-        assertEquals(null, payload["lastCheckError"])
-        assertEquals(null, payload["lastCheckAt"])
-        assertEquals(null, payload["lastCheckLatencyMs"])
-
-        val reopenedContext = acpProfileStoreTestContext(directory.root)
-        val persisted = JsonParser.parseString(reopenedContext
-            .getSharedPreferences("acp_agent_profiles", Context.MODE_PRIVATE)
-            .getString("health", null)).asJsonObject.getAsJsonObject(NA_AGENT_ID)
-        assertEquals(AcpAgentHealth.STATUS_UNCHECKED, persisted["status"].asString)
-        assertTrue(persisted["installed"].asBoolean)
-        assertEquals(store.health(NA_AGENT_ID), AcpAgentProfileStore(reopenedContext).health(NA_AGENT_ID))
-        assertEquals(missing.copy(error = "codex not found"),
-            store.health(AcpAgentProfileStore.CODEX_AGENT_ID))
-    }
-
-    @Test
-    fun `Na cannot acquire another missing result through health writes or direct payloads`() {
-        val store = AcpAgentProfileStore(acpProfileStoreTestContext(directory.root))
-        val missing = AcpAgentHealth(
-            status = AcpAgentHealth.STATUS_MISSING,
-            installed = false,
-            error = "command not found",
-        )
-        store.saveHealth(NA_AGENT_ID, missing)
-        assertEquals(AcpAgentHealth.STATUS_UNCHECKED, store.health(NA_AGENT_ID).status)
-        assertEquals(true, store.health(NA_AGENT_ID).installed)
-        assertEquals(null, store.health(NA_AGENT_ID).error)
-        val naPayload = store.list().single { it.id == NA_AGENT_ID }.toPayload(health = missing)
-        assertEquals(AcpAgentHealth.STATUS_UNCHECKED, naPayload["status"])
-        assertEquals(true, naPayload["installed"])
-        val external = store.list().single { it.id == AcpAgentProfileStore.CODEX_AGENT_ID }
-        assertEquals(true, external.toPayload()["configurationAvailable"])
-        store.saveHealth(external.id, missing)
-        assertEquals(missing, store.health(external.id))
-        assertEquals(AcpAgentHealth.STATUS_MISSING, external.toPayload(health = missing)["status"])
-        assertEquals(false, external.toPayload(health = missing)["installed"])
-    }
-
-    @Test
-    fun `Na preserves actual cloud health and errors instead of claiming it is online`() {
-        val store = AcpAgentProfileStore(acpProfileStoreTestContext(directory.root))
-        for (status in listOf(AcpAgentHealth.STATUS_OFFLINE, AcpAgentHealth.STATUS_ONLINE)) {
-            val health = AcpAgentHealth(
-                status = status,
-                installed = false,
-                error = if (status == AcpAgentHealth.STATUS_OFFLINE) "Cloud account needs login" else null,
-                latencyMs = 87L,
-                checkedAt = 456L,
-                capabilities = mapOf("cloudModelManaged" to true),
-            )
-            store.saveHealth(NA_AGENT_ID, health)
-            val reopened = AcpAgentProfileStore(acpProfileStoreTestContext(directory.root))
-            assertEquals(health.copy(installed = true), reopened.health(NA_AGENT_ID))
-        }
+        assertTrue(error.message?.contains("agent_retired") == true)
     }
 
     @Test

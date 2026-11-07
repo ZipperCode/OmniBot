@@ -7,7 +7,6 @@ import android.content.res.AssetManager
 import cn.com.omnimind.baselib.database.*
 import cn.com.omnimind.bot.agent.ChatConversationPreferences
 import cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore
-import cn.com.omnimind.bot.agent.runtime.NA_AGENT_ID
 import cn.com.omnimind.bot.webchat.ConversationDomainService
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -83,9 +82,9 @@ class UsageStatisticsDatabaseTest {
         ChatConversationPreferences(context).hide(id)
         assertEquals(1, domain.listConversationActivity(100, 200).size)
         val cloudId = DatabaseHelper.insertConversation(Conversation(title = "Cloud", mode = "agent", createdAt = 150))
-        AcpAgentProfileStore(context).bindConversation(cloudId, NA_AGENT_ID)
+        AcpAgentProfileStore(context).bindConversation(cloudId, "na-cloud")
         entry(cloudId, "cloud-user", 150)
-        // An unknown/logged-out cloud owner stays on disk and out of statistics.
+        // 已退役的云端历史保留在本机，不计入当前统计。
         assertEquals(1, domain.listConversationActivity(100, 200).size)
     }
 }

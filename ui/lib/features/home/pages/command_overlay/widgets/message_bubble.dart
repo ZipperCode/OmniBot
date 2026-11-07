@@ -22,7 +22,6 @@ import '../../../../../services/voice_playback_channel_service.dart';
 import '../../../../../theme/theme_context.dart';
 import '../../../../../widgets/streaming_text.dart';
 import 'thinking_dots_indicator.dart';
-import 'na_attachment_preview.dart';
 import 'history_payload_attachments.dart';
 import 'cards/card_widget_factory.dart';
 
@@ -348,29 +347,6 @@ class MessageBubble extends StatelessWidget {
       children: attachments.map((item) {
         if (item['historyPayloadOffloaded'] == true) {
           return HistoryPayloadAttachment(attachment: item);
-        }
-        if (item['source'] == 'na-cloud') {
-          return GestureDetector(
-            onTap: item['deleted'] == true
-                ? null
-                : () {
-                    Navigator.of(context).push(
-                      OmniPageRoute<void>(
-                        builder: (_) => CodexRemoteFilePreviewPage(
-                          agentId: 'na-cloud',
-                          sessionId: item['sessionId'] as String?,
-                          path: item['path'] as String,
-                          title: item['name'] as String?,
-                          remoteCwd: '/workspace',
-                        ),
-                      ),
-                    );
-                  },
-            child: NaAttachmentPreview(
-              attachment: item,
-              child: _buildFileAttachmentChip(context, item),
-            ),
-          );
         }
         if (_isImageAttachment(item)) {
           final imageIndex = imageAttachments.indexOf(item);

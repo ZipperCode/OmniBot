@@ -48,8 +48,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
   bool _usesSharedProviderModel(String? agentId) {
     final normalizedAgentId = agentId?.trim() ?? '';
     if (normalizedAgentId.isEmpty ||
-        normalizedAgentId == _kRemoteCodexModeAgentId ||
-        normalizedAgentId == 'na-cloud') {
+        normalizedAgentId == _kRemoteCodexModeAgentId) {
       return false;
     }
     // Every local ACP Agent consumes the app's configured Provider catalog.
@@ -403,20 +402,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     final agentId = _activeAcpAgentId;
     if (agentId == null) return;
     final remoteTarget = _activeAgentTargetIsRemote;
-    if (_activeAcpAgentId == 'na-cloud') {
-      if (!mounted) return;
-      setState(() {
-        _agentModelOptions = const <String>[];
-        _agentReasoningEffortOptions = const <String>[];
-        _agentCollaborationModes = const <String>[];
-        _agentModelConfigSupported = false;
-        _activeAgentModelId = null;
-        _activeAgentReasoningEffort = null;
-        _activeAgentCollaborationMode = null;
-        _loadedAgentModelSourceKey = _activeAgentModelSourceKey;
-      });
-      return;
-    }
     final sourceKey = _activeAgentModelSourceKey;
     if (_isAgentModelListLoading && _loadingAgentModelSourceKey == sourceKey) {
       return;
@@ -1669,9 +1654,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         // runtime uses it to return the original turn instead of replaying
         // tool calls.
         requestId: aiMessageId,
-        // The cloud adapter preserves the host's actual user item on reload.
-        // Retries may retain a user item while reserving a new prompt id.
-        userMessageId: dispatchAgentId == 'na-cloud' ? userMessageId : null,
         agentId: dispatchAgentId,
         text: messageText,
         attachments: attachments,

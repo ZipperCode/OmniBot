@@ -692,14 +692,6 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
   ) async {
     if (_packageOperations.containsKey(agent.id)) return null;
     final extra = {omniContainerExtraKey: source};
-    if (agent.id == 'na-cloud') {
-      await GoRouterManager.pushForResult<Object?>(
-        '/home/na/personal',
-        extra: extra,
-      );
-      if (mounted) await _load();
-      return null;
-    }
     if (!agent.configurationAvailable) return null;
     final changed = await GoRouterManager.pushForResult<bool>(
       '/home/agent_config/${Uri.encodeComponent(agent.id)}',
@@ -1043,14 +1035,14 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
       secondaryActionLabel: canUninstall ? _text('卸载', 'Uninstall') : null,
       secondaryActionKey: Key('agent-uninstall-${agent.id}'),
       onSecondaryAction: canUninstall ? () => _uninstall(agent) : null,
-      navigationLabel: agent.id == 'na-cloud' || agent.configurationAvailable
+      navigationLabel: agent.configurationAvailable
           ? _text('配置', 'Configure')
           : null,
       navigationKey: Key('agent-navigation-${agent.id}'),
       busy: busy,
       onTap: onTap,
     );
-    if ((agent.id != 'na-cloud' && !agent.configurationAvailable) || busy) {
+    if (!agent.configurationAvailable || busy) {
       return buildTile(null);
     }
     final rowShape = RoundedRectangleBorder(

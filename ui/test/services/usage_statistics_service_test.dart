@@ -1,6 +1,5 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/usage_statistics_service.dart';
 
 void main() {
@@ -10,11 +9,9 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   final today = DateTime(2026, 10, 21);
   final start = today.subtract(const Duration(days: 27));
-  final initialRevision = AssistsMessageService.conversationVisibilityRevision;
 
   tearDown(() {
     messenger.setMockMethodCallHandler(channel, null);
-    AssistsMessageService.conversationVisibilityRevision = initialRevision;
   });
 
   test('activity reads only the aggregate host projection', () async {
@@ -39,30 +36,6 @@ void main() {
     expect(result.currentStreak, 1);
   });
 
-  test(
-    'queued activity reply selects local summary after an account change',
-    () async {
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        AssistsMessageService.conversationVisibilityRevision++;
-        return {
-          'activityMap': {'2026-10-21': 5},
-          'totalConversations': 5,
-          'currentStreak': 1,
-          'localSummary': {
-            'activityMap': {'2026-10-21': 2},
-            'totalConversations': 2,
-            'currentStreak': 1,
-          },
-        };
-      });
-      final result = await UsageStatisticsService.getConversationActivity(
-        startDate: start,
-        today: today,
-      );
-      expect(result.activityMap, {'2026-10-21': 2});
-      expect(result.totalConversations, 2);
-    },
-  );
 
   test(
     'token DTO preserves supplied elapsed-time week starts and model order',

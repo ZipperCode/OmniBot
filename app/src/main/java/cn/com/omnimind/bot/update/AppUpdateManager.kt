@@ -8,7 +8,6 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import cn.com.omnimind.baselib.account.CloudServiceAccessState
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
 import cn.com.omnimind.baselib.llm.OfficialVlmOperationConfig
 import cn.com.omnimind.baselib.llm.OfficialVlmOperationConfigStore
@@ -45,12 +44,6 @@ data class AppUpdateState(
     val releaseNotes: String,
     val apkName: String,
     val apkDownloadUrl: String,
-    val cloudServicePolicyKnown: Boolean = false,
-    val cloudServicePolicyEnabled: Boolean = false,
-    val cloudServiceAccessAllowed: Boolean = false,
-    val cloudServiceMinimumVersion: String = "",
-    val cloudServicePolicyMessage: String = "",
-    val cloudServicePolicyCheckedAt: Long = 0L,
 ) {
     fun toMap(): Map<String, Any> = mapOf(
         "currentVersion" to currentVersion,
@@ -62,12 +55,6 @@ data class AppUpdateState(
         "releaseNotes" to releaseNotes,
         "apkName" to apkName,
         "apkDownloadUrl" to apkDownloadUrl,
-        "cloudServicePolicyKnown" to cloudServicePolicyKnown,
-        "cloudServicePolicyEnabled" to cloudServicePolicyEnabled,
-        "cloudServiceAccessAllowed" to cloudServiceAccessAllowed,
-        "cloudServiceMinimumVersion" to cloudServiceMinimumVersion,
-        "cloudServicePolicyMessage" to cloudServicePolicyMessage,
-        "cloudServicePolicyCheckedAt" to cloudServicePolicyCheckedAt,
     )
 }
 
@@ -109,11 +96,6 @@ internal data class ReleaseCandidate(
     val assets: List<ReleaseAsset>
 )
 
-private data class ParsedCloudServicePolicy(
-    val enabled: Boolean,
-    val access: CloudServiceAccessState,
-    val checkedAt: Long,
-)
 
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -129,11 +111,6 @@ object AppUpdateManager {
     private const val KEY_APK_DOWNLOAD_URL = "apk_download_url"
     private const val KEY_APK_DOWNLOAD_SOURCE = "apk_download_source"
     private const val KEY_INSTALL_ID = "install_id"
-    private const val KEY_CLOUD_SERVICE_POLICY_KNOWN = "cloud_service_policy_known"
-    private const val KEY_CLOUD_SERVICE_POLICY_ENABLED = "cloud_service_policy_enabled"
-    private const val KEY_CLOUD_SERVICE_MINIMUM_VERSION = "cloud_service_minimum_version"
-    private const val KEY_CLOUD_SERVICE_POLICY_MESSAGE = "cloud_service_policy_message"
-    private const val KEY_CLOUD_SERVICE_POLICY_CHECKED_AT = "cloud_service_policy_checked_at"
 
     private const val WORKER_UPDATES_PATH = "updates"
     private const val WORKER_DOWNLOADS_PATH = "downloads"
@@ -142,7 +119,6 @@ object AppUpdateManager {
     private const val WORK_NAME = "app_update_periodic_check"
     private const val PERIODIC_CHECK_HOURS = 12L
     private const val SILENT_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
-    private const val CLOUD_SERVICE_POLICY_MAX_AGE_MS = 24 * 60 * 60 * 1000L
     private const val USER_AGENT = "OpenOmniBot-App"
     private const val EDITION_STANDARD = "standard"
     private val editionApkNamePattern =
@@ -196,21 +172,6 @@ object AppUpdateManager {
         )
     }
 
-    fun getCloudServiceAccessState(context: Context): CloudServiceAccessState {
-        val appContext = context.applicationContext
-        val state = readState(
-            context = appContext,
-            currentVersion = currentVersion(appContext),
-            includeBeta = isBetaOptIn(appContext),
-        )
-        return CloudServiceAccessState(
-            allowed = state.cloudServiceAccessAllowed,
-            policyKnown = state.cloudServicePolicyKnown,
-            currentVersion = state.currentVersion,
-            minimumVersion = state.cloudServiceMinimumVersion,
-            message = state.cloudServicePolicyMessage,
-        )
-    }
 
     fun isBetaOptIn(context: Context): Boolean {
         return context.applicationContext
@@ -405,16 +366,6 @@ object AppUpdateManager {
 
     private fun readState(context: Context, currentVersion: String, includeBeta: Boolean): AppUpdateState {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val policyEnabled = prefs.getBoolean(KEY_CLOUD_SERVICE_POLICY_ENABLED, false)
-        val policyCheckedAt = prefs.getLong(KEY_CLOUD_SERVICE_POLICY_CHECKED_AT, 0L)
-        val cloudServiceAccess = resolveCloudServiceAccessState(
-            currentVersion = currentVersion,
-            policyKnown = prefs.getBoolean(KEY_CLOUD_SERVICE_POLICY_KNOWN, false),
-            policyEnabled = policyEnabled,
-            minimumVersion = prefs.getString(KEY_CLOUD_SERVICE_MINIMUM_VERSION, "").orEmpty(),
-            message = prefs.getString(KEY_CLOUD_SERVICE_POLICY_MESSAGE, "").orEmpty(),
-            checkedAt = policyCheckedAt,
-        )
         val storedState = AppUpdateState(
             currentVersion = currentVersion,
             latestVersion = prefs.getString(KEY_LATEST_VERSION, currentVersion).orEmpty().ifBlank {
@@ -427,12 +378,6 @@ object AppUpdateManager {
             releaseNotes = prefs.getString(KEY_RELEASE_NOTES, "").orEmpty(),
             apkName = prefs.getString(KEY_APK_NAME, "").orEmpty(),
             apkDownloadUrl = prefs.getString(KEY_APK_DOWNLOAD_URL, "").orEmpty(),
-            cloudServicePolicyKnown = cloudServiceAccess.policyKnown,
-            cloudServicePolicyEnabled = policyEnabled,
-            cloudServiceAccessAllowed = cloudServiceAccess.allowed,
-            cloudServiceMinimumVersion = cloudServiceAccess.minimumVersion,
-            cloudServicePolicyMessage = cloudServiceAccess.message,
-            cloudServicePolicyCheckedAt = policyCheckedAt,
         )
         val stateWithPreferredSource = applyPreferredDownloadSource(
             storedState,
@@ -458,11 +403,6 @@ object AppUpdateManager {
             .putString(KEY_RELEASE_NOTES, state.releaseNotes)
             .putString(KEY_APK_NAME, state.apkName)
             .putString(KEY_APK_DOWNLOAD_URL, state.apkDownloadUrl)
-            .putBoolean(KEY_CLOUD_SERVICE_POLICY_KNOWN, state.cloudServicePolicyKnown)
-            .putBoolean(KEY_CLOUD_SERVICE_POLICY_ENABLED, state.cloudServicePolicyEnabled)
-            .putString(KEY_CLOUD_SERVICE_MINIMUM_VERSION, state.cloudServiceMinimumVersion)
-            .putString(KEY_CLOUD_SERVICE_POLICY_MESSAGE, state.cloudServicePolicyMessage)
-            .putLong(KEY_CLOUD_SERVICE_POLICY_CHECKED_AT, state.cloudServicePolicyCheckedAt)
             .apply()
     }
 
@@ -642,21 +582,13 @@ object AppUpdateManager {
         edition: String = BuildConfig.APP_EDITION,
         checkedAt: Long = System.currentTimeMillis()
     ): AppUpdateState {
-        val cloudServicePolicy = parseCloudServicePolicy(
-            payload = payload,
-            currentVersion = currentVersion,
-            checkedAt = checkedAt,
-        )
         val release = payload.optJSONObject("release") ?: payload
         val version = normalizeVersion(
             firstString(release, "latestVersion", "version", "tag", "tagName", "tag_name")
         )
         val track = parseReleaseTrack(release, version)
         if (version.isBlank() || !shouldIncludeTrack(track, includeBeta)) {
-            return applyCloudServicePolicy(
-                emptyState(currentVersion, checkedAt = checkedAt),
-                cloudServicePolicy,
-            )
+            return emptyState(currentVersion, checkedAt = checkedAt)
         }
 
         val assets = parseWorkerAssets(release.optJSONArray("assets"), downloadSource)
@@ -670,7 +602,7 @@ object AppUpdateManager {
             }
         }.orEmpty()
 
-        return applyCloudServicePolicy(AppUpdateState(
+        return AppUpdateState(
             currentVersion = currentVersion,
             latestVersion = version,
             hasUpdate = hasInstallableUpdate,
@@ -682,136 +614,8 @@ object AppUpdateManager {
             releaseNotes = firstString(release, "releaseNotes", "notes", "body"),
             apkName = preferredAsset?.name.orEmpty(),
             apkDownloadUrl = downloadUrl
-        ), cloudServicePolicy)
-    }
-
-    private fun parseCloudServicePolicy(
-        payload: JSONObject,
-        currentVersion: String,
-        checkedAt: Long,
-    ): ParsedCloudServicePolicy {
-        val raw = payload.optJSONObject("cloudServicePolicy")
-        if (raw == null) {
-            return ParsedCloudServicePolicy(
-                enabled = false,
-                access = resolveCloudServiceAccessState(
-                    currentVersion = currentVersion,
-                    policyKnown = false,
-                    policyEnabled = false,
-                    minimumVersion = "",
-                    message = "",
-                    checkedAt = checkedAt,
-                    now = checkedAt,
-                ),
-                checkedAt = checkedAt,
-            )
-        }
-        val enabledValue = raw.opt("enabled")
-        if (raw.optInt("schemaVersion", 0) != 1 || enabledValue !is Boolean) {
-            return ParsedCloudServicePolicy(
-                enabled = false,
-                access = resolveCloudServiceAccessState(
-                    currentVersion = currentVersion,
-                    policyKnown = false,
-                    policyEnabled = false,
-                    minimumVersion = "",
-                    message = "云服务最低版本策略无效，请稍后重试",
-                    checkedAt = checkedAt,
-                    now = checkedAt,
-                ),
-                checkedAt = checkedAt,
-            )
-        }
-        val enabled = enabledValue
-        val minimumVersion = normalizeVersion(
-            firstString(raw, "minimumVersion", "minimum_version", "minVersion", "min_version")
-        )
-        val message = firstString(raw, "message", "reason")
-        return ParsedCloudServicePolicy(
-            enabled = enabled,
-            access = resolveCloudServiceAccessState(
-                currentVersion = currentVersion,
-                policyKnown = true,
-                policyEnabled = enabled,
-                minimumVersion = minimumVersion,
-                message = message,
-                checkedAt = checkedAt,
-                now = checkedAt,
-            ),
-            checkedAt = checkedAt,
         )
     }
-
-    private fun applyCloudServicePolicy(
-        state: AppUpdateState,
-        policy: ParsedCloudServicePolicy,
-    ): AppUpdateState = state.copy(
-        cloudServicePolicyKnown = policy.access.policyKnown,
-        cloudServicePolicyEnabled = policy.enabled,
-        cloudServiceAccessAllowed = policy.access.allowed,
-        cloudServiceMinimumVersion = policy.access.minimumVersion,
-        cloudServicePolicyMessage = policy.access.message,
-        cloudServicePolicyCheckedAt = policy.checkedAt,
-    )
-
-    @VisibleForTesting
-    internal fun resolveCloudServiceAccessState(
-        currentVersion: String,
-        policyKnown: Boolean,
-        policyEnabled: Boolean,
-        minimumVersion: String,
-        message: String,
-        checkedAt: Long,
-        now: Long = System.currentTimeMillis(),
-    ): CloudServiceAccessState {
-        val normalizedCurrent = normalizeVersion(currentVersion)
-        val normalizedMinimum = normalizeVersion(minimumVersion)
-        val policyFresh = checkedAt > 0L && now >= checkedAt &&
-            now - checkedAt <= CLOUD_SERVICE_POLICY_MAX_AGE_MS
-        if (!policyKnown || !policyFresh) {
-            return CloudServiceAccessState(
-                allowed = false,
-                policyKnown = false,
-                currentVersion = normalizedCurrent,
-                minimumVersion = normalizedMinimum,
-                message = "无法验证云服务最低版本，请联网检查更新",
-            )
-        }
-        if (!policyEnabled) {
-            return CloudServiceAccessState(
-                allowed = true,
-                policyKnown = true,
-                currentVersion = normalizedCurrent,
-            )
-        }
-        if (
-            parseNumericVersionParts(normalizedCurrent) == null ||
-            parseNumericVersionParts(normalizedMinimum) == null
-        ) {
-            return CloudServiceAccessState(
-                allowed = false,
-                policyKnown = false,
-                currentVersion = normalizedCurrent,
-                minimumVersion = normalizedMinimum,
-                message = "云服务最低版本策略无效，请稍后重试",
-            )
-        }
-        val allowed = compareVersions(normalizedCurrent, normalizedMinimum) >= 0
-        return CloudServiceAccessState(
-            allowed = allowed,
-            policyKnown = true,
-            currentVersion = normalizedCurrent,
-            minimumVersion = normalizedMinimum,
-            message = if (allowed) {
-                ""
-            } else {
-                message.ifBlank {
-                    "当前版本过旧，请升级至 v$normalizedMinimum 或更高版本后使用账号与官方云服务"
-                }
-            },
-        )
-    }
-
     private fun parseReleaseTrack(release: JSONObject, version: String): ReleaseTrack {
         return when (firstString(release, "track").lowercase(Locale.ROOT)) {
             "stable" -> ReleaseTrack.STABLE

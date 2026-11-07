@@ -25,7 +25,6 @@ class _FeedbackPageState extends State<FeedbackPage> {
   late final FeedbackService _service = widget.service ?? FeedbackService();
   List<FeedbackAttachment> _attachments = [];
   Map<String, dynamic>? _version;
-  String _accountEmail = '';
   String? _reference;
   FeedbackFailure? _error;
   bool _loading = true;
@@ -42,18 +41,14 @@ class _FeedbackPageState extends State<FeedbackPage> {
   }
 
   Future<void> _loadContext() async {
-    final email = FeedbackService.loadAccountEmail();
     final version = await DeviceService.getAppVersion().timeout(
       const Duration(seconds: 5),
       onTimeout: () => null,
     );
-    final address = await email;
     if (!mounted) return;
     setState(() {
       _version = version;
-      _accountEmail = address;
       _loading = false;
-      if (_contact.text.isEmpty) _contact.text = address;
     });
   }
 
@@ -105,7 +100,6 @@ class _FeedbackPageState extends State<FeedbackPage> {
         title: _title.text,
         description: _description.text,
         contact: _contact.text,
-        accountEmail: _accountEmail,
         languageCode: Localizations.localeOf(context).languageCode,
         versionInfo: _version,
         attachments: _attachments,
@@ -247,29 +241,6 @@ class _FeedbackPageState extends State<FeedbackPage> {
                                 ),
                               ),
                             ),
-                            if (_loading) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                _text('正在读取账号信息…', 'Loading account details…'),
-                                style: TextStyle(
-                                  color: palette.textSecondary,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ] else if (_accountEmail.isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                _text(
-                                  '反馈会附上账号邮箱 $_accountEmail，联系方式可修改。',
-                                  'Your account email $_accountEmail accompanies the feedback. Contact details are editable.',
-                                ),
-                                style: TextStyle(
-                                  color: palette.textSecondary,
-                                  fontSize: 12,
-                                  height: 1.5,
-                                ),
-                              ),
-                            ],
                           ],
                         ),
                       ),
@@ -418,7 +389,7 @@ class _FeedbackPageState extends State<FeedbackPage> {
               _reference = null;
               _title.clear();
               _description.clear();
-              _contact.text = _accountEmail;
+              _contact.clear();
               _attachments = [];
               _error = null;
             }),

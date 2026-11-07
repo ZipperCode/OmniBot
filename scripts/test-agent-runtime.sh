@@ -152,7 +152,6 @@ if [[ "$RUN_GRADLE" == "1" ]]; then
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpRuntimeTest' \
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpRuntimeOwnershipTest' \
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpDraftSessionTest' \
-      --tests 'cn.com.omnimind.bot.agent.runtime.NaCloudDraftSessionTest' \
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpSessionListStateTest' \
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpCancellationFailureTest' \
       --tests 'cn.com.omnimind.bot.agent.runtime.LocalAcpSessionCloseTest' \
@@ -179,7 +178,6 @@ if [[ "$RUN_GRADLE" == "1" ]]; then
       --tests 'cn.com.omnimind.bot.plugin.official.agentweb.AgentWebRuntimeTest' \
       --tests 'cn.com.omnimind.bot.plugin.official.agentweb.AgentWebPluginTest' \
       --tests 'cn.com.omnimind.bot.plugin.sandbox.XiaowanChatCompletionRequestFactoryTest' \
-      --tests 'cn.com.omnimind.bot.agent.PlatformEmbeddingGatewayTest' \
       --tests 'cn.com.omnimind.bot.agent.AgentImageAttachmentSupportTest' \
       --tests 'cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupportTest' \
       --tests 'cn.com.omnimind.bot.mcp.RemoteMcpClientInteropTest' \

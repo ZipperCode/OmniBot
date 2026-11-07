@@ -20,7 +20,6 @@ import {
 import { Icon } from "./Icon";
 import { MessageSummaryRail } from "./MessageSummaryRail";
 
-const naAvatarUrl = new URL("../assets/na-avatar.png", import.meta.url).href;
 
 interface ChatPanelProps {
   conversation: Conversation | null;
@@ -126,7 +125,7 @@ function EmptyGreeting() {
 }
 
 function AgentAvatar({ className, agentId }: { className: string; agentId?: string }) {
-  const source = agentId === "na-cloud" ? naAvatarUrl : agentAvatarUrl();
+  const source = agentAvatarUrl();
   const [failedSource, setFailedSource] = useState<string | null>(null);
   return (
     <span className={className}>

@@ -126,18 +126,16 @@ class HttpAgentLlmClientRetryTest {
         assertEquals(1, disabled.bodies.size)
     }
 
-    @Test fun `auth refresh HTTP2 fallback and transient error share the total attempt budget`() = scenario { scope ->
-        val transport = Transport(listOf(failure(401), { listener, source ->
+    @Test fun `HTTP2 fallback and transient error share the total attempt budget`() = scenario { scope ->
+        val transport = Transport(listOf({ listener, source ->
             listener.onFailure(source, java.io.IOException("PROTOCOL_ERROR"), null)
-        }, failure(503), success))
-        var refreshes = 0
+        }, failure(503), failure(503), success))
         val error = runCatching {
-            transport.client(scope, platform = true, refresh = { refreshes++; true }).streamTurn(prompt)
+            transport.client(scope).streamTurn(prompt)
         }.exceptionOrNull()
         assertEquals(503, (error as AgentStreamRequestException).statusCode)
         assertEquals(3, transport.bodies.size)
-        assertEquals(listOf(false, false, true), transport.http1)
-        assertEquals(1, refreshes)
+        assertEquals(listOf(false, true, true), transport.http1)
     }
 
     @Test fun `a new call on the same client gets a fresh retry budget`() = scenario { scope ->
@@ -171,14 +169,13 @@ class HttpAgentLlmClientRetryTest {
     private class Transport(private val steps: List<(EventSourceListener, EventSource) -> Unit>) {
         val bodies = mutableListOf<String>()
         val http1 = mutableListOf<Boolean>()
-        fun client(scope: CoroutineScope, pause: suspend (Long) -> Unit = {}, platform: Boolean = false,
-                   refresh: suspend () -> Boolean = { false }) = HttpAgentLlmClient(
+        fun client(scope: CoroutineScope, pause: suspend (Long) -> Unit = {}) = HttpAgentLlmClient(
             scope = scope,
             modelOverride = AgentModelOverride(providerProfileId = "fixture", modelId = "fixture", apiBase = "https://example.com", apiKey = "dummy"),
             resolveRouteInfoOp = { _, _, _, _, _, _, _ ->
                 HttpController.ChatCompletionRouteInfo(requestedModel = "fixture", resolvedModel = "fixture",
                     apiBase = "https://example.com", providerProfileId = "fixture", providerProfileName = "fixture",
-                    routeTag = if (platform) "platform_gateway" else "fixture", bindingApplied = false,
+                    routeTag = "fixture", bindingApplied = false,
                     bindingProfileMissing = false, overrideApplied = true)
             },
             streamRequestOp = { _, body, listener, _, _, _, _, _, _, forceHttp1 ->
@@ -192,7 +189,6 @@ class HttpAgentLlmClientRetryTest {
                 step(listener, source)
                 source
             },
-            refreshPlatformSessionOp = refresh,
             retryDelayOp = pause,
         )
     }

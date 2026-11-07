@@ -171,11 +171,6 @@ internal class AgentSessionBindingRepository(
                 archived = archived == true,
                 mode = normalizeConversationMode(conversationMode),
                 agentId = normalizedAgentId,
-                expectedNaOwner = if (normalizedAgentId == NA_AGENT_ID) {
-                    requireNotNull(NaConversationAccess.sessionOwner(normalizedThreadId)) {
-                        "agent_identity_required: Na sessions require their existing account owner prefix."
-                    }
-                } else null,
             )
 
         val binding = AgentSessionBinding(
@@ -278,14 +273,12 @@ internal class AgentSessionBindingRepository(
         archived: Boolean,
         mode: String,
         agentId: String,
-        expectedNaOwner: String?,
     ): Conversation {
         val payload = conversationDomainService.createConversation(
             title = title.ifBlank { "Agent" },
             mode = mode,
             agentId = agentId,
             archived = archived,
-            expectedNaOwner = expectedNaOwner,
         )
         val id = requireNotNull(payload["id"] as? Number).toLong()
         return requireNotNull(DatabaseHelper.getConversationById(id)) {

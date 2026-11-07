@@ -4,7 +4,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Pages that make up the first-use tutorial flow.
 enum TutorialPage {
   permissions,
-  provider,
   providerSelection,
   providerConnection,
   modelInventory,
@@ -16,7 +15,6 @@ enum TutorialPage {
 /// Pages reachable through the dotted pagination footer, in order.
 const List<TutorialPage> tutorialNavigationPages = <TutorialPage>[
   TutorialPage.permissions,
-  TutorialPage.provider,
   TutorialPage.providerSelection,
   TutorialPage.providerConnection,
   TutorialPage.modelInventory,

@@ -21,19 +21,14 @@ class AgentAdapterCatalogTest {
             "Omnibot's built-in capabilities through the official ACP Agent interface",
             englishXiaowan.description,
         )
-        val englishNa = requireNotNull(english.definition("na-cloud"))
-        assertEquals("Na", englishNa.name)
-        assertEquals(
-            "Cloud personal assistant with its own models, long-term memory, and tasks",
-            englishNa.description,
-        )
+        assertNull(english.definition("na-cloud"))
+        assertTrue(english.retiredAgentIds.contains("na-cloud"))
 
         val chineseXiaowan = requireNotNull(chinese.definition("xiaowan-acp"))
         assertEquals("小万", chineseXiaowan.name)
         assertEquals("小万内置能力通过官方 ACP Agent 接口提供", chineseXiaowan.description)
-        val chineseNa = requireNotNull(chinese.definition("na-cloud"))
-        assertEquals("Na", chineseNa.name)
-        assertEquals("云端个人助手 · 独立模型、长期记忆与任务", chineseNa.description)
+        assertNull(chinese.definition("na-cloud"))
+        assertTrue(chinese.retiredAgentIds.contains("na-cloud"))
 
         assertEquals(chinese.officialIds, english.officialIds)
         assertEquals(chinese.retiredAgentIds, english.retiredAgentIds)
@@ -60,19 +55,15 @@ class AgentAdapterCatalogTest {
         val profiles = AcpAgentCatalog.parse(File("src/main/assets/acp/agents.json").readText()) {
             File("src/main/assets/$it").readText()
         }.agents
-        assertEquals(7, profiles.size)
+        assertEquals(6, profiles.size)
         for (profile in profiles) {
             val runtime = requireNotNull(AcpAgentProfileStore.officialRuntime(profile))
             val adapter = runtime.harnessAdapter
-            if (profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID || profile.id == NA_AGENT_ID) {
-                // Embedded agents own configuration in-process (Xiaowan) or in the cloud (Na).
+            if (profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
+                // Embedded agents own configuration in-process (Xiaowan).
                 assertTrue(profile.id, runtime.embedded)
                 assertNull(profile.id, adapter.configAdapterId)
-                assertEquals(
-                    profile.id,
-                    profile.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID,
-                    runtime.usesSharedProvider,
-                )
+                assertTrue(profile.id, runtime.usesSharedProvider)
                 continue
             }
             assertNotNull(profile.id, adapter.configAdapterId)

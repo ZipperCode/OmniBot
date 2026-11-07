@@ -32,12 +32,6 @@ void main() {
               'releaseNotes': 'notes',
               'apkName': 'OpenOmniBot-v0.0.2.apk',
               'apkDownloadUrl': 'https://example.com/app.apk',
-              'cloudServicePolicyKnown': true,
-              'cloudServicePolicyEnabled': true,
-              'cloudServiceAccessAllowed': false,
-              'cloudServiceMinimumVersion': '0.0.2',
-              'cloudServicePolicyMessage': 'update required',
-              'cloudServicePolicyCheckedAt': 3,
             };
           }
           return null;
@@ -47,10 +41,6 @@ void main() {
 
     expect(status, isNotNull);
     expect(status!.hasUpdate, isTrue);
-    expect(status.cloudServicePolicyKnown, isTrue);
-    expect(status.cloudServiceAccessAllowed, isFalse);
-    expect(status.cloudServiceMinimumVersion, '0.0.2');
-    expect(status.cloudServicePolicyMessage, 'update required');
     expect(AppUpdateService.statusNotifier.value?.latestVersion, '0.0.2');
   });
 

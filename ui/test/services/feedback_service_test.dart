@@ -51,7 +51,6 @@ FeedbackAttachment attachment(String name, {int size = 3}) =>
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  const channel = MethodChannel('cn.com.omnimind.bot/account');
   late FeedbackService service;
   late RecordingAdapter adapter;
 
@@ -61,21 +60,17 @@ void main() {
   });
   tearDown(() {
     service.close();
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, null);
   });
 
   Future<String> submit({
     String title = ' Problem ',
     String description = ' Details ',
     String contact = ' wechat:sample ',
-    String email = ' user@example.com ',
     List<FeedbackAttachment> files = const [],
   }) => service.submit(
     title: title,
     description: description,
     contact: contact,
-    accountEmail: email,
     languageCode: 'en',
     attachments: files,
     versionInfo: {
@@ -86,7 +81,7 @@ void main() {
   );
 
   test(
-    'posts native multipart feedback with email separate from edited contact',
+    'posts native multipart feedback with user-provided contact',
     () async {
       expect(await submit(files: [attachment('log.txt')]), 'feedback-123');
       final request = adapter.requests.single;
@@ -105,7 +100,6 @@ void main() {
         'title': 'Problem',
         'description': 'Details',
         'contact': 'wechat:sample',
-        'accountEmail': 'user@example.com',
         'source': 'android',
         'locale': 'en',
         'versionName': '0.6.3.3',
@@ -120,11 +114,13 @@ void main() {
     },
   );
 
-  test('signed-out users can submit without contact or email', () async {
-    await submit(contact: '', email: '');
+  test('users can submit without contact', () async {
+    await submit(contact: '');
     expect(
-      Map.fromEntries((adapter.requests.single.data as FormData).fields),
-      isNot(contains('accountEmail')),
+      (adapter.requests.single.data as FormData).fields
+          .firstWhere((e) => e.key == 'contact')
+          .value,
+      '',
     );
   });
 
@@ -224,22 +220,4 @@ void main() {
     );
   });
 
-  test('reads only email from the account channel', () async {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-          expect(call.method, 'getFeedbackEmail');
-          return ' user@example.com ';
-        });
-    expect(await FeedbackService.loadAccountEmail(), 'user@example.com');
-  });
-
-  test('account lookup failure keeps anonymous feedback available', () async {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-          throw PlatformException(code: 'account_not_authenticated');
-        });
-    expect(await FeedbackService.loadAccountEmail(), '');
-    await submit(email: '', contact: '');
-    expect(adapter.requests, hasLength(1));
-  });
 }

@@ -23,7 +23,6 @@ import 'package:ui/models/habitual_hand.dart';
 import 'package:ui/services/app_update_service.dart';
 import 'package:ui/services/embedded_terminal_preparation_service.dart';
 import 'package:ui/services/scheduled_task_storage_service.dart';
-import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/services/special_permission.dart';
 import 'package:ui/features/home/pages/authorize/widgets/permission_prompt_sheet.dart';
@@ -148,8 +147,8 @@ void main() {
         'status': 'online',
       },
       {
-        'id': 'na-cloud',
-        'name': 'Na',
+        'id': 'claude-code-acp',
+        'name': 'Claude Code',
         'enabled': true,
         'installed': true,
         'status': 'online',
@@ -167,7 +166,10 @@ void main() {
         .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
           agentMethods.add(call.method);
           if (call.method == 'agent/list') {
-            return {'agents': nativeAgents};
+            return {
+              'agents': nativeAgents,
+              'retiredAgentIds': ['na-cloud'],
+            };
           }
           return null;
         });
@@ -1569,78 +1571,6 @@ void main() {
     },
   );
 
-  for (final duringConfirmation in [true, false]) {
-    testWidgets(
-      'home batch skips old Na owner after ${duringConfirmation ? 'confirmation' : 'pending operation'}',
-      (tester) async {
-        AssistsMessageService.initialize();
-        addTearDown(() {
-          AssistsMessageService.hasNaHistoryOwnerSnapshot = false;
-          AssistsMessageService.visibleNaOwnerPrefix = null;
-        });
-        nativeConversations = [
-          selectionRow(1, '本地项'),
-          {...selectionRow(2, '旧Na项'), 'agentId': 'na-cloud'},
-        ];
-        final calls = <Map<String, dynamic>>[];
-        final pending = Completer<bool>();
-        installSelectionMutations(
-          calls,
-          respond: (_) =>
-              duringConfirmation ? Future.value(true) : pending.future,
-        );
-        await pumpSelectionHome(tester, initialCategory: 'all');
-        await startSelection(tester, '本地项');
-        await tester.tap(find.byKey(const ValueKey('home-selection-all')));
-        await tester.tap(
-          find.byKey(
-            ValueKey(
-              duringConfirmation
-                  ? 'home-selection-delete'
-                  : 'home-selection-archive',
-            ),
-          ),
-        );
-        if (duringConfirmation) {
-          // Let the sheet finish entering before interacting with its action;
-          // the owner change still happens while confirmation is pending.
-          await tester.pumpAndSettle();
-        } else {
-          await tester.pump(const Duration(milliseconds: 400));
-        }
-        nativeConversations.removeWhere((row) => row['agentId'] == 'na-cloud');
-        final handled = Completer<void>();
-        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-          assistCoreChannel.name,
-          const StandardMethodCodec().encodeMethodCall(
-            const MethodCall('onConversationListChanged', {
-              'reason': 'na_history_owner_changed',
-              'naOwnerPrefix': 'new-account',
-            }),
-          ),
-          (_) => handled.complete(),
-        );
-        await handled.future;
-        await tester.pump();
-        if (duringConfirmation) {
-          await tester.tap(
-            find.byKey(const ValueKey('home-selection-delete-confirm')),
-          );
-        } else {
-          expect(calls, hasLength(1));
-          pending.complete(true);
-        }
-        await tester.pumpAndSettle();
-        expect(calls.map((args) => args['conversationId']), [1]);
-        expect(find.textContaining('1 个对话已不可用，未操作'), findsOneWidget);
-        expect(find.text('已选择 0 项'), findsOneWidget);
-        expect(
-          agentMethods.where((method) => method.startsWith('session/')),
-          isEmpty,
-        );
-      },
-    );
-  }
 
   testWidgets(
     'home selection controls fit a narrow screen with enlarged text',
@@ -1690,9 +1620,10 @@ void main() {
         row(1, '旧版小万对话', 'normal'),
         row(2, '空绑定小万对话', 'agent', ''),
         row(3, 'Na 对话', 'agent', 'na-cloud'),
-        row(4, 'Codex 对话', 'agent', 'codex-acp'),
-        row(5, '纯聊天记录', 'chat_only'),
-        row(6, 'OpenClaw 对话', 'openclaw'),
+        row(4, 'Claude 对话', 'agent', 'claude-code-acp'),
+        row(5, 'Codex 对话', 'agent', 'codex-acp'),
+        row(6, '纯聊天记录', 'chat_only'),
+        row(7, 'OpenClaw 对话', 'openclaw'),
       ];
       ConversationThreadTarget? selected;
       await tester.pumpWidget(
@@ -1717,6 +1648,7 @@ void main() {
       expect(find.text('旧版小万对话'), findsOneWidget);
       expect(find.text('空绑定小万对话'), findsOneWidget);
       expect(find.text('Na 对话'), findsNothing);
+      expect(find.text('Claude 对话'), findsNothing);
       expect(find.text('Codex 对话'), findsNothing);
       expect(find.text('纯聊天记录'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
@@ -1731,12 +1663,13 @@ void main() {
       expect(selected?.agentId, 'xiaowan-acp');
 
       for (final entry in {
-        'na-cloud': 'Na 对话',
+        'claude-code-acp': 'Claude 对话',
         'codex-acp': 'Codex 对话',
       }.entries) {
         await selectHomeCategory(tester, entry.key);
         expect(find.text(entry.value), findsOneWidget);
         expect(find.text('旧版小万对话'), findsNothing);
+        expect(find.text('Na 对话'), findsNothing);
         expect(find.text('纯聊天记录'), findsNothing);
         await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
         expect(selected?.agentId, entry.key);
@@ -1746,7 +1679,9 @@ void main() {
 
       await selectHomeCategory(tester, 'chat');
       expect(find.text('纯聊天记录'), findsOneWidget);
+      expect(find.text('Claude 对话'), findsNothing);
       expect(find.text('Codex 对话'), findsNothing);
+      expect(find.text('Na 对话'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
       expect(selected?.mode, ConversationMode.chatOnly);
       expect(selected?.agentId, isNull);
@@ -1754,13 +1689,14 @@ void main() {
       for (final title in [
         '旧版小万对话',
         '空绑定小万对话',
-        'Na 对话',
+        'Claude 对话',
         'Codex 对话',
         '纯聊天记录',
         'OpenClaw 对话',
       ]) {
         expect(find.text(title), findsOneWidget);
       }
+      expect(find.text('Na 对话'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
       expect(selected?.agentId, 'xiaowan-acp');
       expect(selected?.mode, ConversationMode.agent);
@@ -1790,10 +1726,10 @@ void main() {
         await preparation.refresh();
         expect(preparation.snapshot?.running, isTrue);
         expect(preparation.ready, isFalse);
-        // A fresh catalog can list Na first while Xiaowan has no probe result.
+        // A fresh catalog can list Claude Code first while Xiaowan has no probe result.
         // Catalog order and installation progress must not select the mode.
         nativeAgents = [
-          nativeAgents.firstWhere((agent) => agent['id'] == 'na-cloud'),
+          nativeAgents.firstWhere((agent) => agent['id'] == 'claude-code-acp'),
           {
             ...nativeAgents.firstWhere((agent) => agent['id'] == 'xiaowan-acp'),
             ...health,
@@ -1819,72 +1755,65 @@ void main() {
   }
 
   testWidgets(
-    'explicit Na filter survives a refreshed unprepared Xiaowan catalog',
+    'retired Na agent is omitted from home categories while historical conversations are hidden from active agent filters',
     (tester) async {
-      nativeAgents.firstWhere((agent) => agent['id'] == 'xiaowan-acp').addAll({
-        'installed': null,
-        'status': 'unchecked',
-      });
-      ConversationThreadTarget? opened;
-      await pumpSelectionHome(tester, onOpen: (target) => opened = target);
-      await selectHomeCategory(tester, 'na-cloud');
-      final context = tester.element(find.byType(HomeDrawer));
-      unawaited(
-        Navigator.of(context).push<void>(
-          MaterialPageRoute(builder: (_) => const Scaffold(body: Text('配置'))),
-        ),
-      );
-      await tester.pumpAndSettle();
-      nativeAgents = [
-        for (final agent in nativeAgents)
-          if (agent['id'] == 'xiaowan-acp')
-            {...agent, 'installed': false, 'status': 'missing'}
-          else
-            agent,
+      final now = DateTime.now().millisecondsSinceEpoch;
+      nativeConversations = [
+        {
+          'id': 1,
+          'title': '旧版小万对话',
+          'mode': 'agent',
+          'agentId': 'xiaowan-acp',
+          'status': 0,
+          'messageCount': 0,
+          'createdAt': now,
+          'updatedAt': now,
+        },
+        {
+          'id': 2,
+          'title': '旧 Na 对话',
+          'mode': 'agent',
+          'agentId': 'na-cloud',
+          'status': 0,
+          'messageCount': 0,
+          'createdAt': now,
+          'updatedAt': now,
+        },
       ];
-      Navigator.of(context).pop();
+      await pumpSelectionHome(tester);
+      // 默认小万分类下不展示已退役 Na 会话
+      expect(find.text('旧版小万对话'), findsOneWidget);
+      expect(find.text('旧 Na 对话'), findsNothing);
+
+      // 分类选项中不包含已退役的 Na
+      await tester.tap(find.byKey(const ValueKey('home-agent-switcher')));
       await tester.pumpAndSettle();
       expect(
-        tester.widget<Text>(find.byKey(const ValueKey('home-agent-name'))).data,
-        'Na',
+        find.byKey(const ValueKey('home-agent-option-na-cloud')),
+        findsNothing,
       );
+
+      // 切换至全部，已退役 Na 会话同样被隔离隐藏
+      await tester.tap(find.byKey(const ValueKey('home-agent-option-all')));
+      await tester.pumpAndSettle();
+      expect(find.text('旧版小万对话'), findsOneWidget);
+      expect(find.text('旧 Na 对话'), findsNothing);
+      // 新建对话仍使用默认小万，不能启动已退役的 Na
+      ConversationThreadTarget? target;
+      await pumpSelectionHome(tester, onOpen: (t) => target = t);
       await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
-      expect(opened?.agentId, 'na-cloud');
-      expect(agentMethods, isNot(contains('agent/select')));
+      expect(target?.agentId, 'xiaowan-acp');
+      expect(target?.agentId, isNot('na-cloud'));
     },
   );
-
-  for (final status in ['unchecked', 'offline']) {
-    testWidgets('production Na remains selectable on home: $status', (
-      tester,
-    ) async {
-      nativeAgents.firstWhere((agent) => agent['id'] == 'na-cloud').addAll({
-        'status': status,
-        'configurationAvailable': false,
-      });
-      ConversationThreadTarget? created;
-      await pumpSelectionHome(tester, onOpen: (target) => created = target);
-      await selectHomeCategory(tester, 'na-cloud');
-      expect(
-        tester.widget<Text>(find.byKey(const ValueKey('home-agent-name'))).data,
-        'Na',
-      );
-      await tester.tap(find.byKey(const ValueKey('home-new-conversation')));
-      expect(created?.agentId, 'na-cloud');
-      expect(created?.mode, ConversationMode.agent);
-      expect(created?.conversationId, isNull);
-      expect(agentMethods, isNot(contains('agent/select')));
-      expect(tester.takeException(), isNull);
-    });
-  }
 
   testWidgets(
     'home Agent switcher shows current identity and only available catalog entries',
     (tester) async {
       nativeAgents.addAll([
         {
-          'id': 'claude-code-acp',
-          'name': 'Claude Code',
+          'id': 'opencode-acp',
+          'name': 'OpenCode',
           'enabled': true,
           'installed': false,
         },
@@ -1915,7 +1844,7 @@ void main() {
       await tester.tap(switcher);
       await tester.pumpAndSettle();
       for (final unavailable in [
-        'claude-code-acp',
+        'opencode-acp',
         'unprobed-acp',
         'disabled-acp',
       ]) {
@@ -1924,9 +1853,13 @@ void main() {
           findsNothing,
         );
       }
+      expect(
+        find.byKey(const ValueKey('home-agent-option-na-cloud')),
+        findsNothing,
+      );
       for (final available in [
         'xiaowan-acp',
-        'na-cloud',
+        'claude-code-acp',
         'codex-acp',
         'all',
         'chat',
@@ -1985,7 +1918,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('home-agent-switcher')));
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('home-agent-option-claude-code-acp')),
+      find.byKey(const ValueKey('home-agent-option-opencode-acp')),
       findsNothing,
     );
     await tester.tap(find.byKey(const ValueKey('home-agent-option-codex-acp')));
@@ -2002,8 +1935,8 @@ void main() {
     );
     await tester.pumpAndSettle();
     nativeAgents.add({
-      'id': 'claude-code-acp',
-      'name': 'Claude Code',
+      'id': 'opencode-acp',
+      'name': 'OpenCode',
       'enabled': true,
       'installed': true,
       'status': 'online',
@@ -2025,7 +1958,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('home-agent-switcher')));
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('home-agent-option-claude-code-acp')),
+      find.byKey(const ValueKey('home-agent-option-opencode-acp')),
       findsOneWidget,
     );
     await tester.tap(find.byKey(const ValueKey('home-agent-option-codex-acp')));
@@ -2062,12 +1995,12 @@ void main() {
     (tester) async {
       nativeConversations = [
         {...selectionRow(1, 'Codex对话'), 'agentId': 'codex-acp'},
-        {...selectionRow(2, 'Na对话'), 'agentId': 'na-cloud'},
+        {...selectionRow(2, 'Claude对话'), 'agentId': 'claude-code-acp'},
         selectionRow(3, '小万对话'),
       ];
       ConversationThreadTarget? created;
       await pumpSelectionHome(tester, onOpen: (target) => created = target);
-      for (final agentId in ['codex-acp', 'na-cloud']) {
+      for (final agentId in ['codex-acp', 'claude-code-acp']) {
         await selectHomeCategory(tester, agentId);
         await tester.tap(find.byKey(const ValueKey('home-search-button')));
         await tester.pumpAndSettle();

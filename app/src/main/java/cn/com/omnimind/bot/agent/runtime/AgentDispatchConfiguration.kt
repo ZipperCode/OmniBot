@@ -1,10 +1,7 @@
 package cn.com.omnimind.bot.agent.runtime
 
-import cn.com.omnimind.baselib.account.OmniAccount
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
-import cn.com.omnimind.baselib.llm.OmniOfficialProvider
-import cn.com.omnimind.baselib.llm.PlatformAiProvisioner
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 
 /**
@@ -26,22 +23,18 @@ internal object AgentDispatchConfiguration {
             boundProviderProfileId = binding?.providerProfileId,
             configuredProfile = configuredProfile,
             editingProfile = ModelProviderConfigStore.getEditingProfile(),
-            officialProfile = PlatformAiProvisioner.officialProfileOrNull(),
         )
     }.getOrNull()
 
     fun providerCredentials(): AgentProviderCredentials? = providerProfile()?.let { profile ->
-        val apiKey = resolveAgentProviderApiKey(
-            profile = profile,
-            officialBearerToken = OmniAccount.currentAiRequestAccess().bearerToken,
-        ) ?: return@let null
+        val apiKey = resolveAgentProviderApiKey(profile) ?: return@let null
         AgentProviderCredentials(
             baseUrl = profile.baseUrl,
             apiKey = apiKey,
             wireApi = profile.wireApi,
             customHeaders = profile.customHeaders,
             protocolType = profile.protocolType,
-            supportsNamespaceTools = OmniOfficialProvider.isOfficialProfile(profile.id),
+            supportsNamespaceTools = false,
         ).normalized()
     }
 
@@ -51,7 +44,6 @@ internal object AgentDispatchConfiguration {
             resolveAgentProviderProfile(
                 boundProviderProfileId = it.providerProfileId,
                 configuredProfile = ModelProviderConfigStore.getProfile(it.providerProfileId),
-                officialProfile = PlatformAiProvisioner.officialProfileOrNull(),
             )
         }?.takeIf { it.baseUrl.isNotBlank() }
             ?: return@runCatching null

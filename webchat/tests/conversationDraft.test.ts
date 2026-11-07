@@ -30,14 +30,14 @@ test("only new product chat targets receive the explicit Xiaowan owner", () => {
   assert.throws(() => createConversationDraft("codex"), /agent_identity_required/);
   assert.equal(conversationAgentId({ id: 17, mode: "codex" }), undefined);
   assert.equal(conversationAgentId({ id: 18, mode: "chat_only" }), "xiaowan-acp");
-  assert.equal(conversationAgentId({ id: 19, mode: "codex", agentId: "na-cloud" }), "na-cloud");
+  assert.equal(conversationAgentId({ id: 19, mode: "codex", agentId: "claude-code-acp" }), "claude-code-acp");
 });
 
 
 test("native Agent payloads preserve their explicit owner and never normalize to ordinary chat", () => {
-  const native = { id: 27, mode: "agent", agentId: "na-cloud" };
+  const native = { id: 27, mode: "agent", agentId: "claude-code-acp" };
   assert.equal(normalizeConversationMode(native.mode), "codex");
-  assert.equal(conversationAgentId(native), "na-cloud");
+  assert.equal(conversationAgentId(native), "claude-code-acp");
   assert.equal(canRunConversation(native), true);
   assert.equal(conversationAgentId({ id: 28, mode: "agent" }), undefined);
   assert.equal(normalizeConversationMode("unknown"), "codex");
