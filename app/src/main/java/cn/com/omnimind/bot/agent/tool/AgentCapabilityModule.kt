@@ -5,6 +5,9 @@ import cn.com.omnimind.bot.agent.personal.PersonalContextCapabilityModule
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.SubagentDispatcher
+import cn.com.omnimind.bot.agent.development.PhoneDevelopmentToolHandler
+import cn.com.omnimind.bot.agent.tool.handlers.DeviceDisplayToolHandler
+import cn.com.omnimind.bot.task.runtime.TaskRuntimeToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.BrowserToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ContextToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.FileToolHandler
@@ -70,6 +73,9 @@ class BuiltInAgentCapabilityModule(
         ContextToolHandler(helper),
         VlmToolHandler(context).takeIf { includeVlmTool },
         privilegedHandler,
+        DeviceDisplayToolHandler(context),
+        PhoneDevelopmentToolHandler(helper, workspaceManager, scope),
+        TaskRuntimeToolHandler(context),
         terminalHandler,
         BrowserToolHandler(helper, workspaceManager),
         WebSearchToolHandler(),
@@ -82,4 +88,14 @@ class BuiltInAgentCapabilityModule(
         MemoryLoadToolHandler(helper),
         SubagentToolHandler(helper, subagentDispatcher),
     )
+
+    override val toolDefinitions: List<AgentCapabilityToolDefinition>
+        get() = definitions
+
+    companion object {
+        val definitions: List<AgentCapabilityToolDefinition> =
+            DeviceDisplayToolHandler.definitions +
+                PhoneDevelopmentToolHandler.definitions +
+                TaskRuntimeToolHandler.definitions
+    }
 }

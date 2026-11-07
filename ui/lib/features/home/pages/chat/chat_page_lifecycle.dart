@@ -543,10 +543,39 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       final threadId =
           (response['threadId'] ?? threadMap['id'])?.toString().trim() ?? '';
       final resolvedAgentId =
+      final conversationRuntime = _runtimeCoordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      final rawOptions = response['configOptions'];
+      final configOptionsList = rawOptions is List
+          ? rawOptions.whereType<Map>()
+          : const <Map>[];
+      final modeOption = configOptionsList.firstWhere(
+        (o) => o['id'] == 'mode' || o['category'] == 'mode',
+        orElse: () => const {},
+      );
+      final rawMode = response['mode'] ??
+          response['currentModeId'] ??
+          modeOption['currentValue'] ??
+          modeOption['value'] ??
+          conversationRuntime?.currentAcpModeId;
+      final serverMode = _parseAgentPermissionMode(rawMode);
+      final storedMode = _parseAgentPermissionMode(
+        _readAgentPreference(
+          _kAgentPermissionModePreferenceKey,
+          conversationId: conversationId,
+        ),
+      );
+      // F05 原则：切已有 session 以 server owner 优先，其次为显式保存的会话偏好，缺 mode 时不得猜但有 full 必须反显
+      final resolvedMode = serverMode ?? storedMode;
           (response['agentId'] ?? threadMap['agentId'])?.toString().trim() ??
           '';
       setState(() {
         if (threadId.isNotEmpty) {
+        if (resolvedMode != null) {
+          _agentPermissionMode = resolvedMode;
+        }
           _activeAgentThreadId = threadId;
         }
         if (resolvedAgentId.isNotEmpty) {

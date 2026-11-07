@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import cn.com.omnimind.accessibility.service.AssistsService
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.ActionCoordinateCodec
@@ -14,7 +15,9 @@ import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.baselib.runlog.OobActionSchema
 import cn.com.omnimind.baselib.runlog.State
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
@@ -66,8 +69,11 @@ class AndroidGuiEnvironment internal constructor(
 
     fun isReady(): Boolean = accessibilityStatus() == AndroidGuiAccessibilityStatus.READY
 
-    suspend fun awaitReady(timeoutMs: Long = ACCESSIBILITY_READY_TIMEOUT_MS): Boolean {
-        ensureDisplayInteractive()
+    suspend fun awaitReady(
+        timeoutMs: Long = ACCESSIBILITY_READY_TIMEOUT_MS,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
+        ensureDisplayInteractive(displayId)
         if (!isAccessibilityEnabled()) return false
         return withTimeoutOrNull(timeoutMs) {
             while (!platform.isReady()) delay(50L)
@@ -96,28 +102,37 @@ class AndroidGuiEnvironment internal constructor(
         }
     }
 
-    fun displaySize(): Pair<Int, Int> = platform.displaySize()
+    fun displaySize(): Pair<Int, Int> = platform.displaySize(Display.DEFAULT_DISPLAY)
+
+    fun displaySize(displayId: Int): Pair<Int, Int> = platform.displaySize(displayId)
 
     fun screenshotExcludesOverlays(): Boolean = platform.screenshotExcludesOverlays()
 
     suspend fun observe(
         captureScreenshot: Boolean = true,
         waitToStabilize: Boolean = false,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        leaseOwnerId: String? = null,
     ): State = observeWithDiagnostics(
         captureScreenshot = captureScreenshot,
         waitToStabilize = waitToStabilize,
+        displayId = displayId,
+        leaseOwnerId = leaseOwnerId,
     ).state
 
     suspend fun observeWithDiagnostics(
         captureScreenshot: Boolean = true,
         waitToStabilize: Boolean = false,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        leaseOwnerId: String? = null,
     ): AndroidGuiObservation {
-        check(awaitReady()) { "android_gui_accessibility_not_ready" }
+        check(awaitReady(displayId = displayId)) { "android_gui_accessibility_not_ready" }
         val context = checkNotNull(appContext) { "android_gui_context_required" }
+        KeyguardStateMonitor.ensureInteractiveAndUnlocked(context, displayId, leaseOwnerId)
         val observedAndStability = if (waitToStabilize) {
-            observeStable(captureScreenshot)
+            observeStable(captureScreenshot, displayId)
         } else {
-            platform.observe(captureScreenshot) to false
+            platform.observe(captureScreenshot, displayId) to false
         }
         val observed = observedAndStability.first
         val stabilized = observedAndStability.second
@@ -145,8 +160,9 @@ class AndroidGuiEnvironment internal constructor(
 
     private suspend fun observeStable(
         captureScreenshot: Boolean,
+        displayId: Int,
     ): Pair<AndroidGuiPlatformState, Boolean> {
-        var previous = platform.observe(captureScreenshot)
+        var previous = platform.observe(captureScreenshot, displayId)
         var current = previous
         var stableChecks = 1
         val deadline = SystemClock.elapsedRealtime() + OBSERVE_STABILIZATION_TIMEOUT_MS
@@ -155,7 +171,7 @@ class AndroidGuiEnvironment internal constructor(
             if (remaining <= 0L) break
             delay(min(OBSERVE_STABILIZATION_POLL_MS, remaining))
             if (SystemClock.elapsedRealtime() >= deadline) break
-            current = platform.observe(captureScreenshot)
+            current = platform.observe(captureScreenshot, displayId)
             stableChecks = if (sameUiState(previous, current)) {
                 stableChecks + 1
             } else {
@@ -176,9 +192,15 @@ class AndroidGuiEnvironment internal constructor(
         previous.xml == current.xml
 
     /** Capture a transient preview without writing a RunLog state or image to disk. */
-    suspend fun captureScreenSnapshot(): AndroidGuiScreenSnapshot {
-        check(awaitReady()) { "android_gui_accessibility_not_ready" }
-        val observed = platform.observe(captureScreenshot = true)
+    suspend fun captureScreenSnapshot(
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        leaseOwnerId: String? = null,
+    ): AndroidGuiScreenSnapshot {
+        check(awaitReady(displayId = displayId)) { "android_gui_accessibility_not_ready" }
+        appContext?.let { ctx ->
+            KeyguardStateMonitor.ensureInteractiveAndUnlocked(ctx, displayId, leaseOwnerId)
+        }
+        val observed = platform.observe(captureScreenshot = true, displayId = displayId)
         return AndroidGuiScreenSnapshot(
             packageName = observed.packageName,
             activityName = observed.activityName,
@@ -188,32 +210,60 @@ class AndroidGuiEnvironment internal constructor(
         )
     }
 
+    /**
+     * Dispatches an action onto [displayId] protected by [DisplayInputCoordinator] lease.
+     *
+     * Ensures:
+     * - Multi-step GUI runs with [leaseOwnerId] reuse their lease reentrantly without deadlocks.
+     * - Screen is interactive and unlocked (via [KeyguardStateMonitor]).
+     * - Coordinates are canonicalized against [displayId] resolution.
+     */
     suspend fun act(
         action: Action,
         awaitStabilization: Boolean = true,
-    ): AndroidGuiActionResult {
-        if (!awaitReady()) {
-            return AndroidGuiActionResult(
-                success = false,
-                message = "android_gui_accessibility_not_ready",
-            )
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        leaseOwnerId: String? = null,
+    ): AndroidGuiActionResult = DisplayInputCoordinator.withDisplayLock(displayId, leaseOwnerId) {
+        val currentJob = currentCoroutineContext().job
+        leaseOwnerId?.let { owner ->
+            DisplayInputCoordinator.registerActiveJob(displayId, owner, currentJob)
         }
-        return try {
+        try {
+            if (!awaitReady(displayId = displayId)) {
+                return@withDisplayLock AndroidGuiActionResult(
+                    success = false,
+                    message = "android_gui_accessibility_not_ready",
+                )
+            }
+
+            val context = appContext
+            if (context != null) {
+                val unlocked = KeyguardStateMonitor.ensureInteractiveAndUnlocked(context, displayId, leaseOwnerId)
+                if (!unlocked) {
+                    return@withDisplayLock AndroidGuiActionResult(
+                        success = false,
+                        message = "device_locked_awaiting_user_unlock",
+                    )
+                }
+            }
+
             val stateBeforeAction = if (
                 awaitStabilization && action.tool != OobActionSchema.TOOL_WAIT
             ) {
-                platform.observe(captureScreenshot = false).uiFingerprint()
+                platform.observe(captureScreenshot = false, displayId = displayId).uiFingerprint()
             } else {
                 null
             }
-            val result = platform.dispatch(canonicalForDisplay(action))
-            if (!result.success) return result
+
+            val result = platform.dispatch(canonicalForDisplay(action, displayId), displayId = displayId)
+            if (!result.success) return@withDisplayLock result
             if (!awaitStabilization) {
-                return result.withStabilization("runtime_delegated")
+                return@withDisplayLock result.withStabilization("runtime_delegated")
             }
             if (action.tool == OobActionSchema.TOOL_WAIT) {
-                return result.withStabilization("completed_by_action")
+                return@withDisplayLock result.withStabilization("completed_by_action")
             }
+
             val stable = withTimeoutOrNull(stateStabilizationTimeoutMs(action.tool)) {
                 var previous = stateBeforeAction
                 var stateChanged = false
@@ -221,6 +271,7 @@ class AndroidGuiEnvironment internal constructor(
                     delay(STATE_STABILIZATION_POLL_MS)
                     val fingerprint = platform.observe(
                         captureScreenshot = false,
+                        displayId = displayId,
                     ).uiFingerprint()
                     if (!stateChanged) {
                         if (fingerprint != stateBeforeAction) {
@@ -234,6 +285,7 @@ class AndroidGuiEnvironment internal constructor(
                 @Suppress("UNREACHABLE_CODE")
                 false
             } == true
+
             result.copy(
                 diagnostics = result.diagnostics + mapOf(
                     "state_stabilization" to if (stable) {
@@ -251,6 +303,8 @@ class AndroidGuiEnvironment internal constructor(
                 success = false,
                 message = error.message ?: "android_gui_action_failed",
             )
+        } finally {
+            DisplayInputCoordinator.unregisterActiveJob(displayId, currentJob)
         }
     }
 
@@ -269,16 +323,23 @@ class AndroidGuiEnvironment internal constructor(
         ),
     )
 
-    suspend fun inputTarget(x: Float? = null, y: Float? = null): AndroidGuiInputTarget? =
-        if (awaitReady()) platform.inputTarget(x, y) else null
+    suspend fun inputTarget(
+        x: Float? = null,
+        y: Float? = null,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiInputTarget? =
+        if (awaitReady(displayId = displayId)) platform.inputTarget(x, y, displayId) else null
 
     suspend fun installedApplications(): Map<String, String> = platform.installedApplications()
 
     fun inputMethodTop(): Int? = runCatching(platform::inputMethodTop).getOrNull()
 
-    private suspend fun canonicalForDisplay(action: Action): Action {
+    private suspend fun canonicalForDisplay(
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Action {
         if (action.tool !in OobActionSchema.coordinateToolNames) return action
-        val display = platform.displaySize()
+        val display = platform.displaySize(displayId)
         val args = ActionCoordinateCodec.toScreenPixels(
             args = action.args,
             displaySize = ActionCoordinateCodec.DisplaySize(
@@ -289,7 +350,8 @@ class AndroidGuiEnvironment internal constructor(
         return action.copy(args = args)
     }
 
-    private fun ensureDisplayInteractive() {
+    private fun ensureDisplayInteractive(displayId: Int = Display.DEFAULT_DISPLAY) {
+        if (displayId != Display.DEFAULT_DISPLAY) return
         val context = appContext ?: return
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         if (powerManager != null && !powerManager.isInteractive) {

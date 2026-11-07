@@ -4,8 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.SystemClock
+import android.view.Display
 import cn.com.omnimind.androidgui.AndroidGuiDisplayOffException
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
+import cn.com.omnimind.androidgui.DeviceDisplayManager
+import cn.com.omnimind.androidgui.DisplayInputCoordinator
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.baselib.runlog.OobActionSchema
@@ -136,86 +139,96 @@ object OmniFlow {
         )
         return try {
             executionMutex.withLock {
-                coroutineScope {
-                    val stopped = AtomicBoolean(false)
-                    val completionRequested = AtomicBoolean(false)
-                    var executionJob: Job? = null
-                    val requestStop = {
-                        if (stopped.compareAndSet(false, true)) {
-                            executionJob?.cancel(CancellationException("OmniFlow execution stopped"))
+                val targetDisplayArg = request.toolCall.arguments["display"]?.toString()
+                    ?: request.toolCall.arguments["display_id"]?.toString()
+                val targetDisplayId = if (targetDisplayArg.isNullOrBlank() || targetDisplayArg == "main" || targetDisplayArg == "0") {
+                    Display.DEFAULT_DISPLAY
+                } else {
+                    DeviceDisplayManager.resolveDisplayId(context, targetDisplayArg)
+                }
+                DisplayInputCoordinator.withDisplayLease(displayId = targetDisplayId, ownerId = request.id) {
+                    coroutineScope {
+                        val stopped = AtomicBoolean(false)
+                        val completionRequested = AtomicBoolean(false)
+                        var executionJob: Job? = null
+                        val requestStop = {
+                            if (stopped.compareAndSet(false, true)) {
+                                DisplayInputCoordinator.cancelActiveOperation(targetDisplayId, ownerId = request.id)
+                                executionJob?.cancel(CancellationException("OmniFlow execution stopped"))
+                            }
                         }
-                    }
-                    val requestComplete = {
-                        if (completionRequested.compareAndSet(false, true)) {
-                            executionJob?.cancel(ManualCompletionRequested())
+                        val requestComplete = {
+                            if (completionRequested.compareAndSet(false, true)) {
+                                executionJob?.cancel(ManualCompletionRequested())
+                            }
                         }
-                    }
-                    val executionUi = ExecutionControls.start(
-                        context = context,
-                        title = request.title,
-                        initialPhase = initialExecutionPhase(usesModel = modelClient != null),
-                        onStop = requestStop,
-                        onComplete = requestComplete,
-                    )
-                    val registration = executions.begin(
-                        runId = request.id,
-                        onStop = requestStop,
-                    )
-                    var result: Map<String, Any?>? = null
-                    var cancelled = false
-                    try {
-                        val beforeOperation: suspend () -> Unit = {
-                            executionUi.awaitRunning()
-                            ensureRunning(stopped, hooks)
-                            hooks.beforeOperation()
-                            ensureRunning(stopped, hooks)
-                        }
-                        val host = OmniFlowDeviceDispatcher(
+                        val executionUi = ExecutionControls.start(
                             context = context,
-                            request = request,
-                            runFinished = runFinished,
-                            modelClient = modelClient,
-                            beforeOperation = beforeOperation,
-                            stopRequested = { stopped.get() || hooks.stopRequested() },
-                            onPhase = executionUi::updatePhase,
-                            beforeAction = executionUi::avoidAction,
-                            afterAction = executionUi::restoreDefaultPosition,
-                            beforeScreenshot = executionUi::hideForScreenshot,
-                            afterScreenshot = executionUi::showAfterScreenshot,
-                            onProgress = { progress, extras ->
-                                executionUi.update(progress)
-                                hooks.onProgress(progress, extras)
-                            },
+                            title = request.title,
+                            initialPhase = initialExecutionPhase(usesModel = modelClient != null),
+                            onStop = requestStop,
+                            onComplete = requestComplete,
                         )
-                        val operation = async(start = CoroutineStart.LAZY) { host.execute() }
-                        executionJob = operation
-                        when {
-                            completionRequested.get() ->
-                                operation.cancel(ManualCompletionRequested())
-                            stopped.get() -> operation.cancel(
-                                CancellationException("OmniFlow execution stopped"),
-                            )
-                        }
+                        val registration = executions.begin(
+                            runId = request.id,
+                            onStop = requestStop,
+                        )
+                        var result: Map<String, Any?>? = null
+                        var cancelled = false
                         try {
-                            operation.start()
-                            val payload = operation.await()
-                            result = payload
-                            Result(payload, host.currentStateId)
+                            val beforeOperation: suspend () -> Unit = {
+                                executionUi.awaitRunning()
+                                ensureRunning(stopped, hooks)
+                                hooks.beforeOperation()
+                                ensureRunning(stopped, hooks)
+                            }
+                            val host = OmniFlowDeviceDispatcher(
+                                context = context,
+                                request = request,
+                                runFinished = runFinished,
+                                modelClient = modelClient,
+                                beforeOperation = beforeOperation,
+                                stopRequested = { stopped.get() || hooks.stopRequested() },
+                                onPhase = executionUi::updatePhase,
+                                beforeAction = executionUi::avoidAction,
+                                afterAction = executionUi::restoreDefaultPosition,
+                                beforeScreenshot = executionUi::hideForScreenshot,
+                                afterScreenshot = executionUi::showAfterScreenshot,
+                                onProgress = { progress, extras ->
+                                    executionUi.update(progress)
+                                    hooks.onProgress(progress, extras)
+                                },
+                            )
+                            val operation = async(start = CoroutineStart.LAZY) { host.execute() }
+                            executionJob = operation
+                            when {
+                                completionRequested.get() ->
+                                    operation.cancel(ManualCompletionRequested())
+                                stopped.get() -> operation.cancel(
+                                    CancellationException("OmniFlow execution stopped"),
+                                )
+                            }
+                            try {
+                                operation.start()
+                                val payload = operation.await()
+                                result = payload
+                                Result(payload, host.currentStateId)
+                            } catch (error: CancellationException) {
+                                if (!completionRequested.get()) throw error
+                                val payload = host.finishManualCompletion()
+                                result = payload
+                                Result(payload, host.currentStateId)
+                            }
                         } catch (error: CancellationException) {
-                            if (!completionRequested.get()) throw error
-                            val payload = host.finishManualCompletion()
-                            result = payload
-                            Result(payload, host.currentStateId)
-                        }
-                    } catch (error: CancellationException) {
-                        cancelled = true
-                        throw error
-                    } finally {
-                        executions.end(registration)
-                        val message = completionMessage(result, cancelled || stopped.get())
-                        val visibleMs = completionOverlayVisibleMs(request.source, result)
-                        withContext(NonCancellable) {
-                            executionUi.finish(message, visibleMs)
+                            cancelled = true
+                            throw error
+                        } finally {
+                            executions.end(registration)
+                            val message = completionMessage(result, cancelled || stopped.get())
+                            val visibleMs = completionOverlayVisibleMs(request.source, result)
+                            withContext(NonCancellable) {
+                                executionUi.finish(message, visibleMs)
+                            }
                         }
                     }
                 }
@@ -350,6 +363,15 @@ class OmniFlowDeviceDispatcher internal constructor(
     }
 
     private val appContext = context.applicationContext
+    private val targetDisplayId: Int = run {
+        val displayArg = request?.toolCall?.arguments?.get("display")?.toString()
+            ?: request?.toolCall?.arguments?.get("display_id")?.toString()
+        if (displayArg.isNullOrBlank() || displayArg == "main" || displayArg == "0") {
+            Display.DEFAULT_DISPLAY
+        } else {
+            DeviceDisplayManager.resolveDisplayId(appContext, displayArg)
+        }
+    }
     private val environment = AndroidGuiEnvironment(appContext)
     private val writer = request?.let { activeRun ->
         RunLogWriter { record ->
@@ -391,7 +413,7 @@ class OmniFlowDeviceDispatcher internal constructor(
         val activeRun = requireNotNull(request) { "run_not_configured" }
         return try {
             beforeOperation()
-            check(environment.awaitReady()) { "android_gui_accessibility_not_ready" }
+            check(environment.awaitReady(displayId = targetDisplayId)) { "android_gui_accessibility_not_ready" }
             beforeOperation()
             val payload = mapOf(
                 "name" to activeRun.toolCall.name,
@@ -469,6 +491,7 @@ class OmniFlowDeviceDispatcher internal constructor(
             environment.observeWithDiagnostics(
                 captureScreenshot = captureScreenshot,
                 waitToStabilize = waitToStabilize,
+                displayId = targetDisplayId,
             ).also {
                 currentStateId = it.state.stateId
                 currentState = it.state
@@ -523,6 +546,8 @@ class OmniFlowDeviceDispatcher internal constructor(
             val result = environment.act(
                 action = action,
                 awaitStabilization = payload["await_stabilization"] != false,
+                displayId = targetDisplayId,
+                leaseOwnerId = request?.id,
             )
             if (result.success) previousActionTool = action.tool
             linkedMapOf<String, Any?>(

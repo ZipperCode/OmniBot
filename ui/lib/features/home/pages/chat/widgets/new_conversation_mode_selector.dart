@@ -12,7 +12,7 @@ import 'package:ui/widgets/omni_menu.dart';
 import 'chat_widgets.dart' show ChatAcpAgentModeOption;
 
 const String kNewConversationPureChatModeId = 'chat';
-
+const String kNewConversationFullAccessModeId = 'agent_full_access';
 /// Chooses the presentation target of an unsent conversation.
 ///
 /// The page owns visibility, target changes, and draft preservation. This
@@ -93,6 +93,7 @@ class _NewConversationModeSelectorState
 
   bool _isAvailable(String id) =>
       id == kNewConversationPureChatModeId ||
+      id == kNewConversationFullAccessModeId ||
       widget.agentModes.any((mode) => mode.id == id && mode.isAvailable);
 
   Future<void> _open(BuildContext anchorContext) async {
@@ -108,8 +109,11 @@ class _NewConversationModeSelectorState
       for (final mode in widget.agentModes)
         if (mode.isAvailable &&
             mode.id != kNewConversationPureChatModeId &&
+            mode.id != kNewConversationFullAccessModeId &&
             ids.add(mode.id))
           (mode.id, mode.name.trim().isEmpty ? mode.id : mode.name),
+      if (ids.add(kNewConversationFullAccessModeId))
+        (kNewConversationFullAccessModeId, english ? 'Full Access (Root)' : '全权模式 (Root)'),
       (kNewConversationPureChatModeId, english ? 'Pure chat' : '纯聊天'),
     ];
     final handle = showOverlayGlassPopup<String>(
@@ -176,7 +180,9 @@ class _NewConversationModeSelectorState
   static Widget _modeIcon(String id) => ExcludeSemantics(
     child: id == kNewConversationPureChatModeId
         ? const Icon(LucideIcons.messageCircle, size: 20)
-        : AgentBrandIcon(agentId: id, size: 20),
+        : id == kNewConversationFullAccessModeId
+            ? const Icon(LucideIcons.shieldCheck, size: 20)
+            : AgentBrandIcon(agentId: id, size: 20),
   );
 
   @override
@@ -186,12 +192,18 @@ class _NewConversationModeSelectorState
     final selected = widget.agentModes
         .where((mode) => mode.id == widget.selectedId)
         .firstOrNull;
+    final isFullAccess = widget.selectedId == kNewConversationFullAccessModeId;
     final label = widget.selectedId == kNewConversationPureChatModeId
         ? (english ? 'Pure chat' : '纯聊天')
-        : selected?.name.trim().isNotEmpty == true
-        ? selected!.name.trim()
-        : widget.selectedId;
-    final color = widget.enabled ? palette.textSecondary : palette.textTertiary;
+        : isFullAccess
+            ? (english ? 'Full Access (Root)' : '全权模式 (Root)')
+            : selected?.name.trim().isNotEmpty == true
+                ? selected!.name.trim()
+                : widget.selectedId;
+    // 依据组件是否可用解析文本与图标颜色，遵循无障碍对比度规范
+    final color = widget.enabled
+        ? palette.textPrimary
+        : palette.textTertiary;
     return TextFieldTapRegion(
       child: FlClashPopupSource(
         glass: false,

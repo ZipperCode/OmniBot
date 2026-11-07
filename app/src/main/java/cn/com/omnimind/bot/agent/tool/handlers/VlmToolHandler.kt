@@ -1,7 +1,12 @@
 package cn.com.omnimind.bot.agent.tool.handlers
 
 import android.content.Context
+import android.view.Display
+import cn.com.omnimind.androidgui.DeviceDisplayManager
+import cn.com.omnimind.androidgui.DisplayInputCoordinator
+import cn.com.omnimind.androidgui.KeyguardStateMonitor
 import cn.com.omnimind.baselib.llm.AssistantToolCall
+import cn.com.omnimind.bot.task.runtime.TaskAuthWaitCoordinator
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.OfficialVlmOperationConfigStore
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
@@ -56,8 +61,21 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 helper.localized("缺少 goal"),
             )
         val runId = "gui-${UUID.randomUUID()}"
+        val displayTarget = args["display"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        val targetDisplayId = if (displayTarget == null || displayTarget == "main" || displayTarget == "0") {
+            Display.DEFAULT_DISPLAY
+        } else {
+            try {
+                DeviceDisplayManager.resolveDisplayId(helper.context, displayTarget)
+            } catch (e: Exception) {
+                val msg = "指定的显示屏 '$displayTarget' 不可用或未创建: ${e.message}。请显式选择 'main' 或先创建虚拟屏。"
+                persistFailure(runId, goal, "display_unavailable", msg)
+                return failedRunResult(runId, goal, "display_unavailable", msg)
+            }
+        }
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
+            DisplayInputCoordinator.cancelActiveOperation(targetDisplayId, ownerId = runId)
         }
         helper.reportToolProgress(
             callback = callback,
@@ -66,6 +84,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
             extras = mapOf(
                 "run_id" to runId,
                 "stage" to "vlm_runtime_prepare",
+                "display_id" to targetDisplayId,
             ),
             toolHandle = toolHandle,
         )
@@ -88,6 +107,45 @@ class VlmToolHandler(context: Context) : ToolHandler {
             // of letting the model turn this into an assistant-only sentence.
             return helper.permissionRequiredResult(callback, permission.getDisplayNames())
         }
+        if (KeyguardStateMonitor.isKeyguardLocked(helper.context)) {
+            val convId = env.conversationId
+            if (convId != null) {
+                helper.reportToolProgress(
+                    callback = callback,
+                    toolName = OmniVlmPlugin.RUN_LOG_TOOL,
+                    progress = "设备已锁定，等待解锁",
+                    extras = mapOf(
+                        "run_id" to runId,
+                        "stage" to "await_unlock",
+                        "display_id" to targetDisplayId,
+                    ),
+                    toolHandle = toolHandle,
+                )
+                val unlocked = TaskAuthWaitCoordinator.awaitDeviceUnlock(
+                    context = helper.context,
+                    conversationId = convId,
+                    sessionId = env.acpSessionId,
+                    turnId = env.acpTurnId,
+                )
+                if (!unlocked) {
+                    persistFailure(runId, goal, "device_locked", "设备处于安全锁屏状态，等待解锁超时或已被取消。")
+                    return failedRunResult(runId, goal, "device_locked", "设备处于安全锁屏状态，等待解锁超时或已被取消。")
+                }
+            } else {
+                persistFailure(runId, goal, "device_locked", "设备处于安全锁屏状态，未绑定会话无法等待解锁。")
+                return failedRunResult(runId, goal, "device_locked", "设备处于安全锁屏状态，未绑定会话无法等待解锁。")
+            }
+        }
+        // 虚拟屏动作校验所有权，防止跨会话操作他人屏幕
+        val sessionKey = env.acpSessionId ?: env.agentRunId
+        if (targetDisplayId != Display.DEFAULT_DISPLAY) {
+            val vdOwner = DisplayInputCoordinator.getVirtualDisplayOwner(targetDisplayId)
+            if (vdOwner != null && vdOwner != sessionKey) {
+                persistFailure(runId, goal, "display_forbidden", "虚拟显示屏 $targetDisplayId 属于其他会话 ($vdOwner)，当前会话 ($sessionKey) 无权操作。")
+                return failedRunResult(runId, goal, "display_forbidden", "虚拟显示屏 $targetDisplayId 属于其他会话 ($vdOwner)，当前会话 ($sessionKey) 无权操作。")
+            }
+        }
+
         prepareOfficialModelRoute()?.let { message ->
             persistFailure(runId, goal, "provider_unavailable", message)
             return failedRunResult(
@@ -97,12 +155,41 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 message = message,
             )
         }
-        return try {
+        return DisplayInputCoordinator.withDisplayLease(targetDisplayId, runId) {
+            // Scoped unlock awaiter hook for mid-flight lock events during execution
+            val convId = env.conversationId
+            if (convId != null) {
+                DisplayInputCoordinator.registerLeaseUnlockAwaiter(targetDisplayId, runId) { ctx, _ ->
+                    TaskAuthWaitCoordinator.awaitDeviceUnlock(
+                        context = ctx,
+                        conversationId = convId,
+                        sessionId = env.acpSessionId,
+                        turnId = env.acpTurnId,
+                    )
+                }
+            }
+            val privilegedManager = cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager.get(helper.context)
+            val initialAccess = privilegedManager.reserve(ownerId = runId, acpSessionId = env.acpSessionId)
+            if (initialAccess.isValid()) {
+                DisplayInputCoordinator.registerLeaseExecutor(targetDisplayId, runId) { cmdList ->
+                    kotlinx.coroutines.runBlocking {
+                        val liveAccess = privilegedManager.reserve(ownerId = runId, acpSessionId = env.acpSessionId)
+                        if (!liveAccess.isValid()) return@runBlocking false
+                        val cmdStr = cmdList.joinToString(" ")
+                        val res = liveAccess.executeRawShell(command = cmdStr, timeoutSeconds = 5, confirmed = true)
+                        res.success
+                    }
+                }
+            }
+            DeviceDisplayManager.connectShizukuUserService(helper.context)
+            try {
             val execution = OmniVlmPlugin.execute(
                 context = helper.context,
                 request = OmniVlmPlugin.Request(
                     goal = goal,
                     runId = runId,
+                    display = displayTarget,
+                    displayId = targetDisplayId,
                 ),
                 modelClient = HttpAgentLlmClient(
                     scope = CoroutineScope(currentCoroutineContext()),
@@ -120,7 +207,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
                             callback = callback,
                             toolName = OmniVlmPlugin.RUN_LOG_TOOL,
                             progress = progress,
-                            extras = extras + ("run_id" to progressRunId),
+                            extras = extras + ("run_id" to progressRunId) + ("display_id" to targetDisplayId),
                             toolHandle = toolHandle,
                         )
                     },
@@ -138,7 +225,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
             val content = firstNonBlank(result["finished_content"])
             if (doneReason == "waiting_input") {
                 val question = content.ifBlank { "请提供继续执行所需的信息。" }
-                return ToolExecutionResult.Error(
+                return@withDisplayLease ToolExecutionResult.Error(
                     OmniVlmPlugin.RUN_LOG_TOOL,
                     "视觉任务需要额外输入，当前未提供交互通道：$question",
                 )
@@ -159,7 +246,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
                     extras = mapOf("error" to message),
                 )
                 val encoded = helper.encodeLocalizedPayload(payload)
-                return ToolExecutionResult.Interrupted(
+                return@withDisplayLease ToolExecutionResult.Interrupted(
                     toolName = OmniVlmPlugin.RUN_LOG_TOOL,
                     summaryText = helper.localized("视觉任务已停止"),
                     previewJson = encoded,
@@ -171,7 +258,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
             if (result["success"] != true) {
                 val message = firstNonBlank(result["error_message"], result["error_code"])
                     .ifBlank { "gui_task_failed" }
-                return failedRunResult(
+                return@withDisplayLease failedRunResult(
                     runId = resultRunId,
                     goal = goal,
                     doneReason = doneReason,
@@ -230,6 +317,10 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 doneReason = "error",
                 message = message,
             )
+        } finally {
+            DisplayInputCoordinator.clearLeaseUnlockAwaiter(targetDisplayId, runId)
+            DisplayInputCoordinator.clearLeaseExecutor(targetDisplayId, runId)
+        }
         }
     }
 

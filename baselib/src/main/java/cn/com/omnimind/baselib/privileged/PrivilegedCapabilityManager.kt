@@ -2,6 +2,7 @@ package cn.com.omnimind.baselib.privileged
 
 import android.content.Context
 import android.os.Process
+import cn.com.omnimind.baselib.privileged.management.PrivilegedManagementController
 import cn.com.omnimind.baselib.shizuku.ShizukuCapabilityManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -10,7 +11,6 @@ import kotlinx.coroutines.runInterruptible
 import java.io.File
 import java.util.UUID
 import cn.com.omnimind.baselib.privileged.PrivilegedSessionRegistry.Binding as SessionBinding
-
 data class PrivilegedStatus(
     val provider: PrivilegedProvider = PrivilegedProvider.NONE,
     val backend: PrivilegedBackend = PrivilegedBackend.NONE,
@@ -49,7 +49,7 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
     )
     private val rootExecutor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT, runner)
     private val device = PrivilegedDeviceController(appContext, userId)
-
+    private val management = PrivilegedManagementController(appContext, userId)
     init {
         // 进程恢复时撤销上次进程遗留的租约，不启动 su，也不保留跨进程 shell。
         File(appContext.cacheDir, "privileged-processes").listFiles()
@@ -122,18 +122,46 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
     inner class Access internal constructor(private val ownerId: String, private val acpSessionId: String?, val status: PrivilegedStatus) {
         fun isValid(): Boolean = valid(status)
 
-        suspend fun executeAgentAction(action: String, arguments: Map<String, String>, requiresConfirmation: Boolean): PrivilegedResult =
-            execute(PrivilegedRequest(UUID.randomUUID().toString(), action, arguments, requiresConfirmation, userId = userId))
+        suspend fun executeAgentAction(
+            action: String,
+            arguments: Map<String, String>,
+            requiresConfirmation: Boolean,
+            allowSystemModifications: Boolean = false,
+            isFullPower: Boolean = false,
+        ): PrivilegedResult =
+            execute(PrivilegedRequest(
+                UUID.randomUUID().toString(),
+                action,
+                arguments,
+                requiresConfirmation,
+                userId = userId,
+                allowSystemModifications = allowSystemModifications,
+                isFullPower = isFullPower,
+            ))
 
         suspend fun executeRawShell(
-            command: String, timeoutSeconds: Int? = null, workingDirectory: String? = null,
-            environment: Map<String, String> = emptyMap(), confirmed: Boolean = false,
+            command: String,
+            timeoutSeconds: Int? = null,
+            workingDirectory: String? = null,
+            environment: Map<String, String> = emptyMap(),
+            confirmed: Boolean = false,
+            allowSystemModifications: Boolean = false,
+            isFullPower: Boolean = false,
         ): PrivilegedResult = execute(PrivilegedRequest(
-            UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SHELL_EXEC,
-            confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds,
-            workingDirectory = workingDirectory, environment = environment, userId = userId,
+            UUID.randomUUID().toString(),
+            PrivilegedActionPolicy.ACTION_SHELL_EXEC,
+            confirmation(confirmed),
+            command = command,
+            timeoutSeconds = timeoutSeconds,
+            workingDirectory = workingDirectory,
+            environment = environment,
+            userId = userId,
+            allowSystemModifications = allowSystemModifications,
+            isFullPower = isFullPower,
         ))
 
+        suspend fun executeManagementCommand(command: String): PrivilegedResult =
+            executeRawShell(command = command, confirmed = true, allowSystemModifications = true)
         suspend fun startPrivilegedSession(
             sessionName: String? = null, workingDirectory: String? = null,
             environment: Map<String, String> = emptyMap(), confirmed: Boolean = false,
@@ -155,12 +183,25 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
             return result
         }
 
-        suspend fun execPrivilegedSession(sessionId: String, command: String, timeoutSeconds: Int?, confirmed: Boolean): PrivilegedResult =
+        suspend fun execPrivilegedSession(
+            sessionId: String,
+            command: String,
+            timeoutSeconds: Int?,
+            confirmed: Boolean,
+            allowSystemModifications: Boolean = false,
+            isFullPower: Boolean = false,
+        ): PrivilegedResult =
             execute(PrivilegedRequest(
-                UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_EXEC,
-                confirmation(confirmed), command = command, timeoutSeconds = timeoutSeconds, sessionId = sessionId, userId = userId,
+                UUID.randomUUID().toString(),
+                PrivilegedActionPolicy.ACTION_SESSION_EXEC,
+                confirmation(confirmed),
+                command = command,
+                timeoutSeconds = timeoutSeconds,
+                sessionId = sessionId,
+                userId = userId,
+                allowSystemModifications = allowSystemModifications,
+                isFullPower = isFullPower,
             ))
-
         suspend fun readPrivilegedSession(sessionId: String): PrivilegedResult = execute(PrivilegedRequest(
             UUID.randomUUID().toString(), PrivilegedActionPolicy.ACTION_SESSION_READ, sessionId = sessionId, userId = userId,
         ))
@@ -186,20 +227,39 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
                 return failure(request, "session_not_found")
             }
             if (!isValid()) return failure(request, "privileged_access_changed")
-            if (PrivilegedActionPolicy.requiresConfirmation(request.action) && request.arguments["confirmed"] != "true") {
+            val requiresConfirm = (PrivilegedActionPolicy.requiresConfirmation(request.action) || request.requiresConfirmation) && !request.isFullPower
+            if (requiresConfirm && request.arguments["confirmed"] != "true") {
                 return failure(request, "confirmation_required").copy(requiresConfirmation = true)
             }
+            var observedUid: Int? = null
             val result = if (device.handles(request.action)) {
                 device.execute(request, status.backend, ::isValid) { command ->
-                    dispatch(request.copy(action = PrivilegedActionPolicy.ACTION_DEVICE_COMMAND, command = command, requiresConfirmation = false, timeoutSeconds = 8))
+                    dispatch(request.copy(
+                        action = PrivilegedActionPolicy.ACTION_DEVICE_COMMAND,
+                        command = command,
+                        requiresConfirmation = false,
+                        timeoutSeconds = 8,
+                        allowSystemModifications = true,
+                    )).also { if (it.uid != null) observedUid = it.uid }
+                }
+            } else if (management.handles(request.action)) {
+                management.execute(request, status.backend, ::isValid) { command ->
+                    dispatch(request.copy(
+                        action = PrivilegedActionPolicy.ACTION_DEVICE_COMMAND,
+                        command = command,
+                        requiresConfirmation = false,
+                        timeoutSeconds = 15,
+                        allowSystemModifications = true,
+                    )).also { if (it.uid != null) observedUid = it.uid }
                 }
             } else dispatch(request)
             if (result.code == "root_denied") root.markDenied()
             if (result.code == "root_unavailable") root.markUnavailable()
             if (result.code == "session_not_found" && request.sessionId != null) sessions.remove(request.sessionId)
-            return result.copy(provider = status.provider, backend = status.backend)
+            // 保留实际执行观察 UID，未执行或被拒绝为 null，不按 backend enum 假回填
+            val actualUid = result.uid ?: observedUid
+            return result.copy(provider = status.provider, backend = status.backend, uid = actualUid)
         }
-
         private suspend fun dispatch(request: PrivilegedRequest): PrivilegedResult {
             if (!isValid()) return failure(request, "privileged_access_changed")
             return when (status.provider) {
@@ -215,9 +275,9 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
                 "confirmation_required" -> "This action requires ACP client permission."
                 else -> "Privileged access changed or is unavailable; no action was executed."
             }, backend = status.backend, provider = status.provider,
+            uid = null
         )
     }
-
     companion object {
         @Volatile private var instance: PrivilegedCapabilityManager? = null
         suspend fun closeExistingAcpSession(acpSessionId: String) {

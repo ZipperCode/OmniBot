@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/chat/chat_page.dart'
     hide remoteCodexMessagesFromThreadResponseForTesting;
@@ -14,6 +15,7 @@ import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_model.dart';
 import 'package:ui/services/agent_event_reducer.dart';
 import 'package:ui/services/agent_identity.dart';
+import 'package:ui/services/agent_runtime_service.dart';
 
 void main() {
   late AgentEventReducer reducer;
@@ -7214,6 +7216,359 @@ diff --git a/lib/main.dart b/lib/main.dart
     final card = runtime.messages.single.cardData!;
     expect(card['terminalOutput'], 'one\\ntwo\\n');
     expect(card['terminalSessionId'], 'terminal-1');
+  });
+  test('background turn with host updates clears isAiResponding and activeRunId on end_turn while keeping text', () {
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'bg-session-1',
+        'turnId': 'bg-turn-1',
+        'allowImplicitTurnAdmission': true,
+        'params': {
+          'sessionId': 'bg-session-1',
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'bg-msg-1',
+            'content': {'type': 'text', 'text': '后台运行生成的正文'},
+          },
+        },
+      },
+    );
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, 'bg-turn-1');
+    expect(runtime.activeRunId, isNotNull);
+    expect(runtime.messages.first.text, '后台运行生成的正文');
+
+    final result = reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'bg-session-1',
+        'turnId': 'bg-turn-1',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'prompt-req-1',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+            'sessionId': 'bg-session-1',
+            'turnId': 'bg-turn-1',
+          },
+        },
+      },
+    );
+
+    expect(result.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.messages.first.text, '后台运行生成的正文');
+  });
+
+  test('canonical prompt response handles failure and cancelled states', () {
+    // 1. 取消状态
+    runtime.isAiResponding = true;
+    runtime.activeAcpSessionId = 'cancel-sess';
+    runtime.activeAcpTurnId = 'cancel-turn';
+    runtime.activeRunId = 'cancel-turn';
+
+    final cancelResult = reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'cancel-sess',
+        'turnId': 'cancel-turn',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'cancel-req-1',
+          'result': {
+            'status': 'cancelled',
+            'stopReason': 'cancelled',
+            'completed': true,
+          },
+        },
+      },
+    );
+    expect(cancelResult.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.currentThinkingStage, ThinkingStage.cancelled.value);
+
+    // 2. 携带 failureKind 的错误状态
+    runtime.isAiResponding = true;
+    runtime.activeAcpSessionId = 'fail-sess';
+    runtime.activeAcpTurnId = 'fail-turn';
+    runtime.activeRunId = 'fail-turn';
+
+    final failResult = reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'fail-sess',
+        'turnId': 'fail-turn',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'fail-req-1',
+          'error': {
+            'code': -32603,
+            'message': 'Provider timeout occurred',
+            'data': {'failureKind': 'na_request_timeout'},
+          },
+        },
+      },
+    );
+    expect(failResult.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    final statusCard = runtime.messages.firstWhere(
+      (m) => m.cardData?['toolType'] == 'status',
+    );
+    expect(statusCard.cardData?['status'], 'error');
+    expect(
+      statusCard.cardData?['summary'],
+      formatAgentRuntimeErrorForUser(
+        PlatformException(
+          code: '-32603',
+          message: 'Provider timeout occurred',
+          details: {'failureKind': 'na_request_timeout'},
+        ),
+      ),
+    );
+  });
+
+  test('prompt response arriving before late update stays completed', () {
+    runtime.isAiResponding = true;
+    runtime.activeAcpSessionId = 'race-session';
+    runtime.activeAcpTurnId = 'race-turn-1';
+    runtime.activeRunId = 'race-turn-1';
+
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'race-session',
+        'turnId': 'race-turn-1',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'race-req-1',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.completedAcpTurnIds.contains('race-turn-1'), isTrue);
+
+    // 迟到的 update 不得重新激活 turn
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'race-session',
+        'turnId': 'race-turn-1',
+        'params': {
+          'sessionId': 'race-session',
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'race-msg-late',
+            'content': {'type': 'text', 'text': '迟到的文本'},
+          },
+        },
+      },
+    );
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+  });
+
+  test('quarantines malformed prompt response and ignores in_progress without stopReason', () {
+    runtime.isAiResponding = true;
+    runtime.activeAcpSessionId = 'guard-session';
+    runtime.activeAcpTurnId = 'guard-turn';
+
+    // 缺少 id 隔离
+    final noIdResult = reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'guard-session',
+        'turnId': 'guard-turn',
+        'message': {
+          'jsonrpc': '2.0',
+          'result': {'status': 'end_turn'},
+        },
+      },
+    );
+    expect(noIdResult.affectsActiveTurn, isFalse);
+    expect(runtime.isAiResponding, isTrue);
+
+    // in_progress / completed=false 不触发完成
+    final inProgressResult = reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'guard-session',
+        'turnId': 'guard-turn',
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-inprogress',
+          'result': {
+            'status': 'in_progress',
+            'completed': false,
+          },
+        },
+      },
+    );
+    expect(inProgressResult.affectsActiveTurn, isFalse);
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, 'guard-turn');
+  });
+
+  test('late prompt response for old turn does not clear active background turn', () {
+    runtime.isAiResponding = true;
+    runtime.activeAcpSessionId = 'sess-new';
+    runtime.activeAcpTurnId = 'bg-turn-2';
+    runtime.activeRunId = 'bg-turn-2';
+
+    // 旧 turn-1 的迟到响应
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'sess-new',
+        'turnId': 'bg-turn-1',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'late-req-1',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+
+    // 新的活跃背景 turn-2 必须完好保留
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, 'bg-turn-2');
+    expect(runtime.activeRunId, 'bg-turn-2');
+  });
+  test('old prompt response cannot own the next local admission window', () {
+    for (final knownOldRun in [false, true]) {
+      for (final failed in [false, true]) {
+        final pending = ChatConversationRuntimeState(
+          conversationId: 991,
+          mode: kChatRuntimeModeAgent,
+        );
+        pending
+          ..isAiResponding = true
+          ..activeAcpSessionId = 'same-session'
+          ..activeRunId = 'new-request'
+          ..currentDispatchTurnId = 'new-request'
+          ..lastAgentTurnId = 'new-request';
+        if (knownOldRun) {
+          pending.acpTurnToRunIds[
+            acpTurnKey(sessionId: 'same-session', turnId: 'old-turn')
+          ] = 'old-request';
+        }
+        reducer.reduce(
+          runtime: pending,
+          event: {
+            'method': 'session/prompt',
+            'sessionId': 'same-session',
+            'turnId': 'old-turn',
+            'allowImplicitTurnAdmission': true,
+            'message': {
+              'jsonrpc': '2.0',
+              'id': 'old-request',
+              if (failed)
+                'error': {'code': -32603, 'message': '旧请求失败'}
+              else
+                'result': {'stopReason': 'end_turn', 'completed': true},
+            },
+          },
+        );
+        expect(pending.isAiResponding, isTrue);
+        expect(pending.activeRunId, 'new-request');
+        expect(pending.currentDispatchTurnId, 'new-request');
+        expect(pending.activeAcpTurnId, isNull);
+        expect(pending.completedAgentTurnIds, isNot(contains('new-request')));
+        expect(
+          pending.messages.where(
+            (message) => message.streamMeta?['parentTaskId'] == 'new-request',
+          ),
+          isEmpty,
+        );
+        pending.dispose();
+      }
+    }
+    final current = ChatConversationRuntimeState(
+      conversationId: 992,
+      mode: kChatRuntimeModeAgent,
+    )
+      ..isAiResponding = true
+      ..activeAcpSessionId = 'same-session'
+      ..activeRunId = 'new-request'
+      ..currentDispatchTurnId = 'new-request'
+      ..lastAgentTurnId = 'new-request';
+    reducer.reduce(
+      runtime: current,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'same-session',
+        'turnId': 'new-turn',
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'new-request',
+          'result': {'stopReason': 'end_turn', 'completed': true},
+        },
+      },
+    );
+    expect(current.isAiResponding, isFalse);
+    expect(current.currentDispatchTurnId, isNull);
+    expect(current.activeRunId, isNull);
+    expect(current.completedAcpTurnIds, contains('new-turn'));
+    current.dispose();
+  });
+  test('canonical failed result preserves the actual request failure', () {
+    runtime
+      ..isAiResponding = true
+      ..activeAcpSessionId = 'failed-session'
+      ..activeAcpTurnId = 'failed-turn'
+      ..activeRunId = 'failed-turn';
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': 'failed-session',
+        'turnId': 'failed-turn',
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'failed-request',
+          'result': {
+            'stopReason': 'error',
+            'error': 'stream disconnected',
+          },
+        },
+      },
+    );
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeRunId, isNull);
+    final failure = runtime.messages.single.cardData!;
+    expect(failure['status'], 'error');
+    expect(
+      failure['summary'],
+      formatAgentRuntimeErrorForUser('stream disconnected'),
+    );
   });
 }
 

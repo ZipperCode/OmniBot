@@ -8,10 +8,13 @@ import com.agentclientprotocol.model.*
 internal class XiaowanSessionConfig(
     private var models: List<ModelInfo>,
     initialModel: String,
+    initialMode: String = DEFAULT_MODE,
 ) {
     var model: String = initialModel
         private set
     var effort: String = "default"
+        private set
+    var mode: String = initialMode
         private set
     val requestEffort: String? get() = effort.takeUnless { it == "default" }
 
@@ -23,6 +26,8 @@ internal class XiaowanSessionConfig(
         get() = listOf(
             select("model", "Model", SessionConfigOptionCategory.MODEL, model,
                 models.map { it.modelId.value to it.name }),
+            select("mode", "Mode", SessionConfigOptionCategory.MODE, mode,
+                MODES.map { it.first to it.second }),
             select("reasoning_effort", "Reasoning effort", SessionConfigOptionCategory.THOUGHT_LEVEL,
                 effort, listOf("default" to "Model default", "none" to "Off", "low" to "Low",
                     "medium" to "Medium", "high" to "High", "max" to "Maximum")),
@@ -38,8 +43,21 @@ internal class XiaowanSessionConfig(
         }
         when (id) {
             "model" -> model = selected
+            "mode" -> mode = selected
             "reasoning_effort" -> effort = selected
         }
+    }
+
+    companion object {
+        const val DEFAULT_MODE = "default"
+        const val FULL_ACCESS_MODE = "agent_full_access"
+        const val READ_ONLY_MODE = "read-only"
+
+        val MODES = listOf(
+            DEFAULT_MODE to "默认模式",
+            FULL_ACCESS_MODE to "全权模式",
+            READ_ONLY_MODE to "只读模式",
+        )
     }
 
     private fun select(

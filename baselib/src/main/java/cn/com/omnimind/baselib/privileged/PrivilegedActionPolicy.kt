@@ -1,5 +1,7 @@
 package cn.com.omnimind.baselib.privileged
 
+import cn.com.omnimind.baselib.privileged.management.PrivilegedManagementActions
+
 object PrivilegedActionPolicy {
     val deviceStateTargets: List<String> = listOf("wifi", "bluetooth", "mobile_data", "airplane_mode", "location", "nfc", "battery_saver", "auto_rotate", "auto_brightness", "dark_mode")
 
@@ -88,7 +90,17 @@ object PrivilegedActionPolicy {
         ACTION_SESSION_STOP
     )
 
-    private val commandBlockRules = listOf(
+    private val hostProtectionRules = listOf(
+        CommandBlockRule(
+            Regex(
+                """(^|[;&|()\s])am\s+force-stop\s+cn\.com\.omnimind\.bot(?:\.[A-Za-z0-9._-]+)?(?=($|[;&|()\s]))""",
+                RegexOption.IGNORE_CASE
+            ),
+            "Force-stopping the host app would disable its accessibility service."
+        )
+    )
+
+    private val systemModificationBlockRules = listOf(
         CommandBlockRule(
             Regex("""(^|[;&|()\s])(reboot|shutdown)(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Power-off and reboot commands are blocked."
@@ -96,13 +108,6 @@ object PrivilegedActionPolicy {
         CommandBlockRule(
             Regex("""(^|[;&|()\s])(svc|cmd)\s+power(?=($|[;&|()\s]))""", RegexOption.IGNORE_CASE),
             "Direct power-management commands are blocked."
-        ),
-        CommandBlockRule(
-            Regex(
-                """(^|[;&|()\s])am\s+force-stop\s+cn\.com\.omnimind\.bot(?:\.[A-Za-z0-9._-]+)?(?=($|[;&|()\s]))""",
-                RegexOption.IGNORE_CASE
-            ),
-            "Force-stopping the host app would disable its accessibility service."
         ),
         CommandBlockRule(
             Regex("""(^|[;&|()\s])recovery\s+--wipe_[A-Za-z0-9_-]+""", RegexOption.IGNORE_CASE),
@@ -144,14 +149,22 @@ object PrivilegedActionPolicy {
         )
     )
 
+    private val commandBlockRules = hostProtectionRules + systemModificationBlockRules
+
     fun normalizeAction(raw: String): String = raw.trim().lowercase()
 
     fun visibleAgentActions(backend: PrivilegedBackend): List<String> {
-        return when (backend) {
-            PrivilegedBackend.ROOT -> rootVisibleActions.toList()
+        val base = when (backend) {
+            PrivilegedBackend.ROOT -> rootVisibleActions
             PrivilegedBackend.ADB,
-            PrivilegedBackend.NONE -> adbVisibleActions.toList()
+            PrivilegedBackend.NONE -> adbVisibleActions
         }
+        val management = when (backend) {
+            PrivilegedBackend.ROOT -> PrivilegedManagementActions.actions
+            PrivilegedBackend.ADB,
+            PrivilegedBackend.NONE -> PrivilegedManagementActions.actions - PrivilegedManagementActions.rootOnlyActions
+        }
+        return (base + management).distinct()
     }
 
     fun supportedActions(
@@ -183,7 +196,11 @@ object PrivilegedActionPolicy {
     }
 
     fun requiresConfirmation(action: String): Boolean {
-        return when (normalizeAction(action)) {
+        val normalized = normalizeAction(action)
+        if (normalized in PrivilegedManagementActions.mutatingActions) {
+            return true
+        }
+        return when (normalized) {
             ACTION_DEVICE_SET_STATE,
             ACTION_DEVICE_SET_WIFI_ENABLED,
             ACTION_DEVICE_SET_BRIGHTNESS,
@@ -208,6 +225,9 @@ object PrivilegedActionPolicy {
         arguments: Map<String, String> = emptyMap(),
     ): Boolean {
         val normalizedAction = normalizeAction(action)
+        if (normalizedAction in PrivilegedManagementActions.rootOnlyActions) {
+            return true
+        }
         if (normalizedAction == ACTION_DEVICE_SET_MOBILE_DATA_ENABLED ||
             (normalizedAction == ACTION_DEVICE_SET_STATE && arguments["target"] == "mobile_data")) {
             return true
@@ -221,14 +241,39 @@ object PrivilegedActionPolicy {
         return false
     }
 
-    fun blockedCommandReason(command: String?): String? {
+    fun blockedCommandReason(
+        command: String?,
+        allowSystemModifications: Boolean = false,
+    ): String? {
         val normalized = command?.trim().orEmpty()
         if (normalized.isEmpty()) {
             return null
         }
-        return commandBlockRules.firstOrNull { rule ->
+        hostProtectionRules.firstOrNull { rule ->
+            rule.regex.containsMatchIn(normalized)
+        }?.let { return it.reason }
+
+        if (allowSystemModifications) {
+            return null
+        }
+
+        return systemModificationBlockRules.firstOrNull { rule ->
             rule.regex.containsMatchIn(normalized)
         }?.reason
+    }
+
+    fun blockedCommandReason(command: String?): String? =
+        blockedCommandReason(command, allowSystemModifications = false)
+    fun isHostProtectionViolation(command: String?): Boolean {
+        val normalized = command?.trim().orEmpty()
+        if (normalized.isEmpty()) return false
+        return hostProtectionRules.any { it.regex.containsMatchIn(normalized) }
+    }
+
+    fun isSystemModificationCommand(command: String?): Boolean {
+        val normalized = command?.trim().orEmpty()
+        if (normalized.isEmpty()) return false
+        return systemModificationBlockRules.any { it.regex.containsMatchIn(normalized) }
     }
 
     fun isHostPackage(packageName: String?): Boolean {

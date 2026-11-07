@@ -2170,10 +2170,13 @@ class AgentRuntimeService {
   static Future<Map<String, dynamic>> respondToApproval({
     required Object requestId,
     required bool accepted,
+    String? optionId,
+    String? selectedOptionId,
     String? sessionId,
     String? agentId,
     int? conversationId,
   }) {
+    final effectiveOptionId = (optionId ?? selectedOptionId)?.trim();
     return _invokeServerResponse({
       'requestId': requestId,
       if (agentId != null && agentId.trim().isNotEmpty)
@@ -2181,7 +2184,13 @@ class AgentRuntimeService {
       if (conversationId != null) 'conversationId': conversationId,
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'sessionId': sessionId.trim(),
-      'response': {'decision': accepted ? 'accept' : 'decline'},
+      'response': {
+        'decision': accepted ? 'accept' : 'decline',
+        if (effectiveOptionId != null && effectiveOptionId.isNotEmpty) ...{
+          'optionId': effectiveOptionId,
+          'selectedOptionId': effectiveOptionId,
+        },
+      },
     });
   }
 

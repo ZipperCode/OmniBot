@@ -12,6 +12,7 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.baselib.database.DatabaseHelper
+import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
 import cn.com.omnimind.baselib.database.TokenUsageRecord
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.mcp.McpServerManager
@@ -175,6 +176,7 @@ internal class AcpPromptExecution(
     private var promptJob: Job? = null
     private var promptStarted = false
     private var cancellationRequested = false
+    private var transportCancelled = false
 
     fun attachPromptJob(job: Job) {
         val cancelBeforeStart = synchronized(lock) {
@@ -216,10 +218,17 @@ internal class AcpPromptExecution(
 
     fun promptJob(): Job? = synchronized(lock) { promptJob }
 
+    fun isUserCancellationRequested(): Boolean = synchronized(lock) {
+        cancellationRequested && !transportCancelled
+    }
+
+    fun isTransportCancelled(): Boolean = synchronized(lock) { transportCancelled }
+
     /** Hard transport teardown; unlike user cancellation it may stop ACP IO. */
     fun cancelForTransport(cause: CancellationException) {
         val job = synchronized(lock) {
             cancellationRequested = true
+            transportCancelled = true
             promptJob ?: preparationJob
         }
         job?.cancel(cause)
@@ -498,6 +507,19 @@ internal class LocalAcpRuntime(
         require(ownerAgentId.isNotBlank() && ownerAgentId == ownerAgentId.trim()) {
             "Local ACP runtime requires a canonical ownerAgentId."
         }
+        registerRuntime(this)
+    }
+
+    fun isFullPowerMode(sessionId: String?): Boolean {
+        if (sessionId.isNullOrBlank()) return false
+        val behavior = sessionPermissionBehaviors[sessionId]
+        if (behavior == AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT) return true
+        val session = sessions[sessionId]
+        if (session != null && session.modesSupported) {
+            val currentMode = session.currentMode.value.value
+            if (isAcpFullAccessMode(currentMode)) return true
+        }
+        return false
     }
 
     private val appContext = context.applicationContext
@@ -523,6 +545,9 @@ internal class LocalAcpRuntime(
     // and creating/restoring its ACP session must be atomic. This gate only
     // protects allocation, never the prompt itself.
     private val sessionResolutionMutex = Mutex()
+    private val sessionTurnMutexes = ConcurrentHashMap<String, Mutex>()
+    private fun sessionTurnMutex(sessionId: String): Mutex =
+        sessionTurnMutexes.computeIfAbsent(sessionId) { Mutex() }
     private val workspaceManager = AgentWorkspaceManager(appContext)
     private val sessions = ConcurrentHashMap<String, ClientSession>()
     private val sessionCwds = ConcurrentHashMap<String, String>()
@@ -1069,14 +1094,13 @@ internal class LocalAcpRuntime(
         // (including in-process Xiaowan, which has no external preparation
         // callback) must start from the default enabled capability.
         sessionMcpEnabled = true
-        // Close every in-flight turn before tearing the transport down.
-        // Cancelling the prompt jobs first would leave their finally blocks
-        // racing a dead connection, and the UI would keep showing those turns
-        // as running forever.
+        // Release local ownership, leases and authorizations before transport teardown.
+        // Transport disconnect is not an official terminal confirmation, so do not
+        // persist a fake official cancellation journal entry.
         turnOwnership.activeRecords().forEach { record ->
             val threadId = record.sessionId
             val turnId = record.turnId
-            finishTurn(threadId, turnId, status = "cancelled")
+            finishTurn(threadId, turnId, status = "cancelled", recordJournal = false)
         }
         // Cancel all turns together and apply one total deadline. Waiting for
         // each prompt serially made a switch cost N * 2s when several turns
@@ -1355,7 +1379,6 @@ internal class LocalAcpRuntime(
         } else {
             args
         }
-        cancelPendingPermissionRequests(normalized.stringValue("threadId").orEmpty())
         val runId = normalized.stringValue("runId")?.trim().orEmpty()
         if (runId.isNotEmpty() && OmniVlmPlugin.stop(runId)) {
             return mapOf(
@@ -1369,6 +1392,7 @@ internal class LocalAcpRuntime(
         }
         val threadId = normalized.stringValue("threadId")
             ?: throw IllegalArgumentException("sessionId is required")
+        val expectedTurnId = normalized.stringValue("expectedTurnId") ?: normalized.stringValue("turnId")
         if (turnOwnership.activeTurnId(threadId) == null) {
             // ACP cancellation is safe to repeat after a prompt response or
             // a previous cancel. Do not turn an idle stop button into an
@@ -1376,9 +1400,12 @@ internal class LocalAcpRuntime(
             return mapOf(
                 "ok" to true,
                 "cancelled" to false,
+                "stale" to (expectedTurnId != null),
                 "sessionId" to threadId,
                 "threadId" to threadId,
-            )
+                "turnId" to null,
+                "expectedTurnId" to expectedTurnId,
+            ).filterValues { it != null }
         }
         return interruptTurn(normalized).withAcpSessionId()
     }
@@ -1397,10 +1424,15 @@ internal class LocalAcpRuntime(
         )
         session.setMode(SessionModeId(modeId))
         val sessionId = session.sessionId.value
-        sessionPermissionBehaviors[sessionId] = if (isAcpFullAccessMode(modeId)) {
+        val isFull = isAcpFullAccessMode(modeId)
+        sessionPermissionBehaviors[sessionId] = if (isFull) {
             AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
         } else {
             AcpPermissionBehavior.ASK_USER
+        }
+        if (!isFull) {
+            AcpTurnGrantRegistry.evict(sessionId)
+            cancelPendingPermissionRequests(sessionId)
         }
         emitAcpNotification(
             sessionId = sessionId,
@@ -2342,12 +2374,14 @@ internal class LocalAcpRuntime(
                 "Invalid value '$requestedMode' for ACP mode selection."
             )
             session.setMode(SessionModeId(modeId))
-            sessionPermissionBehaviors[threadId] = if (
-                isAcpFullAccessMode(modeId)
-            ) {
+            val isFull = isAcpFullAccessMode(modeId)
+            sessionPermissionBehaviors[threadId] = if (isFull) {
                 AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
             } else {
                 AcpPermissionBehavior.ASK_USER
+            }
+            if (!isFull) {
+                AcpTurnGrantRegistry.evict(threadId)
             }
             val options = sessionConfigOptions(session).map(::acpConfigOptionPayload)
             emitAcpNotification(
@@ -2419,12 +2453,14 @@ internal class LocalAcpRuntime(
         }
 
         if (configId == "mode" && appliedValue is String) {
-            sessionPermissionBehaviors[threadId] = if (
-                isAcpFullAccessMode(appliedValue)
-            ) {
+            val isFull = isAcpFullAccessMode(appliedValue)
+            sessionPermissionBehaviors[threadId] = if (isFull) {
                 AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
             } else {
                 AcpPermissionBehavior.ASK_USER
+            }
+            if (!isFull) {
+                AcpTurnGrantRegistry.evict(threadId)
             }
         }
         persistSessionConfiguration(session)
@@ -2474,7 +2510,17 @@ internal class LocalAcpRuntime(
         val threadId = session.sessionId.value
         val requestId = args.stringValue("requestId")?.takeIf { it.isNotBlank() }
         val turnId = UUID.randomUUID().toString()
-        val reservation = turnOwnership.reserve(threadId, turnId, requestId)
+        val turnMutex = sessionTurnMutex(threadId)
+        var startedExecution: AcpPromptExecution? = null
+        val reservation = turnMutex.withLock {
+            val res = turnOwnership.reserve(threadId, turnId, requestId)
+            if (res is AcpTurnReservation.Started) {
+                val exec = AcpPromptExecution(coroutineContext[Job])
+                promptExecutions[threadId] = exec
+                startedExecution = exec
+            }
+            res
+        }
         when (reservation) {
             is AcpTurnReservation.InFlight,
             is AcpTurnReservation.Completed -> {
@@ -2499,14 +2545,17 @@ internal class LocalAcpRuntime(
             is AcpTurnReservation.Busy -> {
                 throw IllegalStateException("ACP session $threadId already has an active turn.")
             }
-            is AcpTurnReservation.Started -> Unit
+            is AcpTurnReservation.Started -> {
+                cn.com.omnimind.bot.task.runtime.AcpTaskTerminalJournal.recordAdmission(
+                    context = appContext,
+                    agentId = activeAgentId(),
+                    sessionId = threadId,
+                    turnId = turnId,
+                    requestId = requestId
+                )
+            }
         }
-        // Register the execution resource before any suspending preparation.
-        // A concurrent session/cancel can now stop configuration/attachment
-        // work and cannot race into a prompt that has not been admitted.
-        val execution = AcpPromptExecution(coroutineContext[Job]).also {
-            promptExecutions[threadId] = it
-        }
+        val execution = checkNotNull(startedExecution)
         val turnIdentity = AcpTurnIdentity(threadId, turnId)
         turnTimings[turnIdentity] = AcpTurnTiming()
         markTurnTiming(threadId, turnId, "turn_reserved")
@@ -2526,7 +2575,7 @@ internal class LocalAcpRuntime(
                 // minimal prompt without repeating policy fields.
                 sessionPermissionBehaviors.putIfAbsent(
                     threadId,
-                    AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
+                    AcpPermissionBehavior.ASK_USER
                 )
             }
             // Snapshot the prompt's owner and model before dispatch. Reading
@@ -2556,6 +2605,7 @@ internal class LocalAcpRuntime(
                 turnId = turnId,
                 status = preparationFailureStatus(error),
                 error = error.message ?: error.javaClass.simpleName,
+                recordJournal = !execution.isTransportCancelled(),
             )
             throw error
         }
@@ -2571,6 +2621,7 @@ internal class LocalAcpRuntime(
                     turnId = turnId,
                     status = "error",
                     error = error.message,
+                    recordJournal = !execution.isTransportCancelled(),
                 )
                 throw error
             }
@@ -2601,6 +2652,7 @@ internal class LocalAcpRuntime(
                 turnId = turnId,
                 status = preparationFailureStatus(error),
                 error = error.message ?: error.javaClass.simpleName,
+                recordJournal = !execution.isTransportCancelled(),
             )
             throw error
         }
@@ -2626,7 +2678,8 @@ internal class LocalAcpRuntime(
                 // "thinking" forever even though the turn already ended.
                 acquireForegroundTurn(threadId, turnId)
                 markTurnTiming(threadId, turnId, "prompt_sent")
-                session.prompt(blocks, promptMeta(args)).takeWhile { event ->
+                val promptMetaJson = promptMeta(args, turnId, bindingRepository.getBindingByThreadId(threadId)?.conversationId)
+                session.prompt(blocks, promptMetaJson).takeWhile { event ->
                     when (event) {
                         is Event.SessionUpdateEvent -> {
                             handleSessionUpdate(threadId, turnId, event.update, activeConnection)
@@ -2694,7 +2747,8 @@ internal class LocalAcpRuntime(
                     threadId = threadId,
                     turnId = turnId,
                     status = status,
-                    error = failure?.let { it.message ?: it.javaClass.simpleName }
+                    error = failure?.let { it.message ?: it.javaClass.simpleName },
+                    recordJournal = !execution.isTransportCancelled(),
                 )
                 completion.complete(
                     linkedMapOf<String, Any?>(
@@ -2776,15 +2830,26 @@ internal class LocalAcpRuntime(
      * the shared reducer. This method only releases Android execution
      * resources and host bookkeeping; it must not invent a second private
      * turn lifecycle notification.
-     * lifecycle notification.
      */
     private suspend fun finishTurn(
         threadId: String,
         turnId: String,
         status: String,
-        error: String? = null
+        error: String? = null,
+        recordJournal: Boolean = true,
     ) {
         if (turnOwnership.finish(threadId, turnId, status, error) == null) return
+        AcpTurnGrantRegistry.evict(threadId, turnId)
+        if (recordJournal) {
+            cn.com.omnimind.bot.task.runtime.AcpTaskTerminalJournal.recordTerminal(
+                context = appContext,
+                agentId = activeAgentId(),
+                sessionId = threadId,
+                turnId = turnId,
+                status = status,
+                error = error
+            )
+        }
         markTurnTiming(threadId, turnId, "terminal_$status")
         val turnIdentity = AcpTurnIdentity(threadId, turnId)
         turnTimings.remove(turnIdentity)
@@ -2792,11 +2857,26 @@ internal class LocalAcpRuntime(
         releaseForegroundTurn(threadId, turnId)
     }
 
-    private fun acquireForegroundTurn(sessionId: String, turnId: String) {
+    private suspend fun acquireForegroundTurn(sessionId: String, turnId: String) {
         val turnIdentity = AcpTurnIdentity(sessionId, turnId)
         if (!foregroundTurnIds.add(turnIdentity)) return
         TaskRuntimeSettings.onTaskStarted(appContext)
-        if (!TaskRuntime.start(appContext, agentTurnRuntimeId(sessionId, turnId))) {
+        val conversationId = bindingRepository.getBindingByThreadId(sessionId)?.conversationId
+        val taskId = agentTurnRuntimeId(sessionId, turnId)
+        val started = if (conversationId != null && conversationId > 0L) {
+            TaskRuntime.start(
+                context = appContext,
+                taskId = taskId,
+                conversationId = conversationId,
+                sessionId = sessionId,
+                turnId = turnId,
+                title = "小万 Agent 任务",
+                statusText = "执行中..."
+            )
+        } else {
+            TaskRuntime.start(appContext, taskId)
+        }
+        if (!started) {
             Log.w(TAG, "Unable to acquire foreground runtime for local turn=$turnId")
         }
     }
@@ -2847,31 +2927,54 @@ internal class LocalAcpRuntime(
         val threadId = resolveThreadId(args)
         val session = sessions[threadId]
             ?: throw IllegalArgumentException("ACP session is not loaded: $threadId")
-        // ACP requires the Client to settle every permission prompt after a
-        // cancellation. Otherwise the Agent can remain suspended in a
-        // permission await even after its prompt collector was cancelled.
-        cancelPendingPermissionRequests(threadId)
-        val turnId = turnOwnership.activeTurnId(threadId)
-        turnId?.let { markTurnTiming(threadId, it, "cancel_requested") }
-
-        // ACP owns cancellation once prompt() has been admitted. Before that
-        // point the execution resource cancels preparation and atomically
-        // prevents the later prompt call, so session/cancel is never sent as
-        // a misleading substitute for a prompt that did not exist.
-        val execution = promptExecutions[threadId]
-        val promptStarted = execution?.requestCancellation() == true
-        if (promptStarted) {
-            withTimeout(CANCEL_REQUEST_TIMEOUT_MS) {
-                session.cancel()
+        val expectedTurnId = args.stringValue("expectedTurnId") ?: args.stringValue("turnId")
+        val turnMutex = sessionTurnMutex(threadId)
+        return turnMutex.withLock {
+            val activeTurnId = turnOwnership.activeTurnId(threadId)
+            if (expectedTurnId != null && activeTurnId != null && expectedTurnId != activeTurnId) {
+                return@withLock mapOf(
+                    "ok" to true,
+                    "stale" to true,
+                    "threadId" to threadId,
+                    "turnId" to activeTurnId,
+                    "expectedTurnId" to expectedTurnId,
+                )
             }
-        }
+            if (activeTurnId == null) {
+                return@withLock mapOf(
+                    "ok" to true,
+                    "threadId" to threadId,
+                    "turnId" to null,
+                    "stale" to (expectedTurnId != null),
+                    "expectedTurnId" to expectedTurnId,
+                ).filterValues { it != null }
+            }
+            // ACP requires the Client to settle every permission prompt after a
+            // cancellation. Otherwise the Agent can remain suspended in a
+            // permission await even after its prompt collector was cancelled.
+            cancelPendingPermissionRequests(threadId)
+            markTurnTiming(threadId, activeTurnId, "cancel_requested")
+            AcpTurnGrantRegistry.evict(threadId, activeTurnId)
 
-        return mapOf(
-            "ok" to true,
-            "threadId" to threadId,
-            "turnId" to turnId,
-            "conversationId" to bindingRepository.getBindingByThreadId(threadId)?.conversationId
-        )
+            // ACP owns cancellation once prompt() has been admitted. Before that
+            // point the execution resource cancels preparation and atomically
+            // prevents the later prompt call, so session/cancel is never sent as
+            // a misleading substitute for a prompt that did not exist.
+            val execution = promptExecutions[threadId]
+            val promptStarted = execution?.requestCancellation() == true
+            if (promptStarted) {
+                withTimeout(CANCEL_REQUEST_TIMEOUT_MS) {
+                    session.cancel()
+                }
+            }
+
+            mapOf(
+                "ok" to true,
+                "threadId" to threadId,
+                "turnId" to activeTurnId,
+                "conversationId" to bindingRepository.getBindingByThreadId(threadId)?.conversationId
+            )
+        }
     }
 
     private fun respondToPermission(args: Map<String, Any?>): Map<String, Any?> {
@@ -2928,12 +3031,35 @@ internal class LocalAcpRuntime(
                 option.kind == PermissionOptionKind.REJECT_ALWAYS
             }
         }
+        if (selected != null && (selected.optionId.value == "allow_task" || selected.kind == PermissionOptionKind.ALLOW_ALWAYS)) {
+            val turnId = pending.turnId ?: turnOwnership.activeTurnId(pending.sessionId)
+            if (turnId != null) {
+                val action = pending.scope?.action
+                val isSysMod = action == "system.reboot" ||
+                    action == "device_control.reboot" ||
+                    PrivilegedActionPolicy.isSystemModificationCommand(pending.scope?.command)
+                AcpTurnGrantRegistry.recordGrant(
+                    sessionId = pending.sessionId,
+                    turnId = turnId,
+                    scope = pending.scope,
+                    allowSystemModifications = isSysMod,
+                )
+                pending.additionalScopes.forEach { (additionalScope, allowMod) ->
+                    AcpTurnGrantRegistry.recordGrant(
+                        sessionId = pending.sessionId,
+                        turnId = turnId,
+                        scope = additionalScope,
+                        allowSystemModifications = allowMod,
+                    )
+                }
+            }
+        }
         pending.response.complete(selected)
         return mapOf("ok" to true)
     }
-
     private fun cancelPendingPermissionRequests(threadId: String) {
         if (threadId.isBlank()) return
+        AcpTurnGrantRegistry.evict(threadId)
         pendingPermissions.entries.toList().forEach { (requestId, pending) ->
             if (pending.sessionId == threadId && pendingPermissions.remove(requestId, pending)) {
                 serverRequestOwners.remove(requestId, activeAgentId(), pending.sessionId)
@@ -3112,7 +3238,11 @@ internal class LocalAcpRuntime(
             session
         }
 
-    private fun promptMeta(args: Map<String, Any?>): JsonElement? {
+    private fun promptMeta(
+        args: Map<String, Any?>,
+        turnId: String? = null,
+        conversationId: Long? = null,
+    ): JsonElement? {
         val conversationMode = args.stringValue("conversationMode")
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
@@ -3126,16 +3256,9 @@ internal class LocalAcpRuntime(
             }
             ?.toMap()
             .orEmpty()
-        if (
-            conversationMode == null &&
-            reasoningEffort == null &&
-            terminalEnvironment.isEmpty()
-        ) return null
-        // This metadata is local ACP session metadata. External ACP agents may
-        // ignore it; the built-in Xiaowan adapter uses it to apply the same
-        // chat_only policy and run setting without introducing a second
-        // transport.
         return buildJsonObject {
+            turnId?.let { put("turnId", it) }
+            conversationId?.let { put("conversationId", it) }
             conversationMode?.let { put("conversationMode", it) }
             reasoningEffort?.let { put("reasoningEffort", it) }
             if (terminalEnvironment.isNotEmpty()) {
@@ -3143,7 +3266,7 @@ internal class LocalAcpRuntime(
                     terminalEnvironment.forEach { (key, value) -> put(key, value) }
                 })
             }
-        }
+        }.takeIf { it.isNotEmpty() }
     }
 
     private suspend fun ensureCatalogSession(args: Map<String, Any?>): ClientSession {
@@ -3232,7 +3355,7 @@ internal class LocalAcpRuntime(
         } else {
             sessionPermissionBehaviors.putIfAbsent(
                 session.sessionId.value,
-                AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
+                AcpPermissionBehavior.ASK_USER
             )
         }
         val requested = linkedMapOf<String, Any?>(
@@ -3499,11 +3622,27 @@ internal class LocalAcpRuntime(
                     } ?: RequestPermissionOutcome.Cancelled
                 )
             }
+            val activeTurnId = turnOwnership.activeTurnId(threadId)
+            val scope = extractPermissionScope(toolCall)
+            if (activeTurnId != null && AcpTurnGrantRegistry.isGranted(threadId, activeTurnId, scope)) {
+                val selected = permissions.firstOrNull { it.optionId.value == "allow_task" }
+                    ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ALWAYS }
+                    ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ONCE }
+                if (selected != null) {
+                    return RequestPermissionResponse(
+                        outcome = RequestPermissionOutcome.Selected(selected.optionId)
+                    )
+                }
+            }
+            val additionalScopes = extractAdditionalPermissionScopes(toolCall)
             val requestId = UUID.randomUUID().toString()
             val pending = PendingPermissionRequest(
                 sessionId = threadId,
+                turnId = activeTurnId,
                 options = permissions,
-                response = CompletableDeferred()
+                response = CompletableDeferred(),
+                scope = scope,
+                additionalScopes = additionalScopes,
             )
             pendingPermissions[requestId] = pending
             serverRequestOwners.register(requestId, activeAgentId(), threadId)
@@ -4128,8 +4267,11 @@ internal class LocalAcpRuntime(
 
     private data class PendingPermissionRequest(
         val sessionId: String,
+        val turnId: String?,
         val options: List<PermissionOption>,
-        val response: CompletableDeferred<PermissionOption?>
+        val response: CompletableDeferred<PermissionOption?>,
+        val scope: TurnPermissionScope? = null,
+        val additionalScopes: List<Pair<TurnPermissionScope, Boolean>> = emptyList(),
     )
 
     private data class PendingElicitationRequest(
@@ -4157,6 +4299,31 @@ internal class LocalAcpRuntime(
         private const val CANCEL_REQUEST_TIMEOUT_MS = 2_000L
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L
         private const val COMMAND_PROBE_TIMEOUT_MS = 20_000L
+
+        private val activeRuntimes = java.util.Collections.newSetFromMap(
+            java.util.WeakHashMap<LocalAcpRuntime, Boolean>()
+        )
+
+        fun registerRuntime(runtime: LocalAcpRuntime) {
+            synchronized(activeRuntimes) {
+                activeRuntimes.add(runtime)
+            }
+        }
+
+        fun unregisterRuntime(runtime: LocalAcpRuntime) {
+            synchronized(activeRuntimes) {
+                activeRuntimes.remove(runtime)
+            }
+        }
+
+        fun isSessionFullPower(sessionId: String?): Boolean {
+            if (sessionId.isNullOrBlank()) return false
+            val matching = synchronized(activeRuntimes) {
+                activeRuntimes.filter { it.ownsSession(sessionId) }
+            }
+            if (matching.size != 1) return false
+            return matching.first().isFullPowerMode(sessionId)
+        }
     }
 }
 
@@ -4205,10 +4372,7 @@ internal fun resolveAcpPermissionBehavior(
             "bypass",
             "bypasspermissions",
             "unrestricted"
-        ) ||
-        // No policy means the app's canonical default: unrestricted local
-        // execution. The approval gate is opt-in via on-request/readonly.
-        (approvalPolicy == null && sandboxType == null && permissionMode == null)
+        )
     ) {
         AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
     } else {
@@ -5058,3 +5222,83 @@ internal fun standardAcpPermissionToolCallPayload(
 ): Map<String, Any?> = Json.encodeToJsonElement(
     SessionUpdate.ToolCallUpdate.serializer(), toolCall,
 ).jsonObject.mapValues { (_, value) -> jsonToAny(value) }
+
+private fun extractPermissionScope(toolCall: SessionUpdate.ToolCallUpdate): TurnPermissionScope {
+    val raw = toolCall.rawInput as? JsonObject
+    val action = raw?.get("action")?.jsonPrimitive?.contentOrNull
+    val isShell = raw?.get("isShell")?.jsonPrimitive?.booleanOrNull
+        ?: (action == "shell.exec" || action?.startsWith("shell.session") == true)
+    val targetResource = raw?.get("targetResource")?.jsonPrimitive?.contentOrNull
+    val command = raw?.get("command")?.jsonPrimitive?.contentOrNull
+        ?: if (isShell) targetResource else null
+    val workingDirectory = raw?.get("workingDirectory")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("cwd")?.jsonPrimitive?.contentOrNull
+    val environment = (raw?.get("environment") as? JsonObject)?.entries?.associate { (k, v) ->
+        k to (v.jsonPrimitive.contentOrNull ?: v.toString())
+    } ?: (raw?.get("env") as? JsonObject)?.entries?.associate { (k, v) ->
+        k to (v.jsonPrimitive.contentOrNull ?: v.toString())
+    } ?: emptyMap()
+    val packageName = raw?.get("packageName")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("package_name")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("package")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("target_package")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("targetPackage")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("module_pkg_name")?.jsonPrimitive?.contentOrNull
+        ?: if (!isShell && action?.startsWith("package_control") == true) targetResource else null
+    val path = raw?.get("path")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("file_path")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("filePath")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("apk_path")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("zip_path")?.jsonPrimitive?.contentOrNull
+        ?: if (!isShell && action?.startsWith("file_control") == true) targetResource else null
+    val moduleId = raw?.get("moduleId")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("module_id")?.jsonPrimitive?.contentOrNull
+        ?: raw?.get("module")?.jsonPrimitive?.contentOrNull
+        ?: if (!isShell && (action?.startsWith("ksu_control") == true || action?.startsWith("xposed_control") == true)) targetResource else null
+    return TurnPermissionScope(
+        action = action,
+        packageName = packageName?.trim()?.ifEmpty { null },
+        path = path?.trim()?.ifEmpty { null },
+        moduleId = moduleId?.trim()?.ifEmpty { null },
+        command = command?.trim()?.ifEmpty { null },
+        workingDirectory = workingDirectory?.trim()?.ifEmpty { null },
+        environment = environment,
+        isShell = isShell,
+    )
+}
+
+private fun extractAdditionalPermissionScopes(
+    toolCall: SessionUpdate.ToolCallUpdate
+): List<Pair<TurnPermissionScope, Boolean>> {
+    val raw = toolCall.rawInput as? JsonObject ?: return emptyList()
+    val scopesArray = (raw["scopes"] as? JsonArray)
+        ?: (raw["derivedScopes"] as? JsonArray)
+        ?: return emptyList()
+    return scopesArray.mapNotNull { element ->
+        val obj = element as? JsonObject ?: return@mapNotNull null
+        val action = obj["action"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+        val packageName = obj["packageName"]?.jsonPrimitive?.contentOrNull
+            ?: obj["package_name"]?.jsonPrimitive?.contentOrNull
+        val path = obj["path"]?.jsonPrimitive?.contentOrNull
+            ?: obj["file_path"]?.jsonPrimitive?.contentOrNull
+        val moduleId = obj["moduleId"]?.jsonPrimitive?.contentOrNull
+            ?: obj["module_id"]?.jsonPrimitive?.contentOrNull
+        val command = obj["command"]?.jsonPrimitive?.contentOrNull
+        val workingDirectory = obj["workingDirectory"]?.jsonPrimitive?.contentOrNull
+        val isShell = obj["isShell"]?.jsonPrimitive?.booleanOrNull
+            ?: (action == "shell.exec" || action.startsWith("shell.session"))
+        val allowMod = obj["allowSystemModifications"]?.jsonPrimitive?.booleanOrNull
+            ?: (action == "system.reboot" || action == "device_control.reboot" ||
+                PrivilegedActionPolicy.isSystemModificationCommand(command))
+        val scope = TurnPermissionScope(
+            action = action,
+            packageName = packageName?.trim()?.ifEmpty { null },
+            path = path?.trim()?.ifEmpty { null },
+            moduleId = moduleId?.trim()?.ifEmpty { null },
+            command = command?.trim()?.ifEmpty { null },
+            workingDirectory = workingDirectory?.trim()?.ifEmpty { null },
+            isShell = isShell,
+        )
+        scope to allowMod
+    }
+}

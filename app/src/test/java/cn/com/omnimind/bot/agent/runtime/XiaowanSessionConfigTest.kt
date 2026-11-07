@@ -59,4 +59,21 @@ class XiaowanSessionConfigTest {
         }
         assertEquals("model-a", config.model)
     }
+
+    @Test fun `mode configuration supports standard ACP modes and defaults to default`() {
+        val config = config()
+        assertEquals("default", config.mode)
+        val modeOption = config.options.firstOrNull { it.id.value == "mode" } as? SessionConfigOption.Select
+        assertNotNull(modeOption)
+        assertEquals("default", modeOption?.currentValue?.value)
+
+        for (mode in listOf("agent_full_access", "read-only", "default")) {
+            config.set("mode", SessionConfigOptionValue.StringValue(mode))
+            assertEquals(mode, config.mode)
+            val updatedOption = config.options.firstOrNull { it.id.value == "mode" } as? SessionConfigOption.Select
+            assertEquals(mode, updatedOption?.currentValue?.value)
+        }
+
+        assertTrue(runCatching { config.set("mode", SessionConfigOptionValue.StringValue("invalid_mode")) }.isFailure)
+    }
 }

@@ -66,4 +66,33 @@ class AcpTurnLifecycleRegressionTest {
         activePrompt.cancel()
         activePreparation.cancel()
     }
+
+    @Test
+    fun `transport disconnect distinguishes transport teardown from user cancellation`() {
+        val execution = AcpPromptExecution(null)
+        assertFalse(execution.isTransportCancelled())
+        assertFalse(execution.isUserCancellationRequested())
+
+        execution.cancelForTransport(kotlinx.coroutines.CancellationException("ACP runtime disconnected"))
+        assertTrue(execution.isTransportCancelled())
+        assertFalse(execution.isUserCancellationRequested())
+
+        val userCancelExecution = AcpPromptExecution(null)
+        userCancelExecution.requestCancellation()
+        assertFalse(userCancelExecution.isTransportCancelled())
+        assertTrue(userCancelExecution.isUserCancellationRequested())
+    }
+
+
+    @Test
+    fun `turns in different sessions do not block each other`() {
+        val store = AcpTurnOwnershipStore()
+        val owner = AcpTurnOwnershipRegistry(store, "default")
+        val reservation1 = owner.reserve("session-A", "turn-A", "req-A")
+        val reservation2 = owner.reserve("session-B", "turn-B", "req-B")
+        assertTrue(reservation1 is AcpTurnReservation.Started)
+        assertTrue(reservation2 is AcpTurnReservation.Started)
+        assertEquals("turn-A", owner.activeTurnId("session-A"))
+        assertEquals("turn-B", owner.activeTurnId("session-B"))
+    }
 }

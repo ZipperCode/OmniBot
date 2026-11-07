@@ -3275,4 +3275,293 @@ void main() {
     expect(runtime.chatIslandDisplayLayer, ChatIslandDisplayLayer.tools);
     expect(runtime.lastAgentToolType, 'terminal');
   });
+  test('background turn without registerTask completes via official session/prompt event and clears activeRunId while keeping text', () {
+    const conversationId = 2601;
+    final runtime = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    // 只有 host update 到达，未在前端 registerTask
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'bg-sess-2601',
+        'turnId': 'bg-turn-2601',
+        'allowImplicitTurnAdmission': true,
+        'params': {
+          'sessionId': 'bg-sess-2601',
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'messageId': 'bg-msg-2601',
+            'content': {'type': 'text', 'text': '后台文本内容'},
+          },
+        },
+      },
+    );
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, 'bg-turn-2601');
+    expect(runtime.activeRunId, isNotNull);
+    expect(runtime.messages.first.text, '后台文本内容');
+
+    // 收到原生发出的 canonical session/prompt 响应
+    final result = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': 'prompt-req-2601',
+        'sessionId': 'bg-sess-2601',
+        'turnId': 'bg-turn-2601',
+        'conversationId': conversationId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'prompt-req-2601',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+            'sessionId': 'bg-sess-2601',
+            'turnId': 'bg-turn-2601',
+          },
+        },
+      },
+    );
+
+    expect(result.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+    expect(runtime.activeRunId, isNull);
+    expect(runtime.messages.first.text, '后台文本内容');
+  });
+
+  test('duplicate official response followed by awaited callback is idempotent and cleans task binding', () {
+    const conversationId = 2602;
+    const taskId = 'task-2602';
+    const turnId = 'turn-2602';
+    const sessionId = 'sess-2602';
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    runtime.activeAcpSessionId = sessionId;
+    runtime.activeAcpTurnId = turnId;
+
+    // 1. EventChannel 先将 canonical response 投影完成
+    final eventResult = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': 'req-2602',
+        'sessionId': sessionId,
+        'turnId': turnId,
+        'conversationId': conversationId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-2602',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+    expect(eventResult.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+
+    // 2. 随后前台 awaiter MethodChannel 返回并调用 applyAcpPromptResponse
+    final awaitedResult = coordinator.applyAcpPromptResponse(
+      taskId: taskId,
+      conversationId: conversationId,
+      sessionId: sessionId,
+      turnId: turnId,
+      stopReason: 'end_turn',
+      mode: kChatRuntimeModeAgent,
+    );
+    expect(awaitedResult.handled, isFalse);
+    expect(runtime.isAiResponding, isFalse);
+    expect(coordinator.isTaskActive(taskId: taskId, conversationId: conversationId, mode: kChatRuntimeModeAgent), isFalse);
+  });
+
+  test('parallel background conversations isolate late responses for previous turns', () {
+    const c1 = 2603;
+    const c2 = 2604;
+    final r1 = coordinator.ensureRuntime(conversationId: c1, mode: kChatRuntimeModeAgent);
+    final r2 = coordinator.ensureRuntime(conversationId: c2, mode: kChatRuntimeModeAgent);
+
+    // c1 处于新的后台 turn-2
+    r1.isAiResponding = true;
+    r1.activeAcpSessionId = 's1';
+    r1.activeAcpTurnId = 'c1-turn-2';
+    r1.activeRunId = 'c1-turn-2';
+
+    // c2 处于后台 turn-1
+    r2.isAiResponding = true;
+    r2.activeAcpSessionId = 's2';
+    r2.activeAcpTurnId = 'c2-turn-1';
+    r2.activeRunId = 'c2-turn-1';
+
+    // c1 收到旧 turn-1 的迟到响应，不得清理 c1 活跃的 turn-2
+    coordinator.applyAgentEvent(
+      conversationId: c1,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': 'req-c1-late',
+        'sessionId': 's1',
+        'turnId': 'c1-turn-1',
+        'conversationId': c1,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-c1-late',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+    expect(r1.isAiResponding, isTrue);
+    expect(r1.activeAcpTurnId, 'c1-turn-2');
+    expect(r1.activeRunId, 'c1-turn-2');
+
+    // c2 收到自己的 prompt 响应，c2 清零但 c1 依然保持活跃
+    final c2Complete = coordinator.applyAgentEvent(
+      conversationId: c2,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': 'req-c2',
+        'sessionId': 's2',
+        'turnId': 'c2-turn-1',
+        'conversationId': c2,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-c2',
+          'result': {
+            'status': 'end_turn',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+    expect(c2Complete.handled, isTrue);
+    expect(r2.isAiResponding, isFalse);
+    expect(r2.activeAcpTurnId, isNull);
+
+    // c1 仍然保持活跃
+    expect(r1.isAiResponding, isTrue);
+    expect(r1.activeAcpTurnId, 'c1-turn-2');
+  });
+
+  test('scheduled subagent events share the visible Agent runtime before and after opening', () async {
+    const conversationId = 2605;
+    await emitAgentEvent({
+      'method': 'session/update',
+      'conversationId': conversationId,
+      'conversationMode': 'subagent',
+      'sessionId': 'sub-sess',
+      'turnId': 'sub-turn',
+      'allowImplicitTurnAdmission': true,
+      'params': {
+        'sessionId': 'sub-sess',
+        'update': {
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'sub-reply',
+          'content': {'type': 'text', 'text': '后台仍在执行'},
+        },
+      },
+    });
+    final visible = coordinator.ensureRuntime(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    expect(visible.isAiResponding, isTrue);
+    expect(visible.messages.single.text, '后台仍在执行');
+    expect(visible.activeAcpTurnId, 'sub-turn');
+    expect(
+      coordinator.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeNormal,
+      ),
+      isNull,
+    );
+    await emitAgentEvent({
+      'method': 'session/prompt',
+      'conversationId': conversationId,
+      'conversationMode': 'subagent',
+      'sessionId': 'sub-sess',
+      'turnId': 'sub-turn',
+      'allowImplicitTurnAdmission': true,
+      'message': {
+        'jsonrpc': '2.0',
+        'id': 'sub-request',
+        'result': {'stopReason': 'end_turn', 'completed': true},
+      },
+    });
+    expect(visible.isAiResponding, isFalse);
+    expect(visible.activeRunId, isNull);
+    expect(visible.messages.single.text, '后台仍在执行');
+  });
+  test('incomplete prompt response without stopReason does not clear task binding or active turn', () {
+    const conversationId = 2606;
+    const taskId = 'task-2606';
+    const turnId = 'turn-2606';
+    const sessionId = 'sess-2606';
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    runtime.activeAcpSessionId = sessionId;
+    runtime.activeAcpTurnId = turnId;
+
+    // completed: false 且无 stopReason，不得移除 binding 或清理活跃 turn
+    final eventResult = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': 'req-2606',
+        'sessionId': sessionId,
+        'turnId': turnId,
+        'conversationId': conversationId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-2606',
+          'result': {
+            'status': 'in_progress',
+            'completed': false,
+          },
+        },
+      },
+    );
+
+    expect(eventResult.affectsActiveTurn, isFalse);
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, turnId);
+    expect(coordinator.isTaskActive(taskId: taskId, conversationId: conversationId, mode: kChatRuntimeModeAgent), isTrue);
+  });
 }

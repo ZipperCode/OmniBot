@@ -7,6 +7,7 @@ import cn.com.omnimind.baselib.shizuku.ShizukuBackend
 import cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.tool.AgentCapabilityToolDefinition
+import cn.com.omnimind.bot.agent.tool.BuiltInAgentCapabilityModule
 import cn.com.omnimind.bot.plugin.OmniPluginToolDefinition
 import com.rk.terminal.runtime.TerminalDistribution
 import kotlinx.serialization.json.JsonArray
@@ -48,6 +49,7 @@ class AgentToolRegistry(
     init {
         val locale = AppLocaleManager.resolvePromptLocale(context)
         val privilegedStatus = PrivilegedCapabilityManager.get(context).getStatus()
+        val capabilityDefinitions = BuiltInAgentCapabilityModule.definitions + capabilityToolDefinitions
         val runtimeDefinitions = mutableListOf<JsonObject>()
         runtimeDefinitions.addAll(
             AgentToolDefinitions.staticTools(
@@ -105,7 +107,7 @@ class AgentToolRegistry(
         }
         runtimeDefinitions.addAll(AgentToolDefinitions.memoryTools(locale))
         runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale))
-        if (pluginToolDefinitions.isNotEmpty() || capabilityToolDefinitions.isNotEmpty()) {
+        if (pluginToolDefinitions.isNotEmpty() || capabilityDefinitions.isNotEmpty()) {
             val occupiedNames = runtimeDefinitions.mapNotNullTo(linkedSetOf()) { definition ->
                 (definition["function"] as? JsonObject)
                     ?.get("name")
@@ -135,7 +137,7 @@ class AgentToolRegistry(
                     terminalDistribution
                 )
             }
-            capabilityToolDefinitions.forEach { capabilityTool ->
+            capabilityDefinitions.forEach { capabilityTool ->
                 require(capabilityTool.name !in occupiedNames) {
                     "Capability tool conflicts with an existing tool: ${capabilityTool.name}"
                 }

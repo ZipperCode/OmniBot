@@ -1,7 +1,9 @@
 package cn.com.omnimind.baselib.privileged
 
 import org.junit.Assert.*
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -10,6 +12,7 @@ import java.util.UUID
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class PrivilegedCommandExecutorTest {
+    @get:Rule val temporary = TemporaryFolder()
     private fun request(command: String) = PrivilegedRequest(UUID.randomUUID().toString(), "shell.exec",
         mapOf("confirmed" to "true"), command = command)
 
@@ -36,7 +39,7 @@ class PrivilegedCommandExecutorTest {
 
     @Test fun publicOutputLimitIsReportedEvenBelowTheDrainBufferLimit() {
         val executor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT,
-            PrivilegedProcessRunner(startProcess = { args -> ProcessBuilder(listOf("/bin/sh") + args.drop(1)).start() }))
+            PrivilegedProcessRunner(startProcess = { args -> ProcessBuilder(listOf(PlatformProcessTestHelper.shellPath) + args.drop(1)).start() }))
         try {
             val result = executor.execute(request("i=0; while [ \"\$i\" -lt 2000 ]; do printf 0123456789; i=\$((i+1)); done"))
             assertTrue(result.message, result.success)
@@ -92,12 +95,69 @@ class PrivilegedCommandExecutorTest {
         assertTrue(result.stdout.endsWith("  night [yes|no]\n"))
     }
 
+    @Test fun fullPowerAndSystemModificationFlagsAllowControlledRebootWhileBlockingHostForceStop() {
+        var executedCommand: String? = null
+        val runner = PrivilegedProcessRunner(startProcess = { args ->
+            executedCommand = args.last()
+            ProcessBuilder(listOf(PlatformProcessTestHelper.shellPath) + args.drop(1)).start()
+        })
+        val executor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT, runner)
+
+        // Normal mode: reboot is blocked by static policy
+        val defaultResult = executor.execute(request("reboot"))
+        assertEquals("blocked_by_policy", defaultResult.code)
+        assertTrue(defaultResult.blockedByPolicy)
+
+        // allowSystemModifications=true: reboot is admitted to runner
+        val sysModResult = executor.execute(request("echo reboot-ok").copy(command = "reboot", allowSystemModifications = true))
+        assertNotEquals("blocked_by_policy", sysModResult.code)
+
+        // isFullPower=true: reboot is admitted and confirmation is waived
+        val fullPowerResult = executor.execute(
+            PrivilegedRequest(
+                requestId = UUID.randomUUID().toString(),
+                action = PrivilegedActionPolicy.ACTION_SHELL_EXEC,
+                command = "reboot",
+                arguments = emptyMap(),
+                isFullPower = true,
+            )
+        )
+        assertNotEquals("blocked_by_policy", fullPowerResult.code)
+        assertNotEquals("confirmation_required", fullPowerResult.code)
+
+        // Host protection rule is STILL blocked even under full power
+        val hostStopResult = executor.execute(
+            PrivilegedRequest(
+                requestId = UUID.randomUUID().toString(),
+                action = PrivilegedActionPolicy.ACTION_SHELL_EXEC,
+                command = "am force-stop cn.com.omnimind.bot",
+                arguments = emptyMap(),
+                isFullPower = true,
+                allowSystemModifications = true,
+            )
+        )
+        assertEquals("blocked_by_policy", hostStopResult.code)
+        assertTrue(hostStopResult.blockedByPolicy)
+    }
+
+    @Test fun rootBackendReturnsUidZeroInResultAndMap() {
+        val lease = temporary.newFolder()
+        val executor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT,
+            PrivilegedProcessRunner(root = true, leaseDirectory = lease, startProcess = { args ->
+                val marker = Regex("__OMNI_ROOT_[a-zA-Z0-9-]+__").find(args.last())?.value
+                val script = if (marker != null) "printf '%s\\n' '$marker' >&2; echo ok" else "echo ok"
+                ProcessBuilder(PlatformProcessTestHelper.shellPath, "-c", script).start()
+            }))
+        val result = executor.execute(request("echo ok"))
+        assertEquals(0, result.uid)
+        assertEquals(0, result.toMap()["uid"])
+    }
     private fun executeFixture(request: PrivilegedRequest, outputSize: Int, stderr: Boolean, exitCode: Int): PrivilegedResult {
         val script = "{ printf 'UI mode manager commands:\\n'; " +
             "i=0; while [ \"\$i\" -lt ${outputSize / 10} ]; do printf 0123456789; i=\$((i+1)); done; " +
             "printf '\\n  night [yes|no]\\n'; }" + (if (stderr) " >&2" else "") + "; exit $exitCode"
         val executor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT,
-            PrivilegedProcessRunner(startProcess = { ProcessBuilder("/bin/sh", "-c", script).start() }))
+            PrivilegedProcessRunner(startProcess = { ProcessBuilder(PlatformProcessTestHelper.shellPath, "-c", script).start() }))
         return try { executor.execute(request) } finally { executor.shutdown() }
     }
 }

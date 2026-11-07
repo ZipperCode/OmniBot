@@ -1,6 +1,6 @@
 package cn.com.omnimind.androidgui
 
-import android.content.Intent
+import android.view.Display
 import cn.com.omnimind.baselib.runlog.Action
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -22,11 +22,7 @@ class AndroidGuiEnvironmentTest {
     }
 
     @Test
-    fun `open app clears stale activity stack and gets an extended stabilization window`() {
-        assertEquals(
-            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK,
-            OPEN_APP_INTENT_FLAGS,
-        )
+    fun `open app gets an extended stabilization window`() {
         assertTrue(
             stateStabilizationTimeoutMs("open_app") >
                 stateStabilizationTimeoutMs("click"),
@@ -137,15 +133,29 @@ class AndroidGuiEnvironmentTest {
 
         override fun displaySize(): Pair<Int, Int> = 1080 to 2400
 
+        override fun displaySize(displayId: Int): Pair<Int, Int> = 1080 to 2400
+
         override fun screenshotExcludesOverlays(): Boolean = true
 
-        override suspend fun observe(captureScreenshot: Boolean): AndroidGuiPlatformState {
+        override suspend fun observe(captureScreenshot: Boolean): AndroidGuiPlatformState =
+            observe(captureScreenshot, Display.DEFAULT_DISPLAY)
+
+        override suspend fun observe(
+            captureScreenshot: Boolean,
+            displayId: Int,
+        ): AndroidGuiPlatformState {
             check(ready) { "android_gui_accessibility_not_ready" }
             observeCalls += 1
             return observedStates.removeFirstOrNull() ?: state()
         }
 
-        override suspend fun dispatch(action: Action): AndroidGuiActionResult {
+        override suspend fun dispatch(action: Action): AndroidGuiActionResult =
+            dispatch(action, Display.DEFAULT_DISPLAY)
+
+        override suspend fun dispatch(
+            action: Action,
+            displayId: Int,
+        ): AndroidGuiActionResult {
             check(ready) { "android_gui_accessibility_not_ready" }
             dispatchCalls += 1
             return AndroidGuiActionResult(success = true, message = "ok")
@@ -156,6 +166,11 @@ class AndroidGuiEnvironmentTest {
             y: Float?,
         ): AndroidGuiInputTarget? = null
 
+        override suspend fun inputTarget(
+            x: Float?,
+            y: Float?,
+            displayId: Int,
+        ): AndroidGuiInputTarget? = null
         override suspend fun installedApplications(): Map<String, String> = emptyMap()
 
         override fun inputMethodTop(): Int? = null

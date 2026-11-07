@@ -1,0 +1,66 @@
+package {{PACKAGE_NAME}};
+
+import android.util.Log;
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
+import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
+
+public class ProbeHookEntry implements IXposedHookLoadPackage {
+    private static final String TAG = "OmniBotProbe";
+    private static final String TARGET_PACKAGE = "{{TARGET_PACKAGE}}";
+
+    @Override
+    public void handleLoadPackage(final LoadPackageParam lpparam) throws Throwable {
+        if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
+            return;
+        }
+        Log.i(TAG, "[PROBE_INIT] Hook active in process: " + lpparam.packageName);
+
+        {{HOOK_REGISTRATIONS}}
+    }
+
+    public static void logCall(String className, String methodName, XC_MethodHook.MethodHookParam param, boolean isAfter) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(isAfter ? "[PROBE_AFTER] " : "[PROBE_BEFORE] ");
+        sb.append(className).append("#").append(methodName).append("(");
+        if (param.args != null) {
+            for (int i = 0; i < param.args.length; i++) {
+                if (i > 0) sb.append(", ");
+                Object arg = param.args[i];
+                if (arg == null) {
+                    sb.append("null");
+                } else {
+                    sb.append(arg.getClass().getName());
+                }
+            }
+        }
+        sb.append(")");
+        if (isAfter) {
+            if (param.hasThrowable()) {
+                sb.append(" threw ").append(param.getThrowable().getClass().getName());
+            } else {
+                Object res = param.getResult();
+                sb.append(" -> ").append(res == null ? "null" : res.getClass().getName());
+            }
+        }
+        Log.i(TAG, sb.toString());
+
+        // Stack trace summary (top 5 frames) to verify calling location
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        StringBuilder stackSb = new StringBuilder("[PROBE_STACK] ");
+        int count = 0;
+        for (StackTraceElement elem : stack) {
+            String elemStr = elem.toString();
+            if (elemStr.contains("de.robv.android.xposed") || elemStr.contains(ProbeHookEntry.class.getName()) || elemStr.contains("dalvik.system")) {
+                continue;
+            }
+            if (count > 0) stackSb.append(" -> ");
+            stackSb.append(elem.getClassName()).append(".").append(elem.getMethodName()).append(":").append(elem.getLineNumber());
+            count++;
+            if (count >= 5) break;
+        }
+        Log.d(TAG, stackSb.toString());
+    }
+}

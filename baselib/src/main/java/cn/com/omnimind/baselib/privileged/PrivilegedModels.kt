@@ -21,6 +21,8 @@ data class PrivilegedRequest(
     val environment: Map<String, String> = emptyMap(),
     val sessionId: String? = null,
     val userId: Int = 0,
+    val allowSystemModifications: Boolean = false,
+    val isFullPower: Boolean = false,
 )
 
 @Serializable
@@ -47,6 +49,7 @@ data class PrivilegedResult(
     val blockedByPolicy: Boolean = false,
     val provider: PrivilegedProvider = PrivilegedProvider.NONE,
     val observation: kotlinx.serialization.json.JsonObject? = null,
+    val uid: Int? = null,
 ) {
     fun toMap(): Map<String, Any?> {
         return linkedMapOf(
@@ -57,6 +60,7 @@ data class PrivilegedResult(
             "message" to message,
             "backend" to backend.name,
             "provider" to provider.name,
+            "uid" to uid,
             "observation" to observation?.toNativeValue(),
             "output" to output,
             "stdout" to stdout,

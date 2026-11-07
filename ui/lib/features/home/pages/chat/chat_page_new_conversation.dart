@@ -4,9 +4,10 @@ part of 'chat_page.dart';
 /// with the existing target lifecycle and send barrier.
 mixin _ChatPageNewConversationMixin on _ChatPageStateBase {
   @override
+  bool _isFullAccessDraftSelected = false;
+  @override
   bool get _showNewConversationModeSelector =>
       !_isWorkspaceSurface &&
-      !_isConversationHistoryLoading &&
       !_isFirstUseTourActive &&
       _resolvedThreadTarget?.isNewConversation == true &&
       (_resolvedThreadTarget?.initialMessage?.trim().isEmpty ?? true) &&
@@ -21,25 +22,30 @@ mixin _ChatPageNewConversationMixin on _ChatPageStateBase {
       !_sendMessageInFlightTargetIds.contains(_conversationTargetRequestId);
 
   @override
-  String get _newConversationModeId =>
-      _activeMode == ChatPageMode.normal && _isPureChatSelected
-      ? kNewConversationPureChatModeId
-      : (_activeAcpAgentId ?? _kXiaowanAcpAgentId);
-
+  String get _newConversationModeId {
+    if (_activeMode == ChatPageMode.normal && _isPureChatSelected) {
+      return kNewConversationPureChatModeId;
+    }
+    if (_isFullAccessDraftSelected && _showNewConversationModeSelector) {
+      return kNewConversationFullAccessModeId;
+    }
+    return _activeAcpAgentId ?? _kXiaowanAcpAgentId;
+  }
   @override
   Future<void> _selectNewConversationMode(String modeId) async {
     final id = modeId.trim();
     if (!_canSwitchNewConversationMode || id == _newConversationModeId) {
       return;
     }
+    final isFullAccess = id == kNewConversationFullAccessModeId;
     final pureChat = id == kNewConversationPureChatModeId;
     bool isAvailable() =>
         pureChat ||
+        isFullAccess ||
         _chatAcpAgentModeOptions.any(
           (option) => option.id == id && option.isAvailable,
         );
     if (!isAvailable()) return;
-
     final originRequestId = _conversationTargetRequestId;
     final generation = _harnessSwitchSendBarrier.begin();
     setState(() {});
@@ -59,16 +65,32 @@ mixin _ChatPageNewConversationMixin on _ChatPageStateBase {
             !isAvailable()) {
           return;
         }
+        _isFullAccessDraftSelected = isFullAccess;
+        // 同步更新权限模式：全权模式对应 fullAccess，关闭恢复默认 defaultMode
+        _agentPermissionMode = isFullAccess
+            ? AgentPermissionMode.fullAccess
+            : AgentPermissionMode.defaultMode;
+        final targetAgentId = isFullAccess
+            ? _kXiaowanAcpAgentId
+            : (pureChat ? null : id);
         final target = ConversationThreadTarget.newConversation(
           mode: pureChat ? ConversationMode.chatOnly : ConversationMode.agent,
-          agentId: pureChat ? null : id,
+          agentId: targetAgentId,
           requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
         );
-        // An explicit draft target owns the choice, just like the home entry.
-        // Do not mutate the globally selected native Agent or an old session.
+        // 明确草稿目标归属于本次选择，保留现有输入内容
         await _applyConversationThreadTarget(target, preserveComposer: true);
+        final unboundSession = _unboundConfigurationSessions[ChatPageMode.agent];
+        if (unboundSession != null &&
+            unboundSession.agentId == targetAgentId &&
+            unboundSession.sessionId.isNotEmpty) {
+          unawaited(AgentRuntimeService.setSessionMode(
+            sessionId: unboundSession.sessionId,
+            agentId: targetAgentId,
+            modeId: isFullAccess ? 'agent_full_access' : 'default',
+          ));
+        }
         applied =
-            mounted &&
             _resolvedThreadTarget?.requestKey == target.requestKey &&
             _newConversationModeId == id;
       });

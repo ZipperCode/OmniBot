@@ -520,6 +520,102 @@ void main() {
     expect(surface, findsOneWidget);
     expect(tester.getSize(surface).width, closeTo(360, 0.1));
   });
+
+  testWidgets('approval submits actual allow_task optionId to methodchannel', (
+    tester,
+  ) async {
+    MethodCall? submittedCall;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+      submittedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    final card = <String, dynamic>{
+      ..._requestCardData(),
+      'requestKind': 'approval',
+      'status': 'pending',
+      'rawParamsJson': jsonEncode(<String, dynamic>{
+        'options': [
+          {'optionId': 'allow_once', 'name': '允许一次'},
+          {'optionId': 'allow_task', 'name': '批准本任务 (仅限本任务范围)'},
+          {'optionId': 'reject_once', 'name': '拒绝'},
+        ],
+      }),
+    };
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AgentRequestCard(cardData: card)),
+      ),
+    );
+
+    expect(find.text('允许一次'), findsOneWidget);
+    expect(find.text('批准本任务 (仅限本任务范围)'), findsOneWidget);
+
+    await tester.tap(find.text('批准本任务 (仅限本任务范围)'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Accept'));
+    await tester.pumpAndSettle();
+
+    expect(submittedCall, isNotNull);
+    final arguments = Map<String, dynamic>.from(
+      submittedCall!.arguments as Map,
+    );
+    expect(arguments['requestId'], 'request-1');
+    final response = Map<String, dynamic>.from(arguments['response'] as Map);
+    expect(response['decision'], 'accept');
+    expect(response['optionId'], 'allow_task');
+    expect(response['selectedOptionId'], 'allow_task');
+  });
+
+  testWidgets('compact notice approval passes actual allow_task optionId', (
+    tester,
+  ) async {
+    MethodCall? submittedCall;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+      submittedCall = call;
+      return <String, dynamic>{'ok': true};
+    });
+
+    final card = <String, dynamic>{
+      ..._requestCardData(),
+      'requestKind': 'approval',
+      'status': 'pending',
+      'rawParamsJson': jsonEncode(<String, dynamic>{
+        'options': [
+          {'optionId': 'allow_once', 'name': '允许一次'},
+          {'optionId': 'allow_task', 'name': '批准本任务'},
+          {'optionId': 'reject_once', 'name': '拒绝'},
+        ],
+      }),
+    };
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AgentRequestNotice(cardData: card)),
+      ),
+    );
+
+    expect(find.text('允许一次'), findsOneWidget);
+    expect(find.text('批准本任务'), findsOneWidget);
+
+    await tester.tap(find.text('批准本任务'));
+    await tester.pumpAndSettle();
+
+    expect(submittedCall, isNotNull);
+    final arguments = Map<String, dynamic>.from(
+      submittedCall!.arguments as Map,
+    );
+    expect(arguments['requestId'], 'request-1');
+    final response = Map<String, dynamic>.from(arguments['response'] as Map);
+    expect(response['decision'], 'accept');
+    expect(response['optionId'], 'allow_task');
+  });
 }
 
 Map<String, dynamic> _requestCardData({

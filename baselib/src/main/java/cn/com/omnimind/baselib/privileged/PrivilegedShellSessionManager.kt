@@ -82,6 +82,7 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
         val backend: PrivilegedBackend,
         private val managed: PrivilegedProcessRunner.ManagedProcess,
     ) {
+        var verifiedUid: Int? = null
         private val process get() = managed.process
         private val lock = Object()
         private val writer: BufferedWriter = process.outputStream.bufferedWriter()
@@ -163,6 +164,18 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                     lock.wait(remaining)
                 }
 
+                if (closed) {
+                    return SessionCommandResult(
+                        success = false,
+                        code = "session_not_found",
+                        message = commandState.failureMessage
+                            ?: "The privileged shell session closed unexpectedly.",
+                        stdout = commandState.stdoutBuffer.snapshot(),
+                        stderr = commandState.stderrBuffer.snapshot(),
+                        transcript = transcriptBuffer.snapshot()
+                    )
+                }
+
                 if (commandState.completed) {
                     return SessionCommandResult(
                         success = commandState.exitCode == 0,
@@ -177,18 +190,6 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                         transcript = transcriptBuffer.snapshot(),
                         exitCode = commandState.exitCode,
                         workingDirectory = commandState.workingDirectory
-                    )
-                }
-
-                if (closed) {
-                    return SessionCommandResult(
-                        success = false,
-                        code = "session_not_found",
-                        message = commandState.failureMessage
-                            ?: "The privileged shell session closed unexpectedly.",
-                        stdout = commandState.stdoutBuffer.snapshot(),
-                        stderr = commandState.stderrBuffer.snapshot(),
-                        transcript = transcriptBuffer.snapshot()
                     )
                 }
 
@@ -361,7 +362,8 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                 request = request,
                 backend = backend,
                 code = "session_exists",
-                message = "A privileged shell session with the same id already exists."
+                message = "A privileged shell session with the same id already exists.",
+                sessionId = sessionId,
             )
         }
         val session = runCatching {
@@ -379,30 +381,58 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                     backend == PrivilegedBackend.ROOT && error is java.io.IOException -> "root_unavailable"
                     else -> "session_start_failed"
                 },
-                message = error.message ?: "Failed to start the privileged shell session."
+                message = error.message ?: "Failed to start the privileged shell session.",
+                sessionId = sessionId,
             )
         }
         if (sessions.putIfAbsent(sessionId, session) != null) {
             session.close()
-            return sessionFailure(request, backend, "session_exists", "A session with this id already exists.")
+            return sessionFailure(
+                request = request,
+                backend = backend,
+                code = "session_exists",
+                message = "A session with this id already exists.",
+                sessionId = sessionId,
+            )
         }
 
         try {
             val identity = session.execute("id -u", null, emptyMap(), 10, false)
             val expectedUid = if (backend == PrivilegedBackend.ROOT) "0" else "2000"
-            if (!identity.success || identity.stdout.trim() != expectedUid) {
+            val readUid = identity.stdout.trim().toIntOrNull()
+            if (!identity.success || identity.stdout.trim() != expectedUid || readUid == null) {
                 sessions.remove(sessionId, session)
                 session.close()
-                return sessionFailure(request, backend,
-                    if (identity.timedOut) "timeout" else if (backend == PrivilegedBackend.ROOT) "root_denied" else "permission_denied",
-                    "Could not verify the privileged shell identity.")
+                return sessionFailure(
+                    request = request,
+                    backend = backend,
+                    code = if (identity.timedOut) "timeout" else if (backend == PrivilegedBackend.ROOT) "root_denied" else "permission_denied",
+                    message = "Could not verify the privileged shell identity.",
+                    stdout = identity.stdout,
+                    stderr = identity.stderr,
+                    transcript = identity.transcript,
+                    exitCode = identity.exitCode,
+                    sessionId = sessionId,
+                )
             }
+            // 持有真实 id -u 读回的已验证 UID
+            session.verifiedUid = readUid
             if (!request.workingDirectory.isNullOrBlank() || request.environment.isNotEmpty()) {
                 val bootstrap = session.execute(":", request.workingDirectory, request.environment, 10, false)
                 if (!bootstrap.success) {
                     sessions.remove(sessionId, session)
                     session.close()
-                    return sessionFailure(request, backend, bootstrap.code, bootstrap.message)
+                    return sessionFailure(
+                        request = request,
+                        backend = backend,
+                        code = bootstrap.code,
+                        message = bootstrap.message,
+                        stdout = bootstrap.stdout,
+                        stderr = bootstrap.stderr,
+                        transcript = bootstrap.transcript,
+                        exitCode = bootstrap.exitCode,
+                        sessionId = sessionId,
+                    )
                 }
             }
         } catch (error: Exception) {
@@ -422,8 +452,8 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
             sessionId = sessionId,
             workingDirectory = request.workingDirectory,
             environment = request.environment,
+            uid = session.verifiedUid,
             data = mapOf(
-                "created" to "true",
                 "alive" to "true",
                 "running" to "false"
             )
@@ -486,6 +516,7 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
             workingDirectory = result.workingDirectory ?: request.workingDirectory,
             environment = request.environment,
             sessionId = sessionId,
+            uid = session.verifiedUid,
             data = mapOf(
                 "alive" to session.isAlive().toString(),
                 "running" to result.commandRunning.toString()
@@ -530,6 +561,7 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
             transcript = transcript,
             availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
             sessionId = sessionId,
+            uid = session.verifiedUid,
             data = mapOf(
                 "alive" to session.isAlive().toString(),
                 "running" to session.isBusy().toString()
@@ -568,6 +600,7 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
             backend = backend,
             availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),
             sessionId = sessionId,
+            uid = session.verifiedUid,
             data = mapOf(
                 "stopped" to "true",
                 "alive" to "false",
@@ -628,6 +661,7 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
             transcript: String = "",
             exitCode: Int? = null,
             sessionId: String? = request.sessionId,
+            uid: Int? = null,
         ): PrivilegedResult {
             return PrivilegedResult(
                 requestId = request.requestId,
@@ -646,7 +680,8 @@ internal class PrivilegedShellSessionManager(private val runner: PrivilegedProce
                 timeoutSeconds = request.timeoutSeconds,
                 workingDirectory = request.workingDirectory,
                 environment = request.environment,
-                sessionId = sessionId
+                sessionId = sessionId,
+                uid = uid,
             )
         }
 

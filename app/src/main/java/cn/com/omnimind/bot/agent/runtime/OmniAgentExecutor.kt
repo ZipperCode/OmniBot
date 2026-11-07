@@ -185,6 +185,7 @@ class OmniAgentExecutor(
         continueMode: Boolean = false,
         historyMessagesOverride: List<ChatCompletionMessage>? = null,
         acpSessionId: String? = null,
+        acpTurnId: String? = null,
     ): AgentResult {
         var toolRouter: AgentToolRouter? = null
         var pluginSession: OmniPluginSession? = null
@@ -353,7 +354,9 @@ class OmniAgentExecutor(
                     contextCompactor = contextCompactorFactory(),
                     executionEnv = DefaultAgentExecutionEnvironment(
                         acpSessionId = acpSessionId,
+                        acpTurnId = acpTurnId,
                         agentRunId = agentRunId,
+                        conversationId = conversationId,
                         userMessage = userMessage,
                         runtimeContextRepository = runtimeContextRepository,
                         workspaceDescriptor = workspaceDescriptor,

@@ -314,7 +314,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   List<String> _agentModelOptions = const <String>[];
   List<String> _agentReasoningEffortOptions = const <String>[];
   List<String> _agentCollaborationModes = const <String>[];
-  AgentPermissionMode _agentPermissionMode = AgentPermissionMode.fullAccess;
+  // F05 原则：默认按任务授权 (defaultMode)；仅在用户手动开启全权模式时切换为 fullAccess
+  AgentPermissionMode _agentPermissionMode = AgentPermissionMode.defaultMode;
   ChatBrowserSessionSnapshot? _liveBrowserSessionSnapshot;
   bool _isBrowserOverlayVisible = false;
   bool _isBrowserOverlayInitialized = false;
@@ -2064,8 +2065,12 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   Future<void> _pickAttachments({FileType type = FileType.any});
 
   void _removePendingAttachment(String id);
+  bool get _isFullAccessDraftSelected;
+
 
   String _fileNameFromPath(String path);
+  String? _readAgentPreference(String kind, {int? conversationId});
+
 
   bool _isImageFilePath(String path, {String? mimeType});
 

@@ -30,6 +30,7 @@ class XiaowanSessionCloseCleanupTest {
         var released = 0
         set("closed", closed)
         set("closeMutex", kotlinx.coroutines.sync.Mutex())
+        set("sessionRunControl", StandardAgentRunControl())
         set("mcpSession", mcp)
         val idField = type.getDeclaredField("sessionId").apply { isAccessible = true }
         idField.set(session, if (idField.type == String::class.java) "retry-close" else SessionId("retry-close"))
@@ -79,6 +80,7 @@ class XiaowanSessionCloseCleanupTest {
         var released = 0
         set("closed", closed)
         set("closeMutex", kotlinx.coroutines.sync.Mutex())
+        set("sessionRunControl", StandardAgentRunControl())
         set("mcpSession", mcp)
         val idField = type.getDeclaredField("sessionId").apply { isAccessible = true }
         idField.set(session, if (idField.type == String::class.java) "close-test" else SessionId("close-test"))

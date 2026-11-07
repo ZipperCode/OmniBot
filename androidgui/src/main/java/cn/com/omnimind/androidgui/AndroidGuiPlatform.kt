@@ -7,24 +7,26 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import cn.com.omnimind.accessibility.service.AssistsService
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.OobActionSchema
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class AndroidGuiPlatformState(
     val packageName: String,
@@ -48,15 +50,36 @@ internal interface AndroidGuiPlatform {
 
     fun isReady(): Boolean
 
-    fun displaySize(): Pair<Int, Int>
+    fun displaySize(): Pair<Int, Int> = displaySize(Display.DEFAULT_DISPLAY)
+
+    fun displaySize(displayId: Int): Pair<Int, Int> = displaySize()
 
     fun screenshotExcludesOverlays(): Boolean
 
-    suspend fun observe(captureScreenshot: Boolean): AndroidGuiPlatformState
+    suspend fun observe(captureScreenshot: Boolean): AndroidGuiPlatformState =
+        observe(captureScreenshot, Display.DEFAULT_DISPLAY)
 
-    suspend fun dispatch(action: Action): AndroidGuiActionResult
+    suspend fun observe(
+        captureScreenshot: Boolean,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiPlatformState
 
-    suspend fun inputTarget(x: Float? = null, y: Float? = null): AndroidGuiInputTarget?
+    suspend fun dispatch(action: Action): AndroidGuiActionResult =
+        dispatch(action, Display.DEFAULT_DISPLAY)
+
+    suspend fun dispatch(
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiActionResult
+
+    suspend fun inputTarget(x: Float? = null, y: Float? = null): AndroidGuiInputTarget? =
+        inputTarget(x, y, Display.DEFAULT_DISPLAY)
+
+    suspend fun inputTarget(
+        x: Float? = null,
+        y: Float? = null,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiInputTarget?
 
     suspend fun installedApplications(): Map<String, String>
 
@@ -83,33 +106,79 @@ internal class AccessibilityAndroidGuiPlatform(
 
     override fun isReady(): Boolean = AssistsService.isReady()
 
-    override suspend fun observe(captureScreenshot: Boolean): AndroidGuiPlatformState = coroutineScope {
+    override fun displaySize(): Pair<Int, Int> = displaySize(Display.DEFAULT_DISPLAY)
+
+    override fun displaySize(displayId: Int): Pair<Int, Int> {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val display = dm?.getDisplay(displayId)
+            if (display != null) {
+                val metrics = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                display.getRealMetrics(metrics)
+                return metrics.widthPixels.coerceAtLeast(1) to metrics.heightPixels.coerceAtLeast(1)
+            }
+        }
+        val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            manager.maximumWindowMetrics.bounds
+        } else {
+            @Suppress("DEPRECATION")
+            android.graphics.Point().also(manager.defaultDisplay::getRealSize).let {
+                Rect(0, 0, it.x, it.y)
+            }
+        }
+        return bounds.width().coerceAtLeast(1) to bounds.height().coerceAtLeast(1)
+    }
+
+    override fun screenshotExcludesOverlays(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+
+    override suspend fun observe(
+        captureScreenshot: Boolean,
+        displayId: Int,
+    ): AndroidGuiPlatformState = coroutineScope {
         val service = awaitService()
-        val display = displaySize()
-        val roots = withContext(Dispatchers.Main.immediate) {
-            val activeRoot = service.rootInActiveWindow
+        val display = displaySize(displayId)
+        val (roots, observedPackage) = withContext(Dispatchers.Main.immediate) {
             val seenWindowIds = mutableSetOf<Int>()
-            buildList {
+            val displayWindows = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val allDisplays = runCatching { service.windowsOnAllDisplays }.getOrNull()
+                allDisplays?.get(displayId)?.takeIf { it.isNotEmpty() }
+                    ?: if (displayId == Display.DEFAULT_DISPLAY) service.windows else emptyList()
+            } else {
+                if (displayId == Display.DEFAULT_DISPLAY) service.windows else emptyList()
+            }
+
+            val collectedRoots = buildList {
                 fun addRoot(root: AccessibilityNodeInfo?) {
                     if (root != null && seenWindowIds.add(root.windowId)) add(root)
                 }
-                addRoot(activeRoot)
-                service.windows.forEach { window -> addRoot(window.root) }
+                displayWindows.forEach { window -> addRoot(window.root) }
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    addRoot(service.rootInActiveWindow)
+                    service.windows.forEach { window -> addRoot(window.root) }
+                }
             }
+
+            val resolvedPackage = resolveDisplayPackage(service, displayId, displayWindows)
+            collectedRoots to resolvedPackage
         }
-        // Tablet/foldable Settings may expose visible panes as separate
-        // accessibility windows.  The active root contains only one pane;
-        // serialize every visible window into the single observation graph.
         val xmlDeferred = async(Dispatchers.Default) { AndroidGuiXml.serialize(roots) }
         val screenshotDeferred = if (captureScreenshot) {
-            async { captureScreenshot(service) }
+            async { captureScreenshot(service, displayId) }
         } else {
             null
         }
         val xml = xmlDeferred.await()
+        val activityName = if (displayId == Display.DEFAULT_DISPLAY && observedPackage.isNotEmpty() && observedPackage == service.lastPackageName) {
+            service.lastActivityName
+        } else {
+            ""
+        }
         AndroidGuiPlatformState(
-            packageName = rootPackage(xml).ifBlank { service.lastPackageName },
-            activityName = service.lastActivityName,
+            packageName = observedPackage,
+            activityName = activityName,
             displayWidth = display.first,
             displayHeight = display.second,
             xml = xml,
@@ -117,10 +186,7 @@ internal class AccessibilityAndroidGuiPlatform(
         )
     }
 
-    override fun screenshotExcludesOverlays(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
-
-    override suspend fun dispatch(action: Action): AndroidGuiActionResult {
+    override suspend fun dispatch(action: Action, displayId: Int): AndroidGuiActionResult {
         val service = awaitService()
         return when (action.tool) {
             OobActionSchema.TOOL_CLICK -> gesture(
@@ -128,6 +194,7 @@ internal class AccessibilityAndroidGuiPlatform(
                 x1 = number(action, OobActionSchema.ARG_X),
                 y1 = number(action, OobActionSchema.ARG_Y),
                 durationMs = CLICK_GESTURE_DURATION_MS,
+                displayId = displayId,
             )
 
             OobActionSchema.TOOL_LONG_PRESS -> gesture(
@@ -135,6 +202,7 @@ internal class AccessibilityAndroidGuiPlatform(
                 x1 = number(action, OobActionSchema.ARG_X),
                 y1 = number(action, OobActionSchema.ARG_Y),
                 durationMs = long(action, OobActionSchema.ARG_DURATION_MS, 800L),
+                displayId = displayId,
             )
 
             OobActionSchema.TOOL_SWIPE -> gesture(
@@ -144,18 +212,23 @@ internal class AccessibilityAndroidGuiPlatform(
                 x2 = number(action, OobActionSchema.ARG_X2),
                 y2 = number(action, OobActionSchema.ARG_Y2),
                 durationMs = long(action, OobActionSchema.ARG_DURATION_MS, 300L),
+                displayId = displayId,
             )
 
-            OobActionSchema.TOOL_INPUT_TEXT -> inputText(action)
-            OobActionSchema.TOOL_PRESS_KEY -> pressKey(service, action)
-            OobActionSchema.TOOL_OPEN_APP -> openApp(action)
+            OobActionSchema.TOOL_INPUT_TEXT -> inputText(action, displayId)
+            OobActionSchema.TOOL_PRESS_KEY -> pressKey(service, action, displayId)
+            OobActionSchema.TOOL_OPEN_APP -> openApp(action, displayId)
             OobActionSchema.TOOL_WAIT -> wait(action)
             else -> AndroidGuiActionResult(false, "unsupported_android_gui_action:${action.tool}")
         }
     }
 
-    override suspend fun inputTarget(x: Float?, y: Float?): AndroidGuiInputTarget? =
-        withNodes { nodes ->
+    override suspend fun inputTarget(
+        x: Float?,
+        y: Float?,
+        displayId: Int,
+    ): AndroidGuiInputTarget? =
+        withNodes(displayId) { nodes ->
             selectInputNode(
                 nodes = nodes,
                 x = x,
@@ -190,25 +263,15 @@ internal class AccessibilityAndroidGuiPlatform(
         return bounds.top.takeIf { it > 0 }
     }
 
-    override fun displaySize(): Pair<Int, Int> {
-        val manager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            manager.maximumWindowMetrics.bounds
-        } else {
-            @Suppress("DEPRECATION")
-            android.graphics.Point().also(manager.defaultDisplay::getRealSize).let {
-                Rect(0, 0, it.x, it.y)
-            }
-        }
-        return bounds.width().coerceAtLeast(1) to bounds.height().coerceAtLeast(1)
-    }
-
-    private suspend fun inputText(action: Action): AndroidGuiActionResult {
+    private suspend fun inputText(
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiActionResult {
         val text = action.args[OobActionSchema.ARG_TEXT]?.toString()
             ?: return AndroidGuiActionResult(false, "input_text_required")
         var latest = AndroidGuiActionResult(false, "input_target_not_found")
         repeat(INPUT_TEXT_ATTEMPTS) { attempt ->
-            latest = withNodes { nodes ->
+            latest = withNodes(displayId) { nodes ->
                 val node = selectInputNode(
                     nodes = nodes,
                     x = optionalNumber(action, OobActionSchema.ARG_X),
@@ -244,23 +307,38 @@ internal class AccessibilityAndroidGuiPlatform(
     private suspend fun pressKey(
         service: AssistsService,
         action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
     ): AndroidGuiActionResult {
         val key = action.args[OobActionSchema.ARG_KEY]?.toString()?.trim()?.lowercase().orEmpty()
         val success = when (key) {
-            "back" -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            "home" -> service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-            "enter" -> pressEnter(action)
-            "select_all" -> performFocusedTextAction(selectAll = true)
-            "copy" -> performFocusedTextAction(selectAll = false)
+            "back" -> if (displayId == Display.DEFAULT_DISPLAY) {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            } else {
+                dispatchKeyEventToDisplay(displayId, 4 /* KEYCODE_BACK */)
+            }
+            "home" -> if (displayId == Display.DEFAULT_DISPLAY) {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+            } else {
+                dispatchKeyEventToDisplay(displayId, 3 /* KEYCODE_HOME */)
+            }
+            "enter" -> pressEnter(action, displayId)
+            "select_all" -> performFocusedTextAction(selectAll = true, displayId = displayId)
+            "copy" -> performFocusedTextAction(selectAll = false, displayId = displayId)
             else -> return AndroidGuiActionResult(false, "press_key_invalid:$key")
         }
         return AndroidGuiActionResult(success, if (success) "press_key_dispatched" else "press_key_failed")
     }
 
-    private suspend fun performFocusedTextAction(selectAll: Boolean): Boolean {
+    private fun dispatchKeyEventToDisplay(displayId: Int, keyCode: Int): Boolean =
+        DeviceDisplayManager.injectKeyEvent(displayId, keyCode)
+
+    private suspend fun performFocusedTextAction(
+        selectAll: Boolean,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
         var success = false
         repeat(PRESS_KEY_ATTEMPTS) { attempt ->
-            success = withNodes { nodes ->
+            success = withNodes(displayId) { nodes ->
                 val node = selectInputNode(
                     nodes = nodes,
                     x = null,
@@ -292,7 +370,10 @@ internal class AccessibilityAndroidGuiPlatform(
         return success
     }
 
-    private suspend fun pressEnter(action: Action): Boolean {
+    private suspend fun pressEnter(
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
         val x = optionalNumber(action, OobActionSchema.ARG_X)
         val y = optionalNumber(action, OobActionSchema.ARG_Y)
         val resourceId = action.args[OobActionSchema.ARG_NODE_RESOURCE_ID]
@@ -300,7 +381,7 @@ internal class AccessibilityAndroidGuiPlatform(
             .orEmpty()
         var success = false
         repeat(PRESS_KEY_ATTEMPTS) { attempt ->
-            success = withNodes { nodes ->
+            success = withNodes(displayId) { nodes ->
                 val node = selectInputNode(
                     nodes = nodes,
                     x = x,
@@ -319,14 +400,24 @@ internal class AccessibilityAndroidGuiPlatform(
         return success
     }
 
-    private fun openApp(action: Action): AndroidGuiActionResult {
+    private fun openApp(
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiActionResult {
         val packageName = action.args[OobActionSchema.ARG_PACKAGE_NAME]?.toString()?.trim().orEmpty()
         if (packageName.isEmpty()) return AndroidGuiActionResult(false, "open_app_package_required")
-        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
-            ?: return AndroidGuiActionResult(false, "open_app_not_found:$packageName")
-        intent.addFlags(OPEN_APP_INTENT_FLAGS)
-        context.startActivity(intent)
-        return AndroidGuiActionResult(true, "open_app_dispatched")
+        return if (displayId == Display.DEFAULT_DISPLAY) {
+            val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+                ?: return AndroidGuiActionResult(false, "open_app_not_found:$packageName")
+            intent.addFlags(OPEN_APP_INTENT_FLAGS)
+            context.startActivity(intent)
+            AndroidGuiActionResult(true, "open_app_dispatched")
+        } else {
+            // For secondary/virtual displays, delegate to DeviceDisplayManager
+            kotlinx.coroutines.runBlocking {
+                DeviceDisplayManager.launchAppOnDisplay(context, packageName, displayId)
+            }
+        }
     }
 
     private suspend fun wait(action: Action): AndroidGuiActionResult {
@@ -343,14 +434,18 @@ internal class AccessibilityAndroidGuiPlatform(
         x2: Float = x1,
         y2: Float = y1,
         durationMs: Long,
+        displayId: Int = Display.DEFAULT_DISPLAY,
     ): AndroidGuiActionResult = suspendCancellableCoroutine { continuation ->
         val path = Path().apply {
             moveTo(x1, y1)
             if (x1 != x2 || y1 != y2) lineTo(x2, y2)
         }
-        val gesture = GestureDescription.Builder()
+        val builder = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs.coerceAtLeast(1L)))
-            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            builder.setDisplayId(displayId)
+        }
+        val gesture = builder.build()
         val accepted = service.dispatchGesture(
             gesture,
             object : AccessibilityService.GestureResultCallback() {
@@ -369,14 +464,32 @@ internal class AccessibilityAndroidGuiPlatform(
             null,
         )
         if (!accepted && continuation.isActive) {
-            continuation.resume(AndroidGuiActionResult(false, "gesture_rejected"))
+            if (displayId != Display.DEFAULT_DISPLAY) {
+                val injected = if (x1 == x2 && y1 == y2) {
+                    DeviceDisplayManager.injectTap(displayId, x1.toInt(), y1.toInt())
+                } else {
+                    DeviceDisplayManager.injectSwipe(displayId, x1.toInt(), y1.toInt(), x2.toInt(), y2.toInt(), durationMs)
+                }
+                continuation.resume(
+                    AndroidGuiActionResult(
+                        injected,
+                        if (injected) "gesture_dispatched_via_root" else "gesture_rejected",
+                    ),
+                )
+            } else {
+                continuation.resume(AndroidGuiActionResult(false, "gesture_rejected"))
+            }
         }
     }
-
     private suspend fun captureScreenshot(
         service: AssistsService,
-    ): ByteArray? =
-        suspendCancellableCoroutine { continuation ->
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): ByteArray? {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            val virtualBytes = DeviceDisplayManager.captureVirtualScreenshot(displayId)
+            if (virtualBytes != null) return virtualBytes
+        }
+        return suspendCancellableCoroutine { continuation ->
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                 continuation.resume(null)
                 return@suspendCancellableCoroutine
@@ -401,27 +514,39 @@ internal class AccessibilityAndroidGuiPlatform(
                 }
             }
             service.takeScreenshot(
-                Display.DEFAULT_DISPLAY,
+                displayId,
                 service.mainExecutor,
                 callback,
             )
         }
+    }
 
-    private suspend fun <T> withNodes(block: (List<AccessibilityNodeInfo>) -> T): T {
+    private suspend fun <T> withNodes(
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        block: (List<AccessibilityNodeInfo>) -> T,
+    ): T {
         val service = awaitService()
-        // Once an EditText is focused, Android may report the IME window as the
-        // active accessibility window.  The app's editable node is still present
-        // in another window, so searching only rootInActiveWindow makes
-        // input_text fail on otherwise valid targets (notably Contacts).
         val roots = withContext(Dispatchers.Main.immediate) {
             val seenWindowIds = mutableSetOf<Int>()
             buildList {
                 fun addRoot(root: AccessibilityNodeInfo) {
                     if (seenWindowIds.add(root.windowId)) add(root)
                 }
-                service.rootInActiveWindow?.let(::addRoot)
-                service.windows.forEach { window ->
-                    window.root?.let(::addRoot)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    val allDisplays = runCatching { service.windowsOnAllDisplays }.getOrNull()
+                    val displayWindows = allDisplays?.get(displayId)
+                    if (displayWindows != null && displayWindows.isNotEmpty()) {
+                        displayWindows.forEach { window ->
+                            window.root?.let(::addRoot)
+                        }
+                        return@buildList
+                    }
+                }
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    service.rootInActiveWindow?.let(::addRoot)
+                    service.windows.forEach { window ->
+                        window.root?.let(::addRoot)
+                    }
                 }
             }
         }
@@ -499,7 +624,57 @@ internal class AccessibilityAndroidGuiPlatform(
         } ?: error("android_gui_accessibility_not_ready")
     }
 
-    private fun rootPackage(xml: String): String = PACKAGE.find(xml)?.groupValues?.getOrNull(1).orEmpty()
+    private fun resolveDisplayPackage(
+        service: AssistsService,
+        displayId: Int,
+        displayWindows: List<AccessibilityWindowInfo>,
+    ): String {
+        val isLocked = runCatching { KeyguardStateMonitor.isKeyguardLocked(context) }.getOrDefault(false)
+        if (displayId == Display.DEFAULT_DISPLAY && isLocked) {
+            val lockscreenWindow = displayWindows.firstOrNull { it.isFocused }
+                ?: displayWindows.firstOrNull { it.isActive }
+            val lockPkg = lockscreenWindow?.let(::windowPackage).orEmpty()
+            if (lockPkg.isNotEmpty()) return lockPkg
+            val activePkg = runCatching { service.rootInActiveWindow?.packageName?.toString()?.trim() }.getOrNull().orEmpty()
+            if (activePkg.isNotEmpty()) return activePkg
+            return "com.android.systemui"
+        }
+
+        val focusedAppPkg = displayWindows
+            .firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }
+            ?.let(::windowPackage)
+            .orEmpty()
+        if (focusedAppPkg.isNotEmpty()) return focusedAppPkg
+
+        val activeAppPkg = displayWindows
+            .firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive }
+            ?.let(::windowPackage)
+            .orEmpty()
+        if (activeAppPkg.isNotEmpty()) return activeAppPkg
+
+        val anyAppPkg = displayWindows
+            .firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            ?.let(::windowPackage)
+            .orEmpty()
+        if (anyAppPkg.isNotEmpty()) return anyAppPkg
+
+        val focusedWindowPkg = (displayWindows.firstOrNull { it.isFocused }
+            ?: displayWindows.firstOrNull { it.isActive })
+            ?.let(::windowPackage)
+            .orEmpty()
+        if (focusedWindowPkg.isNotEmpty()) return focusedWindowPkg
+
+        if (displayId == Display.DEFAULT_DISPLAY) {
+            val activePkg = runCatching { service.rootInActiveWindow?.packageName?.toString()?.trim() }.getOrNull().orEmpty()
+            if (activePkg.isNotEmpty()) return activePkg
+            return service.lastPackageName
+        }
+
+        return ""
+    }
+
+    private fun windowPackage(window: AccessibilityWindowInfo): String =
+        runCatching { window.root?.packageName?.toString()?.trim() }.getOrNull().orEmpty()
 
     private fun number(action: Action, key: String): Float =
         optionalNumber(action, key) ?: error("${action.tool}_${key}_required")
@@ -524,7 +699,6 @@ internal class AccessibilityAndroidGuiPlatform(
         const val INPUT_TEXT_RETRY_DELAY_MS = 120L
         const val PRESS_KEY_ATTEMPTS = 6
         const val PRESS_KEY_RETRY_DELAY_MS = 120L
-        val PACKAGE = Regex("package=\\\"([^\\\"]+)\\\"")
     }
 }
 
@@ -538,5 +712,4 @@ internal enum class InputNodeLookup(
 }
 
 internal val OPEN_APP_INTENT_FLAGS: Int =
-    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
-        android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+    android.content.Intent.FLAG_ACTIVITY_NEW_TASK

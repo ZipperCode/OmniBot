@@ -21,6 +21,10 @@ import cn.com.omnimind.bot.agent.AgentModelOverride
 import cn.com.omnimind.bot.agent.AgentResult
 import cn.com.omnimind.bot.agent.AgentRuntimeContextRepository
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
+import cn.com.omnimind.bot.agent.AgentRunControl
+import cn.com.omnimind.bot.agent.AgentToolExecutionHandle
+import cn.com.omnimind.bot.agent.AgentToolProgressSnapshot
+import cn.com.omnimind.bot.agent.ManualToolStopCancellationException
 import cn.com.omnimind.bot.agent.NoOpAgentRunControl
 import cn.com.omnimind.bot.agent.OmniAgentExecutor
 import cn.com.omnimind.bot.agent.ToolExecutionResult
@@ -52,6 +56,9 @@ import com.agentclientprotocol.model.SessionListCapabilities
 import com.agentclientprotocol.model.SessionResumeCapabilities
 import com.agentclientprotocol.model.SessionId
 import com.agentclientprotocol.model.SessionUpdate
+import com.agentclientprotocol.model.SessionMode
+import com.agentclientprotocol.model.SessionModeId
+import com.agentclientprotocol.model.SetSessionModeResponse
 import com.agentclientprotocol.model.SetSessionModelResponse
 import com.agentclientprotocol.model.StopReason
 import com.agentclientprotocol.model.ToolCallContent
@@ -163,13 +170,16 @@ internal class XiaowanAcpConnection(
                         ),
                     )
                 },
-                requestPermission = { sessionId, toolCallId, title, detail ->
+                requestPermission = { sessionId, toolCallId, title, detail, action, targetResource, rawInput ->
                     requestClientPermission(
                         protocol = serverProtocol,
                         sessionId = sessionId,
                         toolCallId = toolCallId,
                         title = title,
                         detail = detail,
+                        action = action,
+                        targetResource = targetResource,
+                        rawInputData = rawInput,
                     )
                 },
             )
@@ -215,7 +225,20 @@ internal class XiaowanAcpConnection(
         toolCallId: String,
         title: String,
         detail: String,
+        action: String? = null,
+        targetResource: String? = null,
+        rawInputData: JsonObject? = null,
     ): Boolean {
+        val rawInput = mutableMapOf<String, Any?>(
+            "detail" to detail.ifBlank { title },
+        )
+        if (!action.isNullOrBlank()) rawInput["action"] = action
+        if (!targetResource.isNullOrBlank()) rawInput["targetResource"] = targetResource
+        if (rawInputData != null) {
+            rawInputData.forEach { (key, element) ->
+                rawInput[key] = element
+            }
+        }
         val response = protocol.sendRequestRaw(
             MethodName("session/request_permission"),
             jsonObjectFromMap(
@@ -229,15 +252,18 @@ internal class XiaowanAcpConnection(
                         "title" to title,
                         "kind" to "execute",
                         "status" to "pending",
-                        "rawInput" to mapOf(
-                            "detail" to detail.ifBlank { title },
-                        ),
+                        "rawInput" to rawInput,
                     ),
                     "options" to listOf(
                         mapOf(
                             "optionId" to "allow_once",
                             "name" to "允许一次",
                             "kind" to "allow_once",
+                        ),
+                        mapOf(
+                            "optionId" to "allow_task",
+                            "name" to "批准本任务 (仅限本任务范围)",
+                            "kind" to "allow_always",
                         ),
                         mapOf(
                             "optionId" to "reject_once",
@@ -278,7 +304,7 @@ internal fun isAllowedAcpPermissionOutcome(response: JsonElement?): Boolean {
         ?.trim()
         ?.lowercase()
         ?: return false
-    return optionId == "allow_once" || optionId == "allow_always"
+    return optionId == "allow_once" || optionId == "allow_task" || optionId == "allow_always"
 }
 
 private class XiaowanAgentSupport(
@@ -290,7 +316,7 @@ private class XiaowanAgentSupport(
     private val isXiaowanSession: suspend (String) -> Boolean,
     private val deleteSessionCallback: suspend (String) -> Unit,
     private val publishUpdate: suspend (String, SessionUpdate) -> Unit,
-    private val requestPermission: suspend (String, String, String, String) -> Boolean,
+    private val requestPermission: suspend (String, String, String, String, String?, String?, JsonObject?) -> Boolean,
 ) : AgentSupport {
     private companion object {
         private const val TAG = "XiaowanAcpConnection"
@@ -653,7 +679,7 @@ private class XiaowanAgentSession(
     private val configuredModelId: String,
     private val providerProfile: ModelProviderProfile,
     override val sessionId: SessionId,
-    private val requestPermission: suspend (String, String, String, String) -> Boolean,
+    private val requestPermission: suspend (String, String, String, String, String?, String?, JsonObject?) -> Boolean,
     private val mcpSession: XiaowanMcpSession,
     private val publishUpdate: suspend (String, SessionUpdate) -> Unit,
     private val onClosed: (String) -> Unit,
@@ -662,6 +688,7 @@ private class XiaowanAgentSession(
         private const val TAG = "XiaowanAcpConnection"
     }
 
+    private val sessionRunControl = StandardAgentRunControl()
     private val messages = mutableListOf<ChatCompletionMessage>()
     private val promptMutex = Mutex()
     @Volatile
@@ -671,7 +698,19 @@ private class XiaowanAgentSession(
     // Guarded by closeMutex. Admission closes before cleanup starts; resource
     // completion is recorded only after every close operation has succeeded.
     private var cleanupComplete = false
-    private val sessionConfig = XiaowanSessionConfig(availableModels, configuredModelId)
+    private val sessionConfig = run {
+        val persisted = cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore(context)
+            .sessionConfiguration(sessionId.value)
+        val initialMode = persisted["mode"]?.takeIf { it.isNotBlank() }
+            ?: XiaowanSessionConfig.DEFAULT_MODE
+        XiaowanSessionConfig(availableModels, configuredModelId, initialMode).also { config ->
+            persisted["reasoning_effort"]?.takeIf { it.isNotBlank() }?.let { effort ->
+                runCatching {
+                    config.set("reasoning_effort", com.agentclientprotocol.model.SessionConfigOptionValue.StringValue(effort))
+                }
+            }
+        }
+    }
     private val selectedModelId: String get() = sessionConfig.model
     private val executor = OmniAgentExecutor(
         context = context,
@@ -775,6 +814,12 @@ private class XiaowanAgentSession(
                 "inMemoryMessages=${messages.size} historySource=" +
                 if (conversationId != null) "conversation" else "session_memory"
         )
+        val acpTurnId = (_meta as? JsonObject)
+            ?.get("turnId")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         val requestedConversationMode = (_meta as? JsonObject)
             ?.get("conversationMode")
             ?.jsonPrimitive
@@ -839,13 +884,40 @@ private class XiaowanAgentSession(
             reasoningEffort = reasoningEffort,
             terminalEnvironment = terminalEnvironment,
             callback = streamBridge,
-            runControl = NoOpAgentRunControl,
-            permissionRequester = AgentPermissionRequester { toolCallId, title, detail ->
-                streamBridge.emitToolPending(toolCallId, title, detail)
-                requestPermission(sessionId.value, toolCallId, title, detail)
+            runControl = sessionRunControl,
+            permissionRequester = object : AgentPermissionRequester {
+                override suspend fun requestPermission(
+                    toolCallId: String,
+                    title: String,
+                    detail: String,
+                ): Boolean = requestPermission(sessionId.value, toolCallId, title, detail, null, null, null)
+
+                override suspend fun requestPermission(
+                    toolCallId: String,
+                    title: String,
+                    detail: String,
+                    action: String?,
+                    targetResource: String?,
+                ): Boolean {
+                    streamBridge.emitToolPending(toolCallId, title, detail)
+                    return requestPermission(sessionId.value, toolCallId, title, detail, action, targetResource, null)
+                }
+
+                override suspend fun requestPermission(
+                    toolCallId: String,
+                    title: String,
+                    detail: String,
+                    action: String?,
+                    targetResource: String?,
+                    rawInput: JsonObject?,
+                ): Boolean {
+                    streamBridge.emitToolPending(toolCallId, title, detail)
+                    return requestPermission(sessionId.value, toolCallId, title, detail, action, targetResource, rawInput)
+                }
             },
             historyMessagesOverride = messages.toList().takeIf { conversationId == null },
             acpSessionId = sessionId.value,
+            acpTurnId = acpTurnId,
         )
         if (result is AgentResult.Error) {
             val error = result.exception
@@ -901,13 +973,18 @@ private class XiaowanAgentSession(
     }
 
     override suspend fun cancel() {
-        // session/cancel is handled by the ACP protocol dispatcher. Cancel the
-        // prompt job without injecting a custom exception into that dispatcher:
-        // the prompt collector observes normal coroutine cancellation and
-        // projects the official cancel result through the existing lifecycle.
-        // Propagating a CancellationException from this callback can abort the
-        // Android process while the JSON-RPC request is being handled.
+        sessionRunControl.stopAll()
         activePromptJob?.cancelAndJoin()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            val sessionKey = sessionId.value
+            cn.com.omnimind.androidgui.DisplayInputCoordinator.closeSessionVirtualDisplays(sessionKey)
+            cn.com.omnimind.androidgui.DeviceDisplayManager.closePrivilegedService(
+                context = context,
+                ownerId = sessionKey,
+                acpSessionId = sessionKey,
+            )
+            cn.com.omnimind.bot.agent.tool.handlers.DeviceDisplayToolHandler.clearSession(sessionKey)
+        }
     }
 
     override suspend fun close(_meta: JsonElement?): CloseSessionResponse =
@@ -917,7 +994,16 @@ private class XiaowanAgentSession(
             closeMutex.withLock {
                 if (!cleanupComplete) {
                     closed.set(true)
+                    sessionRunControl.stopAll()
                     this@XiaowanAgentSession.cancel()
+                    val sessionKey = sessionId.value
+                    cn.com.omnimind.androidgui.DisplayInputCoordinator.closeSessionVirtualDisplays(sessionKey)
+                    cn.com.omnimind.androidgui.DeviceDisplayManager.closePrivilegedService(
+                        context = context,
+                        ownerId = sessionKey,
+                        acpSessionId = sessionKey,
+                    )
+                    cn.com.omnimind.bot.agent.tool.handlers.DeviceDisplayToolHandler.clearSession(sessionKey)
                     cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager
                         .closeExistingAcpSession(sessionId.value)
                     mcpSession.close()
@@ -947,6 +1033,39 @@ private class XiaowanAgentSession(
         setConfigOption(com.agentclientprotocol.model.SessionConfigId("model"),
             com.agentclientprotocol.model.SessionConfigOptionValue.StringValue(modelId.value), _meta)
         return SetSessionModelResponse(JsonNull)
+    }
+
+    override val availableModes: List<SessionMode>
+        get() = XiaowanSessionConfig.MODES.map { (id, name) ->
+            SessionMode(
+                id = SessionModeId(id),
+                name = name,
+                description = when (id) {
+                    XiaowanSessionConfig.FULL_ACCESS_MODE -> "全权模式：无需人工确认，全权执行任务"
+                    XiaowanSessionConfig.READ_ONLY_MODE -> "只读模式：仅读操作，禁止破坏性修改"
+                    else -> "默认模式：每次高权限操作均询问用户确认"
+                }
+            )
+        }
+
+    override val defaultMode: SessionModeId
+        get() = SessionModeId(XiaowanSessionConfig.DEFAULT_MODE)
+
+    val currentMode: SessionModeId
+        get() = SessionModeId(sessionConfig.mode)
+
+    override suspend fun setMode(
+        modeId: SessionModeId,
+        _meta: JsonElement?,
+    ): SetSessionModeResponse {
+        val resolved = resolveAcpSessionModeId(availableModes.map { it.id.value }, modeId.value)
+            ?: throw IllegalArgumentException("Invalid ACP session mode '${modeId.value}'.")
+        setConfigOption(
+            com.agentclientprotocol.model.SessionConfigId("mode"),
+            com.agentclientprotocol.model.SessionConfigOptionValue.StringValue(resolved),
+            _meta
+        )
+        return SetSessionModeResponse(JsonNull)
     }
 
     suspend fun refreshModels() {
@@ -983,12 +1102,13 @@ private class XiaowanAgentSession(
                     // session/load is history replay and is not a model refresh API.
                     refreshModels()
                 }
-                val updated = XiaowanSessionConfig(availableModels, selectedModelId)
+                val updated = XiaowanSessionConfig(availableModels, selectedModelId, sessionConfig.mode)
                 updated.set("reasoning_effort", com.agentclientprotocol.model.SessionConfigOptionValue.StringValue(sessionConfig.effort))
                 updated.set(configId.value, value)
                 AcpAgentProfileStore(context).saveSessionConfiguration(sessionId.value, mapOf(
                     "providerProfileId" to providerProfile.id,
                     "model" to updated.model,
+                    "mode" to updated.mode,
                     "reasoning_effort" to updated.effort,
                 ))
                 sessionConfig.set(configId.value, value)
@@ -2350,5 +2470,74 @@ private class LoopbackTransport : BaseTransport() {
     override fun close() {
         started = false
         fireClose()
+    }
+}
+
+internal class StandardAgentRunControl : AgentRunControl {
+    private val activeHandles = ConcurrentHashMap<String, StandardAgentToolExecutionHandle>()
+
+    override fun beginToolExecution(
+        toolName: String,
+        toolCallId: String,
+    ): AgentToolExecutionHandle {
+        lateinit var handle: StandardAgentToolExecutionHandle
+        handle = StandardAgentToolExecutionHandle(
+            toolName = toolName,
+            toolCallId = toolCallId,
+            onComplete = { activeHandles.remove(toolCallId, handle) }
+        )
+        activeHandles[toolCallId] = handle
+        return handle
+    }
+
+    suspend fun stopAll() {
+        val handles = activeHandles.values.toList()
+        activeHandles.clear()
+        handles.forEach { handle ->
+            runCatching { handle.requestStop() }
+        }
+    }
+}
+
+internal class StandardAgentToolExecutionHandle(
+    override val toolName: String,
+    override val toolCallId: String,
+    private val onComplete: (() -> Unit)? = null,
+) : AgentToolExecutionHandle {
+    override val generation: Long = System.currentTimeMillis()
+    private var boundCardId: String? = null
+    private var executionJob: Job? = null
+    private var stopAction: (suspend () -> Unit)? = null
+    private var progressSnapshot = AgentToolProgressSnapshot()
+    @Volatile private var manualStopRequested = false
+
+    override fun bindCardId(cardId: String) { boundCardId = cardId }
+    override fun currentCardId(): String? = boundCardId
+    override fun bindExecutionJob(job: Job) { executionJob = job }
+    override fun bindStopAction(action: (suspend () -> Unit)?) { stopAction = action }
+    override fun recordProgress(summary: String, extras: Map<String, Any?>) {
+        progressSnapshot = AgentToolProgressSnapshot(summary, extras)
+    }
+    override fun latestProgressSnapshot(): AgentToolProgressSnapshot = progressSnapshot
+    override fun isManualStopRequested(): Boolean = manualStopRequested
+
+    override fun throwIfStopRequested() {
+        if (manualStopRequested) {
+            throw ManualToolStopCancellationException("Tool execution stopped manually")
+        }
+    }
+
+    suspend fun requestStop() {
+        manualStopRequested = true
+        try {
+            stopAction?.invoke()
+        } catch (_: Exception) {}
+        executionJob?.cancel(ManualToolStopCancellationException())
+    }
+
+    override fun complete() {
+        executionJob = null
+        stopAction = null
+        onComplete?.invoke()
     }
 }

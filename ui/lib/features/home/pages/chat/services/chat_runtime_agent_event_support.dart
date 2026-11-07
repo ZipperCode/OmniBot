@@ -81,7 +81,7 @@ extension _ChatRuntimeAgentEventSupport on ChatConversationRuntimeCoordinator {
     );
     if (runtimes.length == 1) return runtimes.single.mode;
     return switch (event['conversationMode']?.toString()) {
-      'normal' || 'chat_only' || 'subagent' => kChatRuntimeModeNormal,
+      'normal' || 'chat_only' => kChatRuntimeModeNormal,
       'openclaw' => kChatRuntimeModeOpenClaw,
       _ => kChatRuntimeModeAgent,
     };

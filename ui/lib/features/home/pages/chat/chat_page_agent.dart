@@ -320,12 +320,13 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       _activeAgentModelId = null;
       _activeAgentReasoningEffort = _normalizeAgentReasoningEffort(effort);
       _activeAgentCollaborationMode = null;
-      // Permission is an app-owned ACP policy. A Harness may report its own
-      // default mode (usually `agent`/on-request), but that must not silently
-      // replace the app's canonical default or a per-conversation choice.
-      // New conversations start in Full access, matching the selector's
-      // initial value; an explicit stored choice remains authoritative.
-      _agentPermissionMode = permissionMode ?? AgentPermissionMode.fullAccess;
+      // F05 原则：未明确手动选 full 的初始新草稿必须 defaultMode（任务授权）；
+      // 已有会话若有显式偏好或已反显状态予以保留，缺 mode 时不得盲目猜。
+      _agentPermissionMode = conversationId == null
+          ? (_isFullAccessDraftSelected
+              ? AgentPermissionMode.fullAccess
+              : AgentPermissionMode.defaultMode)
+          : (permissionMode ?? _agentPermissionMode);
     });
     if (effort == null || _agentModelOptions.isEmpty) {
       unawaited(_loadAgentModelOptionsWhenReady());
@@ -509,12 +510,42 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         effectiveModel,
       );
       final serverEffort = configSettings.reasoningEffort ?? modelDefaultEffort;
+      final activeConvId =
+          _modeState(ChatPageMode.agent).currentConversationId;
+      final conversationRuntime = activeConvId != null
+          ? _runtimeCoordinator.runtimeFor(
+              conversationId: activeConvId,
+              mode: kChatRuntimeModeAgent,
+            )
+          : null;
+      final rawOptions = response['configOptions'];
+      final configOptionsList = rawOptions is List
+          ? rawOptions.whereType<Map>()
+          : const <Map>[];
+      final modeOption = configOptionsList.firstWhere(
+        (o) => o['id'] == 'mode' || o['category'] == 'mode',
+        orElse: () => const {},
+      );
+      final serverModeId = response['mode'] ??
+          response['currentModeId'] ??
+          modeOption['currentValue'] ??
+          modeOption['value'] ??
+          conversationRuntime?.currentAcpModeId;
+      final serverPermissionMode = configSettings.permissionMode ??
+          _extractAgentConfigPermissionMode(response) ??
+          _parseAgentPermissionMode(serverModeId);
       final storedPermissionMode = _parseAgentPermissionMode(
         _readAgentPreference(
           _kAgentPermissionModePreferenceKey,
-          conversationId: _modeState(ChatPageMode.agent).currentConversationId,
+          conversationId: activeConvId,
         ),
       );
+      // F05 原则：切已有 session 以 server owner 优先，其次为显式保存的会话偏好，缺 mode 时不得猜但有 full 必须反显
+      final resolvedPermissionMode = activeConvId != null
+          ? (serverPermissionMode ?? storedPermissionMode)
+          : (_isFullAccessDraftSelected
+              ? AgentPermissionMode.fullAccess
+              : (storedPermissionMode ?? AgentPermissionMode.defaultMode));
       final effortOptions = _mergeAgentReasoningEffortOptions(
         current: serverEffort,
         options: extractAcpReasoningEffortIds(response),
@@ -539,8 +570,8 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         // turn. Some Harnesses expose a read-only/stale mode in config/read;
         // allowing it to overwrite the selection makes the picker appear
         // broken immediately after it is changed.
-        if (storedPermissionMode != null) {
-          _agentPermissionMode = storedPermissionMode;
+        if (resolvedPermissionMode != null) {
+          _agentPermissionMode = resolvedPermissionMode;
         }
         final selectedEffort = _normalizeAgentReasoningEffort(
           _activeAgentReasoningEffort,
@@ -755,34 +786,46 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
 
   @override
   Future<void> _selectAgentPermissionMode(AgentPermissionMode mode) async {
-    final value = switch (mode) {
-      AgentPermissionMode.readOnly => 'read-only',
-      AgentPermissionMode.defaultMode ||
-      AgentPermissionMode.autoReview => 'agent',
-      AgentPermissionMode.fullAccess => 'agent-full-access',
-    };
+    final threadId = _activeAgentThreadId?.trim();
+    final conversationId = _modeState(ChatPageMode.agent).currentConversationId;
+    final currentAgentId = _activeAcpAgentId?.trim();
+    if (threadId != null && threadId.isNotEmpty) {
+      final modeId = switch (mode) {
+        AgentPermissionMode.readOnly => 'read-only',
+        AgentPermissionMode.defaultMode ||
+        AgentPermissionMode.autoReview => 'default',
+        AgentPermissionMode.fullAccess => 'agent_full_access',
+      };
+      try {
+        // 统一使用官方 session/set_mode，避免与 set_config_option 双重调用导致假态
+        await AgentRuntimeService.setSessionMode(
+          sessionId: threadId,
+          conversationId: conversationId,
+          agentId: currentAgentId,
+          modeId: modeId,
+        );
+      } catch (error) {
+        if (mounted) {
+          showToast(
+            formatAgentRuntimeErrorForUser(
+              error,
+              english: LegacyTextLocalizer.isEnglish,
+            ),
+            type: ToastType.error,
+          );
+        }
+        return;
+      }
+    }
     if (!mounted) return;
     setState(() {
       _agentPermissionMode = mode;
     });
-    // The canonical prompt carries approvalPolicy/sandboxPolicy on every
-    // turn, so the local selection remains effective even when a Harness
-    // does not expose a mutable ACP `mode` config option. Persist it before
-    // attempting the optional in-session mutation so a new session also
-    // starts with the selected mode.
     await _writeAgentPreference(
       _kAgentPermissionModePreferenceKey,
       _agentPermissionModePreferenceValue(mode),
     );
-    try {
-      await _setAgentConfigOption(configId: 'mode', value: value);
-    } catch (error) {
-      // A running turn or a Harness without `mode` is not a failed user
-      // selection: the next canonical `session/prompt` applies the policy.
-      debugPrint('ACP permission mode will apply on the next turn: $error');
-    }
   }
-
   Future<void> _setAgentConfigOption({
     required String configId,
     required dynamic value,
@@ -1185,6 +1228,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     );
   }
 
+  @override
   String? _readAgentPreference(String kind, {int? conversationId}) {
     try {
       if (conversationId != null) {
@@ -1194,12 +1238,20 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
               defaultValue: '',
             ) ??
             StorageService.getString(
+              'chat_agent_preference.$kind.conversation.$conversationId',
+              defaultValue: '',
+            ) ??
+            StorageService.getString(
               _legacyAgentPreferenceKey(kind, conversationId: conversationId),
               defaultValue: '',
             );
         final normalizedScoped = scoped?.trim() ?? '';
         if (normalizedScoped.isNotEmpty) {
           return normalizedScoped;
+        }
+        // Permission mode 严格属于当前会话范围，不应落回全局 full 偏好
+        if (kind == _kAgentPermissionModePreferenceKey) {
+          return null;
         }
       }
       final global =
@@ -1275,27 +1327,6 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
     };
   }
 
-  AgentPermissionMode? _parseAgentPermissionMode(String? raw) {
-    switch (raw?.trim().toLowerCase().replaceAll('_', '-')) {
-      case 'read-only':
-      case 'readonly':
-        return AgentPermissionMode.readOnly;
-      case 'workspace-write':
-      case 'workspacewrite':
-      case 'agent':
-      case 'default':
-        return AgentPermissionMode.defaultMode;
-      case 'auto-review':
-      case 'autoreview':
-        return AgentPermissionMode.autoReview;
-      case 'full-access':
-      case 'fullaccess':
-      case 'agent-full-access':
-        return AgentPermissionMode.fullAccess;
-      default:
-        return null;
-    }
-  }
 
   String _agentPreferenceKey(String kind, {int? conversationId}) {
     final source = kind == _kAgentModelPreferenceKey
@@ -1622,6 +1653,15 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       }
       _unboundConfigurationSessions.remove(dispatchMode);
       _activeAgentThreadId = acpSessionId;
+      if (dispatchPermissionMode == AgentPermissionMode.fullAccess) {
+        // 在 prompt 前按真实 prepared acpSessionId 显式 await set_mode，失败阻断该 prompt
+        await AgentRuntimeService.setSessionMode(
+          sessionId: acpSessionId,
+          conversationId: resolvedConversationId,
+          agentId: dispatchAgentId,
+          modeId: 'agent_full_access',
+        );
+      }
       final response = await AgentRuntimeService.promptSession(
         conversationId: resolvedConversationId,
         sessionId: acpSessionId,
@@ -1750,5 +1790,42 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
       activeModel: _activeAgentModelId,
       activeModelSourceMatches: _loadedAgentModelSourceKey == sourceKey,
     );
+  }
+}
+
+AgentPermissionMode? _parseAgentPermissionMode(dynamic raw) {
+  if (raw == null) return null;
+  String text;
+  if (raw is Map) {
+    text = (raw['value'] ??
+            raw['modeId'] ??
+            raw['mode'] ??
+            raw['id'] ??
+            raw['name'] ??
+            '')
+        .toString();
+  } else {
+    text = raw.toString();
+  }
+  switch (text.trim().toLowerCase().replaceAll('_', '-')) {
+    case 'read-only':
+    case 'readonly':
+      return AgentPermissionMode.readOnly;
+    case 'workspace-write':
+    case 'workspacewrite':
+    case 'agent':
+    case 'default':
+      return AgentPermissionMode.defaultMode;
+    case 'auto-review':
+    case 'autoreview':
+      return AgentPermissionMode.autoReview;
+    case 'full-access':
+    case 'fullaccess':
+    case 'agent-full-access':
+    case 'danger-full-access':
+    case 'dangerfullaccess':
+      return AgentPermissionMode.fullAccess;
+    default:
+      return null;
   }
 }

@@ -562,7 +562,8 @@ internal object AgentConversationHistorySupport {
         val normalized = entries.map { entry ->
             if (
                 entry.entryType != AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT ||
-                entry.status != AgentConversationHistoryRepository.STATUS_RUNNING
+                (entry.status != AgentConversationHistoryRepository.STATUS_RUNNING &&
+                    entry.status != "pending")
             ) {
                 entry
             } else {

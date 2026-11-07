@@ -147,7 +147,9 @@ class SubagentDispatcher(
             )
             val subEnv = DefaultAgentExecutionEnvironment(
                 acpSessionId = parentEnv.acpSessionId,
+                acpTurnId = parentEnv.acpTurnId,
                 agentRunId = subagentId,
+                conversationId = parentEnv.conversationId,
                 userMessage = spec.instruction,
                 runtimeContextRepository = parentEnv.runtimeContextRepository,
                 workspaceDescriptor = parentEnv.workspaceDescriptor,

@@ -3035,4 +3035,163 @@ void main() {
       await disposeChat(tester);
     },
   );
+
+  testWidgets(
+    'draft full access sets session mode before first prompt and binds real ID',
+    (tester) async {
+      allowConversationCreation = true;
+      await pumpChat(
+        tester,
+        ConversationThreadTarget.newConversation(mode: ConversationMode.agent),
+      );
+      expect(find.byType(NewConversationModeSelector), findsOneWidget);
+
+      await chooseMode(tester, kNewConversationFullAccessModeId);
+      expect(selector(tester).selectedId, kNewConversationFullAccessModeId);
+
+      // 草稿态尚未发送，不能提前接入 session
+      expectNoSessionAdmission();
+
+      composer(tester).controller.text = '全权首轮执行任务';
+      composer(tester).onSendMessage();
+      await tester.pumpAndSettle();
+
+      final setModeIndex = agentCalls.indexWhere(
+        (call) => call.method == 'session/set_mode',
+      );
+      final promptIndex = agentCalls.indexWhere(
+        (call) => call.method == 'session/prompt',
+      );
+
+      expect(setModeIndex, isNonNegative);
+      expect(promptIndex, isNonNegative);
+      expect(setModeIndex, lessThan(promptIndex));
+
+      final setModeCall = agentCalls[setModeIndex];
+      final promptCall = agentCalls[promptIndex];
+      final setModeArgs = Map<String, dynamic>.from(setModeCall.arguments as Map);
+      final promptArgs = Map<String, dynamic>.from(promptCall.arguments as Map);
+
+      expect(setModeArgs['modeId'], 'agent_full_access');
+      expect(setModeArgs['agentId'], 'xiaowan-acp');
+      expect(setModeArgs['sessionId'], promptArgs['sessionId']);
+      expect(promptArgs['approvalPolicy'], 'never');
+
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'existing conversation mode change failure does not falsely update UI',
+    (tester) async {
+      const conversationId = 801;
+      conversations = [
+        historyConversation(conversationId, ConversationMode.agent),
+      ];
+      historyPages[conversationId] = historyMessage(conversationId);
+      await StorageService.setString(
+        'chat_agent_preference.permission_mode.conversation.$conversationId',
+        'workspace-write',
+      );
+
+      final target = ConversationThreadTarget.existing(
+        conversationId: conversationId,
+        mode: ConversationMode.agent,
+        agentId: 'xiaowan-acp',
+        agentSessionId: 'session-801',
+      );
+      await pumpChat(tester, target);
+
+      expect(
+        composer(tester).agentPermissionMode,
+        AgentPermissionMode.defaultMode,
+      );
+
+      // 模拟底层 set_mode 抛错失败
+      messenger.setMockMethodCallHandler(agentChannel, (call) async {
+        agentCalls.add(call);
+        if (call.method == 'session/set_mode') {
+          throw PlatformException(code: 'FAILED', message: 'Mode unsupported');
+        }
+        return <String, Object?>{};
+      });
+
+      await composer(tester).onAgentPermissionModeChanged!(
+        AgentPermissionMode.fullAccess,
+      );
+      await tester.pumpAndSettle();
+
+      // UI 绝不能误显为 fullAccess，保持原模式
+      expect(
+        composer(tester).agentPermissionMode,
+        AgentPermissionMode.defaultMode,
+      );
+
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'switching between conversations isolates their respective permission modes',
+    (tester) async {
+      const firstId = 811;
+      const secondId = 812;
+      conversations = [
+        historyConversation(firstId, ConversationMode.agent),
+        historyConversation(secondId, ConversationMode.agent),
+      ];
+      historyPages[firstId] = historyMessage(firstId);
+      historyPages[secondId] = historyMessage(secondId);
+
+      // 会话 1：设置为 fullAccess
+      await StorageService.setString(
+        'chat_agent_preference.permission_mode.conversation.$firstId',
+        'full-access',
+      );
+      await StorageService.setString(
+        'chat_agent_command_preference.permission_mode.conversation.$firstId',
+        'full-access',
+      );
+      // 会话 2：设置为 defaultMode
+      await StorageService.setString(
+        'chat_agent_preference.permission_mode.conversation.$secondId',
+        'workspace-write',
+      );
+      await StorageService.setString(
+        'chat_agent_command_preference.permission_mode.conversation.$secondId',
+        'workspace-write',
+      );
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: firstId,
+          mode: ConversationMode.agent,
+          agentId: 'xiaowan-acp',
+          agentSessionId: 'session-811',
+        ),
+      );
+      expect(
+        composer(tester).agentPermissionMode,
+        AgentPermissionMode.fullAccess,
+      );
+
+      // 切换到会话 2
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: secondId,
+          mode: ConversationMode.agent,
+          agentId: 'xiaowan-acp',
+          agentSessionId: 'session-812',
+        ),
+      );
+      expect(
+        composer(tester).agentPermissionMode,
+        AgentPermissionMode.defaultMode,
+      );
+
+      await disposeChat(tester);
+    },
+  );
 }

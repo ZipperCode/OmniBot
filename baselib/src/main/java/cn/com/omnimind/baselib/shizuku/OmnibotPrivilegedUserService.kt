@@ -14,7 +14,8 @@ import kotlinx.serialization.json.Json
 @Keep
 class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
 
-    private val backend = when (android.os.Process.myUid()) {
+    private val serviceUid = android.os.Process.myUid()
+    private val backend = when (serviceUid) {
         0 -> ShizukuBackend.ROOT
         2000 -> ShizukuBackend.ADB
         else -> ShizukuBackend.NONE
@@ -35,7 +36,30 @@ class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
     override fun execute(requestJson: String?): String {
         val result = runCatching {
             val request = json.decodeFromString(PrivilegedRequest.serializer(), requestJson.orEmpty())
-            executor.execute(request)
+            val executed = executor.execute(request)
+            val unexecutedCodes = setOf(
+                "cancelled",
+                "privileged_access_changed",
+                "permission_denied",
+                "unsupported_action",
+                "blocked_by_policy",
+                "confirmation_required",
+                "invalid_arguments",
+                "session_exists",
+                "session_not_found",
+                "session_start_failed",
+                "session_busy",
+                "service_error",
+                "root_denied",
+                "root_unavailable",
+                "process_unavailable",
+            )
+            // 按真实 Process.myUid 回填实际身份，未执行或被拒绝保持 null，且不伪造 Root
+            if (executed.code in unexecutedCodes) {
+                executed.copy(uid = null)
+            } else {
+                executed.copy(uid = serviceUid)
+            }
         }.getOrElse { error ->
             if (error is InterruptedException) Thread.interrupted()
             PrivilegedResult(
@@ -44,7 +68,8 @@ class OmnibotPrivilegedUserService() : IOmnibotPrivilegedUserService.Stub() {
                 success = false,
                 code = "service_error",
                 message = error.message ?: "Privileged service failed.",
-                backend = backend
+                backend = backend,
+                uid = null,
             )
         }
         // Binder 线程会复用，请求取消不能把中断标志带入下一次调用。

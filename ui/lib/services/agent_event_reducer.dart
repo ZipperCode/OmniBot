@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:ui/features/home/pages/authorize/authorize_page_args.dart';
 import 'package:ui/features/home/pages/chat/chat_page_models.dart';
 import 'package:ui/features/home/pages/chat/services/chat_conversation_runtime_coordinator.dart';
@@ -65,20 +66,59 @@ class AgentEventReducer {
     required String? sessionId,
     String? turnId,
     String? stopReason,
-    String? error,
+    Object? error,
+    Object? requestId,
   }) {
     final normalizedSessionId = sessionId?.trim();
     final normalizedTurnId = turnId?.trim().isNotEmpty == true
         ? turnId!.trim()
-        : runtime.activeAcpTurnId?.trim();
+        : null;
+
+    // 已准入的官方回合必须保留身份；无 wire turn 的前台请求仍归其本地预留所有。
+    if (normalizedTurnId == null && runtime.activeAcpTurnId != null) {
+      return AgentReduceResult(
+        handled: true,
+        method: 'session/prompt',
+        affectsActiveTurn: false,
+        requestId: requestId,
+        compatibilityWarning: 'ACP session/prompt 缺少可靠的 sessionId 或 turnId，已隔离。',
+      );
+    }
+
+    // 重复官方响应幂等：若当前 turn 已在完成列表中，直接返回幂等结果，不重复执行完成逻辑
+    if (runtime.completedAcpTurnIds.contains(normalizedTurnId) ||
+        runtime.completedAgentTurnIds.contains(normalizedTurnId)) {
+      return AgentReduceResult(
+        handled: true,
+        method: 'session/prompt',
+        threadId: normalizedSessionId,
+        turnId: normalizedTurnId,
+        requestId: requestId,
+        affectsActiveTurn: false,
+      );
+    }
+
     final reason = stopReason?.trim().toLowerCase() ?? '';
     final isCancelled = reason == 'cancelled' || reason == 'canceled';
     final isFailure =
-        error?.trim().isNotEmpty == true ||
+        error?.toString().trim().isNotEmpty == true ||
         reason == 'error' ||
         reason == 'failed' ||
         reason == 'failure' ||
         reason == 'timeout';
+
+    // 若无 stopReason 且无 error，属于未终态或不完整响应，不触发完成
+    if (reason.isEmpty && !isFailure) {
+      return AgentReduceResult(
+        handled: true,
+        method: 'session/prompt',
+        threadId: normalizedSessionId,
+        turnId: normalizedTurnId,
+        requestId: requestId,
+        affectsActiveTurn: false,
+      );
+    }
+
     final taskId =
         runtime.resolveAcpEventRunId(
           sessionId: normalizedSessionId,
@@ -88,20 +128,18 @@ class AgentEventReducer {
               runtime.currentDispatchTurnId ??
               runtime.lastAgentTurnId,
         ) ??
+        normalizedTurnId ??
         runtime.currentDispatchTurnId ??
         runtime.lastAgentTurnId ??
-        normalizedTurnId ??
         'agent-${runtime.conversationId}';
     if (isFailure) {
-      final detail = error?.trim().isNotEmpty == true
-          ? error!.trim()
-          : (stopReason?.trim().isNotEmpty == true
-                ? stopReason!.trim()
-                : 'ACP session/prompt failed.');
+      final detail = formatAgentRuntimeErrorForUser(
+        error ?? stopReason ?? 'ACP session/prompt failed.',
+      );
       _recordTurnFailure(
         runtime,
         taskId: taskId,
-        detail: formatAgentRuntimeErrorForUser(detail),
+        detail: detail,
         params: <String, dynamic>{
           if (normalizedSessionId != null && normalizedSessionId.isNotEmpty)
             'sessionId': normalizedSessionId,
@@ -125,6 +163,7 @@ class AgentEventReducer {
       method: 'session/prompt',
       threadId: normalizedSessionId,
       turnId: normalizedTurnId,
+      requestId: requestId,
     );
   }
 
@@ -215,6 +254,15 @@ class AgentEventReducer {
         requestId: event['id'],
       );
     }
+    if (method == 'session/prompt') {
+      return _reducePromptResponseEvent(
+        runtime: runtime,
+        event: event,
+        message: message,
+        params: params,
+      );
+    }
+
 
     // ACP agents speak the official session/update notification. The reducer
     // projects that protocol object into UI state without introducing a
@@ -465,26 +513,16 @@ class AgentEventReducer {
     final admittedAcpTurnId = runtime.activeAcpTurnId?.trim();
     final currentTurnId =
         admittedAcpTurnId ?? runtime.currentDispatchTurnId?.trim();
-    // Before ACP admits a prompt, currentDispatchTurnId is only the local
-    // request/render key. A real `turn/started` is the event that binds the
-    // official ACP turn id; rejecting it here leaves every following update
-    // looking stale and strands the UI in "processing" forever.
-    // ACP adapters are not required to emit a synthetic `turn/started`
-    // notification. OpenCode, for example, begins with `session/update` and
-    // carries the official turn id on that update. When the UI has exactly
-    // one local request placeholder and no official turn has been admitted,
-    // the first turn-scoped non-terminal event is therefore the admission
-    // boundary. Without this, all OpenCode deltas look stale and the later
-    // terminal event cannot clear the local "processing" state.
+    // 本地 dispatch 只是请求占位；官方 turn 由宿主预留或正式准入事件确认。
+    // 后台 prompt 没有 Flutter registerTask，也必须用相同的宿主归属准入。
     final isTurnAdmission =
         method == 'turn/started' ||
         (turnId != null &&
             acpEventAllowsImplicitTurnAdmission(event) &&
             admittedAcpTurnId == null &&
-            runtime.isAiResponding &&
-            runtime.currentDispatchTurnId != null &&
-            runtime.currentDispatchTurnId != turnId &&
-            !_isTerminalAgentEventMethod(method));
+            !_isTerminalAgentEventMethod(method) &&
+            !runtime.completedAcpTurnIds.contains(turnId) &&
+            !runtime.completedAgentTurnIds.contains(turnId));
     if (isTurnAdmission && method != 'turn/started') {
       runtime.activeAcpTurnId = turnId;
     }
@@ -530,7 +568,8 @@ class AgentEventReducer {
             null;
     if (turnId != null &&
         method != 'turn/started' &&
-        runtime.completedAgentTurnIds.contains(turnId) &&
+        (runtime.completedAgentTurnIds.contains(turnId) ||
+            runtime.completedAcpTurnIds.contains(turnId)) &&
         !finalTurnUsagePresentation) {
       return AgentReduceResult(
         handled: true,
@@ -1494,6 +1533,140 @@ class AgentEventReducer {
       turnId: turnId,
     );
   }
+  AgentReduceResult _reducePromptResponseEvent({
+    required ChatConversationRuntimeState runtime,
+    required Map<String, dynamic> event,
+    required Map<String, dynamic> message,
+    required Map<String, dynamic> params,
+  }) {
+    final sessionId = acpEventSessionId(event) ?? acpEventSessionId(message);
+    final turnId = acpEventTurnId(event) ?? acpEventTurnId(message);
+    final requestId = _firstString([
+      message['id'],
+      event['id'],
+      message['requestId'],
+      event['requestId'],
+      params['requestId'],
+      params['id'],
+    ]);
+
+    // 校验请求与响应形状：必须包含有效 request id 且不能将请求误认为响应
+    final hasMessageMethod = message.containsKey('method') &&
+        _string(message['method'])?.isNotEmpty == true;
+    final hasResultOrError = message.containsKey('result') ||
+        message.containsKey('error') ||
+        event.containsKey('result') ||
+        event.containsKey('error');
+    if (hasMessageMethod ||
+        !hasResultOrError ||
+        requestId == null ||
+        turnId == null) {
+      // 缺少 message id、包含 inner request method 或非标准响应形状，予以隔离
+      return AgentReduceResult(
+        handled: true,
+        method: 'session/prompt',
+        threadId: sessionId,
+        turnId: turnId,
+        requestId: requestId,
+        affectsActiveTurn: false,
+        compatibilityWarning: 'ACP session/prompt 响应形状不符合标准规范，已隔离。',
+      );
+    }
+
+    // 新请求尚未获得官方 turn 时，只有该请求自己的回包能认领本地预留。
+    // 已知旧 run 映射也不例外，否则 _completeTurn 会将新 placeholder 当成旧响应所有者。
+    final pendingRequestId = runtime.currentDispatchTurnId?.trim();
+    if (runtime.activeAcpTurnId == null &&
+        pendingRequestId != null &&
+        pendingRequestId.isNotEmpty &&
+        requestId != pendingRequestId) {
+      return AgentReduceResult(
+        handled: true,
+        method: 'session/prompt',
+        threadId: sessionId,
+        turnId: turnId,
+        requestId: requestId,
+        affectsActiveTurn: false,
+      );
+    }
+
+    final resultMap =
+        _asStringMap(message['result']) ?? _asStringMap(event['result']);
+    final rawError =
+        message['error'] ?? event['error'] ?? resultMap?['error'];
+
+    // 检查是否为尚未完成的中间响应（例如仅受理或 in_progress）
+    if (resultMap != null && rawError == null) {
+      final isCompleted = resultMap['completed'] == true;
+      final rawStatus = _firstString([resultMap['status']]);
+      final rawStopReason = _firstString([resultMap['stopReason']]);
+      final isExplicitInProgress =
+          resultMap['completed'] == false ||
+          const {'in_progress', 'running', 'accepted', 'queued'}.contains(
+            rawStatus?.toLowerCase(),
+          );
+      if (isExplicitInProgress) {
+        return AgentReduceResult(
+          handled: true,
+          method: 'session/prompt',
+          threadId: sessionId,
+          turnId: turnId,
+          requestId: requestId,
+          affectsActiveTurn: false,
+        );
+      }
+      if (!isCompleted && rawStopReason == null && rawStatus == null) {
+        // 无 terminal proof（缺少 stopReason/status 且未标记 completed）
+        return AgentReduceResult(
+          handled: true,
+          method: 'session/prompt',
+          threadId: sessionId,
+          turnId: turnId,
+          requestId: requestId,
+          affectsActiveTurn: false,
+        );
+      }
+    }
+
+    Object? errorDetail;
+    if (rawError != null) {
+      if (rawError is Map) {
+        final dataMap = _asStringMap(rawError['data']);
+        final failureKind = _firstString([
+          dataMap?['failureKind'],
+          rawError['failureKind'],
+        ]);
+        final rawMsg =
+            _firstString([rawError['message'], rawError['error']]) ??
+            'ACP session/prompt failed.';
+        if (failureKind != null && failureKind.isNotEmpty) {
+          errorDetail = PlatformException(
+            code: rawError['code']?.toString() ?? '-32603',
+            message: rawMsg,
+            details: dataMap ?? <String, dynamic>{'failureKind': failureKind},
+          );
+        } else {
+          errorDetail = rawMsg;
+        }
+      } else {
+        errorDetail = rawError.toString();
+      }
+    }
+
+    final stopReason = resultMap != null
+        ? _firstString([resultMap['stopReason'], resultMap['status']])
+        : null;
+
+    return reducePromptResponse(
+      runtime: runtime,
+      sessionId: sessionId,
+      turnId: turnId,
+      stopReason: stopReason,
+      error: errorDetail,
+      requestId: requestId,
+    );
+  }
+
 
   void _applyAcpPresentation(
     ChatConversationRuntimeState runtime, {
@@ -3424,10 +3597,12 @@ class AgentEventReducer {
         : null;
     final ownerTaskId = pendingLocalTaskId ?? taskId;
     final ownerWasActive = runtime.activeAgentTurnIds.contains(ownerTaskId);
-    final protocolTurnMatchesCurrent =
-        acpTurnId == null ||
-        runtime.activeAcpTurnId == null ||
-        runtime.activeAcpTurnId == acpTurnId;
+    final protocolTurnMatchesCurrent = acpTurnId != null
+        ? (runtime.activeAcpTurnId == null || runtime.activeAcpTurnId == acpTurnId)
+        : (runtime.activeAcpTurnId == null ||
+            runtime.activeAcpTurnId == taskId ||
+            runtime.activeRunId == taskId ||
+            runtime.currentDispatchTurnId == taskId);
     final isCurrentTurn =
         protocolTurnMatchesCurrent &&
         (runtime.activeRunId == ownerTaskId ||
@@ -3438,13 +3613,21 @@ class AgentEventReducer {
     // A terminal notification for turn N can arrive after turn N+1 has
     // already started. Finalize only N's cards/messages in that case; never
     // clear the shared runtime flags or text cache owned by N+1.
-    if (!isCurrentTurn && runtime.currentDispatchTurnId != null) {
+    final hasActiveTurn =
+        runtime.isAiResponding ||
+        runtime.currentDispatchTurnId != null ||
+        runtime.activeAcpTurnId != null ||
+        runtime.activeRunId != null;
+    if (!isCurrentTurn && hasActiveTurn) {
       _markAssistantMessagesFinalForTask(runtime, taskId);
       _clearAcpRetryPresentationForTask(runtime, taskId);
       _finalizeThinkingCardsForTask(runtime, taskId);
       runtime.currentThinkingMessages.remove(taskId);
       if (wasActive) {
         runtime.completedAgentTurnIds.add(taskId);
+      }
+      if (acpTurnId != null && acpTurnId.isNotEmpty) {
+        runtime.rememberCompletedAcpTurn(acpTurnId);
       }
       return;
     }
@@ -3527,7 +3710,9 @@ class AgentEventReducer {
       runtime.rememberCompletedAcpTurn(completedOfficialTurn);
     }
     runtime.activeAcpTurnId = null;
-    if (runtime.activeRunId == ownerTaskId) {
+    if (runtime.activeRunId == ownerTaskId ||
+        runtime.activeRunId == taskId ||
+        (acpTurnId != null && runtime.activeRunId == acpTurnId)) {
       runtime.activeRunId = null;
     }
     runtime.lastAgentTurnId = null;

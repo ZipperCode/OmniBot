@@ -680,10 +680,13 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         !acpEventIsLegacyCompatibilityShape(event)) {
       return const AgentReduceResult(handled: false, affectsActiveTurn: false);
     }
+    final rawMessage = _agentEventMap(event['message']) ?? event;
+    final isPromptResponse =
+        (event['method'] ?? rawMessage['method']) == 'session/prompt';
     if (!runtime.acceptsAcpEvent(
       sessionId: eventSessionId,
       turnId: eventTurnId,
-      allowCompletedTurnMetadata: carriesFinalTurnUsage,
+      allowCompletedTurnMetadata: carriesFinalTurnUsage || isPromptResponse,
       allowSessionAdmission: allowsHostSessionAdmission,
     )) {
       return const AgentReduceResult(handled: false, affectsActiveTurn: false);
@@ -702,10 +705,27 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
         : activeAcpTurnBefore.isEmpty
         ? runtime.isAiResponding && dispatchTurnBefore.isNotEmpty
         : activeAcpTurnBefore == eventTurnId;
-    final result = _agentEventReducer
-        .reduce(runtime: runtime, event: event)
-        .copyWith(affectsActiveTurn: affectsActiveTurn);
+    final reduced = _agentEventReducer.reduce(runtime: runtime, event: event);
+    final result = reduced.copyWith(
+      affectsActiveTurn: affectsActiveTurn && reduced.affectsActiveTurn,
+    );
     if (result.handled) {
+      if (isPromptResponse &&
+          eventTurnId != null &&
+          runtime.completedAcpTurnIds.contains(eventTurnId)) {
+        final targetTaskId = runtime.resolveKnownRunId(
+          sessionId: eventSessionId,
+          turnId: eventTurnId,
+        );
+        if (targetTaskId != null) {
+          final b = _taskBindings[targetTaskId];
+          if (b != null &&
+              b.conversationId == conversationId &&
+              b.mode == mode) {
+            _taskBindings.remove(targetTaskId);
+          }
+        }
+      }
       _annotateAgentMessages(runtime, event, result);
       _notifyAcpVoicePlayback(runtime, event, result);
       if (presentation?['compaction'] is Map) {
@@ -734,7 +754,7 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           persistMessages: true,
           // Exact usage can legally trail turn/completed. Persist it now so
           // leaving the page cannot strand the footer in memory only.
-          delay: carriesFinalTurnUsage
+          delay: (carriesFinalTurnUsage || isPromptResponse)
               ? Duration.zero
               : const Duration(milliseconds: 350),
         );
@@ -762,23 +782,30 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     // The awaited prompt result belongs to the request that sent it, even
     // when ACP supplies no wire turnId. Never lend a later request's active
     // identity to an old response or transport failure.
-    if (!isTaskActive(
+    final runtime = runtimeFor(conversationId: conversationId, mode: mode);
+    if (runtime == null) {
+      return const AgentReduceResult(handled: false, affectsActiveTurn: false);
+    }
+    final binding = _taskBindings[taskId];
+    final isActive = isTaskActive(
       taskId: taskId,
       conversationId: conversationId,
       mode: mode,
-    )) {
+    );
+    if (!isActive) {
+      if (binding != null &&
+          binding.conversationId == conversationId &&
+          binding.mode == mode) {
+        _taskBindings.remove(taskId);
+      }
       return const AgentReduceResult(handled: false, affectsActiveTurn: false);
     }
-    final runtime = ensureRuntime(
-      conversationId: conversationId,
-      mode: mode,
-      conversation: conversation,
-      initialChatIslandDisplayLayer: ChatIslandDisplayLayer.mode,
-    );
     final result = _agentEventReducer.reducePromptResponse(
       runtime: runtime,
       sessionId: sessionId,
-      turnId: turnId,
+      turnId: turnId?.trim().isNotEmpty == true
+          ? turnId
+          : runtime.acpTurnIdForRun(taskId),
       stopReason: stopReason,
       error: error,
     );

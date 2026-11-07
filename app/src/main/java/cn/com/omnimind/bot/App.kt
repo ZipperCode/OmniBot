@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot
 
 import BaseApplication
+import android.app.Application
 import android.os.SystemClock
 import cn.com.omnimind.baselib.account.AccountCredentialStorageException
 import cn.com.omnimind.baselib.account.OmniAccount
@@ -25,6 +26,7 @@ import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.official.OfficialOmniPluginProviders
 import cn.com.omnimind.bot.quicklog.QuickLogWidgetUpdater
+import cn.com.omnimind.bot.task.runtime.TaskContinuationNotifications
 import cn.com.omnimind.bot.update.AppUpdateManager
 import cn.com.omnimind.bot.util.NestedBackgroundStateUtil
 import cn.com.omnimind.bot.vlm.DebugOmniMindProviderBootstrap
@@ -72,6 +74,12 @@ class App : BaseApplication() {
 
     @OptIn(DelicateCoroutinesApi::class)
     override fun onCreate() {
+        // 首次解锁前只发布泛化等待通知，不初始化凭据、数据库或 Agent。
+        if (Application.getProcessName() == packageName + TaskContinuationNotifications.BOOT_NOTIFICATION_PROCESS_SUFFIX) {
+            super.onCreate()
+            instance = this
+            return
+        }
         val appStartTime = SystemClock.elapsedRealtime()
         OmniLog.d("AppStartup", "App onCreate start")
         super.onCreate()

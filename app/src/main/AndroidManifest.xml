@@ -41,6 +41,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" /><!--后台服务权限-->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" /><!--后台服务数据更新权限-->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 悬浮窗权限 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Android 10及以上后台启动权限 -->
@@ -204,11 +205,26 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
                 <action android:name="android.intent.action.TIME_SET" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name="cn.com.omnimind.bot.task.runtime.TaskContinuationBootReceiver"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:exported="true"
+            android:process=":task_boot">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name="cn.com.omnimind.bot.task.runtime.TaskRuntimeActionReceiver"
+            android:enabled="true"
+            android:exported="false" />
         <receiver
             android:name=".quicklog.QuickLogWidgetProvider"
             android:enabled="true"
@@ -256,7 +272,11 @@
             android:name="cn.com.omnimind.bot.task.runtime.TaskRuntimeService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="用户发起的本机 Agent 长任务、手机端编译及人工认证等待" />
+        </service>
         <service
             android:name="cn.com.omnimind.bot.terminal.EmbeddedTerminalInstallService"
             android:exported="false"

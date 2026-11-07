@@ -37,6 +37,21 @@ import java.util.concurrent.atomic.AtomicLong
 
 internal const val NA_AGENT_ID = "na-cloud"
 
+internal class NaAdmittedPromptException(
+    val sessionId: String,
+    val turnId: String,
+    val conversationId: Long?,
+    val requestId: String,
+    cause: Throwable,
+) : RuntimeException(cause.message, cause), NaRuntimeFailure {
+    override val failureKind: String
+        get() = (cause as? NaRuntimeFailure)?.failureKind.orEmpty()
+    override val statusCode: Int?
+        get() = (cause as? NaRuntimeFailure)?.statusCode
+    override val phase: String?
+        get() = (cause as? NaRuntimeFailure)?.phase
+}
+
 /** HTTP transport for the existing Agent session boundary. Na owns execution,
  * model configuration and approvals; the App keeps its existing Conversation
  * bindings, reducer, prompt completion and history UI. No ACP server is used.
@@ -664,6 +679,17 @@ internal class NaCloudRuntime(
                 } catch (_: NaAttachmentCancelled) {
                     mapOf("sessionId" to id, "threadId" to id, "conversationId" to local,
                         "turnId" to reservation, "stopReason" to "cancelled")
+                } catch (error: Throwable) {
+                    if (admittedRunId != null && (error !is kotlinx.coroutines.CancellationException || error is kotlinx.coroutines.TimeoutCancellationException)) {
+                        throw NaAdmittedPromptException(
+                            sessionId = id,
+                            turnId = reservation,
+                            conversationId = local,
+                            requestId = reservation,
+                            cause = error,
+                        )
+                    }
+                    throw error
                 } finally { admittedRunId?.let { activeRuns.remove(id, it) }; cancelPending.remove(id) }
             }.also { promptOwners[key] = connection; promptInputs[key] = submittedInput; prompts[key] = it }
         }

@@ -82,7 +82,8 @@ internal class PrivilegedCommandExecutor(
         if (action == PrivilegedActionPolicy.ACTION_SHELL_EXEC ||
             action == PrivilegedActionPolicy.ACTION_SESSION_EXEC
         ) {
-            PrivilegedActionPolicy.blockedCommandReason(request.command)?.let { reason ->
+            val allowSystemModifications = request.allowSystemModifications || request.isFullPower
+            PrivilegedActionPolicy.blockedCommandReason(request.command, allowSystemModifications)?.let { reason ->
                 return failure(
                     request = request,
                     backend = backend,
@@ -93,9 +94,8 @@ internal class PrivilegedCommandExecutor(
             }
         }
 
-        if ((request.requiresConfirmation || PrivilegedActionPolicy.requiresConfirmation(action)) &&
-            !isExplicitlyConfirmed(arguments)
-        ) {
+        val requiresConfirm = (request.requiresConfirmation || PrivilegedActionPolicy.requiresConfirmation(action)) && !request.isFullPower
+        if (requiresConfirm && !isExplicitlyConfirmed(arguments)) {
             return failure(
                 request = request,
                 backend = backend,
@@ -287,6 +287,7 @@ internal class PrivilegedCommandExecutor(
     }
 
     private fun PrivilegedResult.withOutputMetadata(result: PrivilegedProcessResult): PrivilegedResult = copy(
+        uid = result.uid,
         data = data + ("truncated" to
             (result.truncated || result.stdout.length > OUTPUT_LIMIT || result.stderr.length > OUTPUT_LIMIT).toString()),
     )
@@ -460,6 +461,7 @@ internal class PrivilegedCommandExecutor(
         blockedByPolicy: Boolean = false,
         command: String? = request.command,
         timeoutSeconds: Int? = request.timeoutSeconds,
+        uid: Int? = null,
     ): PrivilegedResult {
         val mergedOutput = if (output.isNotBlank()) output else combineOutput(stdout, stderr)
         return PrivilegedResult(
@@ -473,6 +475,7 @@ internal class PrivilegedCommandExecutor(
             stdout = stdout,
             stderr = stderr,
             transcript = transcript,
+            uid = uid,
             exitCode = exitCode,
             requiresConfirmation = requiresConfirmation,
             availableActions = PrivilegedActionPolicy.visibleAgentActions(backend),

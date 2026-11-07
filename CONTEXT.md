@@ -56,3 +56,28 @@ reserves output space; both ordinary and summary requests obey this boundary.
 A missing, interrupted, truncated or over-budget summary never advances a durable
 checkpoint. A UI repaint, partial page, or empty runtime is never a clear-history
 instruction.
+
+## 任务授权
+
+用户对一个目标及其必要操作范围的授权；范围外的操作不属于该授权。
+模块开发任务的必要目标进程、系统组件与整机重启属于已批准范围。
+
+## 全权模式
+
+用户手动开启并可随时关闭的授权模式；生效期间不逐项确认，包括高风险与对外行为。
+它不是 Root 身份、设备解锁或外部认证，也不延长已撤销的权限或已停止的任务。
+
+## 实际验证
+
+针对指定目标及版本，观察用户要求的行为是否发生并保留证据。
+命令被受理、编译成功、安装成功或模块配置读回均不能替代实际验证。
+
+## 手机本地开发
+
+在目标手机完成代码处理、依赖准备、编译、签名、安装和运行验证的工作过程。
+云端模型可以提供推理，但电脑与远程构建服务器不承担日常执行。
+
+## 等待人工认证
+
+因安全锁屏、首次解锁、验证码或应用认证而暂停受影响操作的任务条件。
+无需认证的后台工作仍可继续；等待不等于失败、完成或自动授权。

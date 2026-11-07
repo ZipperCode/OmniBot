@@ -1291,22 +1291,4 @@ class AgentRuntimeProtocolPayloadTest {
         assertTrue(isAcpFullAccessMode("bypassPermissions"))
         assertFalse(isAcpFullAccessMode("workspace-write"))
     }
-
-    @Test
-    fun acpPermissionDefaultsToUnrestrictedUntilExplicitlyRequested() {
-        assertEquals(
-            AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT,
-            resolveAcpPermissionBehavior(emptyMap())
-        )
-        assertEquals(
-            AcpPermissionBehavior.ASK_USER,
-            resolveAcpPermissionBehavior(mapOf("approvalPolicy" to "on-request"))
-        )
-        assertEquals(
-            AcpPermissionBehavior.ASK_USER,
-            resolveAcpPermissionBehavior(
-                mapOf("sandboxPolicy" to mapOf("type" to "readOnly"))
-            )
-        )
-    }
 }

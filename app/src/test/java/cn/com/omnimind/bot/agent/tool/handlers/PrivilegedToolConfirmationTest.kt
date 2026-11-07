@@ -48,4 +48,30 @@ class PrivilegedToolConfirmationTest {
             fail("Cancellation must propagate")
         } catch (_: CancellationException) { }
     }
+
+    @Test fun structuredScopeIsPassedInRawInput() = runBlocking {
+        var receivedRawInput: kotlinx.serialization.json.JsonObject? = null
+        val requester = object : AgentPermissionRequester {
+            override suspend fun requestPermission(toolCallId: String, title: String, detail: String): Boolean = false
+            override suspend fun requestPermission(
+                toolCallId: String, title: String, detail: String, action: String?, targetResource: String?, rawInput: kotlinx.serialization.json.JsonObject?
+            ): Boolean {
+                receivedRawInput = rawInput
+                return true
+            }
+        }
+        val scope = cn.com.omnimind.bot.agent.runtime.TurnPermissionScope(
+            action = "shell.exec",
+            command = "id",
+            workingDirectory = "/data/local/tmp",
+            isShell = true,
+        )
+        assertTrue(PrivilegedToolConfirmation.request(
+            PrivilegedActionPolicy.ACTION_SHELL_EXEC, "tool-scope", requester, { true }, "Title", "Detail", "id", scope
+        ))
+        assertNotNull(receivedRawInput)
+        assertEquals("shell.exec", (receivedRawInput?.get("action") as? kotlinx.serialization.json.JsonPrimitive)?.content)
+        assertEquals("id", (receivedRawInput?.get("command") as? kotlinx.serialization.json.JsonPrimitive)?.content)
+        assertEquals("/data/local/tmp", (receivedRawInput?.get("workingDirectory") as? kotlinx.serialization.json.JsonPrimitive)?.content)
+    }
 }

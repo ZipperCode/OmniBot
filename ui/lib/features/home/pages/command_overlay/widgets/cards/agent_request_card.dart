@@ -46,11 +46,57 @@ class AgentRequestNotice extends StatefulWidget {
 class _AgentRequestNoticeState extends State<AgentRequestNotice> {
   bool _submitting = false;
   String? _status;
+  String? _selectedOptionValue;
 
+  @override
+  void initState() {
+    super.initState();
+    _syncDefaultSelection();
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentRequestNotice oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_requestRenderSignature(oldWidget.cardData) !=
+        _requestRenderSignature(widget.cardData)) {
+      _status = null;
+      _selectedOptionValue = null;
+      _syncDefaultSelection();
+    }
+  }
+
+  void _syncDefaultSelection() {
+    if (_cardStatus(widget.cardData) != 'pending') return;
+    final options = _resolveRequestOptions(widget.cardData);
+    if (options.isEmpty || _selectedOptionValue != null) return;
+    final kind = (widget.cardData['requestKind'] ?? '').toString().trim();
+    if (kind == 'approval') {
+      final allowOption = options.firstWhere(
+        (o) =>
+            o.value == 'allow_once' ||
+            (o.value != 'reject_once' &&
+                o.value != 'reject' &&
+                o.value != 'decline'),
+        orElse: () => options.first,
+      );
+      _selectedOptionValue = allowOption.value;
+    } else {
+      _selectedOptionValue = options.first.value;
+    }
+  }
   @override
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
     final kind = (widget.cardData['requestKind'] ?? '').toString().trim();
+    final options = _resolveRequestOptions(widget.cardData);
+    final allowOptions = options
+        .where(
+          (o) =>
+              o.value != 'reject_once' &&
+              o.value != 'reject' &&
+              o.value != 'decline',
+        )
+        .toList();
     final presentation = _compactRequestPresentation(widget.cardData);
     final title = presentation.title.isEmpty
         ? (kind == 'approval' ? 'Permission requested' : 'Agent question')
@@ -144,18 +190,38 @@ class _AgentRequestNoticeState extends State<AgentRequestNotice> {
                   const SizedBox(height: 4),
                   Wrap(
                     spacing: 4,
+                    runSpacing: 4,
                     children: [
+                      if (allowOptions.isEmpty)
+                        TextButton(
+                          onPressed: _submitting
+                              ? null
+                              : () => _respond(true, optionId: 'allow_once'),
+                          style: TextButton.styleFrom(
+                            minimumSize: const Size(0, 30),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text('允许'),
+                        )
+                      else
+                        for (final option in allowOptions)
+                          TextButton(
+                            key: ValueKey('agent-request-notice-allow-${option.value}'),
+                            onPressed: _submitting
+                                ? null
+                                : () => _respond(true, optionId: option.value),
+                            style: TextButton.styleFrom(
+                              minimumSize: const Size(0, 30),
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: Text(option.label),
+                          ),
                       TextButton(
-                        onPressed: _submitting ? null : () => _respond(true),
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size(0, 30),
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                        child: const Text('允许'),
-                      ),
-                      TextButton(
-                        onPressed: _submitting ? null : () => _respond(false),
+                        onPressed: _submitting
+                            ? null
+                            : () => _respond(false, optionId: 'reject_once'),
                         style: TextButton.styleFrom(
                           minimumSize: const Size(0, 30),
                           padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -184,25 +250,29 @@ class _AgentRequestNoticeState extends State<AgentRequestNotice> {
     );
   }
 
-  Future<void> _respond(bool accepted) async {
+  Future<void> _respond(bool accepted, {String? optionId}) async {
     final requestId = widget.cardData['requestId'];
     if (requestId == null || _submitting) return;
     setState(() => _submitting = true);
     try {
+      // 审批返回真实所选 ACP optionId (例如 allow_once / allow_task / reject_once)
+      final selectedOption = accepted
+          ? (optionId ?? _selectedOptionValue ?? 'allow_once')
+          : (optionId ?? 'reject_once');
       await AgentRuntimeService.respondToApproval(
         requestId: requestId,
         accepted: accepted,
+        optionId: selectedOption,
         sessionId: widget.cardData['sessionId']?.toString(),
         agentId: _requestAgentId(widget.cardData),
         conversationId: _requestConversationId(widget.cardData),
       );
-      // Persist only after the owning ACP request acknowledges the response.
       // A history-write failure must never resubmit a consumed request.
       try {
         await _persistAgentRequestResponse(
           widget.cardData,
           accepted ? 'accepted' : 'declined',
-          const [],
+          accepted && selectedOption != null ? [selectedOption] : const [],
         );
       } catch (_) {}
       if (!mounted) return;
@@ -389,6 +459,14 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
         status == 'pending' && !_isSubmitting && !interactionUnavailable;
     final options = _resolveRequestOptions(widget.cardData);
     final hasOptions = options.isNotEmpty;
+    final approvalAllowOptions = options
+        .where(
+          (o) =>
+              o.value != 'reject_once' &&
+              o.value != 'reject' &&
+              o.value != 'decline',
+        )
+        .toList();
     final formFields = _resolveElicitationFields(widget.cardData);
     final hasStructuredForm = formFields.isNotEmpty;
     final isStructuredElicitation =
@@ -482,22 +560,39 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
             ),
           ],
           const SizedBox(height: 14),
-          if (kind == 'user_input' && status == 'pending') ...[
-            if (hasStructuredForm) ...[
-              for (final field in formFields) ...[
-                _buildElicitationField(field),
-                const SizedBox(height: 8),
+          if (status == 'pending') ...[
+            if (kind == 'user_input') ...[
+              if (hasStructuredForm) ...[
+                for (final field in formFields) ...[
+                  _buildElicitationField(field),
+                  const SizedBox(height: 8),
+                ],
+              ] else if (hasOptions) ...[
+                for (var index = 0; index < options.length; index++) ...[
+                  _RequestOptionTile(
+                    index: index + 1,
+                    option: options[index],
+                    selected: options[index].value == _selectedOptionValue,
+                    enabled: isPending,
+                    onTap: () {
+                      setState(() {
+                        _selectedOptionValue = options[index].value;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 4),
+                ],
               ],
-            ] else if (hasOptions) ...[
-              for (var index = 0; index < options.length; index++) ...[
+            ] else if (kind == 'approval' && approvalAllowOptions.length > 1) ...[
+              for (var index = 0; index < approvalAllowOptions.length; index++) ...[
                 _RequestOptionTile(
                   index: index + 1,
-                  option: options[index],
-                  selected: options[index].value == _selectedOptionValue,
+                  option: approvalAllowOptions[index],
+                  selected: approvalAllowOptions[index].value == _selectedOptionValue,
                   enabled: isPending,
                   onTap: () {
                     setState(() {
-                      _selectedOptionValue = options[index].value;
+                      _selectedOptionValue = approvalAllowOptions[index].value;
                     });
                   },
                 ),
@@ -522,18 +617,23 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
     );
   }
 
-  Future<void> _respondApproval(bool accepted) async {
+  Future<void> _respondApproval(bool accepted, {String? optionId}) async {
     final requestId = widget.cardData['requestId'];
     if (requestId == null) return;
+    // 审批返回真实所选 ACP optionId (例如 allow_once / allow_task / reject_once)
+    final selectedOption = accepted
+        ? (optionId ?? _selectedOptionValue ?? 'allow_once')
+        : (optionId ?? 'reject_once');
     await _submit(() {
       return AgentRuntimeService.respondToApproval(
         requestId: requestId,
         accepted: accepted,
+        optionId: selectedOption,
         sessionId: widget.cardData['sessionId']?.toString(),
         agentId: _requestAgentId(widget.cardData),
         conversationId: _requestConversationId(widget.cardData),
       );
-    }, accepted ? 'accepted' : 'declined');
+    }, accepted ? 'accepted' : 'declined', answers: accepted && selectedOption != null ? [selectedOption] : const []);
   }
 
   Future<void> _ignoreUserInput() async {
@@ -686,9 +786,21 @@ class _AgentRequestCardState extends State<AgentRequestCard> {
     if (options.isEmpty || _selectedOptionValue != null) {
       return;
     }
-    _selectedOptionValue = options.first.value;
+    final kind = (widget.cardData['requestKind'] ?? '').toString();
+    if (kind == 'approval') {
+      final allowOption = options.firstWhere(
+        (o) =>
+            o.value == 'allow_once' ||
+            (o.value != 'reject_once' &&
+                o.value != 'reject' &&
+                o.value != 'decline'),
+        orElse: () => options.first,
+      );
+      _selectedOptionValue = allowOption.value;
+    } else {
+      _selectedOptionValue = options.first.value;
+    }
   }
-
   void _syncFormState() {
     final fields = _resolveElicitationFields(widget.cardData);
     for (final field in fields) {
@@ -1125,6 +1237,7 @@ List<_RequestOption> _resolveRequestOptions(Map<String, dynamic> cardData) {
   final questionId = (cardData['questionId'] ?? '').toString().trim();
   final question = _resolveQuestion(raw, questionId);
   final optionSource =
+      cardData['options'] ??
       question?['options'] ??
       question?['choices'] ??
       question?['items'] ??
@@ -1198,13 +1311,21 @@ _RequestOption? _requestOptionFromValue(dynamic value) {
         map['name'],
         map['value'],
         map['id'],
+        map['optionId'],
+        map['option_id'],
       ]) ??
       '';
   if (label.isEmpty) {
     return null;
   }
   final optionValue =
-      _firstText([map['value'], map['id'], map['label']]) ?? label;
+      _firstText([
+        map['optionId'],
+        map['option_id'],
+        map['value'],
+        map['id'],
+        map['label'],
+      ]) ?? label;
   final description =
       _firstText([map['description'], map['detail'], map['subtitle']]) ?? '';
   return _RequestOption(

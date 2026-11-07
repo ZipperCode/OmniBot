@@ -34,6 +34,9 @@ import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
 import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
+import cn.com.omnimind.bot.task.runtime.AcpTaskTerminalJournal
+import cn.com.omnimind.bot.agent.AgentRuntimeErrorSupport
+import cn.com.omnimind.bot.task.runtime.AcpTerminalLookupResult
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
 import com.rk.terminal.runtime.TerminalDistribution
 import com.rk.terminal.runtime.EmbeddedRuntimeInstaller
@@ -299,6 +302,9 @@ class AgentRuntimeManager private constructor(
     private val pendingTurnThreads = ConcurrentHashMap.newKeySet<String>()
     /** Execution resources only; ACP remains the owner of prompt lifecycle. */
     private val remotePromptExecutions = ConcurrentHashMap<String, AcpPromptExecution>()
+    private val sessionTurnMutexes = ConcurrentHashMap<String, Mutex>()
+    private fun sessionTurnMutex(sessionId: String): Mutex =
+        sessionTurnMutexes.computeIfAbsent(sessionId.trim()) { Mutex() }
 
     private suspend fun buildLocalAcpHandoffContext(
         conversationId: Long,
@@ -328,13 +334,31 @@ class AgentRuntimeManager private constructor(
         when (val reservation = remoteTurnOwnership.adopt(threadId, turnId, requestId)) {
             is AcpTurnReservation.Started -> Unit
             is AcpTurnReservation.InFlight -> if (reservation.record.turnId == turnId) {
-                requestId?.let { remoteTurnOwnership.attachRequestId(threadId, turnId, it) }
+                requestId?.let {
+                    remoteTurnOwnership.attachRequestId(threadId, turnId, it)
+                    AcpTaskTerminalJournal.recordAdmission(
+                        context = appContext,
+                        agentId = REMOTE_CODEX_AGENT_ID,
+                        sessionId = threadId,
+                        turnId = turnId,
+                        requestId = it,
+                    )
+                }
                 return
             }
             is AcpTurnReservation.Completed -> return
             is AcpTurnReservation.Busy -> {
                 if (reservation.record.turnId == turnId) {
-                    requestId?.let { remoteTurnOwnership.attachRequestId(threadId, turnId, it) }
+                    requestId?.let {
+                        remoteTurnOwnership.attachRequestId(threadId, turnId, it)
+                        AcpTaskTerminalJournal.recordAdmission(
+                            context = appContext,
+                            agentId = REMOTE_CODEX_AGENT_ID,
+                            sessionId = threadId,
+                            turnId = turnId,
+                            requestId = it,
+                        )
+                    }
                     return
                 }
                 throw IllegalStateException(
@@ -343,8 +367,25 @@ class AgentRuntimeManager private constructor(
                 )
             }
         }
+        AcpTaskTerminalJournal.recordAdmission(
+            context = appContext,
+            agentId = REMOTE_CODEX_AGENT_ID,
+            sessionId = threadId,
+            turnId = turnId,
+            requestId = requestId,
+        )
         TaskRuntimeSettings.onTaskStarted(appContext)
-        if (!TaskRuntime.start(appContext, agentTurnRuntimeId(threadId, turnId))) {
+        val conversationId = conversationIdForSession(threadId)
+        val started = TaskRuntime.start(
+            context = appContext,
+            taskId = agentTurnRuntimeId(threadId, turnId),
+            conversationId = conversationId,
+            sessionId = threadId,
+            turnId = turnId,
+            title = "Codex 远程任务",
+            statusText = "执行中..."
+        )
+        if (!started) {
             Log.w("AgentRuntimeManager", "Unable to acquire foreground runtime for turn=$turnId")
         }
     }
@@ -372,7 +413,21 @@ class AgentRuntimeManager private constructor(
         // The official `session/prompt` response (or its owning request
         // error) is the terminal ACP boundary. Release host resources here;
         // the caller projects the returned result through the shared reducer.
-        return clearActiveTurn(sessionId, turnId, terminalStatus = status)
+        return sessionTurnMutex(sessionId).withLock {
+            val cleared = clearActiveTurn(sessionId, turnId, terminalStatus = status)
+            remotePromptExecutions.remove(sessionId)
+            if (cleared) {
+                AcpTaskTerminalJournal.recordTerminal(
+                    context = appContext,
+                    agentId = REMOTE_CODEX_AGENT_ID,
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    status = status,
+                    error = error,
+                )
+            }
+            cleared
+        }
     }
 
     private fun clearActiveTurns() {
@@ -612,6 +667,9 @@ class AgentRuntimeManager private constructor(
         val ownedArgs = canonicalArgs + ("agentId" to identity.agentId)
         if (method == "status") return status(identity.agentId)
         if (method == "disconnect") return disconnect(identity.agentId)
+        if (method == "session/prompt") {
+            return executePromptWithResponseProjection(identity, ownedArgs)
+        }
         if (identity.agentId == NA_AGENT_ID) return naRuntime.handle(method, ownedArgs)
         if (identity.agentId != REMOTE_CODEX_AGENT_ID) {
             when (method) {
@@ -636,7 +694,6 @@ class AgentRuntimeManager private constructor(
             "session/new" -> startRemoteAcpSession(ownedArgs)
             "session/load", "session/resume" -> loadRemoteAcpSession(ownedArgs)
             "session/list" -> listRemoteAcpSessions(ownedArgs)
-            "session/prompt" -> promptRemoteAcpSession(ownedArgs)
             "session/cancel" -> cancelRemoteAcpSession(ownedArgs)
             "\$/cancel_request" -> cancelRemoteAcpRequest(ownedArgs)
             "session/fork", "session/close", "session/delete", "session/set_mode",
@@ -1039,11 +1096,14 @@ class AgentRuntimeManager private constructor(
             }
         }
         val turnId = UUID.randomUUID().toString()
-        admitRemoteTurn(sessionId, turnId, requestId)
+        val turnMutex = sessionTurnMutex(sessionId)
         val promptJob = coroutineContext[Job]
         val execution = AcpPromptExecution(promptJob)
         promptJob?.let { execution.attachPromptJob(it) }
-        remotePromptExecutions[sessionId] = execution
+        turnMutex.withLock {
+            admitRemoteTurn(sessionId, turnId, requestId)
+            remotePromptExecutions[sessionId] = execution
+        }
         var terminalStatus = "completed"
         return try {
             val prompt = resolveInput(args, sessionId).map { block ->
@@ -1098,8 +1158,158 @@ class AgentRuntimeManager private constructor(
             )
             throw error
         } finally {
-            remotePromptExecutions.remove(sessionId, execution)
+            sessionTurnMutex(sessionId).withLock {
+                remotePromptExecutions.remove(sessionId, execution)
+            }
         }
+    }
+    private fun lookupAdmittedTurnId(agentId: String, sessionId: String?, requestId: String): String? {
+        if (sessionId.isNullOrBlank() || requestId.isBlank()) return null
+        if (agentId == REMOTE_CODEX_AGENT_ID) {
+            remoteTurnOwnership.requestRecord(sessionId, requestId)?.turnId?.let { return it }
+        }
+        return when (val journal = AcpTaskTerminalJournal.findByRequestId(appContext, agentId, sessionId, requestId)) {
+            is AcpTerminalLookupResult.TerminalFound -> journal.entry.turnId
+            is AcpTerminalLookupResult.AdmittedInFlight -> journal.entry.turnId
+            else -> null
+        }
+    }
+
+    private suspend fun executePromptWithResponseProjection(
+        identity: AcpRequestIdentity,
+        ownedArgs: Map<String, Any?>
+    ): Any? {
+        val hostRequestId = ownedArgs.stringValue("requestId")?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString()
+        val promptArgs = if (ownedArgs["requestId"] == hostRequestId) ownedArgs else ownedArgs + ("requestId" to hostRequestId)
+        val requestSessionId = promptArgs.stringValue("sessionId") ?: promptArgs.stringValue("threadId")
+        val conversationMode = promptArgs.stringValue("conversationMode")
+            ?: identity.conversationId?.takeIf { it > 0 }?.let { DatabaseHelper.getConversationById(it)?.mode }
+
+        val rawResult: Any?
+        try {
+            rawResult = when {
+                identity.agentId == NA_AGENT_ID -> naRuntime.handle("session/prompt", promptArgs)
+                identity.agentId != REMOTE_CODEX_AGENT_ID -> {
+                    val runtime = localRuntimeFor(identity.agentId)
+                    val operation = runtime.prepareRequest("session/prompt", promptArgs)
+                    ensureLocalAcpConnected("session/prompt", promptArgs, identity)
+                    operation()
+                }
+                else -> promptRemoteAcpSession(promptArgs)
+            }
+        } catch (error: Throwable) {
+            val admittedIdentity = error as? NaAdmittedPromptException
+            val rawError = admittedIdentity?.cause ?: error
+            val admittedTurnId = admittedIdentity?.turnId
+                ?: lookupAdmittedTurnId(identity.agentId, requestSessionId, hostRequestId)
+            val resolvedConversationId = admittedIdentity?.conversationId
+                ?: identity.conversationId
+                ?: requestSessionId?.let { conversationIdForSession(it) }
+                ?: requestSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
+            val resolvedSessionId = admittedIdentity?.sessionId ?: requestSessionId
+            val failureKind = AgentRuntimeErrorSupport.failureKind(rawError)
+            val safeDetail = AgentRuntimeErrorSupport.userFacingMessage(rawError)
+                ?: AgentRuntimeErrorSupport.safeDiagnosticMessage(rawError)
+            val errorData = failureKind?.let { mapOf("failureKind" to it) }
+            val errorMap = linkedMapOf<String, Any?>(
+                "code" to -32603,
+                "message" to safeDetail,
+                "data" to errorData
+            ).filterValues { it != null }
+
+            val profile = if (identity.agentId == REMOTE_CODEX_AGENT_ID) null else runCatching { acpAgentProfileStore.requireProfile(identity.agentId) }.getOrNull()
+            val agentName = profile?.name ?: when (identity.agentId) {
+                REMOTE_CODEX_AGENT_ID -> "Codex Remote"
+                NA_AGENT_ID -> "Na"
+                else -> identity.agentId
+            }
+
+            Log.w("AgentRuntimeManager", "ACP session/prompt 请求异常 requestId=$hostRequestId sessionId=$resolvedSessionId failureKind=$failureKind: $safeDetail")
+            // 尚未准入无 turn 不终结其他 active，前台 awaiter 仍处理 preflight error
+            if (admittedTurnId != null) {
+                emitEvent(
+                    linkedMapOf(
+                        "method" to "session/prompt",
+                        "id" to hostRequestId,
+                        "sessionId" to resolvedSessionId,
+                        "threadId" to resolvedSessionId,
+                        "turnId" to admittedTurnId,
+                        "conversationId" to resolvedConversationId,
+                        "conversationMode" to conversationMode,
+                        "agentId" to identity.agentId,
+                        "agentName" to agentName,
+                        "allowImplicitTurnAdmission" to true,
+                        "message" to linkedMapOf(
+                            "jsonrpc" to "2.0",
+                            "id" to hostRequestId,
+                            "error" to errorMap
+                        )
+                    ).filterValues { it != null }
+                )
+            }
+            throw rawError
+        }
+
+        if (rawResult is Map<*, *>) {
+            @Suppress("UNCHECKED_CAST")
+            val resultMap = rawResult as Map<String, Any?>
+            val status = resultMap.stringValue("status")
+            val hasTerminalSignal = resultMap["completed"] == true ||
+                resultMap.stringValue("stopReason") != null ||
+                resultMap.stringValue("error") != null ||
+                when (status) {
+                    "completed", "end_turn", "cancelled", "error", "failed", "timeout" -> true
+                    else -> false
+                }
+            val isPendingOrInProgress = resultMap["completed"] == false ||
+                when (status) {
+                    "in_progress", "running", "accepted", "queued" -> true
+                    else -> false
+                }
+            if (!hasTerminalSignal || isPendingOrInProgress) {
+                // 受理中或无官方终态信号不发送假终态
+                return rawResult
+            }
+            val resolvedSessionId = resultMap.stringValue("sessionId")
+                ?: resultMap.stringValue("threadId")
+                ?: requestSessionId
+            val resolvedTurnId = resultMap.stringValue("turnId")
+                ?: resultMap.stringValue("promptId")
+                ?: lookupAdmittedTurnId(identity.agentId, resolvedSessionId, hostRequestId)
+            val resolvedConversationId = (resultMap["conversationId"] as? Number)?.toLong()
+                ?: identity.conversationId
+                ?: resolvedSessionId?.let { conversationIdForSession(it) }
+                ?: resolvedSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
+            val profile = if (identity.agentId == REMOTE_CODEX_AGENT_ID) null else runCatching { acpAgentProfileStore.requireProfile(identity.agentId) }.getOrNull()
+            val agentName = profile?.name ?: when (identity.agentId) {
+                REMOTE_CODEX_AGENT_ID -> "Codex Remote"
+                NA_AGENT_ID -> "Na"
+                else -> identity.agentId
+            }
+
+            emitEvent(
+                linkedMapOf(
+                    "method" to "session/prompt",
+                    "id" to hostRequestId,
+                    "sessionId" to resolvedSessionId,
+                    "threadId" to resolvedSessionId,
+                    "turnId" to resolvedTurnId,
+                    "conversationId" to resolvedConversationId,
+                    "conversationMode" to conversationMode,
+                    "agentId" to identity.agentId,
+                    "agentName" to agentName,
+                    "allowImplicitTurnAdmission" to true,
+                    "message" to linkedMapOf(
+                        "jsonrpc" to "2.0",
+                        "id" to hostRequestId,
+                        "result" to resultMap
+                    )
+                ).filterValues { it != null }
+            )
+        }
+
+        return rawResult
     }
 
     private suspend fun cancelRemoteAcpSession(
@@ -1109,57 +1319,115 @@ class AgentRuntimeManager private constructor(
             ?: args.stringValue("threadId")
             ?: throw IllegalArgumentException("sessionId is required")
         bindSessionConversation(sessionId, args.longValue("conversationId"))
-        val turnId = args.stringValue("turnId") ?: remoteTurnOwnership.activeTurnId(sessionId)
-        if (turnId.isNullOrBlank()) {
-            return mapOf(
+        val expectedTurnId = args.stringValue("expectedTurnId") ?: args.stringValue("turnId")
+        val turnMutex = sessionTurnMutex(sessionId)
+        return turnMutex.withLock {
+            val activeTurnId = remoteTurnOwnership.activeTurnId(sessionId)
+            if (expectedTurnId != null && activeTurnId != null && expectedTurnId != activeTurnId) {
+                return@withLock mapOf(
+                    "ok" to true,
+                    "cancelled" to false,
+                    "stale" to true,
+                    "sessionId" to sessionId,
+                    "threadId" to sessionId,
+                    "turnId" to activeTurnId,
+                    "expectedTurnId" to expectedTurnId,
+                ).filterValues { it != null }
+                    .withAcpSessionId()
+                    .withLocalIds(
+                        threadId = sessionId,
+                        conversationId = conversationIdForSession(sessionId),
+                        turnId = activeTurnId,
+                    )
+            }
+            if (activeTurnId == null) {
+                return@withLock mapOf(
+                    "ok" to true,
+                    "cancelled" to false,
+                    "stale" to (expectedTurnId != null),
+                    "sessionId" to sessionId,
+                    "threadId" to sessionId,
+                    "turnId" to null,
+                    "expectedTurnId" to expectedTurnId,
+                ).filterValues { it != null }
+                    .withAcpSessionId()
+                    .withLocalIds(
+                        threadId = sessionId,
+                        conversationId = conversationIdForSession(sessionId),
+                        turnId = null,
+                    )
+            }
+            val targetTurnId = activeTurnId
+            // Cancellation is scoped to the session that admitted this turn. It
+            // must not call ensureConnectedSession(): reconnecting here can send
+            // session/cancel for an already-terminated turn on a new transport.
+            val activeSession = session?.takeIf { it.isRunning }
+            if (activeSession == null) {
+                return@withLock mapOf(
+                    "ok" to false,
+                    "cancelled" to false,
+                    "sessionId" to sessionId,
+                    "threadId" to sessionId,
+                    "turnId" to targetTurnId,
+                    "error" to "Remote ACP transport is unavailable for session/cancel.",
+                ).filterValues { it != null }
+                    .withAcpSessionId()
+                    .withLocalIds(
+                        threadId = sessionId,
+                        conversationId = conversationIdForSession(sessionId),
+                        turnId = targetTurnId,
+                    )
+            }
+            val execution = remotePromptExecutions[sessionId]
+            if (execution == null) {
+                return@withLock mapOf(
+                    "ok" to true,
+                    "cancelled" to false,
+                    "sessionId" to sessionId,
+                    "threadId" to sessionId,
+                    "turnId" to targetTurnId,
+                ).filterValues { it != null }
+                    .withAcpSessionId()
+                    .withLocalIds(
+                        threadId = sessionId,
+                        conversationId = conversationIdForSession(sessionId),
+                        turnId = targetTurnId,
+                    )
+            }
+            val promptStarted = execution.requestCancellation()
+            if (promptStarted) {
+                // ACP defines session/cancel as a notification. The host still
+                // returns an acknowledgement to Flutter, but the Agent wire must
+                // not wait for a JSON-RPC response that compliant Agents never
+                 // send. If the execution resource is unexpectedly absent, keep
+                // the historical best-effort cancellation for the active session.
+                // The bridge may acknowledge cancellation while the original
+                // session/prompt request is still suspended. Let that request
+                // observe the official ACP terminal response before releasing
+                // host ownership; cancelling the waiter here would discard the
+                // response and create a second, locally invented terminal path.
+                activeSession.sendNotification(
+                    "session/cancel",
+                    mapOf("sessionId" to sessionId),
+                )
+            }
+            // `session/cancel` is a notification. The active prompt remains the
+            // owner until the Agent returns its official PromptResponse; this
+            // method must not invent a local cancelled terminal or force-close a
+            // still-valid ACP transport after an arbitrary grace period.
+            mapOf(
                 "ok" to true,
-                "cancelled" to false,
+                "cancelled" to true,
                 "sessionId" to sessionId,
                 "threadId" to sessionId,
-            )
+                "turnId" to targetTurnId,
+            ).withAcpSessionId()
+                .withLocalIds(
+                    threadId = sessionId,
+                    conversationId = conversationIdForSession(sessionId),
+                    turnId = targetTurnId,
+                )
         }
-        // Cancellation is scoped to the session that admitted this turn. It
-        // must not call ensureConnectedSession(): reconnecting here can send
-        // session/cancel for an already-terminated turn on a new transport.
-        val activeSession = session?.takeIf { it.isRunning }
-        if (activeSession == null) {
-            throw IllegalStateException(
-                "Remote ACP transport is unavailable for session/cancel."
-            )
-        }
-        val execution = remotePromptExecutions[sessionId]
-        val promptStarted = execution?.requestCancellation() == true
-        if (execution == null || promptStarted) {
-            // ACP defines session/cancel as a notification. The host still
-            // returns an acknowledgement to Flutter, but the Agent wire must
-            // not wait for a JSON-RPC response that compliant Agents never
-            // send. If the execution resource is unexpectedly absent, keep
-            // the historical best-effort cancellation for the active session.
-            // The bridge may acknowledge cancellation while the original
-            // session/prompt request is still suspended. Let that request
-            // observe the official ACP terminal response before releasing
-            // host ownership; cancelling the waiter here would discard the
-            // response and create a second, locally invented terminal path.
-            activeSession.sendNotification(
-                "session/cancel",
-                mapOf("sessionId" to sessionId),
-            )
-        }
-        // `session/cancel` is a notification. The active prompt remains the
-        // owner until the Agent returns its official PromptResponse; this
-        // method must not invent a local cancelled terminal or force-close a
-        // still-valid ACP transport after an arbitrary grace period.
-        return mapOf(
-            "cancelled" to true,
-            "sessionId" to sessionId,
-            "threadId" to sessionId,
-            "turnId" to turnId,
-        ).withAcpSessionId()
-            .withLocalIds(
-                threadId = sessionId,
-                conversationId = conversationIdForSession(sessionId),
-                turnId = turnId,
-            )
     }
 
 
@@ -1280,7 +1548,9 @@ class AgentRuntimeManager private constructor(
         val response = request("review/start", params) as Map<String, Any?>
         val turnId = extractTurnId(response)
         if (!turnId.isNullOrBlank()) {
-            admitRemoteTurn(threadId, turnId)
+            sessionTurnMutex(threadId).withLock {
+                admitRemoteTurn(threadId, turnId)
+            }
         }
         return response.withLocalIds(
             threadId = threadId,
@@ -2497,7 +2767,9 @@ class AgentRuntimeManager private constructor(
             (method == "turn/started" ||
                 protocolEventType == "task_started" ||
                 protocolEventType == "turn_started")) {
-            admitRemoteTurn(threadId, turnId)
+            sessionTurnMutex(threadId).withLock {
+                admitRemoteTurn(threadId, turnId)
+            }
         }
 
         val eventAgentId = sourceAgentId ?: REMOTE_CODEX_AGENT_ID

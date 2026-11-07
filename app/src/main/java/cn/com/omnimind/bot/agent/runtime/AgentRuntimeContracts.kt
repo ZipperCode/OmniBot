@@ -17,7 +17,9 @@ object AgentRuntimeFeatureFlags {
 
 interface AgentExecutionEnvironment {
     val agentRunId: String
+    val conversationId: Long? get() = null
     val acpSessionId: String? get() = null
+    val acpTurnId: String? get() = null
     val userMessage: String
     val runtimeContextRepository: AgentRuntimeContextRepository
     val workspaceDescriptor: AgentWorkspaceDescriptor
@@ -44,6 +46,7 @@ interface AgentExecutionEnvironment {
 
 data class DefaultAgentExecutionEnvironment(
     override val agentRunId: String,
+    override val conversationId: Long? = null,
     override val userMessage: String,
     override val runtimeContextRepository: AgentRuntimeContextRepository,
     override val workspaceDescriptor: AgentWorkspaceDescriptor,
@@ -58,6 +61,7 @@ data class DefaultAgentExecutionEnvironment(
     override val permissionRequester: AgentPermissionRequester? = null,
     override val longTermMemoryIndex: LongTermMemoryIndex? = null,
     override val acpSessionId: String? = null,
+    override val acpTurnId: String? = null,
 ) : AgentExecutionEnvironment
 
 fun interface AgentPermissionRequester {
@@ -67,6 +71,23 @@ fun interface AgentPermissionRequester {
         title: String,
         detail: String,
     ): Boolean
+
+    suspend fun requestPermission(
+        toolCallId: String,
+        title: String,
+        detail: String,
+        action: String?,
+        targetResource: String?,
+    ): Boolean = requestPermission(toolCallId, title, detail)
+
+    suspend fun requestPermission(
+        toolCallId: String,
+        title: String,
+        detail: String,
+        action: String?,
+        targetResource: String?,
+        rawInput: JsonObject?,
+    ): Boolean = requestPermission(toolCallId, title, detail, action, targetResource)
 }
 
 data class AgentToolSearchEntry(

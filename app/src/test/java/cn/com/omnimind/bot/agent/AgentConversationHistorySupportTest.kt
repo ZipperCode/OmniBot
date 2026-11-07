@@ -953,6 +953,52 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
+    fun `restoring pending tool preserves identity and output without inventing success`() {
+        val pending = AgentConversationEntry(
+            id = 924,
+            conversationId = 1,
+            conversationMode = "agent",
+            entryId = "tool-before-reboot",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = "pending",
+            summary = "等待重启结果",
+            payloadJson = gson.toJson(
+                mapOf(
+                    "sessionId" to "session-restored",
+                    "turnId" to "turn-before-reboot",
+                    "toolCallId" to "tool-reboot",
+                    "toolName" to "android_privileged_action",
+                    "status" to "pending",
+                    "terminalOutput" to "已发送操作",
+                    "rawResultJson" to "{\"commandAccepted\":true,\"verified\":false}",
+                    "success" to false,
+                )
+            ),
+            createdAt = 1,
+            updatedAt = 2,
+        )
+        val completed = pending.copy(
+            id = 925,
+            entryId = "tool-already-completed",
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS,
+        )
+
+        val restored = AgentConversationHistorySupport.normalizeInterruptedEntries(listOf(pending, completed))
+        val payload = AgentConversationHistorySupport.readMap(restored.first().payloadJson)
+
+        assertEquals(AgentConversationHistoryRepository.STATUS_INTERRUPTED, restored.first().status)
+        assertEquals("interrupted", payload["status"])
+        assertEquals("session-restored", payload["sessionId"])
+        assertEquals("turn-before-reboot", payload["turnId"])
+        assertEquals("tool-reboot", payload["toolCallId"])
+        assertEquals("已发送操作", payload["terminalOutput"])
+        assertEquals("{\"commandAccepted\":true,\"verified\":false}", payload["rawResultJson"])
+        assertEquals(false, payload["success"])
+        assertEquals(pending.updatedAt, restored.first().updatedAt)
+        assertEquals(completed, restored.last())
+    }
+
+    @Test
     fun `normalizeInterruptedEntries finalizes lone thinking card during restore`() {
         val thinkingEntry = AgentConversationEntry(
             id = 1,

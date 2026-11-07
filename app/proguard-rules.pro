@@ -116,6 +116,17 @@
     <fields>;
 }
 
+# 重启检查点由 Gson 跨进程恢复，保留身份与进度字段。
+-keep class cn.com.omnimind.bot.task.runtime.TaskContinuationCheckpoint {
+    <init>(...);
+    <fields>;
+}
+
+-keep class cn.com.omnimind.bot.task.runtime.AcpTerminalJournalEntry {
+    <init>(...);
+    <fields>;
+}
+
 # Some persisted enums do not yet declare @SerializedName values.
 -keepclassmembers,allowoptimization enum cn.com.omnimind.** {
     <fields>;

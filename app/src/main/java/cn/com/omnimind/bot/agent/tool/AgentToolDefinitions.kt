@@ -578,6 +578,10 @@ object AgentToolDefinitions {
                         put("type", "string")
                         put("description", "要在 Android GUI 中完成的具体目标。")
                     }
+                    putJsonObject("display") {
+                        put("type", "string")
+                        put("description", "目标屏幕：main 为主屏，virtual 为已创建后台虚拟屏，或传实际显示编号；省略使用主屏。不兼容时明确报告，不暗中切屏。")
+                    }
                 }
                 putJsonArray("required") {
                     add("goal")
@@ -721,7 +725,7 @@ object AgentToolDefinitions {
                                 }
                                 putJsonObject("mode") {
                                     put("type", "string")
-                                    put("description", text("AppOps 模式，或 set_do_not_disturb 的 off/priority/silent/alarms。", "AppOps mode, or off/priority/silent/alarms for set_do_not_disturb."))
+                                    put("description", text("动作模式：AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。", "动作模式：AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。"))
                                 }
                                 putJsonObject("op") {
                                     put("type", "string")
@@ -809,6 +813,63 @@ object AgentToolDefinitions {
                                     put("description", text("shell.exec 的环境变量。", "Environment variables for shell.exec."))
                                     putJsonObject("additionalProperties") {
                                         put("type", "string")
+                                    }
+                                }
+                                mapOf(
+                                    "apk_path" to "安装 APK 的 Android 绝对路径。",
+                                    "package_name" to "应用/进程管理的准确包名。",
+                                    "signal" to "发送到指定 PID 的信号，默认 9。",
+                                    "path" to "受保护文件的 Android 绝对路径。",
+                                    "content" to "文件写入内容，按 encoding 指定编码。",
+                                    "encoding" to "文件内容编码：utf8 或 base64。",
+                                    "owner" to "文件属主 uid:gid。",
+                                    "archive_path" to "备份/恢复 tar 归档的绝对路径。",
+                                    "source_path" to "待备份文件或目录的绝对路径。",
+                                    "destination_dir" to "恢复归档的目标目录。",
+                                    "compression" to "备份压缩格式：gzip 或 none。",
+                                    "module_id" to "KernelSU 模块 module.prop 中的 id。",
+                                    "zip_path" to "待安装 Root 模块 ZIP 的绝对路径。",
+                                    "module_pkg_name" to "LSPosed/Vector 模块的准确包名。",
+                                    "target_packages" to "作用域目标包名，以逗号分隔。",
+                                    "operation" to "作用域操作：add、remove 或 replace。",
+                                    "target_package" to "重载或核验的目标包名；系统目标须由框架明确支持。",
+                                    "log_marker" to "读取运行证据的日志标记，不代表需求行为已验收。",
+                                    "tag" to "logcat 日志标签。",
+                                    "priority" to "logcat 优先级：V/D/I/W/E/F。",
+                                    "reason" to "本次重启原因，不作为授权凭据。",
+                                    "partition_name" to "设备实际支持的分区名，例如 boot 或 init_boot。",
+                                    "destination_path" to "分区备份镜像的绝对路径。",
+                                    "image_path" to "待写入分区的镜像绝对路径。",
+                                ).forEach { (name, description) ->
+                                    putJsonObject(name) {
+                                        put("type", "string")
+                                        put("description", description)
+                                    }
+                                }
+                                mapOf(
+                                    "user_id" to "目标 Android 用户编号，省略使用应用所在用户。",
+                                    "pid" to "待结束的准确进程 PID。",
+                                    "max_bytes" to "本次文件读取字节上限。",
+                                ).forEach { (name, description) ->
+                                    putJsonObject(name) {
+                                        put("type", "integer")
+                                        put("description", description)
+                                    }
+                                }
+                                mapOf(
+                                    "reinstall" to "覆盖安装现有包，默认 true。",
+                                    "grant_permissions" to "安装时授予运行时权限，默认 false。",
+                                    "allow_downgrade" to "允许安装包版本降级，默认 false。",
+                                    "keep_data" to "卸载时保留数据，默认 false。",
+                                    "create_dirs" to "文件写入时创建缺失父目录，默认 false。",
+                                    "recursive" to "递归修改文件权限或属主，默认 false。",
+                                    "preserve_owner" to "归档恢复时保留属主与权限，默认 true。",
+                                    "immediate" to "立即移除指定 Root 模块目录，默认 false。",
+                                    "enforcing" to "SELinux 是否为 enforcing；设备可能拒绝修改。",
+                                ).forEach { (name, description) ->
+                                    putJsonObject(name) {
+                                        put("type", "boolean")
+                                        put("description", description)
                                     }
                                 }
                             }
@@ -2396,6 +2457,11 @@ object AgentToolDefinitions {
             add(androidPrivilegedSessionExecTool(ShizukuBackend.NONE, locale))
             add(androidPrivilegedSessionReadTool(ShizukuBackend.NONE, locale))
             add(androidPrivilegedSessionStopTool(ShizukuBackend.NONE, locale))
+            cn.com.omnimind.bot.agent.tool.BuiltInAgentCapabilityModule.definitions.forEach { capability ->
+                add(buildJsonObject {
+                    putJsonObject("function") { put("name", capability.name) }
+                })
+            }
         }
         return definitions.mapNotNullTo(linkedSetOf()) { definition ->
             (definition["function"] as? JsonObject)

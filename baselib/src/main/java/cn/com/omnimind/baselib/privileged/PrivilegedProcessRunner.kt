@@ -16,6 +16,7 @@ internal data class PrivilegedProcessResult(
     val timedOut: Boolean = false,
     val truncated: Boolean = false,
     val errorCode: String? = null,
+    val uid: Int? = null,
 ) {
     val success: Boolean get() = exitCode == 0 && !timedOut && errorCode == null
 }
@@ -106,6 +107,8 @@ internal class PrivilegedProcessRunner(
             val marker = managed.grantMarker
             val rootConfirmed = marker == null || stderr.contains("$marker\n")
             if (finished && !rootConfirmed) accessDenied()
+            // 只有 Root marker 确证时才记录实际 UID 0；未确证/拒绝/非 Root Runner 保持 null
+            val observedUid = if (marker != null && stderr.contains("$marker\n")) 0 else null
             return PrivilegedProcessResult(
                 exitCode = exitCode,
                 stdout = out.text(),
@@ -117,6 +120,7 @@ internal class PrivilegedProcessRunner(
                     stdoutReader.isAlive || stderrReader.isAlive -> "output_incomplete"
                     else -> null
                 },
+                uid = observedUid,
             )
         }
     }
@@ -148,8 +152,10 @@ internal class PrivilegedProcessRunner(
         return """
             [ "${'$'}(id -u)" = 0 ] || exit 77
             printf '%s\n' ${shellQuote(marker)} >&2
-            /system/bin/setsid /system/bin/sh -c ${shellQuote(worker)} <&0 &
+            exec 3<&0
+            /system/bin/setsid /system/bin/sh -c ${shellQuote(worker)} <&3 &
             omni_child=${'$'}!
+            exec 3<&-
             (
                 while [ -f ${shellQuote(lease.absolutePath)} ] && kill -0 $ownerPid 2>/dev/null; do
                     sleep 0.2
