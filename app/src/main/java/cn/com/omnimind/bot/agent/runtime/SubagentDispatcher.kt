@@ -101,54 +101,68 @@ class SubagentDispatcher(
         val reasoningEffort: String?,
         val modelProviderProfileId: String?,
     )
+    internal data class EffectiveModelRoute(
+        val providerProfileId: String? = null,
+        val modelId: String? = null
+    ) {
+        val isCustom: Boolean get() = providerProfileId != null && modelId != null
+    }
 
-    private fun resolveChildModelContext(parentEnv: AgentExecutionEnvironment): ChildModelContext {
-        val providerId = config.providerProfileId?.trim()?.ifEmpty { null }
-        val modelId = config.modelId?.trim()?.ifEmpty { null }
-        val reasoningEffort = config.reasoningEffort?.trim()?.ifEmpty { null }
-            ?: parentEnv.reasoningEffort
+    internal companion object {
+        fun resolveEffectiveModelRoute(
+            profile: SubagentProfile,
+            defaultConfig: XiaowanSubagentConfig
+        ): EffectiveModelRoute {
+            val roleProvider = profile.providerProfileId?.trim()?.ifEmpty { null }
+            val roleModel = profile.modelId?.trim()?.ifEmpty { null }
+            require((roleProvider == null && roleModel == null) || (roleProvider != null && roleModel != null)) {
+                "子代理角色 '${profile.id}' 模型配置错误：providerProfileId 与 modelId 必须同时指定"
+            }
+            if (roleProvider != null && roleModel != null) {
+                return EffectiveModelRoute(roleProvider, roleModel)
+            }
 
-        if (providerId != null || modelId != null) {
-            require(providerId != null && modelId != null) {
+            val defaultProvider = defaultConfig.providerProfileId?.trim()?.ifEmpty { null }
+            val defaultModel = defaultConfig.modelId?.trim()?.ifEmpty { null }
+            require((defaultProvider == null && defaultModel == null) || (defaultProvider != null && defaultModel != null)) {
                 "子代理模型配置错误：providerProfileId 与 modelId 必须同时指定"
             }
-            val providerProfile = providerProfileResolver(providerId)
-                ?: throw IllegalStateException("子代理指定的 ModelProvider 不存在: $providerId")
-            val childModelOverride = AgentModelOverride.fromProviderProfile(providerProfile, modelId)
-                ?: throw IllegalStateException("子代理指定的 ModelProvider 未完成配置或模型无效: $providerId / $modelId")
-
-            val childLlm = checkNotNull(subagentLlmClientFactory) {
-                "子代理独立模型缺少执行器"
-            }.invoke(modelId, childModelOverride)
-            val childImagePolicy = checkNotNull(subagentImagePolicyResolver) {
-                "子代理独立模型缺少图像能力解析器"
-            }.invoke(modelId, childModelOverride)
-            val childCompactor = subagentCompactorFactory?.let { factory ->
-                { factory(modelId, childModelOverride, reasoningEffort) }
+            if (defaultProvider != null && defaultModel != null) {
+                return EffectiveModelRoute(defaultProvider, defaultModel)
             }
 
-            return ChildModelContext(
-                model = modelId,
-                llmClient = childLlm,
-                toolImageContinuationPolicy = childImagePolicy,
-                contextCompactorFactory = childCompactor,
-                reasoningEffort = reasoningEffort,
-                modelProviderProfileId = providerId,
-            )
-        } else {
-            val childCompactor = {
-                subagentCompactorFactory?.invoke(model, null, reasoningEffort)
-                    ?: contextCompactorFactory?.invoke()
-            }
-            return ChildModelContext(
-                model = model,
-                llmClient = llmClient,
-                toolImageContinuationPolicy = toolImageContinuationPolicy,
-                contextCompactorFactory = childCompactor,
-                reasoningEffort = reasoningEffort,
-                modelProviderProfileId = parentEnv.modelProviderProfileId,
-            )
+            return EffectiveModelRoute(null, null)
         }
+    }
+
+    private fun resolveCustomModelContext(
+        providerId: String,
+        modelId: String,
+        reasoningEffort: String?
+    ): ChildModelContext {
+        val providerProfile = providerProfileResolver(providerId)
+            ?: throw IllegalStateException("子代理指定的 ModelProvider 不存在: $providerId")
+        val childModelOverride = AgentModelOverride.fromProviderProfile(providerProfile, modelId)
+            ?: throw IllegalStateException("子代理指定的 ModelProvider 未完成配置或模型无效: $providerId / $modelId")
+
+        val childLlm = checkNotNull(subagentLlmClientFactory) {
+            "子代理独立模型缺少执行器"
+        }.invoke(modelId, childModelOverride)
+        val childImagePolicy = checkNotNull(subagentImagePolicyResolver) {
+            "子代理独立模型缺少图像能力解析器"
+        }.invoke(modelId, childModelOverride)
+        val childCompactor = subagentCompactorFactory?.let { factory ->
+            { factory(modelId, childModelOverride, reasoningEffort) }
+        }
+
+        return ChildModelContext(
+            model = modelId,
+            llmClient = childLlm,
+            toolImageContinuationPolicy = childImagePolicy,
+            contextCompactorFactory = childCompactor,
+            reasoningEffort = reasoningEffort,
+            modelProviderProfileId = providerId,
+        )
     }
 
     suspend fun dispatch(
@@ -164,12 +178,50 @@ class SubagentDispatcher(
         require(config.enabled) { "子代理功能未启用" }
         if (tasks.isEmpty()) return emptyList()
         require(concurrency > 0) { "concurrency must be positive" }
-        // 显式模型与 Provider 配置验证：报错明确告知调用者，不静默回退
-        val modelContext = resolveChildModelContext(parentEnv)
 
         // 校验所有任务的角色均存在且已启用
-        for (spec in tasks) {
-            config.requireProfile(spec.profileId)
+        val specsWithProfiles = tasks.map { spec ->
+            spec to config.requireProfile(spec.profileId)
+        }
+
+        val reasoningEffort = config.reasoningEffort?.trim()?.ifEmpty { null }
+            ?: parentEnv.reasoningEffort
+
+        // 逐角色按本次启用的 Profile 解析模型上下文：
+        // 1. 角色显式覆盖优先级最高；
+        // 2. 未配置角色的使用默认子代理模型配置；
+        // 3. 默认子代理模型也未配置则跟随主 Agent。
+        // 相同 (providerId, modelId) pair 复用同一上下文，避免重复 hydrate 凭据与构建客户端。
+        // 当所有任务均有角色 override 时，无效的默认 Provider 不得提前解析，不阻断任务。
+        val contextsByRoute = mutableMapOf<EffectiveModelRoute, ChildModelContext>()
+        val modelContextsByProfileId = mutableMapOf<String, ChildModelContext>()
+
+        for ((_, profile) in specsWithProfiles) {
+            if (modelContextsByProfileId.containsKey(profile.id)) continue
+            val route = resolveEffectiveModelRoute(profile, config)
+            val context = contextsByRoute.getOrPut(route) {
+                if (route.isCustom) {
+                    resolveCustomModelContext(
+                        providerId = route.providerProfileId!!,
+                        modelId = route.modelId!!,
+                        reasoningEffort = reasoningEffort
+                    )
+                } else {
+                    val childCompactor = {
+                        subagentCompactorFactory?.invoke(model, null, reasoningEffort)
+                            ?: contextCompactorFactory?.invoke()
+                    }
+                    ChildModelContext(
+                        model = model,
+                        llmClient = llmClient,
+                        toolImageContinuationPolicy = toolImageContinuationPolicy,
+                        contextCompactorFactory = childCompactor,
+                        reasoningEffort = reasoningEffort,
+                        modelProviderProfileId = parentEnv.modelProviderProfileId,
+                    )
+                }
+            }
+            modelContextsByProfileId[profile.id] = context
         }
 
         val limit = concurrency
@@ -182,13 +234,15 @@ class SubagentDispatcher(
         )
         val semaphore = Semaphore(limit)
         return supervisorScope {
-            tasks.mapIndexed { index, spec ->
+            specsWithProfiles.mapIndexed { index, (spec, profile) ->
+                val modelContext = checkNotNull(modelContextsByProfileId[profile.id])
                 async {
                     semaphore.withPermit {
                         runSingleSubagent(
                             parentEnv = parentEnv,
                             taskIndex = index,
                             spec = spec,
+                            profile = profile,
                             parentToolCallId = parentToolCallId,
                             modelContext = modelContext,
                             progressReporter = progressReporter,
@@ -204,12 +258,12 @@ class SubagentDispatcher(
         parentEnv: AgentExecutionEnvironment,
         taskIndex: Int,
         spec: SubagentTaskSpec,
+        profile: SubagentProfile,
         parentToolCallId: String?,
         modelContext: ChildModelContext,
         progressReporter: (suspend (SubagentProgressEvent) -> Unit)?,
         progressSequence: AtomicLong
     ): SubagentRunResult {
-        val profile = config.requireProfile(spec.profileId)
         val subagentId = "subagent-${UUID.randomUUID().toString().take(8)}"
         return try {
             emitProgress(

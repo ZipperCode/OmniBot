@@ -14,7 +14,13 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import cn.com.omnimind.baselib.llm.ChatCompletionMessage
+import cn.com.omnimind.baselib.llm.ModelProviderProfile
+import kotlinx.serialization.json.JsonPrimitive
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.mockito.Mockito.mock
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -174,29 +180,331 @@ class SubagentRuntimeExecutionTest {
         assertTrue(result.exceptionOrNull() is IllegalStateException)
     }
 
-    private class FakeExecutionEnvironment : AgentExecutionEnvironment {
+    @Test
+    fun `same dispatch runs multiple roles with different models and reuses model client`() = runBlocking {
+        val providerAlpha = ModelProviderProfile(
+            id = "prov-alpha",
+            name = "Alpha",
+            baseUrl = "https://api.alpha.com/v1",
+            apiKey = "alpha-key"
+        )
+        val providerBeta = ModelProviderProfile(
+            id = "prov-beta",
+            name = "Beta",
+            baseUrl = "https://api.beta.com/v1",
+            apiKey = "beta-key"
+        )
+        val providers = mapOf("prov-alpha" to providerAlpha, "prov-beta" to providerBeta)
+
+        val explorerProfile = SubagentProfile(
+            id = "explorer",
+            displayName = "探索者",
+            systemPrompt = "探索系统提示词",
+            providerProfileId = "prov-alpha",
+            modelId = "deepseek-v4-pro"
+        )
+        val plannerProfile = SubagentProfile(
+            id = "planner",
+            displayName = "规划器",
+            systemPrompt = "规划系统提示词",
+            providerProfileId = "prov-beta",
+            modelId = "deepseek-v4-flash"
+        )
+
+        val config = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = null,
+            modelId = null,
+            profiles = listOf(SubagentProfileRegistry.general, explorerProfile, plannerProfile)
+        )
+
+        val clientAlpha = RecordingTurnLlmClient("result-alpha")
+        val clientBeta = RecordingTurnLlmClient("result-beta")
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = FakeLlmClient(),
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "parent-model",
+            config = config,
+            providerProfileResolver = { providers[it] },
+            subagentLlmClientFactory = { model, _ ->
+                if (model == "deepseek-v4-pro") clientAlpha else clientBeta
+            },
+            subagentImagePolicyResolver = { _, _ -> AgentToolImageContinuationPolicy.DEFAULT }
+        )
+
+        val env = FakeExecutionEnvironment()
+        val results = dispatcher.dispatch(
+            parentEnv = env,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("explorer", "task-alpha-1"),
+                SubagentDispatcher.SubagentTaskSpec("planner", "task-beta"),
+                SubagentDispatcher.SubagentTaskSpec("explorer", "task-alpha-2")
+            ),
+            concurrency = 3
+        )
+
+        assertEquals(3, results.size)
+        assertEquals("completed", results[0].status)
+        assertEquals("completed", results[1].status)
+        assertEquals("completed", results[2].status)
+
+        // 验证各角色输出隔离且由对应独立 client 完成，绝无 request model 字符串回声
+        assertEquals("result-alpha", results[0].finalContent)
+        assertEquals("result-beta", results[1].finalContent)
+        assertEquals("result-alpha", results[2].finalContent)
+
+        // 对 LLM 实际接收到的 request.model 进行行为断言
+        assertEquals(2, clientAlpha.requests.size)
+        assertEquals("deepseek-v4-pro", clientAlpha.requests[0].model)
+        assertEquals("deepseek-v4-pro", clientAlpha.requests[1].model)
+        assertEquals(1, clientBeta.requests.size)
+        assertEquals("deepseek-v4-flash", clientBeta.requests[0].model)
+    }
+
+    @Test
+    fun `default inheritance switches when config default changes and falls back to parent when unconfigured`() = runBlocking {
+        val providerAlpha = ModelProviderProfile(
+            id = "prov-alpha",
+            name = "Alpha",
+            baseUrl = "https://api.alpha.com/v1",
+            apiKey = "alpha-key"
+        )
+        val providerBeta = ModelProviderProfile(
+            id = "prov-beta",
+            name = "Beta",
+            baseUrl = "https://api.beta.com/v1",
+            apiKey = "beta-key"
+        )
+        val providers = mapOf("prov-alpha" to providerAlpha, "prov-beta" to providerBeta)
+
+        val explorerProfile = SubagentProfile(
+            id = "explorer",
+            displayName = "探索者",
+            systemPrompt = "探索",
+            providerProfileId = "prov-alpha",
+            modelId = "deepseek-v4-pro"
+        )
+
+        val parentClient = RecordingTurnLlmClient("result-parent")
+        val alphaClient = RecordingTurnLlmClient("result-alpha")
+        val betaClient = RecordingTurnLlmClient("result-beta")
+
+        fun createDispatcher(cfg: XiaowanSubagentConfig) = SubagentDispatcher(
+            llmClient = parentClient,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "parent-model-gpt",
+            config = cfg,
+            providerProfileResolver = { providers[it] },
+            subagentLlmClientFactory = { model, _ ->
+                if (model == "deepseek-v4-pro") alphaClient else betaClient
+            },
+            subagentImagePolicyResolver = { _, _ -> AgentToolImageContinuationPolicy.DEFAULT }
+        )
+
+        val env = FakeExecutionEnvironment(modelProviderProfileId = "parent-provider-id")
+
+        // 1. 同一批次：角色 A (explorer) 显式配置为 Alpha；角色 B (general) 未覆盖，继承默认 Alpha
+        val config1 = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = "prov-alpha",
+            modelId = "deepseek-v4-pro",
+            profiles = listOf(SubagentProfileRegistry.general, explorerProfile)
+        )
+        val result1 = createDispatcher(config1).dispatch(
+            parentEnv = env,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("explorer", "task A-1"),
+                SubagentDispatcher.SubagentTaskSpec("general", "task B-1")
+            ),
+            concurrency = 2
+        )
+        assertEquals(2, result1.size)
+        assertEquals("result-alpha", result1[0].finalContent)
+        assertEquals("result-alpha", result1[1].finalContent)
+        assertEquals("deepseek-v4-pro", alphaClient.requests[alphaClient.requests.size - 2].model)
+        assertEquals("deepseek-v4-pro", alphaClient.requests[alphaClient.requests.size - 1].model)
+
+        // 2. 修改默认子代理模型配置为 Beta：角色 B (general) 随之切换为 Beta，而角色 A (explorer) 依然保留显式配置 Alpha
+        val config2 = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = "prov-beta",
+            modelId = "deepseek-v4-flash",
+            profiles = listOf(SubagentProfileRegistry.general, explorerProfile)
+        )
+        val result2 = createDispatcher(config2).dispatch(
+            parentEnv = env,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("explorer", "task A-2"),
+                SubagentDispatcher.SubagentTaskSpec("general", "task B-2")
+            ),
+            concurrency = 2
+        )
+        assertEquals(2, result2.size)
+        assertEquals("result-alpha", result2[0].finalContent)
+        assertEquals("result-beta", result2[1].finalContent)
+        assertEquals("deepseek-v4-pro", alphaClient.requests.last().model)
+        assertEquals("deepseek-v4-flash", betaClient.requests.last().model)
+
+        // 3. 默认子代理模型未配置（两者皆空）：角色 B 跟随父级模型与父级 Client，而角色 A 依然保留在 Alpha
+        val config3 = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = null,
+            modelId = null,
+            profiles = listOf(SubagentProfileRegistry.general, explorerProfile)
+        )
+        val result3 = createDispatcher(config3).dispatch(
+            parentEnv = env,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("explorer", "task A-3"),
+                SubagentDispatcher.SubagentTaskSpec("general", "task B-3")
+            ),
+            concurrency = 2
+        )
+        assertEquals(2, result3.size)
+        assertEquals("result-alpha", result3[0].finalContent)
+        assertEquals("result-parent", result3[1].finalContent)
+        assertEquals("deepseek-v4-pro", alphaClient.requests.last().model)
+        assertEquals("parent-model-gpt", parentClient.requests.last().model)
+    }
+
+    @Test
+    fun `full role overrides succeed even with broken default provider but role bad provider throws explicitly`() = runBlocking {
+        val providerAlpha = ModelProviderProfile(
+            id = "prov-alpha",
+            name = "Alpha",
+            baseUrl = "https://api.alpha.com/v1",
+            apiKey = "alpha-key"
+        )
+
+        val explorerProfile = SubagentProfile(
+            id = "explorer",
+            displayName = "探索者",
+            systemPrompt = "探索",
+            providerProfileId = "prov-alpha",
+            modelId = "deepseek-v4-pro"
+        )
+        val badRoleProfile = SubagentProfile(
+            id = "bad-role",
+            displayName = "错误角色",
+            systemPrompt = "错误",
+            providerProfileId = "broken-role-provider",
+            modelId = "bad-model"
+        )
+
+        // 默认子模型指向一个不存在/无效的 Provider
+        val config = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = "broken-default-provider",
+            modelId = "broken-default-model",
+            profiles = listOf(SubagentProfileRegistry.general, explorerProfile, badRoleProfile)
+        )
+
+        val alphaClient = RecordingTurnLlmClient("alpha-ok")
+        val dispatcher = SubagentDispatcher(
+            llmClient = FakeLlmClient(),
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "parent-model",
+            config = config,
+            providerProfileResolver = { id ->
+                if (id == "prov-alpha") providerAlpha else null
+            },
+            subagentLlmClientFactory = { _, _ -> alphaClient },
+            subagentImagePolicyResolver = { _, _ -> AgentToolImageContinuationPolicy.DEFAULT }
+        )
+
+        val env = FakeExecutionEnvironment()
+
+        // 1. 全部任务均有有效 role override：无效的默认 Provider 不得阻断执行
+        val overrideResults = dispatcher.dispatch(
+            parentEnv = env,
+            tasks = listOf(SubagentDispatcher.SubagentTaskSpec("explorer", "explore task")),
+            concurrency = 1
+        )
+        assertEquals(1, overrideResults.size)
+        assertEquals("completed", overrideResults.single().status)
+        assertEquals("alpha-ok", overrideResults.single().finalContent)
+        assertEquals("deepseek-v4-pro", alphaClient.requests.last().model)
+
+        // 2. 角色自身配置了无效 Provider：显式报错 IllegalStateException，绝不静默 fallback
+        val badRoleRun = runCatching {
+            dispatcher.dispatch(
+                parentEnv = env,
+                tasks = listOf(SubagentDispatcher.SubagentTaskSpec("bad-role", "bad role task")),
+                concurrency = 1
+            )
+        }
+        assertTrue(badRoleRun.isFailure)
+        val badRoleException = badRoleRun.exceptionOrNull()
+        assertTrue(badRoleException is IllegalStateException)
+        assertTrue(badRoleException?.message?.contains("broken-role-provider") == true)
+
+        // 3. 混合批次中若有任务依赖默认子模型（如 general 未覆盖），则在 admission 校验阶段阻断全部子任务
+        val mixedRun = runCatching {
+            dispatcher.dispatch(
+                parentEnv = env,
+                tasks = listOf(
+                    SubagentDispatcher.SubagentTaskSpec("explorer", "valid task"),
+                    SubagentDispatcher.SubagentTaskSpec("general", "needs broken default")
+                ),
+                concurrency = 2
+            )
+        }
+        assertTrue(mixedRun.isFailure)
+        val mixedException = mixedRun.exceptionOrNull()
+        assertTrue(mixedException is IllegalStateException)
+        assertTrue(mixedException?.message?.contains("broken-default-provider") == true)
+    }
+
+    private class FakeExecutionEnvironment(
+        override val runtimeContextRepository: AgentRuntimeContextRepository = mock(AgentRuntimeContextRepository::class.java),
+        override val workspaceDescriptor: AgentWorkspaceDescriptor = mock(AgentWorkspaceDescriptor::class.java),
+        override val workspaceManager: AgentWorkspaceManager = mock(AgentWorkspaceManager::class.java),
+        override val workspaceMemoryService: WorkspaceMemoryService = mock(WorkspaceMemoryService::class.java),
+        override val modelProviderProfileId: String = "test-provider",
+        override val reasoningEffort: String = "medium"
+    ) : AgentExecutionEnvironment {
         override val agentRunId: String = "test-run"
         override val conversationId: Long = 12345L
         override val acpSessionId: String = "acp-session-1"
         override val acpTurnId: String = "acp-turn-1"
         override val userMessage: String = "test"
         override val resolvedSkills: List<ResolvedSkillContext> = emptyList()
-        override val runtimeContextRepository: AgentRuntimeContextRepository
-            get() = throw UnsupportedOperationException("unused in test")
-        override val workspaceDescriptor: AgentWorkspaceDescriptor
-            get() = throw UnsupportedOperationException("unused in test")
-        override val workspaceManager: AgentWorkspaceManager
-            get() = throw UnsupportedOperationException("unused in test")
-        override val workspaceMemoryService: WorkspaceMemoryService
-            get() = throw UnsupportedOperationException("unused in test")
         override val conversationMode: String = AgentConversationModePolicy.AGENT_MODE
-        override val reasoningEffort: String = "medium"
-        override val modelProviderProfileId: String = "test-provider"
         override val terminalEnvironment: Map<String, String> = emptyMap()
         override val runControl: AgentRunControl = NoOpAgentRunControl
         override val permissionRequester: AgentPermissionRequester? = null
         override val turnJob = null
         override val longTermMemoryIndex = null
+    }
+
+    private class RecordingTurnLlmClient(
+        private val fixedResponse: String = "subagent execution done"
+    ) : AgentLlmClient {
+        val requests = mutableListOf<ChatCompletionRequest>()
+
+        override suspend fun streamTurn(
+            request: ChatCompletionRequest,
+            onReasoningUpdate: (suspend (String) -> Unit)?,
+            onContentUpdate: (suspend (String) -> Unit)?,
+            onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+            allowTransportRetry: Boolean,
+        ): ChatCompletionTurn {
+            requests.add(request)
+            onContentUpdate?.invoke(fixedResponse)
+            return ChatCompletionTurn(
+                message = ChatCompletionMessage(
+                    role = "assistant",
+                    content = JsonPrimitive(fixedResponse)
+                )
+            )
+        }
     }
 
     private class FakeLlmClient : AgentLlmClient {

@@ -13,8 +13,21 @@ data class SubagentProfile(
     val baseProfileId: String = "general",
     val enabled: Boolean = true,
     val allowedTools: List<String>? = null,
-    val disallowedTools: List<String> = emptyList()
-)
+    val disallowedTools: List<String> = emptyList(),
+    val providerProfileId: String? = null,
+    val modelId: String? = null
+) {
+    init {
+        require((providerProfileId == null && modelId == null) || (providerProfileId != null && modelId != null)) {
+            "providerProfileId and modelId must both be null or both non-null."
+        }
+        if (providerProfileId != null) {
+            require(providerProfileId.isNotBlank() && modelId!!.isNotBlank()) {
+                "providerProfileId and modelId must not be blank."
+            }
+        }
+    }
+}
 
 object SubagentProfileRegistry {
     val general: SubagentProfile = SubagentProfile(

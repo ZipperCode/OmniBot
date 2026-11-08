@@ -59,6 +59,8 @@ class SubagentProfileData {
     this.enabled = true,
     this.allowedTools,
     this.disallowedTools = const [],
+    this.providerProfileId,
+    this.modelId,
   });
 
   final String id;
@@ -72,8 +74,21 @@ class SubagentProfileData {
   final List<String>? allowedTools;
   final List<String> disallowedTools;
 
+  /// 角色专属 Provider 标识（null 表示继承默认子代理模型）。
+  final String? providerProfileId;
+
+  /// 角色专属模型标识（null 表示继承默认子代理模型）。
+  final String? modelId;
+
   bool get isBuiltIn => kBuiltInSubagentProfileIds.contains(id);
   bool get isGeneral => id == 'general';
+
+  /// 是否为该角色显式配置了专用模型（二者皆非空才视为有效配置）。
+  bool get hasDedicatedModel =>
+      providerProfileId != null &&
+      providerProfileId!.isNotEmpty &&
+      modelId != null &&
+      modelId!.isNotEmpty;
 
   SubagentToolMode get toolMode {
     if (allowedTools == null) return SubagentToolMode.inherit;
@@ -96,6 +111,16 @@ class SubagentProfileData {
         .where((item) => item.isNotEmpty)
         .toList();
 
+    final rawProvider = json['providerProfileId']?.toString().trim();
+    final rawModel = json['modelId']?.toString().trim();
+    if ((rawProvider == null) != (rawModel == null) ||
+        (rawProvider != null && rawProvider.isEmpty) ||
+        (rawModel != null && rawModel.isEmpty)) {
+      throw const FormatException('角色的 Provider 与模型必须成对配置。');
+    }
+    final providerProfileId = rawProvider;
+    final modelId = rawModel;
+
     return SubagentProfileData(
       id: id,
       displayName: (json['displayName']?.toString() ?? id).trim(),
@@ -108,6 +133,8 @@ class SubagentProfileData {
       enabled: json['enabled'] as bool? ?? true,
       allowedTools: allowedTools,
       disallowedTools: disallowedTools,
+      providerProfileId: providerProfileId,
+      modelId: modelId,
     );
   }
 
@@ -120,6 +147,8 @@ class SubagentProfileData {
         'enabled': enabled,
         'allowedTools': allowedTools,
         'disallowedTools': disallowedTools,
+        'providerProfileId': providerProfileId,
+        'modelId': modelId,
       };
 
   SubagentProfileData copyWith({
@@ -132,6 +161,9 @@ class SubagentProfileData {
     List<String>? allowedTools,
     bool forceAllowedTools = false,
     List<String>? disallowedTools,
+    String? providerProfileId,
+    String? modelId,
+    bool clearModel = false,
   }) {
     return SubagentProfileData(
       id: id ?? this.id,
@@ -143,6 +175,10 @@ class SubagentProfileData {
       allowedTools:
           forceAllowedTools ? allowedTools : (allowedTools ?? this.allowedTools),
       disallowedTools: disallowedTools ?? this.disallowedTools,
+      providerProfileId: clearModel
+          ? null
+          : (providerProfileId ?? this.providerProfileId),
+      modelId: clearModel ? null : (modelId ?? this.modelId),
     );
   }
 }
@@ -352,12 +388,36 @@ class _XiaowanSubagentSettingsEditorState
       existingIds.remove(existingProfile.id);
     }
 
+    // 解析当前默认子代理模型显示文案。
+    final dedicatedProfile = widget.config.providerProfileId == null
+        ? null
+        : widget.providerProfiles
+            .where((p) => p.id == widget.config.providerProfileId)
+            .firstOrNull;
+    final defaultSubagentModelDesc = widget.config.usesDedicatedModel
+        ? '${dedicatedProfile?.name ?? widget.config.providerProfileId} / ${widget.config.modelId}'
+        : null;
+
+    // 解析主 Agent 模型显示文案。
+    final mainBinding = widget.mainBinding;
+    final mainProfile = mainBinding == null
+        ? null
+        : widget.providerProfiles
+            .where((p) => p.id == mainBinding.providerProfileId)
+            .firstOrNull;
+    final mainModelDesc = mainBinding == null
+        ? _text('默认统一模型', 'Default shared model')
+        : '${mainProfile?.name ?? mainBinding.providerProfileId} / ${mainBinding.modelId}';
+
     await showSettingsDetailSheet<void>(
       context: context,
       isScrollControlled: true,
       builder: (sheetContext) => _ProfileDetailEditorSheet(
         profile: existingProfile,
         existingProfileIds: existingIds,
+        providerProfiles: widget.providerProfiles,
+        defaultSubagentModelDesc: defaultSubagentModelDesc,
+        mainModelDesc: mainModelDesc,
         onSave: (saved) {
           final List<SubagentProfileData> nextProfiles;
           if (existingProfile != null) {
@@ -379,6 +439,17 @@ class _XiaowanSubagentSettingsEditorState
             : null,
       ),
     );
+  }
+
+  String _roleModelSummary(SubagentProfileData profile) {
+    if (profile.hasDedicatedModel) {
+      final provider = widget.providerProfiles
+          .where((p) => p.id == profile.providerProfileId)
+          .firstOrNull;
+      final providerName = provider?.name ?? profile.providerProfileId;
+      return '$providerName / ${profile.modelId}';
+    }
+    return _text('继承默认子代理模型', 'Inherit default subagent model');
   }
 
   IconData _iconForProfile(String id) {
@@ -446,15 +517,15 @@ class _XiaowanSubagentSettingsEditorState
         OmniSettingsGroup(
           title: _text('子代理执行环境', 'Execution Environment'),
           subtitle: _text(
-            '默认跟随主 Agent；点选时读取已配置 Provider 的可用模型。',
-            'Dedicated model and reasoning effort. Defaults to following the main Agent.',
+            '未单独配置模型的子角色将使用此处的默认子代理模型；未配置时跟随主 Agent。',
+            'Subagent roles without a dedicated model inherit this default model; defaults to following the main Agent.',
           ),
           children: [
             Builder(
               builder: (anchorContext) => OmniSettingsTile(
                 tileKey: const Key('xiaowan-subagent-dedicated-model-tile'),
                 icon: LucideIcons.cpu,
-                title: _text('专用 Provider / 模型', 'Dedicated Provider / Model'),
+                title: _text('默认子代理模型', 'Default Subagent Model'),
                 subtitle: dedicatedModelLabel,
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -565,7 +636,7 @@ class _XiaowanSubagentSettingsEditorState
                 ),
                 title: profile.displayName,
                 subtitle:
-                    'ID: ${profile.id} · ${_text('基础', 'Base')}: ${baseProfileLabel(profile.baseProfileId, _english)}\n${_text('工具', 'Tools')}: ${toolSummaryLabel(profile, _english)}',
+                    'ID: ${profile.id} · ${_text('基础', 'Base')}: ${baseProfileLabel(profile.baseProfileId, _english)}\n${_text('模型', 'Model')}: ${_roleModelSummary(profile)}\n${_text('工具', 'Tools')}: ${toolSummaryLabel(profile, _english)}',
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -604,13 +675,18 @@ class _ProfileDetailEditorSheet extends StatefulWidget {
     required this.existingProfileIds,
     required this.onSave,
     this.onDelete,
+    this.providerProfiles = const [],
+    this.defaultSubagentModelDesc,
+    required this.mainModelDesc,
   });
 
   final SubagentProfileData? profile;
   final Set<String> existingProfileIds;
   final ValueChanged<SubagentProfileData> onSave;
   final VoidCallback? onDelete;
-
+  final List<ModelProviderProfileSummary> providerProfiles;
+  final String? defaultSubagentModelDesc;
+  final String mainModelDesc;
   @override
   State<_ProfileDetailEditorSheet> createState() =>
       _ProfileDetailEditorSheetState();
@@ -629,6 +705,8 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
   late SubagentToolMode _toolMode;
   late List<String> _allowedTools;
   late List<String> _disallowedTools;
+  String? _selectedProviderProfileId;
+  String? _selectedModelId;
   String? _errorMessage;
 
   bool get _isNew => widget.profile == null;
@@ -656,8 +734,9 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
     _toolMode = profile?.toolMode ?? SubagentToolMode.inherit;
     _allowedTools = List<String>.from(profile?.allowedTools ?? const []);
     _disallowedTools = List<String>.from(profile?.disallowedTools ?? const []);
+    _selectedProviderProfileId = profile?.providerProfileId;
+    _selectedModelId = profile?.modelId;
   }
-
   @override
   void dispose() {
     _idController.dispose();
@@ -727,6 +806,55 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
     });
   }
 
+  Future<void> _selectRoleModel(BuildContext anchorContext) async {
+    final anchor = glassPopupAnchorFromContext(anchorContext);
+    if (anchor == null) return;
+
+    final hasDedicated = _selectedProviderProfileId != null &&
+        _selectedProviderProfileId!.isNotEmpty &&
+        _selectedModelId != null &&
+        _selectedModelId!.isNotEmpty;
+
+    final currentSelection = hasDedicated
+        ? ConversationModelSelection(
+            providerProfileId: _selectedProviderProfileId!,
+            modelId: _selectedModelId!,
+          )
+        : null;
+
+    final selection = await showGlassPopup<ConversationModelSelection>(
+      context: context,
+      sourceContext: anchorContext,
+      anchor: anchor,
+      child: Builder(
+        builder: (popupContext) => LayoutBuilder(
+          builder: (context, constraints) => ConversationModelSelectorContent(
+            width: 320,
+            maxHeight: constraints.maxHeight.clamp(220.0, 460.0),
+            loadLiveProviders: true,
+            currentSelection: currentSelection,
+            onSelect: (value) => Navigator.of(popupContext).pop(value),
+          ),
+        ),
+      ),
+    );
+
+    if (!mounted || selection == null) return;
+    setState(() {
+      _selectedProviderProfileId = selection.providerProfileId;
+      _selectedModelId = selection.modelId;
+      _errorMessage = null;
+    });
+  }
+
+  void _resetRoleModel() {
+    setState(() {
+      _selectedProviderProfileId = null;
+      _selectedModelId = null;
+      _errorMessage = null;
+    });
+  }
+
   void _handleSave() {
     final id = _idController.text.trim();
     final displayName = _nameController.text.trim();
@@ -777,6 +905,28 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
       SubagentToolMode.custom => _allowedTools,
     };
 
+    // 角色专属模型配置校验：Provider 与 Model 必须成对设置或成对留空
+    final String? roleProvider;
+    final String? roleModel;
+    final hasProvider = _selectedProviderProfileId != null &&
+        _selectedProviderProfileId!.trim().isNotEmpty;
+    final hasModel = _selectedModelId != null &&
+        _selectedModelId!.trim().isNotEmpty;
+
+    if (hasProvider && hasModel) {
+      roleProvider = _selectedProviderProfileId!.trim();
+      roleModel = _selectedModelId!.trim();
+    } else if (!hasProvider && !hasModel) {
+      roleProvider = null;
+      roleModel = null;
+    } else {
+      setState(() => _errorMessage = _text(
+        '角色模型配置不完整：Provider 与 Model 必须成对设置或成对留空。',
+        'Incomplete role model configuration: Provider and Model must be set together or cleared together.',
+      ));
+      return;
+    }
+
     final saved = SubagentProfileData(
       id: _isNew ? id : (widget.profile?.id ?? id),
       displayName: displayName,
@@ -786,8 +936,9 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
       enabled: _isGeneral ? true : _enabled,
       allowedTools: finalAllowedTools,
       disallowedTools: _disallowedTools,
+      providerProfileId: roleProvider,
+      modelId: roleModel,
     );
-
     widget.onSave(saved);
     Navigator.of(context).pop();
   }
@@ -1063,8 +1214,85 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
               ],
             ),
             const SizedBox(height: 16),
+            // 6. 角色模型选择与继承设置
+            Builder(
+              builder: (anchorContext) {
+                final hasDedicatedModel = _selectedProviderProfileId != null &&
+                    _selectedProviderProfileId!.isNotEmpty &&
+                    _selectedModelId != null &&
+                    _selectedModelId!.isNotEmpty;
 
-            // 6. 系统提示词
+                final selectedProvider = _selectedProviderProfileId == null
+                    ? null
+                    : widget.providerProfiles
+                        .where((p) => p.id == _selectedProviderProfileId)
+                        .firstOrNull;
+                final modelDisplayName = hasDedicatedModel
+                    ? '${selectedProvider?.name ?? _selectedProviderProfileId} / $_selectedModelId'
+                    : (widget.defaultSubagentModelDesc != null
+                        ? _text(
+                            '使用默认子代理模型 (${widget.defaultSubagentModelDesc})',
+                            'Use default subagent model (${widget.defaultSubagentModelDesc})',
+                          )
+                        : _text(
+                            '使用默认子代理模型（未配置，跟随主 Agent: ${widget.mainModelDesc}）',
+                            'Use default subagent model (unconfigured, follows main: ${widget.mainModelDesc})',
+                          ));
+
+                return InkWell(
+                  key: const Key('xiaowan-subagent-sheet-model-selector'),
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => _selectRoleModel(anchorContext),
+                  child: InputDecorator(
+                    decoration: InputDecoration(
+                      labelText: _text('角色模型 (Role Model)', 'Role Model'),
+                      helperText: hasDedicatedModel
+                          ? _text('已为该角色单独配置专用模型；点击可修改。', 'Dedicated model configured for this role. Tap to change.')
+                          : _text(
+                              '未配置时自动使用默认子代理模型。点击可为该角色单独配置模型。',
+                              'Inherits default subagent model. Tap to configure a dedicated model.',
+                            ),
+                      suffixIcon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (hasDedicatedModel) ...[
+                            TextButton(
+                              key: const Key('xiaowan-subagent-sheet-reset-model-button'),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: const Size(0, 32),
+                                textStyle: const TextStyle(fontSize: 12),
+                              ),
+                              onPressed: _resetRoleModel,
+                              child: Text(_text('使用默认子模型', 'Use default')),
+                            ),
+                            const SizedBox(width: 4),
+                          ],
+                          Icon(
+                            LucideIcons.chevronRight,
+                            size: 18,
+                            color: palette.textTertiary,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                      ),
+                    ),
+                    child: Text(
+                      modelDisplayName,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        color: hasDedicatedModel
+                            ? palette.textPrimary
+                            : palette.textSecondary,
+                        fontWeight: hasDedicatedModel ? FontWeight.w500 : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 14),
+            // 7. 系统提示词
             TextField(
               key: const Key('xiaowan-subagent-sheet-prompt-input'),
               controller: _promptController,
@@ -1083,7 +1311,7 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
             ),
             const SizedBox(height: 20),
 
-            // 7. 工具授权策略
+            // 8. 工具授权策略
             Text(
               _text('工具使用策略', 'Tool Permissions Policy'),
               style: TextStyle(
@@ -1228,7 +1456,7 @@ class _ProfileDetailEditorSheetState extends State<_ProfileDetailEditorSheet> {
               const SizedBox(height: 16),
             ],
 
-            // 8. 显式禁止工具（黑名单）
+            // 9. 显式禁止工具（黑名单）
             Text(
               _text('显式禁止的工具 (黑名单)：', 'Disallowed tools (blacklist):'),
               style: TextStyle(

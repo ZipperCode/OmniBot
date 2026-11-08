@@ -129,14 +129,21 @@ class XiaowanSubagentConfigStore(
             true
         }
 
-        val providerProfileId = if (obj.has("providerProfileId") && !obj.get("providerProfileId").isJsonNull) {
-            obj.get("providerProfileId").asString.trim().takeIf { it.isNotEmpty() }
+        val hasTopProvider = obj.has("providerProfileId") && !obj.get("providerProfileId").isJsonNull
+        val hasTopModel = obj.has("modelId") && !obj.get("modelId").isJsonNull
+
+        val providerProfileId = if (hasTopProvider) {
+            val raw = obj.get("providerProfileId").asString
+            require(raw.isNotBlank()) { "Field 'providerProfileId' must not be blank." }
+            raw.trim()
         } else {
             null
         }
 
-        val modelId = if (obj.has("modelId") && !obj.get("modelId").isJsonNull) {
-            obj.get("modelId").asString.trim().takeIf { it.isNotEmpty() }
+        val modelId = if (hasTopModel) {
+            val raw = obj.get("modelId").asString
+            require(raw.isNotBlank()) { "Field 'modelId' must not be blank." }
+            raw.trim()
         } else {
             null
         }
@@ -234,6 +241,28 @@ class XiaowanSubagentConfigStore(
         } else {
             emptyList()
         }
+        val hasRoleProvider = obj.has("providerProfileId") && !obj.get("providerProfileId").isJsonNull
+        val hasRoleModel = obj.has("modelId") && !obj.get("modelId").isJsonNull
+
+        val providerProfileId = if (hasRoleProvider) {
+            val raw = obj.get("providerProfileId").asString
+            require(raw.isNotBlank()) { "Profile '$id' providerProfileId cannot be blank." }
+            raw.trim()
+        } else {
+            null
+        }
+
+        val modelId = if (hasRoleModel) {
+            val raw = obj.get("modelId").asString
+            require(raw.isNotBlank()) { "Profile '$id' modelId cannot be blank." }
+            raw.trim()
+        } else {
+            null
+        }
+
+        require((providerProfileId == null && modelId == null) || (providerProfileId != null && modelId != null)) {
+            "Profile '$id' providerProfileId and modelId must both be provided or both omitted."
+        }
 
         return SubagentProfile(
             id = id,
@@ -243,7 +272,9 @@ class XiaowanSubagentConfigStore(
             baseProfileId = baseProfileId,
             enabled = enabled,
             allowedTools = allowedTools,
-            disallowedTools = disallowedTools
+            disallowedTools = disallowedTools,
+            providerProfileId = providerProfileId,
+            modelId = modelId
         )
     }
 
@@ -308,6 +339,16 @@ class XiaowanSubagentConfigStore(
             val disallowed = JsonArray()
             p.disallowedTools.forEach { disallowed.add(it) }
             pObj.add("disallowedTools", disallowed)
+            if (p.providerProfileId != null) {
+                pObj.addProperty("providerProfileId", p.providerProfileId)
+            } else {
+                pObj.add("providerProfileId", JsonNull.INSTANCE)
+            }
+            if (p.modelId != null) {
+                pObj.addProperty("modelId", p.modelId)
+            } else {
+                pObj.add("modelId", JsonNull.INSTANCE)
+            }
             profilesArray.add(pObj)
         }
         obj.add("profiles", profilesArray)
@@ -329,7 +370,9 @@ class XiaowanSubagentConfigStore(
                     "baseProfileId" to profile.baseProfileId,
                     "enabled" to profile.enabled,
                     "allowedTools" to profile.allowedTools,
-                    "disallowedTools" to profile.disallowedTools
+                    "disallowedTools" to profile.disallowedTools,
+                    "providerProfileId" to profile.providerProfileId,
+                    "modelId" to profile.modelId,
                 )
             }
         )

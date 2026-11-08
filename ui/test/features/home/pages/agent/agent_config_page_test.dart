@@ -908,7 +908,7 @@ void main() {
   );
 
   testWidgets(
-    'Xiaowan reload failure clears subagent draft, surfaces error and disables save',
+    'Xiaowan incomplete role model reload clears draft and prevents overwriting config',
     (tester) async {
       var readCount = 0;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -947,6 +947,20 @@ void main() {
             'agentId': 'xiaowan-acp',
             'kind': 'xiaowan',
             'revision': 1,
+            'subagent': <String, dynamic>{
+              'enabled': true,
+              'profiles': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': 'general',
+                  'displayName': '通用子任务',
+                  'systemPrompt': 'general prompt',
+                  'baseProfileId': 'general',
+                  'enabled': true,
+                  'providerProfileId': 'role-provider',
+                  'modelId': null,
+                },
+              ],
+            },
           };
         }
         return null;
@@ -983,6 +997,365 @@ void main() {
         find.byKey(const Key('xiaowan-subagent-enabled-switch')),
         findsNothing,
       );
+    },
+  );
+  testWidgets(
+    'Xiaowan Subagent profile allows choosing dedicated model, persisting on save/reload, and fallback to default when reset',
+    (tester) async {
+      var readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': 'provider-2',
+          'modelId': 'gpt-4o',
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general system prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+              'providerProfileId': null,
+              'modelId': null,
+            },
+            <String, dynamic>{
+              'id': 'planner',
+              'displayName': '任务规划器',
+              'systemPrompt': 'planner system prompt',
+              'description': 'planner desc',
+              'baseProfileId': 'planner',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+              'providerProfileId': null,
+              'modelId': null,
+            },
+          ],
+        },
+      };
+
+      Map<String, dynamic>? lastWriteArgs;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        if (call.method == 'agent/config/write') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          lastWriteArgs = args;
+          final updatedSubagent =
+              jsonDecode(args['content'] as String) as Map<String, dynamic>;
+          readPayload = <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': (args['expectedRevision'] as int? ?? 0) + 1,
+            'subagent': updatedSubagent,
+          };
+          return readPayload;
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return <String, dynamic>{
+              'editingProfileId': 'provider-1',
+              'profiles': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': 'provider-1',
+                  'name': 'DeepSeek Provider',
+                  'baseUrl': 'https://api.deepseek.com',
+                  'apiKey': 'sk-test',
+                  'configured': true,
+                  'hasApiKey': true,
+                  'revision': 1,
+                },
+                <String, dynamic>{
+                  'id': 'provider-2',
+                  'name': 'OpenAI Provider',
+                  'baseUrl': 'https://api.openai.com',
+                  'apiKey': 'sk-test-2',
+                  'configured': true,
+                  'hasApiKey': true,
+                  'revision': 1,
+                },
+              ],
+            };
+          case 'getSceneModelBindings':
+            return <dynamic>[];
+          case 'fetchProviderModels':
+            final profileId = (call.arguments as Map?)?['profileId'];
+            if (profileId == 'provider-1') {
+              return <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': 'deepseek-v4-pro',
+                  'displayName': 'deepseek-v4-pro',
+                },
+              ];
+            }
+            if (profileId == 'provider-2') {
+              return <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'id': 'gpt-4o',
+                  'displayName': 'gpt-4o',
+                },
+              ];
+            }
+            return <dynamic>[];
+        }
+        return null;
+      });
+
+      await seedManualModels(
+        profileId: 'provider-1',
+        apiBase: 'https://api.deepseek.com',
+        profileRevision: 1,
+        models: const <ProviderModelOption>[
+          ProviderModelOption(
+            id: 'deepseek-v4-pro',
+            displayName: 'deepseek-v4-pro',
+          ),
+        ],
+      );
+      await seedManualModels(
+        profileId: 'provider-2',
+        apiBase: 'https://api.openai.com',
+        profileRevision: 1,
+        models: const <ProviderModelOption>[
+          ProviderModelOption(
+            id: 'gpt-4o',
+            displayName: 'gpt-4o',
+          ),
+        ],
+      );
+
+      // 1. 加载小万页面，验证初始继承默认模型
+      await _pumpPage(tester, 'xiaowan-acp');
+      final plannerTile =
+          find.byKey(const Key('xiaowan-subagent-profile-tile-planner'));
+      expect(plannerTile, findsOneWidget);
+      expect(find.textContaining('继承默认子代理模型'), findsWidgets);
+
+      // 2. 打开 planner 角色编辑弹窗
+      await tester.tap(plannerTile);
+      await tester.pumpAndSettle();
+
+      final roleModelSelector =
+          find.byKey(const Key('xiaowan-subagent-sheet-model-selector'));
+      expect(roleModelSelector, findsOneWidget);
+      expect(
+        find.byKey(const Key('xiaowan-subagent-sheet-reset-model-button')),
+        findsNothing,
+      );
+
+      // 3. 点击模型选择器，选择 deepseek-v4-pro
+      await tester.tap(roleModelSelector);
+      await tester.pumpAndSettle();
+
+      final modelOption = find.text('deepseek-v4-pro');
+      expect(modelOption, findsOneWidget);
+      await tester.tap(modelOption);
+      await tester.pumpAndSettle();
+
+      // 4. 验证弹窗内显示已选模型与重置按钮
+      expect(
+        find.textContaining('DeepSeek Provider / deepseek-v4-pro'),
+        findsWidgets,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-sheet-reset-model-button')),
+        findsOneWidget,
+      );
+
+      // 5. 保存角色并触发全局保存
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-sheet-save-button')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      // 6. 验证持久化 payload
+      expect(lastWriteArgs, isNotNull);
+      final savedSubagent =
+          jsonDecode(lastWriteArgs!['content'] as String) as Map<String, dynamic>;
+      final savedPlanner = (savedSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'planner') as Map;
+      expect(savedPlanner['providerProfileId'], 'provider-1');
+      expect(savedPlanner['modelId'], 'deepseek-v4-pro');
+      final savedGeneral = (savedSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'general') as Map;
+      expect(savedGeneral['providerProfileId'], isNull);
+      expect(savedGeneral['modelId'], isNull);
+
+      // 7. 重新加载小万页面，确认 planner 专属模型保留
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      expect(
+        find.textContaining('DeepSeek Provider / deepseek-v4-pro'),
+        findsWidgets,
+      );
+
+      // 8. 再次打开 planner 弹窗并点击清空重置按钮
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-planner')),
+      );
+      await tester.pumpAndSettle();
+
+      final resetBtn =
+          find.byKey(const Key('xiaowan-subagent-sheet-reset-model-button'));
+      expect(resetBtn, findsOneWidget);
+      await tester.tap(resetBtn);
+      await tester.pumpAndSettle();
+
+      // 9. 确认重置按钮消失并显示继承默认文案
+      expect(
+        find.byKey(const Key('xiaowan-subagent-sheet-reset-model-button')),
+        findsNothing,
+      );
+      expect(find.textContaining('使用默认子代理模型'), findsWidgets);
+
+      // 10. 保存弹窗并全局保存，验证清空后 null pair
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-sheet-save-button')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      final resetSubagent =
+          jsonDecode(lastWriteArgs!['content'] as String) as Map<String, dynamic>;
+      final resetPlanner = (resetSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'planner') as Map;
+      expect(resetPlanner['providerProfileId'], isNull);
+      expect(resetPlanner['modelId'], isNull);
+
+      // 11. 重载页面验证回到继承状态
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpPage(tester, 'xiaowan-acp');
+      expect(find.textContaining('继承默认子代理模型'), findsWidgets);
+    },
+  );
+
+  testWidgets(
+    'Xiaowan modifying default subagent model does not overwrite role dedicated model pair',
+    (tester) async {
+      var readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': 'provider-2',
+          'modelId': 'gpt-4o',
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general system prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+              'providerProfileId': 'provider-1',
+              'modelId': 'deepseek-v4-pro',
+            },
+          ],
+        },
+      };
+
+      Map<String, dynamic>? lastWriteArgs;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        if (call.method == 'agent/config/write') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          lastWriteArgs = args;
+          readPayload = <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': 1,
+            'subagent': jsonDecode(args['content'] as String),
+          };
+          return readPayload;
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{
+            'editingProfileId': 'provider-1',
+            'profiles': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'id': 'provider-1',
+                'name': 'DeepSeek Provider',
+                'baseUrl': 'https://api.deepseek.com',
+                'apiKey': 'sk-test',
+                'configured': true,
+                'hasApiKey': true,
+                'revision': 1,
+              },
+            ],
+          };
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      // 验证 general 角色具有专属模型
+      expect(
+        find.textContaining('DeepSeek Provider / deepseek-v4-pro'),
+        findsOneWidget,
+      );
+
+      // 重置全局默认子代理模型为跟随主 Agent
+      final resetDefaultBtn =
+          find.byKey(const Key('xiaowan-subagent-reset-model-button'));
+      expect(resetDefaultBtn, findsOneWidget);
+      await tester.tap(resetDefaultBtn);
+      await tester.pumpAndSettle();
+
+      // 保存配置
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      // 验证全局默认模型已清空，但 general 角色的专属 pair 严格保留未被覆盖
+      expect(lastWriteArgs, isNotNull);
+      final savedSubagent =
+          jsonDecode(lastWriteArgs!['content'] as String) as Map<String, dynamic>;
+      expect(savedSubagent['providerProfileId'], isNull);
+      expect(savedSubagent['modelId'], isNull);
+      final generalProfile = (savedSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'general') as Map;
+      expect(generalProfile['providerProfileId'], 'provider-1');
+      expect(generalProfile['modelId'], 'deepseek-v4-pro');
     },
   );
 }

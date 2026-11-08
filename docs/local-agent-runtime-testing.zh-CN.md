@@ -172,17 +172,29 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 
 入口为 `Agents → 小万 → 配置`，读写仍走既有 `agent/config/read`、`agent/config/write`。配置按 Turn 读取同一快照，保存只影响下一轮；Provider/模型只保存引用，不复制认证信息。模型列表在用户主动点开选择器时由现有 Provider 入口加载。其他 Harness 与公共设备 MCP 不提供分派能力。
 
-配置包括总开关、专用模型、思考档位、内置与自定义角色提示词以及工具允许/禁止列表。基础角色权限与父目录是上限，空允许列表表示无工具，所有子角色均禁止递归分派。配置损坏、禁用角色、已删除 Provider 与过期 revision 明确报错，不重新启用较宽的默认权限。
+配置包括总开关、默认子代理模型、思考档位、内置与自定义角色提示词以及工具允许/禁止列表。每个角色可保存独立 Provider/模型引用，完整组合优先于默认子代理模型；两层均未配置时继承父 Agent 当前模型。清空角色模型恢复继承，Provider 与模型必须成对设置或成对留空，显式配置失效时不静默回退。只解析本批实际使用的模型，全部角色均有专用模型时，不使用的失效默认 Provider 不阻断执行。基础角色权限与父目录是上限，空允许列表表示无工具，所有子角色均禁止递归分派。配置损坏、禁用角色、已删除 Provider 与过期 revision 明确报错，不重新启用较宽的默认权限。
 
 维护入口已包含 `SubagentRuntimeExecutionTest` 和 `XiaowanSubagentConfigBehaviorTest`；后者覆盖失败提交后的旧快照、跨实例 revision 冲突、冷读取、损坏配置与 null/空工具策略。`AgentOrchestratorTest` 覆盖父审批允许/拒绝的实际副作用，以及父取消后仍可挂起发送且只发送一次的子取消终态。
 
-本次实际执行结果：
+基础功能实际执行结果：
 
 - 原生聚焦回归 108 项通过；`assembleDevelopStandardDebug` 成功，真机覆盖安装成功。构建未安装依赖；Windows 跨盘缓存使用命令行 `-Pkotlin.incremental=false -Pkotlin.compiler.execution.strategy=in-process`。
 - Flutter 设置页、工具详情卡片与共享 reducer 合计 249 项通过；修改角色表单滚动与模型选择器后，设置页 13 项再次通过；改动文件 `flutter analyze --no-pub` 无问题。
 - 真机从旧版小万配置仅显示启动命令复现缺口；新版总开关关闭后保存、退出重开仍为关闭。新增 `smoke-reviewer`（探索者基础、无工具）后保存并重新加载，角色与权限保留。
 - 默认继承模型和显式配置 `deepseek-v4-pro` / `low` 两条路径均从聊天界面实际调用一次 `subagent_dispatch`，并发两个角色分别得到 `ROLE_42`、`PLAN_42`；工具详情中的两个结果均为 `completed`，`toolCalls` 为空，主回复包含两项结果。
 - 真机运行子任务期间点击“停止”，父任务显示“任务已取消”；最终工具详情保留 `subagent_cancelled` / `status: cancelled`，而不是被旧进度覆盖。同一会话下一轮实际返回 `RECOVERY_OK`，未重放取消的子任务。
-- 最终安装 APK 的 SHA256 为 `d99fd6ba515268d229983f3b98c4ca44e2f9056b52ce483149914722c8b0099e`；该版本取消后实际返回 `FINAL_RECOVERY_OK`。验收创建的自定义角色已通过设置页删除，模型与思考恢复跟随主 Agent；保留测试对话记录，不删除用户历史。
+- 基础功能验收安装 APK 的 SHA256 为 `d99fd6ba515268d229983f3b98c4ca44e2f9056b52ce483149914722c8b0099e`；该版本取消后实际返回 `FINAL_RECOVERY_OK`。验收创建的自定义角色已通过设置页删除，模型与思考恢复跟随主 Agent；保留测试对话记录，不删除用户历史。
 - 未以浏览器自动化、HTTP 200 或仅工具卡片存在作为验收；未修改长期记忆、未输出凭据。审批允许/拒绝与取消终态的细分边界由上述原生行为测试覆盖，发布全量门禁与全部 ROM 未执行。
+
+### 逐角色独立模型追加验收
+
+- Flutter 在 `ui/` 执行 `flutter test --no-pub test/features/home/pages/agent/agent_config_page_test.dart test/agent_tool_summary_card_test.dart test/services/agent_event_reducer_test.dart`，251 项通过；严格拒绝角色半配置的修正后，单独复验 `agent_config_page_test.dart`，15 项全部通过。两轮有重叠，不相加计数。
+- 最后对 `agent_config_page.dart`、`xiaowan_subagent_settings_editor.dart` 与 `agent_config_page_test.dart` 执行 `flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings`，结果为 `No issues found!`。
+- 最后离线执行聚焦 `:app:testDevelopStandardDebugUnitTest` 与 `:app:assembleDevelopStandardDebug -Ptarget=lib/main_standard.dart`，沿用 Windows Kotlin 缓存参数并排除两个依赖安装任务；结果为 `BUILD SUCCESSFUL in 2m 37s`，590 个任务中 31 个执行、559 个已最新。该轮 assemble 为 `UP-TO-DATE`，不是重新打包；安装产物匹配情况见下。
+- 原生聚焦回归合计 114 项，失败、错误、跳过均为 0；覆盖同批角色使用不同模型、修改默认模型不覆盖角色专用模型、清空后继承、旧配置读取与非法半配置拒绝，以及工具禁止列表的保存和回读。
+- 真机设置页将默认子代理模型设为 `deepseek-v4-pro`、planner 专用模型设为 `deepseek-v4-flash`、general 保持继承；保存、离开重开并重新加载后，角色选择仍保留。
+- 从真实聊天页分派两个角色，工具详情保留两个不同 `subagentId`，planner 返回 `ROLE_MODEL_42`、general 返回 `DEFAULT_MODEL_42`，状态均为 `completed`，`toolCalls` 均为空。主回复包含两个结果；本轮 17:46:02–17:46:32 的请求日志标题同时记录 Pro 和 Flash，与角色路由回归结果相符，未展开请求正文或认证信息。
+- 在角色详情点击“使用默认子模型”，保存并重新加载后 planner 恢复继承。同一聊天验收再次完成两个子任务及主回复；17:51:08–17:51:13 的四条本轮请求标题均为 Pro。
+- 本轮安装 APK SHA256 为 `58e1dfa2d2be128cfd0282359091c7a52052807bd104d5fd06a2eb2745c094b3`，与本机构建产物一致。已恢复默认子代理模型跟随主 Agent、角色无专用模型、思考档位 `low`；保留验收对话，未删除用户历史，未改 Provider 或长期记忆。
+- 以上功能验收来自真实 Android 应用流程，不以单元测试、HTTP 200 或卡片存在代替；其他 Agent、全部 ROM 与发布全量门禁未做真机验收。
 
