@@ -26,6 +26,11 @@ import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.Display
 import android.view.Surface
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.Method
 import java.util.UUID
@@ -55,149 +60,82 @@ data class VirtualDisplayInfo(
     val dpi: Int,
 )
 
-/**
- * Frame source backed by [ImageReader].
- *
- * Adapted from IzukiJS (GPL-3.0), commit eb995dff24849fed215a75a136d4b2d076f69c69.
- * Provides a Surface for VirtualDisplay rendering and captures frames without accessibility screenshot overhead.
- */
-class VirtualScreenFrameSource(
-    val width: Int,
-    val height: Int,
-) : AutoCloseable {
-    private val thread = HandlerThread("omni-vd-frames").apply { start() }
-    private val handler = Handler(thread.looper)
-    private val lock = ReentrantLock()
+data class PrivilegedRootTaskInfo(
+    val taskId: Int,
+    val taskKind: String,
+    val displayId: Int,
+    val userId: Int,
+    val packageName: String,
+    val childTaskIds: List<Int> = emptyList(),
+)
 
-    @Volatile
-    private var reader: ImageReader? = null
+data class TaskMigrationResult(
+    val success: Boolean,
+    val code: String,
+    val taskId: Int,
+    val taskKind: String,
+    val sourceDisplayId: Int,
+    val targetDisplayId: Int,
+    val verified: Boolean,
+)
 
-    @Volatile
-    private var latestBitmap: Bitmap? = null
-
-    @Volatile
-    private var closed = false
-
-    val surface: Surface
-        get() = checkNotNull(reader?.surface) { "Frame source not started" }
-
-    fun start() {
-        if (reader != null || closed) return
-        val created = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        reader = created
-        created.setOnImageAvailableListener({ source ->
-            val image = runCatching { source.acquireLatestImage() }.getOrNull() ?: return@setOnImageAvailableListener
-            try {
-                val bitmap = runCatching { imageToBitmap(image) }.getOrNull()
-                if (bitmap != null) {
-                    lock.withLock {
-                        latestBitmap?.recycle()
-                        latestBitmap = bitmap
-                    }
-                }
-            } finally {
-                runCatching { image.close() }
+private fun parseRootTasksJson(jsonStr: String): List<PrivilegedRootTaskInfo> = runCatching {
+    val array = JSONArray(jsonStr)
+    val list = ArrayList<PrivilegedRootTaskInfo>(array.length())
+    for (i in 0 until array.length()) {
+        val obj = array.optJSONObject(i) ?: continue
+        val taskId = obj.optInt("taskId", -1)
+        if (taskId < 0) continue
+        val taskKind = obj.optString("taskKind", "")
+        val displayId = obj.optInt("displayId", 0)
+        val userId = obj.optInt("userId", 0)
+        val packageName = obj.optString("packageName", "")
+        val childArray = obj.optJSONArray("childTaskIds")
+        val childTaskIds = if (childArray != null) {
+            val children = ArrayList<Int>(childArray.length())
+            for (j in 0 until childArray.length()) {
+                children.add(childArray.getInt(j))
             }
-        }, handler)
-    }
-
-    fun captureScreenshotJpeg(quality: Int = 85): ByteArray? = lock.withLock {
-        val bitmap = latestBitmap ?: return null
-        ByteArrayOutputStream().use { output ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
-            output.toByteArray()
-        }
-    }
-
-    private fun imageToBitmap(image: Image): Bitmap {
-        val plane = image.planes[0]
-        val buffer: ByteBuffer = plane.buffer
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * image.width
-
-        val bitmap = Bitmap.createBitmap(
-            image.width + rowPadding / pixelStride,
-            image.height,
-            Bitmap.Config.ARGB_8888,
-        )
-        bitmap.copyPixelsFromBuffer(buffer)
-
-        return if (rowPadding == 0) {
-            bitmap
+            children
         } else {
-            val cropped = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
-            bitmap.recycle()
-            cropped
+            emptyList()
         }
+        list.add(
+            PrivilegedRootTaskInfo(
+                taskId = taskId,
+                taskKind = taskKind,
+                displayId = displayId,
+                userId = userId,
+                packageName = packageName,
+                childTaskIds = childTaskIds,
+            )
+        )
     }
+    list
+}.getOrDefault(emptyList())
 
-    override fun close() {
-        closed = true
-        lock.withLock {
-            latestBitmap?.recycle()
-            latestBitmap = null
-        }
-        reader?.close()
-        reader = null
-        thread.quitSafely()
-    }
+private fun parseMigrationResultJson(jsonStr: String): TaskMigrationResult = runCatching {
+    val obj = JSONObject(jsonStr)
+    TaskMigrationResult(
+        success = obj.optBoolean("success", false),
+        code = obj.optString("code", ""),
+        taskId = obj.optInt("taskId", 0),
+        taskKind = obj.optString("taskKind", ""),
+        sourceDisplayId = obj.optInt("sourceDisplayId", 0),
+        targetDisplayId = obj.optInt("targetDisplayId", 0),
+        verified = obj.optBoolean("verified", false),
+    )
+}.getOrElse {
+    TaskMigrationResult(
+        success = false,
+        code = "parse_error",
+        taskId = 0,
+        taskKind = "unknown",
+        sourceDisplayId = 0,
+        targetDisplayId = 0,
+        verified = false,
+    )
 }
-
-/**
- * Bridge for privileged display and input operations executed under UID 0 (Root) or UID 2000 (Shell).
- */
-interface PrivilegedDisplayBridge {
-    suspend fun createVirtualDisplay(
-        width: Int,
-        height: Int,
-        dpi: Int,
-        surface: Surface,
-        flags: Int,
-    ): Result<Int>
-
-    suspend fun releaseVirtualDisplay(displayId: Int)
-
-    suspend fun injectKeyEvent(displayId: Int, keyCode: Int): Boolean
-
-    suspend fun injectTap(displayId: Int, x: Int, y: Int): Boolean
-
-    suspend fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean
-
-    suspend fun launchActivity(displayId: Int, packageName: String): Boolean
-}
-
-class BinderPrivilegedDisplayBridge(
-    private val service: IPrivilegedDisplayService,
-) : PrivilegedDisplayBridge {
-    override suspend fun createVirtualDisplay(
-        width: Int,
-        height: Int,
-        dpi: Int,
-        surface: Surface,
-        flags: Int,
-    ): Result<Int> = runCatching {
-        val id = service.createVirtualDisplay("OmniVirtualDisplay", width, height, dpi, surface, flags)
-        if (id >= 0) id else error("createVirtualDisplay failed in privileged service: $id")
-    }
-
-    override suspend fun releaseVirtualDisplay(displayId: Int) {
-        runCatching { service.releaseVirtualDisplay(displayId) }
-    }
-
-    override suspend fun injectKeyEvent(displayId: Int, keyCode: Int): Boolean =
-        runCatching { service.injectKeyEvent(displayId, keyCode) }.getOrDefault(false)
-
-    override suspend fun injectTap(displayId: Int, x: Int, y: Int): Boolean =
-        runCatching { service.injectTap(displayId, x, y) }.getOrDefault(false)
-
-    override suspend fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean =
-        runCatching { service.injectSwipe(displayId, x1, y1, x2, y2, durationMs) }.getOrDefault(false)
-
-    override suspend fun launchActivity(displayId: Int, packageName: String): Boolean =
-        runCatching { service.launchActivity(displayId, packageName) }.getOrDefault(false)
-}
-
 /**
  * Manages physical and virtual screen targets, virtual display lifecycle, and app routing.
  *
@@ -677,6 +615,47 @@ object DeviceDisplayManager {
         return null
     }
 
+    private fun validateVirtualFrameSource(displayId: Int, ownerId: String): VirtualScreenFrameSource? {
+        if (displayId == Display.DEFAULT_DISPLAY || displayId != activeVirtualDisplayId) {
+            return null
+        }
+        val currentOwner = activeVirtualDisplayOwner
+        val registeredOwner = DisplayInputCoordinator.getVirtualDisplayOwner(displayId)
+        if (ownerId != currentOwner && ownerId != registeredOwner) {
+            return null
+        }
+        return frameSource
+    }
+
+    /**
+     * Returns the current frame sequence for [displayId] if active, owned by [ownerId],
+     * and backed by an active [VirtualScreenFrameSource]; otherwise null.
+     */
+    fun virtualFrameSequence(displayId: Int, ownerId: String): Long? {
+        val source = validateVirtualFrameSource(displayId, ownerId) ?: return null
+        return source.currentFrameSequence()
+    }
+
+    /**
+     * Draws the latest virtual frame for [displayId] into [canvas] within [destination].
+     *
+     * Validates that [displayId] matches [activeVirtualDisplayId] and [ownerId] matches
+     * the active virtual display owner or registered session owner before delegating to
+     * [VirtualScreenFrameSource.drawLatestFrame].
+     *
+     * Only renders when the latest frame sequence is strictly greater than [afterSequence].
+     */
+    fun drawVirtualFrame(
+        displayId: Int,
+        ownerId: String,
+        canvas: Canvas,
+        destination: Rect,
+        afterSequence: Long = -1L,
+    ): Boolean {
+        val source = validateVirtualFrameSource(displayId, ownerId) ?: return false
+        return source.drawLatestFrame(canvas, destination, afterSequence)
+    }
+
     /**
      * Launches an app on [displayId].
      *
@@ -702,6 +681,23 @@ object DeviceDisplayManager {
 
         val options = ActivityOptions.makeBasic().apply {
             launchDisplayId = displayId
+        }
+
+        val activeTasks = (listDisplays(context).map { it.displayId } + displayId).distinct()
+            .flatMap { getRootTasks(it) }
+            .filter { it.packageName == packageName }
+        if (activeTasks.size > 1) {
+            return AndroidGuiActionResult(
+                success = false,
+                message = "ambiguous_task",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to "ambiguous_task",
+                    "packageName" to packageName,
+                    "targetDisplayId" to displayId.toString(),
+                    "candidateTaskIds" to activeTasks.map { it.taskId }.joinToString(","),
+                ),
+            )
         }
 
         val bridge = displayBridge
@@ -743,6 +739,233 @@ object DeviceDisplayManager {
         }
 
         return AndroidGuiActionResult(true, "open_app_dispatched_on_display:$displayId")
+    }
+
+    suspend fun getRootTasks(displayId: Int): List<PrivilegedRootTaskInfo> {
+        val bridge = displayBridge
+        if (bridge != null) {
+            val jsonStr = bridge.getRootTasks(displayId)
+            return parseRootTasksJson(jsonStr)
+        }
+        val service = privilegedService
+        if (service != null) {
+            val jsonStr = runCatching { service.getRootTasks(displayId) }.getOrDefault("[]")
+            return parseRootTasksJson(jsonStr)
+        }
+        return emptyList()
+    }
+
+    suspend fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): TaskMigrationResult {
+        val bridge = displayBridge
+        if (bridge != null) {
+            val jsonStr = bridge.moveRootTask(taskId, sourceDisplayId, targetDisplayId)
+            return parseMigrationResultJson(jsonStr)
+        }
+        val service = privilegedService
+        if (service != null) {
+            val jsonStr = runCatching { service.moveRootTask(taskId, sourceDisplayId, targetDisplayId) }.getOrNull()
+            if (jsonStr != null) {
+                return parseMigrationResultJson(jsonStr)
+            }
+        }
+        return TaskMigrationResult(
+            success = false,
+            code = "privileged_service_unavailable",
+            taskId = taskId,
+            taskKind = "unknown",
+            sourceDisplayId = sourceDisplayId,
+            targetDisplayId = targetDisplayId,
+            verified = false,
+        )
+    }
+
+    /**
+     * Moves a task running on the caller's active virtual display to [Display.DEFAULT_DISPLAY]
+     * without killing or recreating the task.
+     *
+     * Guarantees:
+     * - Source display must be the active virtual display belonging to [sessionOwnerId].
+     * - Target display is fixed to [Display.DEFAULT_DISPLAY].
+     * - Coordinates locks using [DisplayInputCoordinator.withDisplayLeases] (sorted, non-deadlocking).
+     * - Preserves lockscreen security via [KeyguardStateMonitor.ensureInteractiveAndUnlocked].
+     * - On failure, preserves the virtual display, frame source, and running task (never destroys).
+     * - On success, does NOT destroy the helper/display immediately (retained for session lifecycle).
+     */
+    suspend fun presentToUser(
+        context: Context,
+        packageName: String,
+        taskId: Int? = null,
+        sessionOwnerId: String,
+        leaseOwnerId: String,
+        canPresent: (() -> Boolean)? = null,
+    ): AndroidGuiActionResult {
+        val sourceDisplayId = activeVirtualDisplayId
+        if (sourceDisplayId == Display.DEFAULT_DISPLAY) {
+            return AndroidGuiActionResult(
+                success = false,
+                message = "no_active_virtual_display",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to "source_display_unavailable",
+                    "taskId" to (taskId?.toString() ?: "0"),
+                    "taskKind" to "unknown",
+                    "sourceDisplayId" to sourceDisplayId.toString(),
+                    "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                    "verified" to "false",
+                ),
+            )
+        }
+
+        val currentOwner = activeVirtualDisplayOwner
+        val registeredOwner = DisplayInputCoordinator.getVirtualDisplayOwner(sourceDisplayId)
+        if (sessionOwnerId != currentOwner && sessionOwnerId != registeredOwner) {
+            return AndroidGuiActionResult(
+                success = false,
+                message = "virtual_display_owner_mismatch",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to "cross_session_forbidden",
+                    "taskId" to (taskId?.toString() ?: "0"),
+                    "taskKind" to "unknown",
+                    "sourceDisplayId" to sourceDisplayId.toString(),
+                    "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                    "verified" to "false",
+                ),
+            )
+        }
+
+        val unlocked = KeyguardStateMonitor.ensureInteractiveAndUnlocked(context, Display.DEFAULT_DISPLAY, leaseOwnerId)
+        if (!unlocked) {
+            return AndroidGuiActionResult(
+                success = false,
+                message = "device_locked_awaiting_user_unlock",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to "device_locked",
+                    "taskId" to (taskId?.toString() ?: "0"),
+                    "taskKind" to "unknown",
+                    "sourceDisplayId" to sourceDisplayId.toString(),
+                    "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                    "verified" to "false",
+                ),
+            )
+        }
+
+        return try {
+            DisplayInputCoordinator.withDisplayLeases(
+                listOf(sourceDisplayId, Display.DEFAULT_DISPLAY),
+                leaseOwnerId,
+            ) {
+                if (canPresent != null && !canPresent()) {
+                    return@withDisplayLeases AndroidGuiActionResult(
+                        success = false,
+                        message = "display_busy",
+                        diagnostics = mapOf(
+                            "success" to "false",
+                            "code" to "display_busy",
+                            "taskId" to (taskId?.toString() ?: "0"),
+                            "taskKind" to "unknown",
+                            "sourceDisplayId" to sourceDisplayId.toString(),
+                            "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                            "verified" to "false",
+                        ),
+                    )
+                }
+
+                val tasks = getRootTasks(sourceDisplayId)
+                val targetTask = if (taskId != null) {
+                    tasks.firstOrNull { it.taskId == taskId }
+                } else {
+                    val matching = tasks.filter { it.packageName == packageName }
+                    if (matching.size > 1) {
+                        return@withDisplayLeases AndroidGuiActionResult(
+                            success = false,
+                            message = "ambiguous_task",
+                            diagnostics = mapOf(
+                                "success" to "false",
+                                "code" to "ambiguous_task",
+                                "taskId" to "0",
+                                "taskKind" to "unknown",
+                                "sourceDisplayId" to sourceDisplayId.toString(),
+                                "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                                "verified" to "false",
+                            ),
+                        )
+                    }
+                    matching.firstOrNull()
+                }
+
+                if (targetTask == null) {
+                    return@withDisplayLeases AndroidGuiActionResult(
+                        success = false,
+                        message = "task_not_found",
+                        diagnostics = mapOf(
+                            "success" to "false",
+                            "code" to "task_not_found",
+                            "taskId" to (taskId?.toString() ?: "0"),
+                            "taskKind" to "unknown",
+                            "sourceDisplayId" to sourceDisplayId.toString(),
+                            "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                            "verified" to "false",
+                        ),
+                    )
+                }
+
+                val migration = moveRootTask(targetTask.taskId, sourceDisplayId, Display.DEFAULT_DISPLAY)
+                val diagnostics = mapOf(
+                    "success" to migration.success.toString(),
+                    "code" to migration.code,
+                    "taskId" to migration.taskId.toString(),
+                    "taskKind" to migration.taskKind,
+                    "sourceDisplayId" to migration.sourceDisplayId.toString(),
+                    "targetDisplayId" to migration.targetDisplayId.toString(),
+                    "verified" to migration.verified.toString(),
+                )
+
+                if (migration.verified) {
+                    AndroidGuiActionResult(
+                        success = true,
+                        message = "task_presented_to_user",
+                        diagnostics = diagnostics,
+                    )
+                } else {
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "present_to_user_failed:${migration.code}",
+                        diagnostics = diagnostics,
+                    )
+                }
+            }
+        } catch (e: IllegalStateException) {
+            val code = if (e.message == "display_busy") "display_busy" else "error"
+            AndroidGuiActionResult(
+                success = false,
+                message = e.message ?: "present_to_user_failed",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to code,
+                    "taskId" to (taskId?.toString() ?: "0"),
+                    "taskKind" to "unknown",
+                    "sourceDisplayId" to sourceDisplayId.toString(),
+                    "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                    "verified" to "false",
+                ),
+            )
+        } catch (e: Exception) {
+            AndroidGuiActionResult(
+                success = false,
+                message = e.message ?: "present_to_user_error",
+                diagnostics = mapOf(
+                    "success" to "false",
+                    "code" to "error",
+                    "taskId" to (taskId?.toString() ?: "0"),
+                    "taskKind" to "unknown",
+                    "sourceDisplayId" to sourceDisplayId.toString(),
+                    "targetDisplayId" to Display.DEFAULT_DISPLAY.toString(),
+                    "verified" to "false",
+                ),
+            )
+        }
     }
 
     private suspend fun awaitPackageOnDisplay(

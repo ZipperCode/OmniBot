@@ -883,6 +883,7 @@ private class XiaowanAgentSession(
             terminalEnvironment = terminalEnvironment,
             callback = streamBridge,
             runControl = sessionRunControl,
+            turnJob = checkNotNull(promptJob) { "活动 ACP Turn 缺少执行任务" },
             permissionRequester = object : AgentPermissionRequester {
                 override suspend fun requestPermission(
                     toolCallId: String,
@@ -973,16 +974,6 @@ private class XiaowanAgentSession(
     override suspend fun cancel() {
         sessionRunControl.stopAll()
         activePromptJob?.cancelAndJoin()
-        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-            val sessionKey = sessionId.value
-            cn.com.omnimind.androidgui.DisplayInputCoordinator.closeSessionVirtualDisplays(sessionKey)
-            cn.com.omnimind.androidgui.DeviceDisplayManager.closePrivilegedService(
-                context = context,
-                ownerId = sessionKey,
-                acpSessionId = sessionKey,
-            )
-            cn.com.omnimind.bot.agent.tool.handlers.DeviceDisplayToolHandler.clearSession(sessionKey)
-        }
     }
 
     override suspend fun close(_meta: JsonElement?): CloseSessionResponse =

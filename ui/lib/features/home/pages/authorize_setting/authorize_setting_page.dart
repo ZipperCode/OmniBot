@@ -10,6 +10,7 @@ import 'package:ui/services/special_permission.dart';
 import 'package:ui/services/personal_context_service.dart';
 import 'package:ui/features/home/pages/authorize_setting/personal_context_labels.dart';
 import 'package:ui/features/home/pages/authorize_setting/root_access_setting.dart';
+import 'package:ui/features/home/pages/authorize_setting/system_capabilities_popup.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/omni_menu.dart';
 import 'package:ui/utils/cache_util.dart';
@@ -41,6 +42,10 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
   Map<String, PersonalContextCapability> _personalContext = {};
   bool _personalContextLoaded = false;
   bool _personalContextFailed = false;
+  AssistantStatus? _assistantStatus;
+  bool _assistantStatusLoaded = false;
+  bool _assistantStatusFailed = false;
+  bool _assistantStatusChecking = false;
 
   Color get _pageBackground => context.omniPalette.pageBackground;
   Color get _titleColor => context.omniPalette.textPrimary;
@@ -261,6 +266,72 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
                 await _checkPermissions();
               }
             },
+          ),
+          _AuthorizeSettingItem(
+            icon: LucideIcons.bot,
+            title: _localeText(zh: '系统数字助理', en: 'Digital Assistant'),
+            subtitle: _assistantStatusChecking
+                ? _localeText(zh: '正在检查状态…', en: 'Checking status…')
+                : _assistantStatusFailed
+                ? _localeText(
+                    zh: '无法读取状态，点击重试',
+                    en: 'Could not read status. Tap to retry.',
+                  )
+                : !_assistantStatusLoaded
+                ? _localeText(zh: '检查中…', en: 'Checking…')
+                : _assistantStatus?.supported != true
+                ? _localeText(
+                    zh: '当前系统不支持数字助理服务',
+                    en: 'Not supported on this device',
+                  )
+                : _assistantStatus?.selected == true
+                ? _localeText(
+                    zh: '已设为系统默认数字助理，支持长按或手势唤醒',
+                    en: 'Default assistant · Long-press or gesture to wake',
+                  )
+                : _localeText(
+                    zh: '设为系统默认数字助理，可在任意界面快速唤醒小万',
+                    en: 'Set as default assistant for quick access across the system',
+                  ),
+            trailing: _buildPermissionTrailing(
+              label: _assistantStatusChecking || !_assistantStatusLoaded
+                  ? _localeText(zh: '检查中', en: 'Checking')
+                  : _assistantStatusFailed
+                  ? _localeText(zh: '重试', en: 'Retry')
+                  : _assistantStatus?.supported != true
+                  ? _localeText(zh: '不支持', en: 'Unsupported')
+                  : _assistantStatus?.selected == true
+                  ? _localeText(zh: '已设置', en: 'Enabled')
+                  : _localeText(zh: '去设置', en: 'Enable'),
+              color: _assistantStatusFailed
+                  ? _accentColor
+                  : _assistantStatus?.selected == true
+                  ? _tertiaryTextColor
+                  : _accentColor,
+            ),
+            onTap: () async {
+              if (_assistantStatusFailed || !_assistantStatusLoaded) {
+                await _retryAssistantStatus();
+              } else {
+                await _openAssistantSettings();
+              }
+            },
+          ),
+          _AuthorizeSettingItem(
+            icon: LucideIcons.sliders,
+            title: _localeText(zh: '系统设备能力', en: 'System Capabilities'),
+            subtitle: _localeText(
+              zh: '查看 Wi-Fi、蓝牙、护眼、热点、手电筒等系统开关支持详情。',
+              en: 'View device control support for Wi-Fi, hotspot, night light, and more.',
+            ),
+            trailing: _buildPermissionTrailing(
+              label: _localeText(zh: '查看详情', en: 'View'),
+              color: _accentColor,
+            ),
+            onMenuTap: (anchorContext) => showSystemCapabilitiesPopup(
+              context: context,
+              anchorContext: anchorContext,
+            ),
           ),
         ],
       ),
@@ -494,6 +565,14 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
       final localNetworkStatus = await spePermission
           .invokeMapMethod<String, dynamic>('getLocalNetworkPermissionStatus');
       final shizukuStatus = await getShizukuStatus();
+      AssistantStatus? assistantStatus;
+      bool assistantFailed = false;
+      try {
+        assistantStatus = await getAssistantStatus();
+      } catch (e) {
+        debugPrint('Error checking assistant status: $e');
+        assistantFailed = true;
+      }
 
       if (await waitForPageReady() && mounted) {
         setState(() {
@@ -507,10 +586,58 @@ class _AuthorizeSettingPageState extends State<AuthorizeSettingPage>
           _localNetworkPermissionGranted =
               localNetworkStatus?['granted'] == true;
           _shizukuStatus = shizukuStatus;
+          if (assistantFailed) {
+            _assistantStatusLoaded = true;
+            _assistantStatusFailed = true;
+            _assistantStatus = null;
+          } else if (assistantStatus != null) {
+            _assistantStatus = assistantStatus;
+            _assistantStatusLoaded = true;
+            _assistantStatusFailed = false;
+          }
         });
       }
     } catch (e) {
       debugPrint('Error checking permissions: $e');
+    }
+  }
+
+  Future<void> _retryAssistantStatus() async {
+    if (_assistantStatusChecking) return;
+    setState(() {
+      _assistantStatusChecking = true;
+    });
+    try {
+      final status = await getAssistantStatus();
+      if (mounted) {
+        setState(() {
+          _assistantStatus = status;
+          _assistantStatusLoaded = true;
+          _assistantStatusFailed = false;
+          _assistantStatusChecking = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error retrying assistant status: $e');
+      if (mounted) {
+        setState(() {
+          _assistantStatusLoaded = true;
+          _assistantStatusFailed = true;
+          _assistantStatus = null;
+          _assistantStatusChecking = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _openAssistantSettings() async {
+    try {
+      await openAssistantSettings();
+      if (mounted) {
+        await _checkPermissions();
+      }
+    } catch (e) {
+      debugPrint('Error opening assistant settings: $e');
     }
   }
 

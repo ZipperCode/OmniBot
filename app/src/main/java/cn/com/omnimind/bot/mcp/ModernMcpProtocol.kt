@@ -52,23 +52,52 @@ internal object ModernMcpProtocol {
         put("title", "OmniBot")
     }
 
-    internal fun isModernRequest(call: ApplicationCall): Boolean =
-        call.request.path() == "/mcp" &&
-            (
-                call.request.headers[PROTOCOL_VERSION_HEADER] == PROTOCOL_VERSION ||
-                    call.request.headers[METHOD_HEADER] != null
-                )
+    internal fun isAcpPath(path: String): Boolean {
+        if (!path.startsWith("/mcp/acp/")) return false
+        val leaseId = path.removePrefix("/mcp/acp/")
+        return leaseId.isNotEmpty() && !leaseId.contains('/')
+    }
+
+    internal fun isModernRequest(call: ApplicationCall): Boolean {
+        val path = call.request.path()
+        val matchesPath = path == "/mcp" || isAcpPath(path)
+        if (!matchesPath) return false
+        return call.request.headers[PROTOCOL_VERSION_HEADER] == PROTOCOL_VERSION ||
+            call.request.headers[METHOD_HEADER] != null
+    }
 
     internal suspend fun handle(
         call: ApplicationCall,
         context: Context,
         scope: CoroutineScope,
+        caller: McpDeviceCaller = McpDeviceCaller.Global,
     ) {
         call.response.header(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION)
+        val rawText = try {
+            call.receiveText()
+        } catch (e: IllegalArgumentException) {
+            respondError(
+                call = call,
+                id = null,
+                code = -32602,
+                message = e.message ?: "Invalid arguments",
+                status = HttpStatusCode.BadRequest,
+            )
+            return
+        } catch (t: Throwable) {
+            respondError(
+                call = call,
+                id = null,
+                code = -32700,
+                message = "Parse error",
+                status = HttpStatusCode.BadRequest,
+            )
+            return
+        }
         val request = runCatching {
-            McpJson.parseToJsonElement(call.receiveText()).jsonObject
+            McpJson.parseToJsonElement(rawText).jsonObject
         }.getOrElse {
-            respondError(call, null, -32700, "Parse error")
+            respondError(call, null, -32700, "Parse error", status = HttpStatusCode.BadRequest)
             return
         }
         val id = request["id"] ?: JsonNull
@@ -165,7 +194,7 @@ internal object ModernMcpProtocol {
             )
 
             "tools/list" -> {
-                val tools = AndroidDeviceMcpServer.modernToolDescriptors(context, scope)
+                val tools = AndroidDeviceMcpServer.modernToolDescriptors(context, scope, caller)
                 respondResult(
                     call,
                     id,
@@ -196,11 +225,24 @@ internal object ModernMcpProtocol {
                     return
                 }
                 val arguments = params["arguments"] as? JsonObject ?: JsonObject(emptyMap())
+                val rawArgumentsBytes = extractRawCalendarBatchArgumentsBytes(rawText)
+                if (toolName == "calendar_event_batch" && rawArgumentsBytes != null && rawArgumentsBytes > 256 * 1024) {
+                    respondError(
+                        call = call,
+                        id = id,
+                        code = -32602,
+                        message = "日历批量请求数据过大（超过 256KiB）",
+                        status = HttpStatusCode.BadRequest,
+                    )
+                    return
+                }
                 val result = AndroidDeviceMcpServer.modernCallTool(
                     context = context,
                     scope = scope,
                     name = toolName,
                     arguments = arguments,
+                    caller = caller,
+                    rawPayloadBytes = rawArgumentsBytes,
                 )
                 val resultJson = McpJson
                     .encodeToJsonElement(CallToolResult.serializer(), result)
@@ -319,5 +361,153 @@ internal object ModernMcpProtocol {
 
     private const val BASE64_PREFIX = "=?base64?"
     private const val BASE64_SUFFIX = "?="
+
+    internal fun extractRawCalendarBatchArgumentsBytes(rawJsonText: String): Int? {
+        val n = rawJsonText.length
+        var pos = 0
+
+        fun skipWs() {
+            while (pos < n && rawJsonText[pos].isWhitespace()) {
+                pos++
+            }
+        }
+
+        fun parseString(): String? {
+            if (pos >= n || rawJsonText[pos] != '"') return null
+            pos++
+            val sb = StringBuilder()
+            while (pos < n) {
+                val c = rawJsonText[pos]
+                if (c == '\\') {
+                    if (pos + 1 >= n) return null
+                    when (val esc = rawJsonText[pos + 1]) {
+                        'u' -> {
+                            if (pos + 5 < n) {
+                                val hex = rawJsonText.substring(pos + 2, pos + 6)
+                                val codePoint = hex.toIntOrNull(16)
+                                if (codePoint != null) {
+                                    sb.append(codePoint.toChar())
+                                    pos += 6
+                                    continue
+                                }
+                            }
+                            sb.append("\\u")
+                            pos += 2
+                        }
+                        '"', '\\', '/' -> {
+                            sb.append(esc)
+                            pos += 2
+                        }
+                        'b' -> { sb.append('\b'); pos += 2 }
+                        'f' -> { sb.append('\u000c'); pos += 2 }
+                        'n' -> { sb.append('\n'); pos += 2 }
+                        'r' -> { sb.append('\r'); pos += 2 }
+                        't' -> { sb.append('\t'); pos += 2 }
+                        else -> {
+                            sb.append(esc)
+                            pos += 2
+                        }
+                    }
+                } else if (c == '"') {
+                    pos++
+                    return sb.toString()
+                } else {
+                    sb.append(c)
+                    pos++
+                }
+            }
+            return null
+        }
+
+        fun skipValue() {
+            skipWs()
+            if (pos >= n) return
+            val c = rawJsonText[pos]
+            if (c == '"') {
+                parseString()
+            } else if (c == '{' || c == '[') {
+                val closing = if (c == '{') '}' else ']'
+                var depth = 1
+                pos++
+                while (pos < n && depth > 0) {
+                    val ch = rawJsonText[pos]
+                    if (ch == '"') {
+                        parseString()
+                        continue
+                    } else if (ch == c) {
+                        depth++
+                    } else if (ch == closing) {
+                        depth--
+                    }
+                    pos++
+                }
+            } else {
+                while (pos < n && rawJsonText[pos] !in ",]} \t\r\n") {
+                    pos++
+                }
+            }
+        }
+
+        skipWs()
+        if (pos >= n || rawJsonText[pos] != '{') return null
+        pos++ // enter root object
+
+        var foundToolName: String? = null
+        var argsStart = -1
+        var argsEnd = -1
+
+        while (pos < n) {
+            skipWs()
+            if (pos >= n || rawJsonText[pos] == '}') break
+            val key = parseString() ?: break
+            skipWs()
+            if (pos >= n || rawJsonText[pos] != ':') break
+            pos++ // skip ':'
+            skipWs()
+
+            if (key == "params" && pos < n && rawJsonText[pos] == '{') {
+                pos++ // enter params object
+                while (pos < n) {
+                    skipWs()
+                    if (pos >= n || rawJsonText[pos] == '}') {
+                        if (pos < n && rawJsonText[pos] == '}') pos++
+                        break
+                    }
+                    val pKey = parseString() ?: break
+                    skipWs()
+                    if (pos >= n || rawJsonText[pos] != ':') break
+                    pos++ // skip ':'
+                    skipWs()
+
+                    when (pKey) {
+                        "name" -> {
+                            foundToolName = parseString()
+                        }
+                        "arguments" -> {
+                            val startVal = pos
+                            skipValue()
+                            argsStart = startVal
+                            argsEnd = pos
+                        }
+                        else -> {
+                            skipValue()
+                        }
+                    }
+                    skipWs()
+                    if (pos < n && rawJsonText[pos] == ',') pos++
+                }
+            } else {
+                skipValue()
+            }
+            skipWs()
+            if (pos < n && rawJsonText[pos] == ',') pos++
+        }
+
+        if (foundToolName == "calendar_event_batch" && argsStart >= 0 && argsEnd > argsStart) {
+            val rawSlice = rawJsonText.substring(argsStart, argsEnd)
+            return rawSlice.toByteArray(Charsets.UTF_8).size
+        }
+        return null
+    }
 
 }

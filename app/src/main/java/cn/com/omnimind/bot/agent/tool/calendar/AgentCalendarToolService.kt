@@ -1,10 +1,14 @@
 package cn.com.omnimind.bot.agent
 
 import android.Manifest
+import android.content.ContentProviderOperation
+import android.content.ContentProviderResult
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.OperationApplicationException
 import android.content.pm.PackageManager
+import android.os.RemoteException
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
 import java.time.Instant
@@ -73,7 +77,10 @@ class AgentCalendarToolService(
         val startMillis: Long,
         val endMillis: Long,
         val timezone: String,
-        val allDay: Boolean
+        val allDay: Boolean,
+        val lastSynced: Long? = null,
+        val dirty: Int? = null,
+        val mutators: String? = null
     )
 
     fun hasCalendarPermissions(write: Boolean = false): Boolean {
@@ -154,51 +161,58 @@ class AgentCalendarToolService(
         return items
     }
 
-    fun createEvent(request: CalendarEventCreateRequest): Map<String, Any?> {
-        val calendarId = resolveWritableCalendarId(request.calendarId)
-        val zone = resolveZone(request.timezone)
-        val start = parseDateTime(request.startAt, zone)
-        val end = parseDateTime(request.endAt, zone)
-        val (normalizedStart, normalizedEnd) = normalizeEventRange(start, end, request.allDay)
-
-        val values = ContentValues().apply {
-            put(CalendarContract.Events.CALENDAR_ID, calendarId)
-            put(CalendarContract.Events.TITLE, request.title.trim())
-            put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
-            put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
-            put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
-            put(CalendarContract.Events.ALL_DAY, if (request.allDay) 1 else 0)
-            if (!request.description.isNullOrBlank()) {
-                put(CalendarContract.Events.DESCRIPTION, request.description.trim())
-            }
-            if (!request.location.isNullOrBlank()) {
-                put(CalendarContract.Events.EVENT_LOCATION, request.location.trim())
-            }
-            put(CalendarContract.Events.HAS_ALARM, if (request.reminderMinutes.isNotEmpty()) 1 else 0)
-        }
-
-        cancellation?.throwIfCanceled()
-        val insertedUri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
-            ?: throw IllegalStateException("创建日程失败")
-        val eventId = insertedUri.lastPathSegment?.toLongOrNull()
-            ?: throw IllegalStateException("创建日程失败：无法获取 eventId")
-
-        if (request.reminderMinutes.isNotEmpty()) {
-            replaceReminders(eventId, request.reminderMinutes)
-        }
-
-        return mapOf(
+    fun applyBatch(
+        mutations: List<CalendarBatchMutation>,
+        rawPayloadBytes: Int? = null
+    ): Map<String, Any?> {
+        val internalResult = executeBatchInternal(mutations, rawPayloadBytes)
+        @Suppress("UNCHECKED_CAST")
+        val items = internalResult["items"] as List<Map<String, Any?>>
+        val verified = internalResult["verified"] as Boolean
+        val result = mutableMapOf<String, Any?>(
             "success" to true,
-            "eventId" to eventId.toString(),
-            "calendarId" to calendarId.toString(),
-            "title" to request.title.trim(),
-            "startAt" to normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "endAt" to normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "timezone" to normalizedStart.zone.id,
-            "allDay" to request.allDay,
-            "reminderMinutes" to request.reminderMinutes,
-            "summary" to "已创建日程“${request.title.trim()}”"
+            "items" to items,
+            "verified" to verified
         )
+        if (!verified) {
+            result["warning"] = "提交已受理，但状态未确认"
+        }
+        return result
+    }
+
+    fun createEvent(request: CalendarEventCreateRequest): Map<String, Any?> {
+        val internalResult = executeBatchInternal(listOf(CalendarBatchMutation.Create(request)))
+        @Suppress("UNCHECKED_CAST")
+        val items = internalResult["items"] as List<Map<String, Any?>>
+        val item = items[0]
+        val eventId = item["eventId"] as String
+        val verified = item["verified"] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val prepared = (internalResult["_prepared"] as List<PreparedMutation>)[0]
+
+        val summary = if (verified) {
+            "已创建日程“${prepared.title}”"
+        } else {
+            "已提交创建日程“${prepared.title}”，但状态未确认"
+        }
+
+        val result = mutableMapOf<String, Any?>(
+            "success" to true,
+            "eventId" to eventId,
+            "calendarId" to prepared.calendarId.toString(),
+            "title" to prepared.title,
+            "startAt" to prepared.normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            "endAt" to prepared.normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            "timezone" to prepared.timezone,
+            "allDay" to prepared.allDay,
+            "reminderMinutes" to (prepared.reminderMinutes ?: emptyList()),
+            "verified" to verified,
+            "summary" to summary
+        )
+        if (!verified) {
+            result["warning"] = "提交已受理，但状态未确认"
+        }
+        return result
     }
 
     fun listEvents(request: CalendarEventListRequest): Map<String, Any?> {
@@ -308,94 +322,472 @@ class AgentCalendarToolService(
     }
 
     fun updateEvent(request: CalendarEventUpdateRequest): Map<String, Any?> {
-        val eventId = request.eventId.trim().toLongOrNull()
-            ?: throw IllegalArgumentException("eventId 必须为数字")
-        val current = loadEventSnapshot(eventId)
-            ?: throw IllegalArgumentException("未找到对应日程")
+        val internalResult = executeBatchInternal(listOf(CalendarBatchMutation.Update(request)))
+        @Suppress("UNCHECKED_CAST")
+        val items = internalResult["items"] as List<Map<String, Any?>>
+        val item = items[0]
+        val eventId = item["eventId"] as String
+        val verified = item["verified"] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val prepared = (internalResult["_prepared"] as List<PreparedMutation>)[0]
 
-        val zone = resolveZone(request.timezone ?: current.timezone)
-        val allDay = request.allDay ?: current.allDay
-        val currentStart = Instant.ofEpochMilli(current.startMillis).atZone(zone)
-        val currentEnd = Instant.ofEpochMilli(current.endMillis).atZone(zone)
+        val summary = if (verified) {
+            "已更新日程“${prepared.title}”"
+        } else {
+            "已提交更新日程“${prepared.title}”，但状态未确认"
+        }
 
-        val nextStart = request.startAt?.takeIf { it.isNotBlank() }?.let { parseDateTime(it, zone) }
-            ?: currentStart
-        val nextEnd = request.endAt?.takeIf { it.isNotBlank() }?.let { parseDateTime(it, zone) }
-            ?: currentEnd
-        val (normalizedStart, normalizedEnd) = normalizeEventRange(nextStart, nextEnd, allDay)
+        val result = mutableMapOf<String, Any?>(
+            "success" to true,
+            "eventId" to eventId,
+            "title" to prepared.title,
+            "startAt" to prepared.normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            "endAt" to prepared.normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+            "timezone" to prepared.timezone,
+            "allDay" to prepared.allDay,
+            "reminderMinutes" to (prepared.reminderMinutes ?: loadReminderMinutes(prepared.targetEventId!!)),
+            "verified" to verified,
+            "summary" to summary
+        )
+        if (!verified) {
+            result["warning"] = "提交已受理，但状态未确认"
+        }
+        return result
+    }
 
-        val values = ContentValues().apply {
-            put(CalendarContract.Events.TITLE, request.title?.trim()?.ifBlank { current.title } ?: current.title)
-            put(
-                CalendarContract.Events.DESCRIPTION,
-                request.description?.trim() ?: current.description
-            )
-            put(
-                CalendarContract.Events.EVENT_LOCATION,
-                request.location?.trim() ?: current.location
-            )
-            put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
-            put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
-            put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
-            put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
-            if (request.reminderMinutes != null) {
-                put(CalendarContract.Events.HAS_ALARM, if (request.reminderMinutes.isNotEmpty()) 1 else 0)
+    fun deleteEvent(eventIdRaw: String): Map<String, Any?> {
+        val internalResult = executeBatchInternal(listOf(CalendarBatchMutation.Delete(eventIdRaw)))
+        @Suppress("UNCHECKED_CAST")
+        val items = internalResult["items"] as List<Map<String, Any?>>
+        val item = items[0]
+        val eventId = item["eventId"] as String
+        val verified = item["verified"] as Boolean
+        @Suppress("UNCHECKED_CAST")
+        val prepared = (internalResult["_prepared"] as List<PreparedMutation>)[0]
+
+        val summary = if (verified) {
+            "已删除日程“${prepared.title}”"
+        } else {
+            "已提交删除日程“${prepared.title}”，但状态未确认"
+        }
+
+        val result = mutableMapOf<String, Any?>(
+            "success" to true,
+            "eventId" to eventId,
+            "verified" to verified,
+            "summary" to summary
+        )
+        if (!verified) {
+            result["warning"] = "提交已受理，但状态未确认"
+        }
+        return result
+    }
+
+    private data class PreparedMutation(
+        val index: Int,
+        val mutation: CalendarBatchMutation,
+        val eventOpIndex: Int,
+        val targetEventId: Long?,
+        val calendarId: Long,
+        val title: String,
+        val description: String,
+        val location: String,
+        val startMillis: Long,
+        val endMillis: Long,
+        val timezone: String,
+        val allDay: Boolean,
+        val normalizedStart: ZonedDateTime,
+        val normalizedEnd: ZonedDateTime,
+        val reminderMinutes: List<Int>?,
+        val currentSnapshot: EventSnapshot?
+    )
+
+    private fun executeBatchInternal(
+        mutations: List<CalendarBatchMutation>,
+        rawPayloadBytes: Int? = null
+    ): Map<String, Any?> {
+        require(mutations.isNotEmpty()) { "operations 不能为空" }
+        require(mutations.size <= 50) { "operations 不能超过 50 项（当前 ${mutations.size} 项）" }
+
+        if (rawPayloadBytes != null) {
+            require(rawPayloadBytes <= 256 * 1024) { "日历批量请求数据过大（超过 256KiB）" }
+        }
+
+        val targetedEventIds = mutableSetOf<Long>()
+        for (mutation in mutations) {
+            val rawId = when (mutation) {
+                is CalendarBatchMutation.Create -> null
+                is CalendarBatchMutation.Update -> mutation.request.eventId.trim()
+                is CalendarBatchMutation.Delete -> mutation.eventId.trim()
+            }
+            if (rawId != null) {
+                require(rawId.isNotEmpty()) { "eventId 不能为空" }
+                val numericId = rawId.toLongOrNull()
+                    ?: throw IllegalArgumentException("eventId 必须为数字：$rawId")
+                require(targetedEventIds.add(numericId)) { "批处理中存在针对同一日程 (eventId=$rawId) 的重复操作" }
+            }
+        }
+
+        val operations = ArrayList<ContentProviderOperation>()
+        val preparedList = mutableListOf<PreparedMutation>()
+
+        for ((index, mutation) in mutations.withIndex()) {
+            cancellation?.throwIfCanceled()
+            when (mutation) {
+                is CalendarBatchMutation.Create -> {
+                    val req = mutation.request
+                    require(req.title.isNotBlank()) { "title 不能为空" }
+                    val calendarId = resolveWritableCalendarId(req.calendarId)
+                    val zone = resolveZone(req.timezone)
+                    val start = parseDateTime(req.startAt, zone)
+                    val end = parseDateTime(req.endAt, zone)
+                    val (normalizedStart, normalizedEnd) = normalizeEventRange(start, end, req.allDay)
+                    val normalizedReminders = req.reminderMinutes
+                        .map { it.coerceAtLeast(0) }
+                        .distinct()
+                        .sorted()
+
+                    val eventOpIndex = operations.size
+                    val values = ContentValues().apply {
+                        put(CalendarContract.Events.CALENDAR_ID, calendarId)
+                        put(CalendarContract.Events.TITLE, req.title.trim())
+                        put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
+                        put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
+                        put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
+                        put(CalendarContract.Events.ALL_DAY, if (req.allDay) 1 else 0)
+                        if (!req.description.isNullOrBlank()) {
+                            put(CalendarContract.Events.DESCRIPTION, req.description.trim())
+                        }
+                        if (!req.location.isNullOrBlank()) {
+                            put(CalendarContract.Events.EVENT_LOCATION, req.location.trim())
+                        }
+                        put(CalendarContract.Events.HAS_ALARM, if (normalizedReminders.isNotEmpty()) 1 else 0)
+                    }
+
+                    operations.add(
+                        ContentProviderOperation.newInsert(CalendarContract.Events.CONTENT_URI)
+                            .withValues(values)
+                            .build()
+                    )
+
+                    for (minutes in normalizedReminders) {
+                        operations.add(
+                            ContentProviderOperation.newInsert(CalendarContract.Reminders.CONTENT_URI)
+                                .withValueBackReference(CalendarContract.Reminders.EVENT_ID, eventOpIndex)
+                                .withValue(CalendarContract.Reminders.MINUTES, minutes)
+                                .withValue(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                                .build()
+                        )
+                    }
+
+                    preparedList.add(
+                        PreparedMutation(
+                            index = index,
+                            mutation = mutation,
+                            eventOpIndex = eventOpIndex,
+                            targetEventId = null,
+                            calendarId = calendarId,
+                            title = req.title.trim(),
+                            description = req.description?.trim().orEmpty(),
+                            location = req.location?.trim().orEmpty(),
+                            startMillis = normalizedStart.toInstant().toEpochMilli(),
+                            endMillis = normalizedEnd.toInstant().toEpochMilli(),
+                            timezone = normalizedStart.zone.id,
+                            allDay = req.allDay,
+                            normalizedStart = normalizedStart,
+                            normalizedEnd = normalizedEnd,
+                            reminderMinutes = normalizedReminders,
+                            currentSnapshot = null
+                        )
+                    )
+                }
+                is CalendarBatchMutation.Update -> {
+                    val req = mutation.request
+                    val eventId = req.eventId.trim().toLongOrNull()
+                        ?: throw IllegalArgumentException("eventId 必须为数字")
+                    val current = loadEventSnapshot(eventId)
+                        ?: throw IllegalArgumentException("未找到对应日程：eventId=$eventId")
+                    if (!isWritableCalendar(current.calendarId)) {
+                        throw IllegalArgumentException("指定日程所在日历不可写：calendarId=${current.calendarId}")
+                    }
+
+                    val zone = resolveZone(req.timezone ?: current.timezone)
+                    val allDay = req.allDay ?: current.allDay
+                    val currentStart = Instant.ofEpochMilli(current.startMillis).atZone(zone)
+                    val currentEnd = Instant.ofEpochMilli(current.endMillis).atZone(zone)
+
+                    val nextStart = req.startAt?.takeIf { it.isNotBlank() }?.let { parseDateTime(it, zone) }
+                        ?: currentStart
+                    val nextEnd = req.endAt?.takeIf { it.isNotBlank() }?.let { parseDateTime(it, zone) }
+                        ?: currentEnd
+                    val (normalizedStart, normalizedEnd) = normalizeEventRange(nextStart, nextEnd, allDay)
+
+                    val normalizedReminders = req.reminderMinutes?.map { it.coerceAtLeast(0) }?.distinct()?.sorted()
+
+                    val nextTitle = req.title?.trim()?.ifBlank { current.title } ?: current.title
+                    val nextDescription = req.description?.trim() ?: current.description
+                    val nextLocation = req.location?.trim() ?: current.location
+
+                    val values = ContentValues().apply {
+                        put(CalendarContract.Events.TITLE, nextTitle)
+                        put(CalendarContract.Events.DESCRIPTION, nextDescription)
+                        put(CalendarContract.Events.EVENT_LOCATION, nextLocation)
+                        put(CalendarContract.Events.DTSTART, normalizedStart.toInstant().toEpochMilli())
+                        put(CalendarContract.Events.DTEND, normalizedEnd.toInstant().toEpochMilli())
+                        put(CalendarContract.Events.EVENT_TIMEZONE, normalizedStart.zone.id)
+                        put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
+                        if (normalizedReminders != null) {
+                            put(CalendarContract.Events.HAS_ALARM, if (normalizedReminders.isNotEmpty()) 1 else 0)
+                        }
+                    }
+
+                    val eventOpIndex = operations.size
+                    val (selection, selectionArgs) = buildConcurrencySelection(current)
+
+                    operations.add(
+                        ContentProviderOperation.newUpdate(CalendarContract.Events.CONTENT_URI)
+                            .withSelection(selection, selectionArgs)
+                            .withValues(values)
+                            .withExpectedCount(1)
+                            .build()
+                    )
+
+                    if (normalizedReminders != null) {
+                        operations.add(
+                            ContentProviderOperation.newDelete(CalendarContract.Reminders.CONTENT_URI)
+                                .withSelection("${CalendarContract.Reminders.EVENT_ID} = ?", arrayOf(eventId.toString()))
+                                .build()
+                        )
+                        for (minutes in normalizedReminders) {
+                            operations.add(
+                                ContentProviderOperation.newInsert(CalendarContract.Reminders.CONTENT_URI)
+                                    .withValue(CalendarContract.Reminders.EVENT_ID, eventId)
+                                    .withValue(CalendarContract.Reminders.MINUTES, minutes)
+                                    .withValue(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                                    .build()
+                            )
+                        }
+                    }
+
+                    preparedList.add(
+                        PreparedMutation(
+                            index = index,
+                            mutation = mutation,
+                            eventOpIndex = eventOpIndex,
+                            targetEventId = eventId,
+                            calendarId = current.calendarId,
+                            title = nextTitle,
+                            description = nextDescription,
+                            location = nextLocation,
+                            startMillis = normalizedStart.toInstant().toEpochMilli(),
+                            endMillis = normalizedEnd.toInstant().toEpochMilli(),
+                            timezone = normalizedStart.zone.id,
+                            allDay = allDay,
+                            normalizedStart = normalizedStart,
+                            normalizedEnd = normalizedEnd,
+                            reminderMinutes = normalizedReminders,
+                            currentSnapshot = current
+                        )
+                    )
+                }
+                is CalendarBatchMutation.Delete -> {
+                    val eventId = mutation.eventId.trim().toLongOrNull()
+                        ?: throw IllegalArgumentException("eventId 必须为数字")
+                    val current = loadEventSnapshot(eventId)
+                        ?: throw IllegalArgumentException("未找到对应日程：eventId=$eventId")
+                    if (!isWritableCalendar(current.calendarId)) {
+                        throw IllegalArgumentException("指定日程所在日历不可写：calendarId=${current.calendarId}")
+                    }
+
+                    val eventOpIndex = operations.size
+                    val (selection, selectionArgs) = buildConcurrencySelection(current)
+
+                    operations.add(
+                        ContentProviderOperation.newDelete(CalendarContract.Events.CONTENT_URI)
+                            .withSelection(selection, selectionArgs)
+                            .withExpectedCount(1)
+                            .build()
+                    )
+
+                    preparedList.add(
+                        PreparedMutation(
+                            index = index,
+                            mutation = mutation,
+                            eventOpIndex = eventOpIndex,
+                            targetEventId = eventId,
+                            calendarId = current.calendarId,
+                            title = current.title,
+                            description = current.description,
+                            location = current.location,
+                            startMillis = current.startMillis,
+                            endMillis = current.endMillis,
+                            timezone = current.timezone,
+                            allDay = current.allDay,
+                            normalizedStart = Instant.ofEpochMilli(current.startMillis).atZone(ZoneId.of("UTC")),
+                            normalizedEnd = Instant.ofEpochMilli(current.endMillis).atZone(ZoneId.of("UTC")),
+                            reminderMinutes = null,
+                            currentSnapshot = current
+                        )
+                    )
+                }
             }
         }
 
         cancellation?.throwIfCanceled()
-        val updated = context.contentResolver.update(
-            ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
-            values,
-            null,
-            null
-        )
-        if (updated <= 0) {
-            throw IllegalStateException("更新日程失败")
+        val results: Array<ContentProviderResult> = try {
+            context.contentResolver.applyBatch(CalendarContract.AUTHORITY, operations)
+        } catch (error: OperationApplicationException) {
+            throw IllegalStateException("日历批量操作未通过约束检查：${error.message}", error)
+        } catch (error: RemoteException) {
+            throw IllegalStateException("日历服务通信失败：${error.message}", error)
         }
 
-        if (request.reminderMinutes != null) {
-            replaceReminders(eventId, request.reminderMinutes)
+        val items = mutableListOf<Map<String, Any?>>()
+        for (prepared in preparedList) {
+            val eventIdStr = when (prepared.mutation) {
+                is CalendarBatchMutation.Create -> {
+                    val opResult = results.getOrNull(prepared.eventOpIndex)
+                        ?: throw IllegalStateException("未能获取创建结果")
+                    opResult.uri?.lastPathSegment
+                        ?: throw IllegalStateException("创建日程失败：无法解析 eventId")
+                }
+                is CalendarBatchMutation.Update -> prepared.targetEventId.toString()
+                is CalendarBatchMutation.Delete -> prepared.targetEventId.toString()
+            }
+
+            var verified = false
+            try {
+                if (cancellation?.isCanceled == true) {
+                    verified = false
+                } else {
+                    val eventIdLong = eventIdStr.toLongOrNull()
+                    if (eventIdLong != null) {
+                        when (prepared.mutation) {
+                            is CalendarBatchMutation.Create -> {
+                                val snapshot = loadEventSnapshot(eventIdLong)
+                                if (snapshot != null &&
+                                    snapshot.title == prepared.title &&
+                                    snapshot.description == prepared.description &&
+                                    snapshot.location == prepared.location &&
+                                    snapshot.startMillis == prepared.startMillis &&
+                                    snapshot.endMillis == prepared.endMillis &&
+                                    snapshot.timezone == prepared.timezone &&
+                                    snapshot.allDay == prepared.allDay
+                                ) {
+                                    if (prepared.reminderMinutes.isNullOrEmpty()) {
+                                        verified = true
+                                    } else {
+                                        val readReminders = loadReminderMinutes(eventIdLong)
+                                        verified = (readReminders == prepared.reminderMinutes)
+                                    }
+                                }
+                            }
+                            is CalendarBatchMutation.Update -> {
+                                val snapshot = loadEventSnapshot(eventIdLong)
+                                if (snapshot != null &&
+                                    snapshot.title == prepared.title &&
+                                    snapshot.description == prepared.description &&
+                                    snapshot.location == prepared.location &&
+                                    snapshot.startMillis == prepared.startMillis &&
+                                    snapshot.endMillis == prepared.endMillis &&
+                                    snapshot.timezone == prepared.timezone &&
+                                    snapshot.allDay == prepared.allDay
+                                ) {
+                                    if (prepared.reminderMinutes == null) {
+                                        verified = true
+                                    } else {
+                                        val readReminders = loadReminderMinutes(eventIdLong)
+                                        verified = (readReminders == prepared.reminderMinutes)
+                                    }
+                                }
+                            }
+                            is CalendarBatchMutation.Delete -> {
+                                val snapshot = loadEventSnapshot(eventIdLong)
+                                verified = (snapshot == null)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                verified = false
+            }
+
+            items.add(
+                mapOf(
+                    "index" to prepared.index,
+                    "operation" to prepared.mutation.operation,
+                    "eventId" to eventIdStr,
+                    "verified" to verified
+                )
+            )
         }
 
+        val allVerified = items.isNotEmpty() && items.all { it["verified"] == true }
         return mapOf(
             "success" to true,
-            "eventId" to eventId.toString(),
-            "title" to (request.title?.trim()?.ifBlank { current.title } ?: current.title),
-            "startAt" to normalizedStart.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "endAt" to normalizedEnd.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "timezone" to normalizedStart.zone.id,
-            "allDay" to allDay,
-            "reminderMinutes" to (request.reminderMinutes ?: loadReminderMinutes(eventId)),
-            "summary" to "已更新日程“${request.title?.trim()?.ifBlank { current.title } ?: current.title}”"
+            "items" to items,
+            "verified" to allVerified,
+            "_prepared" to preparedList
         )
     }
 
-    fun deleteEvent(eventIdRaw: String): Map<String, Any?> {
-        val eventId = eventIdRaw.trim().toLongOrNull()
-            ?: throw IllegalArgumentException("eventId 必须为数字")
-        val snapshot = loadEventSnapshot(eventId)
-            ?: throw IllegalArgumentException("未找到对应日程")
+    private fun buildConcurrencySelection(snapshot: EventSnapshot): Pair<String, Array<String>> {
+        val parts = mutableListOf<String>()
+        val args = mutableListOf<String>()
 
-        cancellation?.throwIfCanceled()
-        val deleted = context.contentResolver.delete(
-            ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
-            null,
-            null
-        )
-        if (deleted <= 0) {
-            throw IllegalStateException("删除日程失败")
+        parts += "${CalendarContract.Events._ID} = ?"
+        args += snapshot.eventId.toString()
+
+        parts += "${CalendarContract.Events.CALENDAR_ID} = ?"
+        args += snapshot.calendarId.toString()
+        parts += "${CalendarContract.Events.TITLE} = ?"
+        args += snapshot.title
+
+        if (snapshot.description.isEmpty()) {
+            parts += "(${CalendarContract.Events.DESCRIPTION} IS NULL OR ${CalendarContract.Events.DESCRIPTION} = '')"
+        } else {
+            parts += "${CalendarContract.Events.DESCRIPTION} = ?"
+            args += snapshot.description
         }
 
-        return mapOf(
-            "success" to true,
-            "eventId" to eventId.toString(),
-            "summary" to "已删除日程“${snapshot.title}”"
-        )
+        if (snapshot.location.isEmpty()) {
+            parts += "(${CalendarContract.Events.EVENT_LOCATION} IS NULL OR ${CalendarContract.Events.EVENT_LOCATION} = '')"
+        } else {
+            parts += "${CalendarContract.Events.EVENT_LOCATION} = ?"
+            args += snapshot.location
+        }
+
+        parts += "${CalendarContract.Events.DTSTART} = ?"
+        args += snapshot.startMillis.toString()
+
+        parts += "${CalendarContract.Events.DTEND} = ?"
+        args += snapshot.endMillis.toString()
+
+        parts += "${CalendarContract.Events.EVENT_TIMEZONE} = ?"
+        args += snapshot.timezone
+
+        parts += "${CalendarContract.Events.ALL_DAY} = ?"
+        args += if (snapshot.allDay) "1" else "0"
+
+        if (snapshot.lastSynced != null) {
+            parts += "${CalendarContract.Events.LAST_SYNCED} = ?"
+            args += snapshot.lastSynced.toString()
+        }
+        if (snapshot.dirty != null) {
+            parts += "${CalendarContract.Events.DIRTY} = ?"
+            args += snapshot.dirty.toString()
+        }
+        if (snapshot.mutators != null) {
+            parts += "${CalendarContract.Events.MUTATORS} = ?"
+            args += snapshot.mutators
+        }
+
+        return parts.joinToString(" AND ") to args.toTypedArray()
     }
+
 
     private fun loadEventSnapshot(eventId: Long): EventSnapshot? {
-        val projection = arrayOf(
+        val baseProjection = arrayOf(
             CalendarContract.Events._ID,
             CalendarContract.Events.CALENDAR_ID,
             CalendarContract.Events.TITLE,
@@ -406,17 +798,45 @@ class AgentCalendarToolService(
             CalendarContract.Events.EVENT_TIMEZONE,
             CalendarContract.Events.ALL_DAY
         )
-
-        val cursor = query(
-            ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
-            projection,
-            null,
-            null,
-            null
+        val fullProjection = arrayOf(
+            CalendarContract.Events._ID,
+            CalendarContract.Events.CALENDAR_ID,
+            CalendarContract.Events.TITLE,
+            CalendarContract.Events.DESCRIPTION,
+            CalendarContract.Events.EVENT_LOCATION,
+            CalendarContract.Events.DTSTART,
+            CalendarContract.Events.DTEND,
+            CalendarContract.Events.EVENT_TIMEZONE,
+            CalendarContract.Events.ALL_DAY,
+            CalendarContract.Events.LAST_SYNCED,
+            CalendarContract.Events.DIRTY,
+            CalendarContract.Events.MUTATORS
         )
+
+        val cursor = runCatching {
+            query(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                fullProjection,
+                null,
+                null,
+                null
+            )
+        }.getOrElse {
+            query(
+                ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId),
+                baseProjection,
+                null,
+                null,
+                null
+            )
+        }
 
         cursor.use {
             if (it.moveToFirst()) {
+                val lastSyncedIdx = it.getColumnIndex(CalendarContract.Events.LAST_SYNCED)
+                val dirtyIdx = it.getColumnIndex(CalendarContract.Events.DIRTY)
+                val mutatorsIdx = it.getColumnIndex(CalendarContract.Events.MUTATORS)
+
                 return EventSnapshot(
                     eventId = it.getLong(0),
                     calendarId = it.getLong(1),
@@ -426,7 +846,10 @@ class AgentCalendarToolService(
                     startMillis = it.getLong(5),
                     endMillis = it.getLong(6),
                     timezone = it.getString(7).orEmpty().ifBlank { ZoneId.systemDefault().id },
-                    allDay = it.getInt(8) == 1
+                    allDay = it.getInt(8) == 1,
+                    lastSynced = if (lastSyncedIdx >= 0 && !it.isNull(lastSyncedIdx)) it.getLong(lastSyncedIdx) else null,
+                    dirty = if (dirtyIdx >= 0 && !it.isNull(dirtyIdx)) it.getInt(dirtyIdx) else null,
+                    mutators = if (mutatorsIdx >= 0 && !it.isNull(mutatorsIdx)) it.getString(mutatorsIdx) else null
                 )
             }
         }
@@ -477,27 +900,6 @@ class AgentCalendarToolService(
         return false
     }
 
-    private fun replaceReminders(eventId: Long, reminderMinutes: List<Int>) {
-        context.contentResolver.delete(
-            CalendarContract.Reminders.CONTENT_URI,
-            "${CalendarContract.Reminders.EVENT_ID} = ?",
-            arrayOf(eventId.toString())
-        )
-
-        val normalized = reminderMinutes
-            .map { it.coerceAtLeast(0) }
-            .distinct()
-            .sorted()
-
-        normalized.forEach { minutes ->
-            val values = ContentValues().apply {
-                put(CalendarContract.Reminders.EVENT_ID, eventId)
-                put(CalendarContract.Reminders.MINUTES, minutes)
-                put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
-            }
-            context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, values)
-        }
-    }
 
     private fun loadReminderMinutes(eventId: Long): List<Int> {
         val projection = arrayOf(

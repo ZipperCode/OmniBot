@@ -496,85 +496,8 @@ class AgentRuntimeProtocolPayloadTest {
         assertFalse(isUnsupportedRemoteAcpMethod(IllegalStateException("connection refused")))
     }
 
-    @Test
-    fun managedAcpCatalogIncludesOnlySupportedAgents() {
-        assertEquals(
-            listOf("小万", "Na", "Claude Code", "Codex", "OpenCode", "Pi", "Kimi Code"),
-            officialCatalogAgents().map { it.name }
-        )
-        assertTrue(officialCatalogAgents().all { it.builtIn })
-        assertEquals(
-            officialCatalogAgents().size,
-            officialCatalogAgents().map { it.id }.toSet().size
-        )
-        val codex = officialCatalogAgents().first {
-            it.id == AcpAgentProfileStore.CODEX_AGENT_ID
-        }
-        assertEquals(
-            "codex",
-            AcpAgentProfileStore.officialRuntime(codex)?.discoveryCommand
-        )
-        assertEquals(
-            "@openai/codex@latest",
-            AcpAgentProfileStore.officialRuntime(codex)?.managedAdapterPackage
-        )
-        val codexRuntime = requireNotNull(AcpAgentProfileStore.officialRuntime(codex))
-        assertTrue(codexRuntime.managedAdapterPackage in codexRuntime.managedAdapterPackages)
-        val bridgePackage = codexRuntime.managedAdapterPackages.single {
-            it.startsWith("@agentclientprotocol/codex-acp@")
-        }
-        val bridgeRevision = "codex-acp-${bridgePackage.substringAfterLast('@')}"
-        // The package version anchors readiness; a host preparation fix may
-        // append a revision so already-installed devices rerun that fix.
-        assertTrue(
-            codexRuntime.preparationRevision == bridgeRevision ||
-                codexRuntime.preparationRevision?.startsWith("$bridgeRevision-") == true,
-        )
-        // The title fix must invalidate persisted readiness from the previous APK.
-        assertFalse(shouldReuseManagedAcpPreparation(
-            healthStatus = "online",
-            installed = true,
-            preparationRevision = "codex-acp-1.10.0-message-completion-1",
-            requiredRevision = codexRuntime.preparationRevision,
-        ))
-        assertTrue(shouldPrepareManagedAcpAdapter(
-            agentId = codex.id,
-            commandAvailable = true,
-            allPackagesReady = true,
-            adapterHealthy = true,
-            preparationRevision = "codex-acp-1.10.0-message-completion-1",
-            requiredRevision = codexRuntime.preparationRevision,
-        ))
-        assertTrue(shouldReuseManagedAcpPreparation(
-            healthStatus = "online",
-            installed = true,
-            preparationRevision = codexRuntime.preparationRevision,
-            requiredRevision = codexRuntime.preparationRevision,
-        ))
-        val xiaowan = officialCatalogAgents().first {
-            it.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID
-        }
-        assertEquals("omnibot-xiaowan-acp", xiaowan.command)
-        assertEquals(
-            "omnibot-xiaowan-acp",
-            AcpAgentProfileStore.officialRuntime(xiaowan)?.discoveryCommand
-        )
-        assertNull(AcpAgentProfileStore.officialRuntime(xiaowan)?.managedAdapterPackage)
-        val kimi = officialCatalogAgents().first {
-            it.id == AcpAgentProfileStore.KIMI_CODE_AGENT_ID
-        }
-        assertEquals("kimi", kimi.command)
-        assertEquals(listOf("acp"), kimi.arguments)
-        val kimiRuntime = AcpAgentProfileStore.officialRuntime(kimi)
-        assertEquals("kimi", kimiRuntime?.discoveryCommand)
-        assertEquals(KIMI_CODE_NPM_PACKAGE_SPEC, kimiRuntime?.managedAdapterPackage)
-        assertEquals("kimi", kimiRuntime?.terminalPackageId)
-        assertEquals(
-            "kimi-code",
-            kimiRuntime?.harnessAdapter?.configAdapterId,
-        )
-    }
-
+    // 根据项目测试设计规则，删除易碎的固定 catalog 目录枚举断言测试（managedAcpCatalogIncludesOnlySupportedAgents），
+    // 避免内置 Agent 调整（如移除 Na 等）时重复维护死板目录枚举，不重钉新目录，改为通过已有行为与适配边界用例保障。
     @Test
     fun legacyXiaowanBotProfileIsRecognizedAsAnAlias() {
         assertTrue(
@@ -718,32 +641,47 @@ class AgentRuntimeProtocolPayloadTest {
             token = "secret-token"
         )
 
+        val testLease = AcpSessionMcpLease(
+            leaseId = "lease-test-1",
+            token = "lease-token-1",
+            agentId = "codex",
+            conversationId = 42L,
+        )
         val codexServers = buildLocalAgentAcpMcpServers(
             supportsHttp = true,
-            state = state
+            state = state,
+            lease = testLease,
         )
         val server = codexServers.single() as McpServer.Http
         assertEquals("omnibot", server.name)
-        assertEquals("http://127.0.0.1:8899/mcp", server.url)
+        assertEquals("http://127.0.0.1:8899/mcp/acp/lease-test-1", server.url)
         assertEquals("Authorization", server.headers.single().name)
-        assertEquals("Bearer secret-token", server.headers.single().value)
+        assertEquals("Bearer lease-token-1", server.headers.single().value)
 
         assertTrue(
             buildLocalAgentAcpMcpServers(
                 supportsHttp = false,
-                state = state
+                state = state,
+                lease = testLease,
             ).isEmpty()
         )
         assertTrue(
             buildLocalAgentAcpMcpServers(
                 supportsHttp = false,
-                state = state
+                state = state,
+                lease = testLease,
             ).isEmpty()
         )
     }
 
     @Test
     fun httpMcpConnectionUsesOfficialSessionDeclaration() {
+        val testLease2 = AcpSessionMcpLease(
+            leaseId = "lease-test-2",
+            token = "lease-token-2",
+            agentId = "claude",
+            conversationId = 43L,
+        )
         val servers = buildLocalAgentAcpMcpServers(
             supportsHttp = true,
             state = McpServerState(
@@ -752,11 +690,12 @@ class AgentRuntimeProtocolPayloadTest {
                 host = null,
                 port = 9001,
                 token = "local-secret"
-            )
+            ),
+            lease = testLease2,
         )
         val server = servers.single() as McpServer.Http
-        assertEquals("http://127.0.0.1:9001/mcp", server.url)
-        assertEquals("Bearer local-secret", server.headers.single().value)
+        assertEquals("http://127.0.0.1:9001/mcp/acp/lease-test-2", server.url)
+        assertEquals("Bearer lease-token-2", server.headers.single().value)
     }
 
     @Test

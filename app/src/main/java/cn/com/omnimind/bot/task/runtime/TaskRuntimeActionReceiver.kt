@@ -30,6 +30,48 @@ class TaskRuntimeActionReceiver : BroadcastReceiver() {
         const val EXTRA_STOP_TOKEN = "extra_stop_token"
         const val EXTRA_WAIT_TOKEN = "extra_wait_token"
         const val EXTRA_CONVERSATION_ID = "extra_conversation_id"
+
+        /**
+         * 官方任务停止执行通道。
+         * 原子校验 taskId 与 stopToken，携带 expectedTurnId 与 turnId 发起官方 session/cancel。
+         */
+        suspend fun executeStopTask(
+            context: Context,
+            taskId: String,
+            sessionId: String,
+            turnId: String?,
+            stopToken: String,
+        ): Boolean {
+            if (taskId.isEmpty()) {
+                OmniLog.w(TAG, "停止任务操作被拒绝：taskId 为空")
+                return false
+            }
+            if (!TaskRuntime.validateStopToken(taskId, stopToken)) {
+                OmniLog.w(TAG, "停止任务操作被忽略：凭据不匹配或任务已不在活跃状态 taskId=$taskId")
+                return false
+            }
+            if (sessionId.isEmpty()) {
+                OmniLog.w(TAG, "停止任务操作：taskId=$taskId 无关联的 sessionId，仅释放本地执行租约")
+                TaskRuntime.finish(context, taskId)
+                return true
+            }
+            val cancelArgs = mutableMapOf<String, Any?>("sessionId" to sessionId)
+            if (!turnId.isNullOrBlank()) {
+                cancelArgs["expectedTurnId"] = turnId
+                cancelArgs["turnId"] = turnId
+            }
+            return try {
+                OmniLog.i(TAG, "正在通过官方 session/cancel 取消会话 sessionId=$sessionId expectedTurnId=$turnId")
+                AgentRuntimeManager.getInstance(context).handleMethod(
+                    "session/cancel",
+                    cancelArgs
+                )
+                true
+            } catch (t: Throwable) {
+                OmniLog.e(TAG, "通过 runtime manager 取消会话失败 sessionId=$sessionId：${t.message}", t)
+                false
+            }
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent?) {
@@ -55,40 +97,10 @@ class TaskRuntimeActionReceiver : BroadcastReceiver() {
         val turnId = intent.getStringExtra(EXTRA_TURN_ID).orEmpty().trim()
         val stopToken = intent.getStringExtra(EXTRA_STOP_TOKEN).orEmpty().trim()
 
-        if (taskId.isEmpty()) {
-            OmniLog.w(TAG, "停止任务操作被拒绝：taskId 为空")
-            return
-        }
-
-        // 校验凭据：迟到的通知 Stop Action 绝不取消后续新任务或已轮替的任务
-        // 注意：stopToken 属于能力凭据，绝不打入日志
-        if (!TaskRuntime.validateStopToken(taskId, stopToken)) {
-            OmniLog.w(TAG, "停止任务操作被忽略：凭据不匹配或任务已不在活跃状态 taskId=$taskId")
-            return
-        }
-
-        if (sessionId.isEmpty()) {
-            OmniLog.w(TAG, "停止任务操作：taskId=$taskId 无关联的 sessionId，仅释放本地执行租约")
-            TaskRuntime.finish(context, taskId)
-            return
-        }
-
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // 携带 expectedTurnId 与 turnId 进行原子校验，防止旧 Turn 刚结束、新 Turn 启动时的误杀
-                val cancelArgs = mutableMapOf<String, Any?>("sessionId" to sessionId)
-                if (turnId.isNotEmpty()) {
-                    cancelArgs["expectedTurnId"] = turnId
-                    cancelArgs["turnId"] = turnId
-                }
-                OmniLog.i(TAG, "正在通过官方 session/cancel 取消会话 sessionId=$sessionId expectedTurnId=$turnId")
-                AgentRuntimeManager.getInstance(context).handleMethod(
-                    "session/cancel",
-                    cancelArgs
-                )
-            } catch (t: Throwable) {
-                OmniLog.e(TAG, "通过 runtime manager 取消会话失败 sessionId=$sessionId：${t.message}", t)
+                executeStopTask(context, taskId, sessionId, turnId, stopToken)
             } finally {
                 pendingResult.finish()
             }

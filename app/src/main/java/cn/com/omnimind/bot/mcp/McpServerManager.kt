@@ -17,6 +17,12 @@ import io.ktor.http.ContentDisposition
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.Cookie
+import io.ktor.http.HttpMethod
+import io.ktor.server.response.ApplicationSendPipeline
+import cn.com.omnimind.bot.agent.runtime.AcpSessionMcpLeaseStore
+import io.ktor.server.request.ApplicationReceivePipeline
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.toByteArray
 import io.ktor.serialization.gson.gson
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.ApplicationCallPipeline
@@ -33,6 +39,7 @@ import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.host
 import io.ktor.server.request.path
+import io.ktor.server.request.httpMethod
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondFile
@@ -397,7 +404,7 @@ object McpServerManager {
             ?: error("MCP 端口 $preferredPort..$lastPort 均被占用")
     }
 
-    private fun buildServer(
+    internal fun buildServer(
         context: Context,
         port: Int,
         lanHost: String,
@@ -421,7 +428,11 @@ object McpServerManager {
         val allowedMcpOrigins = allowedMcpHosts.map { host -> "http://$host" }
 
         return embeddedServer(CIO, host = "0.0.0.0", port = port) {
-            install(CallLogging)
+            install(CallLogging) {
+                filter { call ->
+                    !ModernMcpProtocol.isAcpPath(call.request.path())
+                }
+            }
             install(ContentNegotiation) {
                 json(McpJson)
                 gson()
@@ -435,47 +446,167 @@ object McpServerManager {
                     }
                 }
             }
+            receivePipeline.intercept(ApplicationReceivePipeline.Phases.Before) { subject ->
+                if (subject is ByteReadChannel) {
+                    val bytes = subject.toByteArray()
+                    val rawText = String(bytes, Charsets.UTF_8)
+                    val rawCalendarBytes = ModernMcpProtocol.extractRawCalendarBatchArgumentsBytes(rawText)
+                    if (rawCalendarBytes != null && rawCalendarBytes > 256 * 1024) {
+                        throw IllegalArgumentException("日历批量请求数据过大（超过 256KiB）")
+                    }
+                    proceedWith(ByteReadChannel(bytes))
+                }
+            }
             intercept(ApplicationCallPipeline.Plugins) {
-                if (call.request.path() == "/mcp") {
-                    if (!isAllowedMcpRequestAuthority(
-                            host = call.request.headers[HttpHeaders.Host].orEmpty(),
-                            origin = call.request.headers[HttpHeaders.Origin],
-                            allowedHosts = allowedMcpHosts,
-                        )
-                    ) {
-                        call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Invalid MCP origin"))
+                val path = call.request.path()
+                if (path == "/mcp" || path.startsWith("/mcp/")) {
+                    val isAcp = ModernMcpProtocol.isAcpPath(path)
+                    if (path == "/mcp") {
+                        val sessionId = call.request.headers["Mcp-Session-Id"]
+                        if (sessionId != null) {
+                            if (!McpSessionRegistry.isRegisteredForTarget(sessionId, McpSessionRegistry.GLOBAL_TARGET)) {
+                                OmniLog.w(TAG, "MCP 网关拦截: code=session_mismatch")
+                                call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Session lease mismatch or unregistered"))
+                                finish()
+                                return@intercept
+                            }
+                        }
+                        if (!isAllowedMcpRequestAuthority(
+                                host = call.request.headers[HttpHeaders.Host].orEmpty(),
+                                origin = call.request.headers[HttpHeaders.Origin],
+                                allowedHosts = allowedMcpHosts,
+                            )
+                        ) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=invalid_origin")
+                            call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Invalid MCP origin"))
+                            finish()
+                            return@intercept
+                        }
+                        val bearerToken = call.request.headers[HttpHeaders.Authorization]
+                            ?.removePrefix("Bearer ")
+                            ?.trim()
+                        if (bearerToken.isNullOrBlank() || !timingSafeEquals(bearerToken, token)) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=unauthorized")
+                            call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Authentication required"))
+                            finish()
+                            return@intercept
+                        }
+                        if (call.request.httpMethod == HttpMethod.Delete && sessionId != null) {
+                            McpSessionRegistry.unregister(sessionId)
+                        }
+                        if (ModernMcpProtocol.isModernRequest(call)) {
+                            ModernMcpProtocol.handle(
+                                call = call,
+                                context = appContext,
+                                scope = serverScope,
+                                caller = McpDeviceCaller.Global,
+                            )
+                            finish()
+                            return@intercept
+                        }
+                    } else if (isAcp) {
+                        val leaseId = path.removePrefix("/mcp/acp/").substringBefore('/')
+                        val physicalRemoteAddress = call.request.local.remoteAddress
+                        if (!isLocalSocket(physicalRemoteAddress)) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=non_local")
+                            call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Localhost access only"))
+                            finish()
+                            return@intercept
+                        }
+                        if (!isAllowedMcpRequestAuthority(
+                                host = call.request.headers[HttpHeaders.Host].orEmpty(),
+                                origin = call.request.headers[HttpHeaders.Origin],
+                                allowedHosts = allowedMcpHosts,
+                            )
+                        ) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=invalid_origin")
+                            call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Invalid MCP origin"))
+                            finish()
+                            return@intercept
+                        }
+                        val bearerToken = call.request.headers[HttpHeaders.Authorization]
+                            ?.removePrefix("Bearer ")
+                            ?.trim()
+                        if (bearerToken.isNullOrBlank()) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=unauthorized")
+                            call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Authentication required"))
+                            finish()
+                            return@intercept
+                        }
+                        val lease = AcpSessionMcpLeaseStore.resolve(leaseId, bearerToken)
+                        if (lease == null) {
+                            OmniLog.w(TAG, "MCP 网关拦截: code=unauthorized")
+                            call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Authentication required"))
+                            finish()
+                            return@intercept
+                        }
+                        val sessionId = call.request.headers["Mcp-Session-Id"]
+                        if (sessionId != null) {
+                            if (!McpSessionRegistry.isRegisteredForTarget(sessionId, leaseId)) {
+                                OmniLog.w(TAG, "MCP 网关拦截: code=session_mismatch")
+                                call.respond(HttpStatusCode.Forbidden, mapOf("error" to "Session lease mismatch or unregistered"))
+                                finish()
+                                return@intercept
+                            }
+                        }
+                        if (call.request.httpMethod == HttpMethod.Delete && sessionId != null) {
+                            McpSessionRegistry.unregister(sessionId)
+                        }
+                        if (ModernMcpProtocol.isModernRequest(call)) {
+                            val caller = McpDeviceCaller.Acp(leaseId, bearerToken)
+                            ModernMcpProtocol.handle(
+                                call = call,
+                                context = appContext,
+                                scope = serverScope,
+                                caller = caller,
+                            )
+                            finish()
+                            return@intercept
+                        }
+                    } else {
+                        OmniLog.w(TAG, "MCP 网关拦截: code=invalid_tail")
+                        call.respond(HttpStatusCode.NotFound, mapOf("error" to "Not Found"))
                         finish()
                         return@intercept
                     }
-                    val bearerToken = call.request.headers[HttpHeaders.Authorization]
-                        ?.removePrefix("Bearer ")
-                        ?.trim()
-                    if (bearerToken.isNullOrBlank() || !timingSafeEquals(bearerToken, token)) {
-                        call.respond(HttpStatusCode.Unauthorized, mapOf("error" to "Authentication required"))
-                        finish()
-                        return@intercept
-                    }
-                    if (ModernMcpProtocol.isModernRequest(call)) {
-                        ModernMcpProtocol.handle(
-                            call = call,
-                            context = appContext,
-                            scope = serverScope,
-                        )
-                        finish()
+                }
+            }
+            sendPipeline.intercept(ApplicationSendPipeline.Phases.After) {
+                val outgoingSessionId = call.response.headers["Mcp-Session-Id"]
+                if (outgoingSessionId != null) {
+                    val reqPath = call.request.path()
+                    val target = if (ModernMcpProtocol.isAcpPath(reqPath)) {
+                        reqPath.removePrefix("/mcp/acp/").substringBefore('/')
+                    } else if (reqPath == "/mcp") {
+                        McpSessionRegistry.GLOBAL_TARGET
+                    } else null
+
+                    if (target != null) {
+                        val registered = McpSessionRegistry.register(outgoingSessionId, target)
+                        if (!registered) {
+                            OmniLog.e(TAG, "检测到 MCP 会话归属冲突")
+                        }
                     }
                 }
             }
             mcpStreamableHttp(
-                path = "/mcp",
+                path = "/mcp/{...}",
                 enableDnsRebindingProtection = true,
                 allowedHosts = allowedMcpHosts,
                 allowedOrigins = allowedMcpOrigins,
             ) {
-                // This endpoint is the narrow ACP bridge: it intentionally
-                // publishes only AndroidDeviceMcpServer tools.  OmniBot's
-                // general Agent catalog remains internal to the app, while a
-                // Harness discovers its own built-in tools from its protocol.
-                AndroidDeviceMcpServer.create(appContext, serverScope)
+                val reqPath = call.request.path()
+                if (ModernMcpProtocol.isAcpPath(reqPath)) {
+                    val leaseId = reqPath.removePrefix("/mcp/acp/").substringBefore('/')
+                    val bearerToken = call.request.headers[HttpHeaders.Authorization]
+                        ?.removePrefix("Bearer ")
+                        ?.trim()
+                        .orEmpty()
+                    val caller = McpDeviceCaller.Acp(leaseId, bearerToken)
+                    AndroidDeviceMcpServer.create(appContext, serverScope, caller)
+                } else {
+                    AndroidDeviceMcpServer.create(appContext, serverScope, McpDeviceCaller.Global)
+                }
             }
             routing {
                 get("/") {
@@ -526,6 +657,11 @@ object McpServerManager {
         return originHost in allowed
     }
 
+    internal fun isLocalSocket(remoteAddress: String): Boolean {
+        val trimmed = remoteAddress.trim().removeSurrounding("[", "]")
+        return trimmed == "127.0.0.1" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1"
+    }
+
     private fun extractMcpHost(value: String): String? {
         val raw = value.trim()
         if (raw.isEmpty() || raw.any { it.isWhitespace() || it in "/@?#" }) return null
@@ -565,6 +701,8 @@ object McpServerManager {
         synchronized(webChatSessionLock) {
             webChatSessions.clear()
         }
+        AcpSessionMcpLeaseStore.revokeAll()
+        McpSessionRegistry.clear()
     }
 
     private fun resolveLanIp(): String? {

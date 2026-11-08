@@ -46,6 +46,10 @@ class AgentAlarmToolService(
         const val MODE_EXACT_ALARM = "exact_alarm"
         const val MODE_CLOCK_APP = "clock_app"
 
+        const val ACTION_CREATE_TIMER = "create_timer"
+        const val ACTION_SHOW_ALARMS = "show_alarms"
+        const val ACTION_SHOW_TIMERS = "show_timers"
+
         const val STATE_PENDING = "pending"
         const val STATE_COUNTDOWN = "countdown"
         const val STATE_RINGING = "ringing"
@@ -156,6 +160,94 @@ class AgentAlarmToolService(
             MODE_EXACT_ALARM -> createExactAlarm(request)
             MODE_CLOCK_APP -> createSystemClockAlarm(request)
             else -> throw IllegalArgumentException("Unsupported alarm mode: ${request.mode}")
+        }
+    }
+
+    fun executeClockAction(
+        action: String,
+        durationSeconds: Int? = null,
+        title: String? = null,
+        skipUi: Boolean = false
+    ): Map<String, Any?> {
+        val normalizedAction = action.trim()
+        val intent = when (normalizedAction) {
+            ACTION_CREATE_TIMER -> {
+                if (durationSeconds == null || durationSeconds !in 1..86400) {
+                    return mapOf(
+                        "success" to false,
+                        "code" to "invalid_argument",
+                        "dispatched" to false,
+                        "verified" to false,
+                        "action" to normalizedAction,
+                        "summary" to "创建计时器时长必须在 1 到 86400 秒之间"
+                    )
+                }
+                Intent(AlarmClock.ACTION_SET_TIMER).apply {
+                    putExtra(AlarmClock.EXTRA_LENGTH, durationSeconds)
+                    val trimmedTitle = title?.trim()
+                    if (!trimmedTitle.isNullOrEmpty()) {
+                        putExtra(AlarmClock.EXTRA_MESSAGE, trimmedTitle)
+                    }
+                    putExtra(AlarmClock.EXTRA_SKIP_UI, skipUi)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            ACTION_SHOW_ALARMS -> {
+                Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            ACTION_SHOW_TIMERS -> {
+                Intent(AlarmClock.ACTION_SHOW_TIMERS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+            }
+
+            else -> {
+                return mapOf(
+                    "success" to false,
+                    "code" to "unsupported_action",
+                    "dispatched" to false,
+                    "verified" to false,
+                    "action" to normalizedAction,
+                    "summary" to "不支持的时钟操作: $action"
+                )
+            }
+        }
+
+        if (intent.resolveActivity(context.packageManager) == null) {
+            return mapOf(
+                "success" to false,
+                "code" to "unsupported_action",
+                "dispatched" to false,
+                "verified" to false,
+                "action" to normalizedAction,
+                "summary" to "当前设备不支持该时钟操作"
+            )
+        }
+
+        return runCatching {
+            context.startActivity(intent)
+            mapOf(
+                "success" to true,
+                "dispatched" to true,
+                "verified" to false,
+                "action" to normalizedAction,
+                "summary" to "已交给系统时钟处理，请在时钟中确认"
+            )
+        }.getOrElse { error ->
+            OmniLog.e(TAG, "启动系统时钟操作失败: $normalizedAction", error)
+            mapOf(
+                "success" to false,
+                "code" to "activity_launch_failed",
+                "dispatched" to false,
+                "verified" to false,
+                "action" to normalizedAction,
+                "summary" to "启动系统时钟失败: ${error.message ?: "未知错误"}",
+                "error" to (error.message ?: error.javaClass.simpleName)
+            )
         }
     }
 
@@ -410,6 +502,8 @@ class AgentAlarmToolService(
 
         return mapOf(
             "success" to true,
+            "dispatched" to true,
+            "verified" to false,
             "mode" to MODE_CLOCK_APP,
             "title" to request.title.trim(),
             "triggerAt" to localTrigger.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),

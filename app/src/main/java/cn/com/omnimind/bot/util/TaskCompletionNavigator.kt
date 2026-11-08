@@ -2,13 +2,9 @@ package cn.com.omnimind.bot.util
 
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import cn.com.omnimind.baselib.util.OmniLog
-import cn.com.omnimind.bot.App
 import cn.com.omnimind.bot.activity.MainActivity
 import cn.com.omnimind.uikit.UIKit
-import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 
 object TaskCompletionNavigator {
@@ -61,32 +57,7 @@ object TaskCompletionNavigator {
             OmniLog.w(TAG, "halfScreenApi unavailable, using fallback route navigation")
         }
 
-        routeMainEngineFallback(targetRoute, needClear)
         bringMainActivityToFront(context, targetRoute, needClear)
-    }
-
-    private fun routeMainEngineFallback(route: String, needClear: Boolean) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            Handler(Looper.getMainLooper()).post {
-                routeMainEngineFallback(route, needClear)
-            }
-            return
-        }
-        try {
-            val routerChannel = MethodChannel(
-                App.getCachedMainEngine().dartExecutor.binaryMessenger,
-                "ui_router_channel"
-            )
-            val method = if (needClear) "clearAndNavigateTo" else "resetToHomeAndPush"
-            val arguments = mapOf<String, Any>(
-                "route" to route,
-                "options" to mapOf("noAnim" to true)
-            )
-            routerChannel.invokeMethod(method, arguments)
-            OmniLog.d(TAG, "兜底主引擎路由调用成功: method=$method route=$route")
-        } catch (e: Exception) {
-            OmniLog.e(TAG, "兜底主引擎路由调用失败: ${e.message}")
-        }
     }
 
     private fun bringMainActivityToFront(context: Context, route: String, needClear: Boolean) {

@@ -109,6 +109,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(requests, isEmpty);
       await tester.scrollUntilVisible(find.text('读取日历'), 400);
+      await tester.ensureVisible(find.text('读取日历'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('读取日历'));
       await tester.pumpAndSettle();
       expect(requests, hasLength(1));

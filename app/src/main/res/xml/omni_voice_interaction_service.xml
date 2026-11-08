@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="cn.com.omnimind.bot.assistant.OmniVoiceSessionService"
+    android:recognitionService="cn.com.omnimind.bot.assistant.OmniRecognitionService"
+    android:supportsAssist="true"
+    android:usesAssistData="true"
+    android:usesAssistScreenshots="true"
+    android:usesAssistStructureScreenContent="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="false" />

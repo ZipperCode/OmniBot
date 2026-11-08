@@ -30,6 +30,7 @@ internal class PrivilegedDisplaySoundControls(private val context: Context) {
         PrivilegedActionPolicy.ACTION_DEVICE_GET_SOUND -> sound(execution)
         PrivilegedActionPolicy.ACTION_DEVICE_SET_VOLUME -> volume(execution)
         PrivilegedActionPolicy.ACTION_DEVICE_SET_DND -> dnd(execution)
+        PrivilegedActionPolicy.ACTION_DEVICE_SET_RINGER_MODE -> ringerMode(execution)
         else -> execution.failure("unsupported_action", "Unsupported display or sound action.")
     }
 
@@ -95,6 +96,37 @@ internal class PrivilegedDisplaySoundControls(private val context: Context) {
         }
     }
 
+    private suspend fun ringerMode(execution: DeviceActionExecution): PrivilegedResult {
+        val mode = execution.request.arguments["mode"]?.lowercase()?.trim()
+        val expected = requireNotNull(ringerModes[mode]) { "mode must be normal, silent or vibrate." }
+        val audio = context.getSystemService(AudioManager::class.java)
+            ?: return execution.failure("unsupported_action", "The audio service is unavailable.")
+        return execution.mutate(
+            expected = JsonPrimitive(expected),
+            scope = "device",
+            read = {
+                try {
+                    JsonPrimitive(audio.ringerMode)
+                } catch (_: SecurityException) {
+                    null
+                }
+            },
+        ) {
+            try {
+                audio.ringerMode = expected
+                PrivilegedResult(execution.request.requestId, execution.request.action, true, "ok", "响铃模式请求已提交。")
+            } catch (_: SecurityException) {
+                PrivilegedResult(
+                    execution.request.requestId,
+                    execution.request.action,
+                    false,
+                    "permission_denied",
+                    "系统因通知策略限制拒绝更改响铃模式。",
+                )
+            }
+        }
+    }
+
     private fun timeout(): Long? = Settings.System.getLong(context.contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, -1)
         .takeIf { it >= 0 }?.div(1000)
 
@@ -111,6 +143,11 @@ internal class PrivilegedDisplaySoundControls(private val context: Context) {
             "voice_call" to AudioManager.STREAM_VOICE_CALL, "system" to AudioManager.STREAM_SYSTEM,
         )
         private val zenModes = mapOf("off" to 0, "priority" to 1, "silent" to 2, "alarms" to 3)
+        private val ringerModes = mapOf(
+            "silent" to AudioManager.RINGER_MODE_SILENT,
+            "vibrate" to AudioManager.RINGER_MODE_VIBRATE,
+            "normal" to AudioManager.RINGER_MODE_NORMAL,
+        )
         internal fun volumeLevel(percent: Int, min: Int, max: Int): Int {
             require(percent in 0..100 && min >= 0 && max >= min)
             return (min + (max - min) * percent / 100.0).roundToInt().coerceIn(min, max)

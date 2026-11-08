@@ -23,6 +23,7 @@ class SystemToolHandler(
     override val toolNames: Set<String> = setOf(
         "schedule_task_create", "schedule_task_list", "schedule_task_update", "schedule_task_delete",
         "alarm_reminder_create", "alarm_reminder_list", "alarm_reminder_delete",
+        "system_clock_action",
         "music_playback_control"
     )
 
@@ -41,7 +42,7 @@ class SystemToolHandler(
         return when (toolName) {
             in setOf("schedule_task_create", "schedule_task_list", "schedule_task_update", "schedule_task_delete") ->
                 executeScheduleTool(toolName, args, env.runtimeContextRepository, callback)
-            in setOf("alarm_reminder_create", "alarm_reminder_list", "alarm_reminder_delete") ->
+            in setOf("alarm_reminder_create", "alarm_reminder_list", "alarm_reminder_delete", "system_clock_action") ->
                 executeAlarmTool(toolName, args, callback)
             "music_playback_control" -> executeMusicTool(args, env.workspaceDescriptor, callback)
             else -> ToolExecutionResult.Error(toolName, "Unknown system tool")
@@ -161,6 +162,27 @@ class SystemToolHandler(
                         toolName = toolName,
                         summaryText = helper.localized(payload["summary"]?.toString().orEmpty().ifBlank { "提醒闹钟已删除" }),
                         previewJson = payloadJson, rawResultJson = payloadJson, success = payload["success"] != false
+                    )
+                }
+                "system_clock_action" -> {
+                    helper.reportToolProgress(callback, toolName, "正在调起系统时钟")
+                    val action = args["action"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                    val durationSeconds = args["durationSeconds"]?.jsonPrimitive?.intOrNull
+                    val title = args["title"]?.jsonPrimitive?.contentOrNull?.trim()
+                    val skipUi = args["skipUi"]?.jsonPrimitive?.booleanOrNull ?: false
+                    val payload = alarmToolService.executeClockAction(
+                        action = action,
+                        durationSeconds = durationSeconds,
+                        title = title,
+                        skipUi = skipUi
+                    )
+                    val payloadJson = helper.encodeLocalizedPayload(payload)
+                    ToolExecutionResult.ContextResult(
+                        toolName = toolName,
+                        summaryText = helper.localized(payload["summary"]?.toString().orEmpty().ifBlank { "时钟操作已处理" }),
+                        previewJson = payloadJson,
+                        rawResultJson = payloadJson,
+                        success = payload["success"] != false
                     )
                 }
                 else -> ToolExecutionResult.Error(toolName, "Unknown alarm tool")

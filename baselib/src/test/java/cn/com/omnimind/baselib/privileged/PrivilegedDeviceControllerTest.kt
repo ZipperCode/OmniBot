@@ -2,8 +2,14 @@ package cn.com.omnimind.baselib.privileged
 
 import android.app.UiModeManager
 import android.content.Context
+import android.media.AudioManager
 import android.net.wifi.WifiManager
+import android.content.pm.PackageManager
+import android.provider.Settings
+import org.robolectric.Shadows
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
@@ -11,7 +17,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class PrivilegedDeviceControllerTest {
@@ -139,5 +144,344 @@ class PrivilegedDeviceControllerTest {
         assertEquals(4, PrivilegedDisplaySoundControls.volumeLevel(50, 1, 7))
         assertEquals(7, PrivilegedDisplaySoundControls.volumeLevel(100, 1, 7))
         assertThrows(IllegalArgumentException::class.java) { PrivilegedDisplaySoundControls.volumeLevel(101, 0, 7) }
+    }
+
+    @Test fun flashlightWithoutHardwareFeatureReturnsUnsupported() = runBlocking {
+        val request = PrivilegedRequest("torch", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            mapOf("target" to "flashlight", "enabled" to "true"))
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ROOT, { true }) {
+            error("Must not run any command")
+        }
+        assertEquals("unsupported_action", result.code)
+    }
+
+    @Test fun unknownStateQueryReturnsStateUnavailable() = runBlocking {
+        Settings.System.putInt(context.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 2)
+        val request = PrivilegedRequest("unknown-query", PrivilegedActionPolicy.ACTION_DEVICE_GET_STATE,
+            mapOf("target" to "auto_rotate"))
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ROOT, { true }) {
+            error("未知设置状态不得推测或执行命令")
+        }
+        assertFalse(result.success)
+        assertEquals("state_unavailable", result.code)
+    }
+
+    @Test fun truncatedHelperOutputIsRejected() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val raw = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.get_state\",\"success\":true,\"code\":\"ok\",\"message\":\"ok\"}\n",
+            data = mapOf("truncated" to "true")
+        )
+        val result = client.parseHelperOutput(raw, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_GET_STATE, isMutation = false)
+        assertFalse(result.success)
+        assertEquals("capability_probe_incomplete", result.code)
+
+        val mutateResult = client.parseHelperOutput(raw, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(mutateResult.success)
+        assertEquals("state_change_unconfirmed", mutateResult.code)
+    }
+
+    @Test fun helperOutputWithoutMarkerOrMultipleMarkersFails() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val noMarker = PrivilegedResult(
+            requestId = "req-1", action = "device_control.command", success = true, code = "ok", message = "", stdout = "Some random crash or log\n"
+        )
+        val resNoMarker = client.parseHelperOutput(noMarker, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(resNoMarker.success)
+        assertEquals("state_change_unconfirmed", resNoMarker.code)
+
+        val multiMarker = PrivilegedResult(
+            requestId = "req-1", action = "device_control.command", success = true, code = "ok", message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\"}\n" +
+                "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\"}\n"
+        )
+        val resMulti = client.parseHelperOutput(multiMarker, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(resMulti.success)
+        assertEquals("state_change_unconfirmed", resMulti.code)
+    }
+
+    @Test fun helperUntrustedUidIsRejected() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val raw = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"ok\",\"data\":{\"uid\":\"10001\"}}\n"
+        )
+        val result = client.parseHelperOutput(raw, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(result.success)
+        assertEquals("permission_denied", result.code)
+    }
+
+
+    @Test fun ringerModeRejectsInvalidMode() = runBlocking {
+        val request = PrivilegedRequest("ringer", PrivilegedActionPolicy.ACTION_DEVICE_SET_RINGER_MODE,
+            mapOf("mode" to "invalid_mode"))
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ROOT, { true }) {
+            error("Must not run")
+        }
+        assertEquals("invalid_arguments", result.code)
+    }
+
+    @Test fun privilegeRevocationAbortsBeforeWrite() = runBlocking {
+        var allowed = true
+        val request = PrivilegedRequest("dark-mode", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            mapOf("target" to "dark_mode", "enabled" to "true"))
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ROOT, { allowed }) { command ->
+            if (command.endsWith("'help'")) {
+                allowed = false
+                PrivilegedResult("help", "device_control.command", false, "command_failed", "",
+                    stdout = "UiModeManager commands:\n  night [yes|no]\n", exitCode = 255)
+            } else {
+                error("Must not attempt write after revocation")
+            }
+        }
+        assertFalse(result.success)
+        assertEquals("privileged_access_changed", result.code)
+    }
+
+    @Test fun capabilitiesReportsDeniedHostCameraAndRingerPolicy() = runBlocking {
+        Shadows.shadowOf(RuntimeEnvironment.getApplication()).denyPermissions(android.Manifest.permission.CAMERA)
+        Shadows.shadowOf(context.getSystemService(android.app.NotificationManager::class.java)).setNotificationPolicyAccessGranted(false)
+        val request = PrivilegedRequest("caps", PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES)
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ADB, { true }) { command ->
+            if (command.contains("capabilities")) {
+                PrivilegedResult(
+                    requestId = "caps",
+                    action = "device_control.command",
+                    success = true,
+                    code = "ok",
+                    message = "",
+                    stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"caps\",\"action\":\"device_control.capabilities\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"observation\":{\"value\":{\"targets\":[{\"target\":\"night_light\",\"readable\":true,\"writable\":true,\"code\":\"ok\"},{\"target\":\"hotspot\",\"readable\":false,\"writable\":false,\"code\":\"unsupported_action\"}]}},\"data\":{\"uid\":\"2000\"}}\n"
+                )
+            } else if (command.endsWith("'help'")) {
+                val service = command.split(" ").getOrNull(1)?.replace("'", "").orEmpty()
+                val op = when (service) {
+                    "wifi" -> "set-wifi-enabled"
+                    "bluetooth_manager" -> "enable"
+                    "location" -> "set-location-enabled"
+                    "nfc" -> "enable-nfc"
+                    "power" -> "set-mode"
+                    "uimode" -> "night"
+                    "connectivity" -> "airplane-mode"
+                    "display" -> "set-brightness"
+                    "notification" -> "set_dnd"
+                    else -> "help"
+                }
+                PrivilegedResult(
+                    requestId = "caps-help",
+                    action = "device_control.command",
+                    success = true,
+                    code = "ok",
+                    message = "",
+                    stdout = "$service commands:\n  $op [options]\n",
+                    exitCode = 0
+                )
+            } else {
+                PrivilegedResult(requestId = "caps-cmd", action = "device_control.command", success = true, code = "ok", message = "", stdout = "ok\n")
+            }
+        }
+        assertTrue(result.success)
+        val obs = result.observation!!["value"] as JsonObject
+        val targets = obs["targets"] as JsonArray
+        val actions = obs["actions"] as JsonArray
+        val flashlight = targets.first { (it as JsonObject)["target"] == JsonPrimitive("flashlight") } as JsonObject
+        assertEquals(JsonPrimitive(false), flashlight["writable"])
+        assertEquals(JsonPrimitive("permission_denied"), flashlight["code"])
+        val ringer = actions.first { (it as JsonObject)["action"] == JsonPrimitive("device_control.set_ringer_mode") } as JsonObject
+        assertEquals(JsonPrimitive(false), ringer["available"])
+        assertEquals(JsonPrimitive("permission_denied"), ringer["code"])
+    }
+
+    @Test fun capabilitiesUnderBackendNoneDoesNotRunCommands() = runBlocking {
+        val request = PrivilegedRequest("caps", PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES)
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.NONE, { false }) {
+            error("Must not invoke command when backend is NONE")
+        }
+        assertTrue(result.success)
+        val obs = result.observation!!["value"] as JsonObject
+        val targets = obs["targets"] as JsonArray
+        val nlTarget = targets.map { it as JsonObject }.first { (it["target"] as JsonPrimitive).content == "night_light" }
+        assertEquals("permission_denied", (nlTarget["code"] as JsonPrimitive).content)
+    }
+
+    @Test fun helperUnconfirmedPreservesAcceptedTrueAndBefore() = runBlocking {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val request = PrivilegedRequest("nl-set", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            mapOf("target" to "night_light", "enabled" to "true"))
+        val execution = DeviceActionExecution(request, 0, {
+            PrivilegedResult(
+                requestId = "nl-set",
+                action = "device_control.command",
+                success = true,
+                code = "ok",
+                message = "",
+                stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"nl-set\",\"action\":\"device_control.set_state\",\"success\":false,\"code\":\"state_change_unconfirmed\",\"message\":\"The request was submitted, but target state is unconfirmed.\",\"observation\":{\"before\":false,\"after\":null,\"expected\":true,\"commandAccepted\":true,\"verified\":false,\"changed\":false,\"userId\":0,\"scope\":\"device\"},\"data\":{\"uid\":\"2000\"}}\n"
+            )
+        }, { true })
+        val result = client.execute(execution, "night_light", enabled = true)
+        assertFalse(result.success)
+        assertEquals("state_change_unconfirmed", result.code)
+        val obs = result.observation!!
+        assertEquals(JsonPrimitive(true), obs["commandAccepted"])
+        assertEquals(JsonPrimitive(false), obs["before"])
+        assertEquals(JsonPrimitive(false), obs["verified"])
+    }
+
+    @Test fun identicalDoubleMarkerIsRejectedWithoutDistinct() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val singleJson = "{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"data\":{\"uid\":\"0\"}}"
+        val identicalDouble = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:$singleJson\nOMNI_DEVICE_API_RESULT:$singleJson\n"
+        )
+        val res = client.parseHelperOutput(identicalDouble, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(res.success)
+        assertEquals("state_change_unconfirmed", res.code)
+    }
+
+    @Test fun ringerCapabilityReflectsPolicyAndVolumeFixedBoundary() = runBlocking {
+        val request = PrivilegedRequest("caps", PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES)
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ADB, { true }) {
+            PrivilegedResult(
+                requestId = "helper-caps",
+                action = "device_control.command",
+                success = true,
+                code = "ok",
+                message = "",
+                stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"caps\",\"action\":\"device_control.capabilities\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"observation\":{\"value\":{\"targets\":[]}},\"data\":{\"uid\":\"2000\"}}\n"
+            )
+        }
+        assertTrue(result.success)
+        val obs = result.observation!!["value"] as JsonObject
+        val actions = obs["actions"] as JsonArray
+        val ringerAction = actions.map { it as JsonObject }.first { (it["action"] as JsonPrimitive).content == "device_control.set_ringer_mode" }
+        val code = (ringerAction["code"] as JsonPrimitive).content
+        assertTrue(code == "permission_denied" || code == "unsupported_action")
+        assertEquals(JsonPrimitive(false), ringerAction["available"])
+    }
+
+    @Test fun torchSecurityExceptionReturnsPermissionDeniedWithSettingsEntry() = runBlocking {
+        val torch = PrivilegedTorchController(context)
+        val request = PrivilegedRequest("torch", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            mapOf("target" to "flashlight", "enabled" to "true"))
+        val execution = DeviceActionExecution(request, 0, { error("Must not run") }, { true })
+        val result = torch.execute(execution, enabled = true)
+        assertEquals("permission_denied", result.code)
+        assertEquals(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, result.data["settingsAction"])
+        assertEquals(context.packageName, result.data["packageName"])
+    }
+
+    @Test fun hotspotSdkGuardRejectsBelowApi36() = runBlocking {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val request = PrivilegedRequest("hs-set", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            mapOf("target" to "hotspot", "enabled" to "true"))
+        val execution = DeviceActionExecution(request, 0, { error("Must not run") }, { true })
+        val result = client.execute(execution, "hotspot", enabled = true)
+        assertEquals("unsupported_action", result.code)
+    }
+
+    @Test fun helperUidFieldMismatchIsRejected() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val raw = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"uid\":0,\"data\":{\"uid\":\"2000\"}}\n"
+        )
+        val result = client.parseHelperOutput(raw, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true)
+        assertFalse(result.success)
+        assertEquals("permission_denied", result.code)
+    }
+
+    @Test fun helperBackendIdentityMismatchIsRejected() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val rawUid2000 = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"data\":{\"uid\":\"2000\"}}\n"
+        )
+        // Root 后端必须拒绝 UID 2000
+        val resRoot = client.parseHelperOutput(
+            rawResult = rawUid2000,
+            expectedRequestId = "req-1",
+            expectedAction = PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            isMutation = true,
+            expectedBackend = PrivilegedBackend.ROOT,
+        )
+        assertFalse(resRoot.success)
+        assertEquals("permission_denied", resRoot.code)
+
+        val rawUid0 = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = true,
+            code = "ok",
+            message = "",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"data\":{\"uid\":\"0\"}}\n"
+        )
+        // ADB 后端必须拒绝 UID 0
+        val resAdb = client.parseHelperOutput(
+            rawResult = rawUid0,
+            expectedRequestId = "req-1",
+            expectedAction = PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE,
+            isMutation = true,
+            expectedBackend = PrivilegedBackend.ADB,
+        )
+        assertFalse(resAdb.success)
+        assertEquals("permission_denied", resAdb.code)
+    }
+    @Test fun helperFailureNeverReportsVerifiedSuccess() {
+        val client = PrivilegedDeviceApiClient(context, 0)
+        val rawFailed = PrivilegedResult(
+            requestId = "req-1",
+            action = "device_control.command",
+            success = false,
+            code = "timeout",
+            message = "Process timed out.",
+            stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"req-1\",\"action\":\"device_control.set_state\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"observation\":{\"before\":false,\"after\":true,\"expected\":true,\"commandAccepted\":true,\"verified\":true,\"changed\":true,\"userId\":0,\"scope\":\"device\"},\"data\":{\"uid\":\"0\"}}\n"
+        )
+        val res = client.parseHelperOutput(rawFailed, "req-1", PrivilegedActionPolicy.ACTION_DEVICE_SET_STATE, isMutation = true, expectedBackend = PrivilegedBackend.ROOT)
+        assertFalse(res.success)
+        assertEquals("state_change_unconfirmed", res.code)
+        val obs = res.observation!!
+        assertEquals(JsonPrimitive(false), obs["verified"])
+        assertEquals(JsonPrimitive(true), obs["commandAccepted"])
+    }
+
+    @Test fun capabilitiesReflectsMissingCommandHelpOrUnknownState() = runBlocking {
+        val request = PrivilegedRequest("caps", PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES)
+        val result = PrivilegedDeviceController(context, 0).execute(request, PrivilegedBackend.ADB, { true }) { command ->
+            if (command.contains("capabilities")) {
+                PrivilegedResult(
+                    requestId = "caps", action = "device_control.command", success = true, code = "ok", message = "",
+                    stdout = "OMNI_DEVICE_API_RESULT:{\"requestId\":\"caps\",\"action\":\"device_control.capabilities\",\"success\":true,\"code\":\"ok\",\"message\":\"\",\"observation\":{\"value\":{\"targets\":[]}},\"data\":{\"uid\":\"2000\"}}\n"
+                )
+            } else {
+                PrivilegedResult(requestId = "cmd-fail", action = "device_control.command", success = false, code = "command_failed", message = "Service missing", exitCode = -1)
+            }
+        }
+        assertTrue(result.success)
+        val obs = result.observation!!["value"] as JsonObject
+        val actions = obs["actions"] as JsonArray
+        val brightness = actions.map { it as JsonObject }.first { (it["action"] as JsonPrimitive).content == "device_control.set_brightness" }
+        assertEquals(JsonPrimitive(false), brightness["available"])
+        assertEquals("unsupported_action", (brightness["code"] as JsonPrimitive).content)
     }
 }

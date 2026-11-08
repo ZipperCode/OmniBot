@@ -74,6 +74,10 @@ class DeviceDisplayToolHandler(
                 // 创建虚拟屏时无需提前校验虚拟屏已存在，使用默认主屏申请操作租约
                 Display.DEFAULT_DISPLAY
             }
+            actionName == "present_to_user" -> {
+                // 移交主屏目标为主屏，双屏租约在外部单独分流处理
+                Display.DEFAULT_DISPLAY
+            }
             actionName == "destroy_virtual_display" -> {
                 // 已持有的虚拟屏即使对应用不可见，也必须能送达所属 Helper 清理。
                 val currentActiveId = DeviceDisplayManager.activeVirtualDisplayId()
@@ -104,6 +108,12 @@ class DeviceDisplayToolHandler(
         // Bind stop action
         toolHandle.bindStopAction {
             DisplayInputCoordinator.cancelActiveOperation(targetDisplayId, leaseOwnerId)
+            if (actionName == "present_to_user") {
+                val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
+                if (activeVd != Display.DEFAULT_DISPLAY) {
+                    DisplayInputCoordinator.cancelActiveOperation(activeVd, leaseOwnerId)
+                }
+            }
         }
 
         val displayName = if (targetDisplayId == Display.DEFAULT_DISPLAY) "主屏(0)" else "虚拟屏($targetDisplayId)"
@@ -154,6 +164,20 @@ class DeviceDisplayToolHandler(
                 )
             }
         }
+        // 移交主屏在单屏 withDisplayLease 外独立分流，避免先持虚拟屏锁再持主屏锁引发死锁
+        if (actionName == "present_to_user") {
+            val sessionId = env.acpSessionId?.trim()?.ifEmpty { null }
+            val turnId = env.acpTurnId?.trim()?.ifEmpty { null }
+            if (sessionId == null || turnId == null) {
+                return ToolExecutionResult.Error(
+                    toolName = TOOL_NAME,
+                    message = "缺少有效 ACP 会话或 Turn 标识 (acpSessionId=$sessionId, acpTurnId=$turnId)，无法执行主屏移交。",
+                )
+            }
+            val presentLeaseOwnerId = "$sessionId:$turnId:${toolCall.id}"
+            return handlePresentToUser(args, sessionId, presentLeaseOwnerId, env, callback, toolHandle)
+        }
+
 
         // 虚拟屏动作校验所有权，防止跨会话操作他人屏幕
         if (targetDisplayId != Display.DEFAULT_DISPLAY) {
@@ -226,6 +250,89 @@ class DeviceDisplayToolHandler(
             }
         }
     }
+    private suspend fun handlePresentToUser(
+        args: JsonObject,
+        sessionId: String,
+        leaseOwnerId: String,
+        env: AgentExecutionEnvironment,
+        callback: AgentCallback,
+        toolHandle: AgentToolExecutionHandle,
+    ): ToolExecutionResult {
+        toolHandle.throwIfStopRequested()
+
+        val packageName = args["packageName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (packageName.isEmpty()) {
+            return ToolExecutionResult.Error(
+                toolName = TOOL_NAME,
+                message = "Missing required argument 'packageName' for present_to_user.",
+            )
+        }
+        val taskId = args["taskId"]?.jsonPrimitive?.intOrNull
+
+        DeviceDisplayManager.connectShizukuUserService(context)
+
+        return try {
+            val result = DeviceDisplayManager.presentToUser(
+                context = context,
+                packageName = packageName,
+                taskId = taskId,
+                sessionOwnerId = sessionId,
+                leaseOwnerId = leaseOwnerId,
+            )
+
+            val resSuccess = result.success
+            val resCode = result.diagnostics["code"] ?: if (resSuccess) "ok" else "error"
+            val resTaskId = result.diagnostics["taskId"]?.toIntOrNull() ?: taskId ?: 0
+            val resTaskKind = result.diagnostics["taskKind"] ?: "unknown"
+            val resSourceDisplayId = result.diagnostics["sourceDisplayId"]?.toIntOrNull() ?: 0
+            val resTargetDisplayId = result.diagnostics["targetDisplayId"]?.toIntOrNull() ?: Display.DEFAULT_DISPLAY
+            val resVerified = result.diagnostics["verified"]?.toBooleanStrictOrNull() ?: resSuccess
+
+            val payload = buildJsonObject {
+                put("success", resSuccess)
+                put("code", resCode)
+                put("taskId", resTaskId)
+                put("taskKind", resTaskKind)
+                put("sourceDisplayId", resSourceDisplayId)
+                put("targetDisplayId", resTargetDisplayId)
+                put("verified", resVerified)
+                put("packageName", packageName)
+                if (!resSuccess) {
+                    put("error", result.message)
+                }
+            }
+            val jsonStr = payload.toString()
+
+            if (resSuccess) {
+                sessionDisplayTargets[sessionId] = Display.DEFAULT_DISPLAY
+                ToolExecutionResult.ContextResult(
+                    toolName = TOOL_NAME,
+                    summaryText = "已将应用 $packageName (taskId=$resTaskId) 移交至主屏显示",
+                    previewJson = jsonStr,
+                    rawResultJson = jsonStr,
+                    success = true,
+                )
+            } else {
+                ToolExecutionResult.ContextResult(
+                    toolName = TOOL_NAME,
+                    summaryText = "移交主屏失败: ${result.message}",
+                    previewJson = jsonStr,
+                    rawResultJson = jsonStr,
+                    success = false,
+                )
+            }
+        } catch (e: CancellationException) {
+            ToolExecutionResult.Interrupted(
+                toolName = TOOL_NAME,
+                summaryText = "手机操作已被用户手动停止并接管",
+                interruptedBy = "user",
+                interruptionReason = "manual_stop",
+            )
+        } catch (e: Exception) {
+            ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Action execution failed")
+        }
+    }
+
 
     private fun handleListDisplays(): ToolExecutionResult {
         val displays = DeviceDisplayManager.listDisplays(context)
@@ -570,6 +677,7 @@ class DeviceDisplayToolHandler(
                                 add(JsonPrimitive("destroy_virtual_display"))
                                 add(JsonPrimitive("switch_display"))
                                 add(JsonPrimitive("wait"))
+                                add(JsonPrimitive("present_to_user"))
                             })
                         }
                         putJsonObject("display") {
@@ -622,6 +730,14 @@ class DeviceDisplayToolHandler(
                         putJsonObject("package_name") {
                             put("type", "string")
                             put("description", "应用包名（仅 action=open_app）")
+                        }
+                        putJsonObject("packageName") {
+                            put("type", "string")
+                            put("description", "应用包名（仅 action=present_to_user 必填）")
+                        }
+                        putJsonObject("taskId") {
+                            put("type", "integer")
+                            put("description", "要移交的任务根 ID（仅 action=present_to_user 可选）")
                         }
                         putJsonObject("width") {
                             put("type", "integer")

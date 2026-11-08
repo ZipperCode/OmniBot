@@ -1,6 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission
+        android:name="cn.com.omnimind.bot.permission.TEST_CLOCK_FIXTURE"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="cn.com.omnimind.bot.permission.TEST_CLOCK_FIXTURE" />
     <application>
+        <!-- 仅 instrumentation 临时启用，默认不参与用户时钟请求。 -->
+        <activity
+            android:name=".debug.TestClockReceiverActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:permission="cn.com.omnimind.bot.permission.TEST_CLOCK_FIXTURE">
+            <intent-filter>
+                <action android:name="android.intent.action.SET_TIMER" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SHOW_ALARMS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SHOW_TIMERS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- 仅用于系统助理屏幕识别与虚拟屏任务移交验收的非敏感测试页面，默认禁用，仅在测试期间临时启用。
+             使用常规 task，不配置 singleTask/configChanges，以真实验证系统配置变更与生命周期重建时的状态保存。 -->
+        <activity
+            android:name=".debug.TestDeviceStateActivity"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
         <receiver
             android:name=".debug.DebugHumanRecordingReceiver"
             android:enabled="true"

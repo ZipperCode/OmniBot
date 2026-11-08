@@ -20,6 +20,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 object AgentToolDefinitions {
 
@@ -185,6 +186,7 @@ object AgentToolDefinitions {
         "创建提醒闹钟" to "Create Reminder Alarm",
         "查看提醒闹钟" to "List Reminder Alarms",
         "删除提醒闹钟" to "Delete Reminder Alarm",
+        "系统时钟操作" to "System Clock Action",
         "查看日历列表" to "List Calendars",
         "创建日程" to "Create Calendar Event",
         "查询日程" to "List Calendar Events",
@@ -404,6 +406,18 @@ object AgentToolDefinitions {
         "删除后等待工具结果，再向用户确认。" to
             "Wait for the tool result after deleting, then confirm with the user.",
         "闹钟 ID。" to "Alarm ID.",
+        "调用系统时钟应用执行计时器创建或展示闹钟/计时器界面。操作由系统时钟处理，本应用不执行静默 CRUD。" to
+            "Invoke the system clock app to create a timer or display alarms/timers. Handled by the system clock without silent CRUD.",
+        "提交后向用户说明已交给系统时钟处理，请在时钟中确认。" to
+            "After submitting, inform the user that it has been handed over to the system clock for confirmation.",
+        "时钟操作类型：create_timer=创建计时器；show_alarms=展示系统闹钟；show_timers=展示系统计时器。" to
+            "Clock action type: create_timer = create a timer; show_alarms = show alarms; show_timers = show timers.",
+        "计时器时长（秒），取值范围 1 到 86400（最多24小时）。仅在 create_timer 操作时有效且必需。" to
+            "Timer duration in seconds, range 1 to 86400 (up to 24 hours). Required and only effective for create_timer.",
+        "计时器标签或备注名称，可选。仅在 create_timer 操作时生效。" to
+            "Timer label or note, optional. Only effective for create_timer.",
+        "是否尝试在后台启动计时器而不弹出时钟界面。默认 false。" to
+            "Whether to try starting the timer without popping up the clock UI. Default false.",
         "查询设备日历账户列表，可用于选择 calendarId。" to
             "Query the device's calendar accounts so the agent can choose a calendarId.",
         "查看结果后再决定新建或管理日程。" to
@@ -689,8 +703,8 @@ object AgentToolDefinitions {
                             put(
                                 "description",
                                 text(
-                                    "要执行的高级动作。设备状态查询/切换使用 device_control.get_state/set_state 与 target/enabled；亮度、音量使用 percent；息屏使用 seconds；查询显示/声音使用 get_display/get_sound。",
-                                    "The privileged action to run. Use device_control.get_state/set_state with target/enabled, set_brightness/set_volume with percent, set_screen_timeout with seconds, and get_display/get_sound for queries."
+                                    "要执行的高级动作。先用 device_control.capabilities 查询当前设备可读/可改的能力；设备状态查询/切换使用 device_control.get_state/set_state 与 target/enabled（含热点、标准护眼、手电筒）；亮度、音量使用 percent；息屏使用 seconds；查询显示/声音使用 get_display/get_sound；set_ringer_mode 的 mode 仅 normal、silent、vibrate。",
+                                    "要执行的高级动作。先用 device_control.capabilities 查询当前设备可读/可改的能力；设备状态查询/切换使用 device_control.get_state/set_state 与 target/enabled（含热点、标准护眼、手电筒）；亮度、音量使用 percent；息屏使用 seconds；查询显示/声音使用 get_display/get_sound；set_ringer_mode 的 mode 仅 normal、silent、vibrate。"
                                 )
                             )
                             putJsonArray("enum") {
@@ -725,7 +739,7 @@ object AgentToolDefinitions {
                                 }
                                 putJsonObject("mode") {
                                     put("type", "string")
-                                    put("description", text("动作模式：AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。", "动作模式：AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。"))
+                                    put("description", text("动作模式：set_ringer_mode 仅 normal/silent/vibrate；其余为 AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。", "动作模式：set_ringer_mode 仅 normal/silent/vibrate；其余为 AppOps/DND、文件八进制权限、SELinux enforcing/permissive，或重启 normal/recovery/bootloader/userspace。"))
                                 }
                                 putJsonObject("op") {
                                     put("type", "string")
@@ -1932,6 +1946,51 @@ object AgentToolDefinitions {
         }
     }
 
+    val systemClockActionTool: JsonObject = buildJsonObject {
+        put("type", "function")
+        putJsonObject("function") {
+            put("name", "system_clock_action")
+            put("displayName", "系统时钟操作")
+            put("toolType", "clock")
+            put(
+                "description",
+                "调用系统时钟应用执行计时器创建或展示闹钟/计时器界面。操作由系统时钟处理，本应用不执行静默 CRUD。"
+            )
+            put("postToolRule", "提交后向用户说明已交给系统时钟处理，请在时钟中确认。")
+            putJsonObject("parameters") {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("action") {
+                        put("type", "string")
+                        putJsonArray("enum") {
+                            add("create_timer")
+                            add("show_alarms")
+                            add("show_timers")
+                        }
+                        put("description", "时钟操作类型：create_timer=创建计时器；show_alarms=展示系统闹钟；show_timers=展示系统计时器。")
+                    }
+                    putJsonObject("durationSeconds") {
+                        put("type", "integer")
+                        put("minimum", 1)
+                        put("maximum", 86400)
+                        put("description", "计时器时长（秒），取值范围 1 到 86400（最多24小时）。仅在 create_timer 操作时有效且必需。")
+                    }
+                    putJsonObject("title") {
+                        put("type", "string")
+                        put("description", "计时器标签或备注名称，可选。仅在 create_timer 操作时生效。")
+                    }
+                    putJsonObject("skipUi") {
+                        put("type", "boolean")
+                        put("description", "是否尝试在后台启动计时器而不弹出时钟界面。默认 false。")
+                    }
+                }
+                putJsonArray("required") {
+                    add("action")
+                }
+            }
+        }
+    }
+
     val calendarListTool: JsonObject = buildJsonObject {
         put("type", "function")
         putJsonObject("function") {
@@ -2097,6 +2156,103 @@ object AgentToolDefinitions {
                 putJsonArray("required") {
                     add("eventId")
                 }
+            }
+        }
+    }
+
+    val calendarEventBatchTool: JsonObject = buildJsonObject {
+        val createParams = buildJsonObject {
+            ((calendarEventCreateTool["function"] as JsonObject)["parameters"] as JsonObject).forEach { (k, v) -> put(k, v) }
+            put("additionalProperties", false)
+        }
+        val updateParams = buildJsonObject {
+            ((calendarEventUpdateTool["function"] as JsonObject)["parameters"] as JsonObject).forEach { (k, v) -> put(k, v) }
+            put("additionalProperties", false)
+        }
+        val deleteParams = buildJsonObject {
+            ((calendarEventDeleteTool["function"] as JsonObject)["parameters"] as JsonObject).forEach { (k, v) -> put(k, v) }
+            put("additionalProperties", false)
+        }
+        put("type", "function")
+        putJsonObject("function") {
+            put("name", "calendar_event_batch")
+            put("displayName", "批量管理日程")
+            put("toolType", "calendar")
+            put("description", "批量创建、更新或删除日历事件（1..50 项）。整批操作在同一事务中原子执行，任何一项失败则整批回滚。")
+            put("postToolRule", "执行后等待工具结果，再向用户确认批量变更结果。")
+            putJsonObject("parameters") {
+                put("type", "object")
+                putJsonObject("properties") {
+                    putJsonObject("operations") {
+                        put("type", "array")
+                        put("minItems", 1)
+                        put("maxItems", 50)
+                        put("description", "操作列表（1..50 项）。每个元素通过 oneOf 匹配 create/update/delete 及其参数。")
+                        putJsonObject("items") {
+                            put("type", "object")
+                            putJsonArray("oneOf") {
+                                add(
+                                    buildJsonObject {
+                                        put("type", "object")
+                                        putJsonObject("properties") {
+                                            putJsonObject("operation") {
+                                                put("type", "string")
+                                                put("const", "create")
+                                                put("description", "创建日历事件。")
+                                            }
+                                            put("arguments", createParams)
+                                        }
+                                        putJsonArray("required") {
+                                            add("operation")
+                                            add("arguments")
+                                        }
+                                        put("additionalProperties", false)
+                                    }
+                                )
+                                add(
+                                    buildJsonObject {
+                                        put("type", "object")
+                                        putJsonObject("properties") {
+                                            putJsonObject("operation") {
+                                                put("type", "string")
+                                                put("const", "update")
+                                                put("description", "修改日历事件。")
+                                            }
+                                            put("arguments", updateParams)
+                                        }
+                                        putJsonArray("required") {
+                                            add("operation")
+                                            add("arguments")
+                                        }
+                                        put("additionalProperties", false)
+                                    }
+                                )
+                                add(
+                                    buildJsonObject {
+                                        put("type", "object")
+                                        putJsonObject("properties") {
+                                            putJsonObject("operation") {
+                                                put("type", "string")
+                                                put("const", "delete")
+                                                put("description", "删除日历事件。")
+                                            }
+                                            put("arguments", deleteParams)
+                                        }
+                                        putJsonArray("required") {
+                                            add("operation")
+                                            add("arguments")
+                                        }
+                                        put("additionalProperties", false)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                putJsonArray("required") {
+                    add("operations")
+                }
+                put("additionalProperties", false)
             }
         }
     }
@@ -2383,12 +2539,17 @@ object AgentToolDefinitions {
         alarmReminderDeleteTool
     )
 
+    private val clockToolDefinitions: List<JsonObject> = listOf(
+        systemClockActionTool
+    )
+
     private val calendarToolDefinitions: List<JsonObject> = listOf(
         calendarListTool,
         calendarEventCreateTool,
         calendarEventListTool,
         calendarEventUpdateTool,
-        calendarEventDeleteTool
+        calendarEventDeleteTool,
+        calendarEventBatchTool
     )
 
     private val musicToolDefinitions: List<JsonObject> = listOf(
@@ -2422,6 +2583,9 @@ object AgentToolDefinitions {
     fun alarmTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
         alarmToolDefinitions.map { decorateToolDefinition(it, locale) }
 
+    fun clockTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
+        clockToolDefinitions.map { decorateToolDefinition(it, locale) }
+
     fun calendarTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
         calendarToolDefinitions.map { decorateToolDefinition(it, locale) }
 
@@ -2443,7 +2607,7 @@ object AgentToolDefinitions {
         includeVlmTool: Boolean = true,
     ): List<JsonObject> =
         builtinTools(locale, terminalDistribution, includeVlmTool) +
-        scheduleTools(locale) + alarmTools(locale) + PersonalContextTools.definitions(locale) + musicTools(locale) +
+        scheduleTools(locale) + alarmTools(locale) + clockTools(locale) + PersonalContextTools.definitions(locale) + musicTools(locale) +
         webSearchTools(locale)
 
     fun reservedToolNames(): Set<String> {

@@ -10,10 +10,14 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.view.Display
 import androidx.core.app.NotificationCompat
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.R
 import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
+import cn.com.omnimind.androidgui.DeviceDisplayManager
+import cn.com.omnimind.androidgui.DisplayInputCoordinator
+import cn.com.omnimind.bot.agent.display.VirtualDisplayPreviewActivity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -144,6 +148,36 @@ class TaskRuntimeService : Service() {
                     ).build()
                 )
             }
+            // 操作按钮：查看屏幕（仅在 primaryTask.sessionId 拥有活跃虚拟屏时展示）
+            val primarySessionId = primaryTask?.sessionId
+            val activeVdId = DeviceDisplayManager.activeVirtualDisplayId()
+            val ownsVirtualDisplay = activeVdId != Display.DEFAULT_DISPLAY &&
+                primarySessionId != null &&
+                DisplayInputCoordinator.getVirtualDisplayOwner(activeVdId) == primarySessionId
+
+            if (ownsVirtualDisplay && primarySessionId != null) {
+                val previewIntent = VirtualDisplayPreviewActivity.createIntent(
+                    context = context,
+                    sessionId = primarySessionId,
+                    displayId = activeVdId,
+                    taskId = primaryTask.taskId,
+                    turnId = primaryTask.turnId,
+                    stopToken = primaryTask.stopToken,
+                )
+                val previewPendingIntent = PendingIntent.getActivity(
+                    context,
+                    ("preview_${primarySessionId}_$activeVdId").hashCode(),
+                    previewIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag()
+                )
+                builder.addAction(
+                    NotificationCompat.Action.Builder(
+                        0,
+                        "查看屏幕",
+                        previewPendingIntent
+                    ).build()
+                )
+            }
 
             // 操作按钮：停止
             // 采用独立 data URI 绑定 taskId、turnId 与 stopToken，杜绝旧通知被新任务覆盖
@@ -171,7 +205,11 @@ class TaskRuntimeService : Service() {
                 )
             }
 
-            return builder.build()
+            val baseNotification = builder.build()
+            if (Build.VERSION.SDK_INT >= 36 && primaryTask != null && waiting == null) {
+                return applyPromotedOngoingNotification(context, baseNotification, primaryTask)
+            }
+            return baseNotification
         }
 
         fun ensureNotificationChannels(context: Context) {
@@ -207,6 +245,33 @@ class TaskRuntimeService : Service() {
             } else {
                 0
             }
+        private fun applyPromotedOngoingNotification(
+            context: Context,
+            baseNotification: Notification,
+            primaryTask: TaskExecutionInfo,
+        ): Notification {
+            return try {
+                val recoverBuilder = Notification.Builder.recoverBuilder(context, baseNotification)
+                recoverBuilder.setRequestPromotedOngoing(true)
+
+                val cur = primaryTask.progressCurrent
+                val max = primaryTask.progressMax
+                val progressStyle = Notification.ProgressStyle()
+                if (cur != null && max != null && max > 0) {
+                    val clamped = cur.coerceIn(0, max)
+                    progressStyle.addProgressSegment(Notification.ProgressStyle.Segment(max))
+                    progressStyle.setProgress(clamped)
+                    progressStyle.setProgressIndeterminate(false)
+                } else {
+                    progressStyle.setProgressIndeterminate(true)
+                }
+                recoverBuilder.setStyle(progressStyle)
+                recoverBuilder.build()
+            } catch (e: Throwable) {
+                OmniLog.w(TAG, "Promoted ongoing notification configuration failed: ${e.message}")
+                baseNotification
+            }
+        }
     }
 
     private val notificationManager by lazy {

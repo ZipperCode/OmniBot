@@ -20,7 +20,11 @@ internal class PersonalContextCapabilityModule(context: Context) : AgentCapabili
         override val toolNames = PersonalContextTools.names
         override suspend fun execute(toolCall: AssistantToolCall, args: JsonObject, runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
             env: AgentExecutionEnvironment, callback: AgentCallback, toolHandle: AgentToolExecutionHandle): ToolExecutionResult {
-            val result = service.execute(toolCall.function.name, args)
+            val rawBytes = toolCall.function.arguments.toByteArray(Charsets.UTF_8).size
+            if (toolCall.function.name == "calendar_event_batch") {
+                require(rawBytes <= 256 * 1024) { "日历批量请求数据过大（超过 256KiB）" }
+            }
+            val result = service.execute(toolCall.function.name, args, rawPayloadBytes = rawBytes)
             val json = result.contextJson().toString()
             return ToolExecutionResult.ContextResult(toolName = toolCall.function.name,
                 summaryText = result["message"]?.toString() ?: runtimeDescriptor.displayName,

@@ -130,3 +130,8 @@
 # Ktor's IntelliJ debugger detector probes these JVM-only management APIs.
 -dontwarn java.lang.management.ManagementFactory
 -dontwarn java.lang.management.RuntimeMXBean
+
+# 固定设备 API 桥由受控 app_process 入口加载。
+-keep class cn.com.omnimind.baselib.privileged.PrivilegedDeviceApiMain {
+    public static void main(java.lang.String[]);
+}

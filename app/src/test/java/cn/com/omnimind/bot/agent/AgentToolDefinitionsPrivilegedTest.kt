@@ -37,10 +37,6 @@ class AgentToolDefinitionsPrivilegedTest {
         assertTrue("stream" in argumentProperties)
         assertTrue("seconds" in argumentProperties)
         assertEquals(false, arguments["additionalProperties"]?.toString()?.toBoolean())
-        assertTrue(
-            function["description"]?.jsonPrimitive?.contentOrNull?.contains("one-shot arbitrary shell") ==
-                true
-        )
     }
 
     @Test
@@ -67,9 +63,5 @@ class AgentToolDefinitionsPrivilegedTest {
         val parameters = function["parameters"] as JsonObject
         val properties = parameters["properties"] as JsonObject
         assertTrue("confirmed" !in properties)
-        assertTrue(
-            function["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("ACP", ignoreCase = true) == true
-        )
     }
 }

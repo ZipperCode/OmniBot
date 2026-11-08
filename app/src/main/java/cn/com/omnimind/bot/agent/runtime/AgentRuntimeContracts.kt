@@ -2,6 +2,7 @@ package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.bot.agent.workspace.memory.LongTermMemoryIndex
 import kotlinx.serialization.json.JsonObject
+import kotlinx.coroutines.Job
 
 /**
  * Separate switches for the temporary clean Agent baseline.
@@ -42,6 +43,9 @@ interface AgentExecutionEnvironment {
     /** Long-term memory slug index. Null when unavailable; tools handle gracefully. */
     val longTermMemoryIndex: LongTermMemoryIndex? get() = null
 
+    /** Active turn Job when running inside a managed turn. */
+    val turnJob: Job? get() = null
+
 }
 
 data class DefaultAgentExecutionEnvironment(
@@ -62,6 +66,7 @@ data class DefaultAgentExecutionEnvironment(
     override val longTermMemoryIndex: LongTermMemoryIndex? = null,
     override val acpSessionId: String? = null,
     override val acpTurnId: String? = null,
+    override val turnJob: Job? = null,
 ) : AgentExecutionEnvironment
 
 fun interface AgentPermissionRequester {

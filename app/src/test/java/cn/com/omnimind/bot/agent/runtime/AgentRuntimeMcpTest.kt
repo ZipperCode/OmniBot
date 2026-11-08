@@ -19,12 +19,20 @@ class AgentRuntimeMcpTest {
         port = 18765,
         token = "test-token",
     )
+    private val testLease = AcpSessionMcpLease(
+        leaseId = "lease-123",
+        token = "lease-token-abc",
+        agentId = "codex",
+        conversationId = 1L,
+    )
+
 
     @Test
     fun standardAcpAgentReceivesOfficialHttpMcpDeclaration() {
         val servers = buildLocalAgentAcpMcpServers(
             supportsHttp = true,
             state = runningState,
+            lease = testLease,
         )
 
         assertEquals(1, servers.size)
@@ -32,9 +40,9 @@ class AgentRuntimeMcpTest {
         assertTrue(server is McpServer.Http)
         server as McpServer.Http
         assertEquals("omnibot", server.name)
-        assertEquals("http://127.0.0.1:18765/mcp", server.url)
+        assertEquals("http://127.0.0.1:18765/mcp/acp/lease-123", server.url)
         assertEquals("Authorization", server.headers.single().name)
-        assertEquals("Bearer test-token", server.headers.single().value)
+        assertEquals("Bearer lease-token-abc", server.headers.single().value)
     }
 
     @Test
@@ -42,6 +50,7 @@ class AgentRuntimeMcpTest {
         val servers = buildLocalAgentAcpMcpServers(
             supportsHttp = true,
             state = runningState,
+            lease = testLease,
         )
         assertEquals(1, servers.size)
         assertEquals("omnibot", (servers.single() as McpServer.Http).name)
@@ -122,12 +131,27 @@ class AgentRuntimeMcpTest {
             buildLocalAgentAcpMcpServers(
                 supportsHttp = true,
                 state = stopped,
+                lease = testLease,
             )
             throw AssertionError("expected unavailable MCP server to be rejected")
         } catch (error: IllegalArgumentException) {
             assertEquals("Omnibot MCP server is not running.", error.message)
         }
     }
+    @Test
+    fun mcpDeclarationsRejectAnEmptyLeaseToken() {
+        try {
+            buildLocalAgentAcpMcpServers(
+                supportsHttp = true,
+                state = runningState,
+                lease = testLease.copy(token = ""),
+            )
+            throw AssertionError("expected empty lease token to be rejected")
+        } catch (error: IllegalArgumentException) {
+            assertEquals("ACP session MCP lease token is missing.", error.message)
+        }
+    }
+
 
     @Test
     fun codexSkipsMcpDeclarationForCustomResponsesProvider() {

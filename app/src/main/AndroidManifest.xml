@@ -33,6 +33,7 @@
 
     <!-- 添加通知权限，Android 13+ (API 33+) 需要 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
@@ -72,6 +73,8 @@
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Android 17 数字助理读取用户确认分享的屏幕结构内容。 -->
+    <uses-permission android:name="android.permission.READ_ASSIST_STRUCTURE_SCREEN_CONTENT" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
@@ -109,6 +112,39 @@
         android:label="@string/omni_app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.OmnibotApp">
+        <activity
+            android:name=".agent.display.VirtualDisplayPreviewActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.display_preview"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:supportsPictureInPicture="true"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|uiMode" />
+        <!-- 系统数字助理只在用户选择后接收单次屏幕输入。 -->
+        <service
+            android:name=".assistant.OmniVoiceInteractionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/omni_voice_interaction_service" />
+        </service>
+        <service
+            android:name=".assistant.OmniVoiceSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="false" />
+        <service
+            android:name=".assistant.OmniRecognitionService"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
         <activity
             android:name=".agent.personal.PersonalContextAccessActivity"
             android:exported="false"

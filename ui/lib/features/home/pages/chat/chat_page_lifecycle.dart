@@ -1146,11 +1146,15 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
   Future<ConversationThreadTarget> _overrideTargetWithSharedDraftIfNeeded(
     ConversationThreadTarget target,
   ) async {
-    if (target.mode != ConversationMode.normal) {
+    if (!target.isNewConversation ||
+        (target.mode != ConversationMode.normal && target.requestKey == null)) {
       return target;
     }
     final staged = _activeStagedSharedOpenDraft();
     if (staged != null && staged.hasContent) {
+      if (target.requestKey != null && target.requestKey != staged.requestKey) {
+        return target;
+      }
       return ConversationThreadTarget.newConversation(
         mode: ConversationMode.agent,
         agentId: _kXiaowanAcpAgentId,
@@ -1161,6 +1165,9 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
 
     final payload = await SharedOpenDraftService.getPendingDraft();
     if (payload == null || !payload.hasContent) {
+      return target;
+    }
+    if (target.requestKey != null && target.requestKey != payload.requestKey) {
       return target;
     }
     _stagedSharedOpenDraft = payload;
@@ -1181,6 +1188,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     if (payload == null ||
         !payload.hasContent ||
         !target.isNewConversation ||
+        (target.requestKey != null && target.requestKey != payload.requestKey) ||
         (target.mode != ConversationMode.agent &&
             target.mode != ConversationMode.normal)) {
       return;
@@ -1216,6 +1224,8 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
       _applyDraftForConversationMode(targetPageMode);
     }
     await SharedOpenDraftService.clearPendingDraft();
+    _stagedSharedOpenDraft = null;
+    _stagedSharedOpenDraftExpiresAt = null;
   }
 
   SharedOpenDraftPayload? _activeStagedSharedOpenDraft() {

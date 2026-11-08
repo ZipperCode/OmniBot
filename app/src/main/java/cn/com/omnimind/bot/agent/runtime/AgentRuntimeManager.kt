@@ -241,6 +241,11 @@ class AgentRuntimeManager private constructor(
     private val turnOwnershipStore = AcpTurnOwnershipStore()
     private val localAcpRuntimes = ConcurrentHashMap<String, LocalAcpRuntime>()
 
+    // 仅查询现有宿主预留，不恢复会话或改变 ACP 生命周期。
+    internal fun isSessionTurnActive(sessionId: String): Boolean =
+        remoteTurnOwnership.activeTurnId(sessionId) != null ||
+            localAcpRuntimes.values.any { it.activeTurnIdForSession(sessionId) != null }
+
     private fun createLocalAcpRuntime(agentId: String): LocalAcpRuntime = LocalAcpRuntime(
         context = appContext,
         scope = scope,
@@ -394,8 +399,9 @@ class AgentRuntimeManager private constructor(
         // error) is the terminal ACP boundary. Release host resources here;
         // the caller projects the returned result through the shared reducer.
         return sessionTurnMutex(sessionId).withLock {
+            val execution = remotePromptExecutions.remove(sessionId)
+            execution?.cancelActionJob(CancellationException("远程提示词轮次已结束 ($status)"))
             val cleared = clearActiveTurn(sessionId, turnId, terminalStatus = status)
-            remotePromptExecutions.remove(sessionId)
             if (cleared) {
                 AcpTaskTerminalJournal.recordTerminal(
                     context = appContext,
@@ -411,6 +417,10 @@ class AgentRuntimeManager private constructor(
     }
 
     private fun clearActiveTurns() {
+        remotePromptExecutions.values.forEach { execution ->
+            execution.cancelActionJob(CancellationException("活跃轮次已清理"))
+        }
+        remotePromptExecutions.clear()
         remoteTurnOwnership.activeRecords().forEach { record ->
             if (remoteTurnOwnership.finish(record.sessionId, record.turnId, status = "cancelled") != null) {
                 releaseTurnRuntime(record.sessionId, record.turnId)
@@ -1076,13 +1086,15 @@ class AgentRuntimeManager private constructor(
         val turnMutex = sessionTurnMutex(sessionId)
         val promptJob = coroutineContext[Job]
         val execution = AcpPromptExecution(promptJob)
-        promptJob?.let { execution.attachPromptJob(it) }
-        turnMutex.withLock {
-            admitRemoteTurn(sessionId, turnId, requestId)
-            remotePromptExecutions[sessionId] = execution
-        }
+        var admitted = false
         var terminalStatus = "completed"
         return try {
+            turnMutex.withLock {
+                admitRemoteTurn(sessionId, turnId, requestId)
+                promptJob?.let { execution.attachPromptJob(it) }
+                remotePromptExecutions[sessionId] = execution
+                admitted = true
+            }
             val prompt = resolveInput(args, sessionId).map { block ->
                 LinkedHashMap<String, Any?>().apply {
                     block.forEach { (key, value) ->
@@ -1127,16 +1139,21 @@ class AgentRuntimeManager private constructor(
             val detail = error.message?.trim()
                 ?.takeIf { it.isNotEmpty() }
                 ?: error.javaClass.simpleName
-            completeRemotePromptFromResponse(
-                sessionId = sessionId,
-                turnId = turnId,
-                status = terminalStatus,
-                error = detail.takeIf { terminalStatus != "cancelled" },
-            )
+            if (admitted) {
+                completeRemotePromptFromResponse(
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    status = terminalStatus,
+                    error = detail.takeIf { terminalStatus != "cancelled" },
+                )
+            }
             throw error
         } finally {
-            sessionTurnMutex(sessionId).withLock {
-                remotePromptExecutions.remove(sessionId, execution)
+            execution.cancelActionJob(CancellationException("远程提示词已退出"))
+            if (admitted) {
+                sessionTurnMutex(sessionId).withLock {
+                    remotePromptExecutions.remove(sessionId, execution)
+                }
             }
         }
     }

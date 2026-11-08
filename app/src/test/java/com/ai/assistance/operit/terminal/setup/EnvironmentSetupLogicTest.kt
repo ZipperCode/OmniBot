@@ -46,8 +46,8 @@ class EnvironmentSetupLogicTest {
         // The host macOS has no /root; emulate only the core cwd check.
         val command = "cd() { :; }; git() { echo broken-binary; return 7; }; ssh() { echo OpenSSH-test; };\n" +
             EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git", "ssh_client"))
-        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
-        val process = ProcessBuilder(shell, "-c", command).redirectErrorStream(true).start()
+        // 使用测试 helper 定位本机 POSIX sh，避免 Windows 找不到 /bin/sh
+        val process = PosixShellTestHelper.processBuilder("/bin/sh", "-c", command).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         assertEquals(output, 0, process.waitFor())
         val parsed = EnvironmentSetupLogic.parseInventoryProbeOutput(output)
@@ -61,8 +61,8 @@ class EnvironmentSetupLogicTest {
     fun inventoryProbe_isolatesBadSubstitutionAndAcceptsEmptySuccessfulVersion() {
         val command = "cd() { :; }; git() { eval 'echo ${'$'}{broken!}'; }; ssh() { :; };\n" +
             EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git", "ssh_client"))
-        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
-        val process = ProcessBuilder(shell, "-c", command).redirectErrorStream(true).start()
+        // 使用测试 helper 定位本机 POSIX sh
+        val process = PosixShellTestHelper.processBuilder("/bin/sh", "-c", command).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         assertEquals(output, 0, process.waitFor())
         val parsed = EnvironmentSetupLogic.parseInventoryProbeOutput(output)
@@ -73,7 +73,8 @@ class EnvironmentSetupLogicTest {
 
     @Test
     fun inventoryProbe_coreFailureRemainsFatal() {
-        val process = ProcessBuilder("/bin/sh", "-c", "cd() { return 1; };\n" +
+        // 使用测试 helper 定位本机 POSIX sh
+        val process = PosixShellTestHelper.processBuilder("/bin/sh", "-c", "cd() { return 1; };\n" +
             EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("git")))
             .redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
@@ -280,10 +281,11 @@ class EnvironmentSetupLogicTest {
             val command = buildAlpinePackageInstallCommand(
                 listOf("build-base", "python3")
             )
-            val process = ProcessBuilder("/bin/sh", "-c", command)
+            val process = PosixShellTestHelper.processBuilder("/bin/sh", "-c", command)
                 .redirectErrorStream(true)
                 .apply {
-                    environment()["OMNIBOT_TEST_APK_LOG"] = invocationLog.absolutePath
+                    // 将 Windows 路径转为 POSIX 格式并保留测试 helper 注入的工具 PATH
+                    environment()["OMNIBOT_TEST_APK_LOG"] = PosixShellTestHelper.toPosixPath(invocationLog.absolutePath)
                     environment()["PATH"] =
                         tempDir.absolutePath + File.pathSeparator + environment()["PATH"]
                 }
@@ -350,7 +352,8 @@ class EnvironmentSetupLogicTest {
         val packageIds = EnvironmentSetupLogic.packageDefinitions.map { it.id }
         val workingModes = listOf(WorkingMode.ALPINE, WorkingMode.UBUNTU)
         val processes = workingModes.associateWith { workingMode ->
-            ProcessBuilder("/bin/sh", "-n")
+            // 使用测试 helper 定位本机 POSIX sh 执行语法校验
+            PosixShellTestHelper.processBuilder("/bin/sh", "-n")
                 .redirectErrorStream(true)
                 .start()
         }

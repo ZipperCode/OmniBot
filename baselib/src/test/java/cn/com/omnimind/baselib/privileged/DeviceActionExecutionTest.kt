@@ -1,5 +1,9 @@
 package cn.com.omnimind.baselib.privileged
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
@@ -63,6 +67,43 @@ class DeviceActionExecutionTest {
         }) { allowed = false; accepted() }
         assertEquals("state_change_unconfirmed", result.code)
         assertFalse(result.success)
+    }
+
+    @Test fun unknownStateAfterAcceptedWriteRemainsUnconfirmed() = runBlocking {
+        var writes = 0
+        val result = execution().mutate(JsonPrimitive(true), read = { null }) {
+            writes++
+            accepted()
+        }
+        assertEquals(1, writes)
+        assertFalse(result.success)
+        assertEquals("state_change_unconfirmed", result.code)
+        assertEquals(JsonNull, result.observation!!["before"])
+        assertEquals(JsonNull, result.observation["after"])
+        assertEquals(JsonNull, result.observation["changed"])
+    }
+
+    @Test fun cancelledVerificationCannotResubmitTheMutation() = runBlocking {
+        val submitted = CompletableDeferred<Unit>()
+        var writes = 0
+        var cancelled = false
+        val job = launch {
+            try {
+                DeviceActionExecution(request, 10, { error("不得执行 shell") }, { true }, 12, 250)
+                    .mutate(JsonPrimitive(true), read = { JsonPrimitive(false) }) {
+                        writes++
+                        submitted.complete(Unit)
+                        accepted()
+                    }
+                fail("取消后不得完成状态验证")
+            } catch (_: CancellationException) {
+                cancelled = true
+            }
+        }
+        submitted.await()
+        job.cancelAndJoin()
+        assertTrue(cancelled)
+        assertEquals(1, writes)
     }
 
     @Test fun resultKeepsTypedObservationAcrossNativeMapBoundary() {

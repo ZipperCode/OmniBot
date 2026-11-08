@@ -11,6 +11,8 @@ import cn.com.omnimind.bot.agent.readAgentAttachmentBytes
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
+import cn.com.omnimind.bot.agent.AgentPermissionRequester
+import cn.com.omnimind.bot.agent.tool.handlers.StructuredDeviceActionContext
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
 import cn.com.omnimind.baselib.database.TokenUsageRecord
@@ -45,6 +47,7 @@ import com.agentclientprotocol.model.Implementation
 import com.agentclientprotocol.model.MessageId
 import com.agentclientprotocol.model.PermissionOption
 import com.agentclientprotocol.model.PermissionOptionKind
+import com.agentclientprotocol.model.PermissionOptionId
 import com.agentclientprotocol.model.PlanCapabilities
 import com.agentclientprotocol.model.PlanVariant
 import com.agentclientprotocol.model.ReadTextFileResponse
@@ -61,6 +64,7 @@ import com.agentclientprotocol.model.SessionModeId
 import com.agentclientprotocol.model.SessionUpdate
 import com.agentclientprotocol.model.ToolCallContent
 import com.agentclientprotocol.model.ToolCallStatus
+import com.agentclientprotocol.model.ToolCallId
 import com.agentclientprotocol.model.TerminalExitStatus
 import com.agentclientprotocol.model.TerminalOutputResponse
 import com.agentclientprotocol.model.WaitForTerminalExitResponse
@@ -174,17 +178,20 @@ internal class AcpPromptExecution(
 ) {
     private val lock = Any()
     private var promptJob: Job? = null
+    private var actionJob: Job? = null
     private var promptStarted = false
     private var cancellationRequested = false
     private var transportCancelled = false
 
     fun attachPromptJob(job: Job) {
-        val cancelBeforeStart = synchronized(lock) {
+        val (cancelBeforeStart, aJob) = synchronized(lock) {
             promptJob = job
-            cancellationRequested && !promptStarted
+            actionJob = Job(parent = job)
+            Pair(cancellationRequested && !promptStarted, actionJob)
         }
         if (cancelBeforeStart) {
             job.cancel()
+            aJob?.cancel()
         }
     }
 
@@ -201,10 +208,11 @@ internal class AcpPromptExecution(
      * must be cancelled through ClientSession.cancel instead.
      */
     fun requestCancellation(): Boolean {
-        val started = synchronized(lock) {
+        val (started, aJob) = synchronized(lock) {
             cancellationRequested = true
-            promptStarted
+            Pair(promptStarted, actionJob)
         }
+        aJob?.cancel(CancellationException("ACP prompt turn was cancelled"))
         if (!started) {
             // User cancellation is a normal ACP lifecycle outcome. Do not
             // inject a custom exception into the protocol coroutine.
@@ -218,6 +226,17 @@ internal class AcpPromptExecution(
 
     fun promptJob(): Job? = synchronized(lock) { promptJob }
 
+    fun actionJob(): Job? = synchronized(lock) {
+        if (actionJob == null) {
+            promptJob?.let { actionJob = Job(parent = it) }
+        }
+        actionJob
+    }
+
+    fun cancelActionJob(cause: CancellationException? = null) {
+        synchronized(lock) { actionJob }?.cancel(cause)
+    }
+
     fun isUserCancellationRequested(): Boolean = synchronized(lock) {
         cancellationRequested && !transportCancelled
     }
@@ -226,11 +245,12 @@ internal class AcpPromptExecution(
 
     /** Hard transport teardown; unlike user cancellation it may stop ACP IO. */
     fun cancelForTransport(cause: CancellationException) {
-        val job = synchronized(lock) {
+        val (job, aJob) = synchronized(lock) {
             cancellationRequested = true
             transportCancelled = true
-            promptJob ?: preparationJob
+            Pair(promptJob ?: preparationJob, actionJob)
         }
+        aJob?.cancel(cause)
         job?.cancel(cause)
     }
 }
@@ -1084,6 +1104,7 @@ internal class LocalAcpRuntime(
         // Revoke callbacks before cancellation drains queued SDK work.
         val oldConnection = connection
         connection = null
+        oldConnection?.let { AcpSessionMcpLeaseStore.revokeConnection(it) }
         val prepared = activePreparedLaunch
         activePreparedLaunch = null
         closePreparedLaunch(prepared)
@@ -1454,6 +1475,7 @@ internal class LocalAcpRuntime(
 
     private suspend fun closeLoadedSession(sessionId: String) {
         val session = sessions[sessionId] ?: return
+        AcpSessionMcpLeaseStore.revokeSession(sessionId)
         // Match the SDK: a rejected/failed close does not detach the session.
         session.close()
         if (sessions.remove(sessionId, session)) {
@@ -1491,6 +1513,7 @@ internal class LocalAcpRuntime(
         check(turnOwnership.activeTurnId(sessionId) == null) {
             "ACP session $sessionId is running; cancel the turn before deleting it."
         }
+        AcpSessionMcpLeaseStore.revokeSession(sessionId)
         check(requireAgentInfo().capabilities.sessionCapabilities.delete != null) {
             "The Agent does not advertise session/delete."
         }
@@ -1924,17 +1947,34 @@ internal class LocalAcpRuntime(
                 catalogSession
             } else {
                 val startedAtNanos = System.nanoTime()
-                requireClient().newSession(
-                    sessionCreationParameters(cwd, args),
-                    operationsFactory()
-                ).also {
-                    registerSession(it, cwd)
-                    Log.i(
-                        TAG,
-                        "ACP timing agent=${activeAgentId()} stage=session_created " +
-                            "session=${compactId(it.sessionId.value)} " +
-                            "elapsedMs=${elapsedMillis(startedAtNanos)}"
+                val activeConn = checkNotNull(connection) { "ACP agent is not connected." }
+                val requestedConversationId = args.longValue("conversationId")
+                val lease = prepareSessionMcpLease(requestedConversationId, activeConn)
+                var bound = false
+                try {
+                    val created = requireClient().newSession(
+                        sessionCreationParameters(cwd, args, lease),
+                        operationsFactory()
+                    ).also {
+                        registerSession(it, cwd)
+                        Log.i(
+                            TAG,
+                            "ACP timing agent=${activeAgentId()} stage=session_created " +
+                                "session=${compactId(it.sessionId.value)} " +
+                                "elapsedMs=${elapsedMillis(startedAtNanos)}"
+                        )
+                    }
+                    AcpSessionMcpLeaseStore.bind(
+                        lease.leaseId,
+                        created.sessionId.value,
+                        createDeviceActionResolver(created.sessionId.value, activeConn)
                     )
+                    bound = true
+                    created
+                } finally {
+                    if (!bound) {
+                        AcpSessionMcpLeaseStore.revokeLease(lease.leaseId)
+                    }
                 }
             }
             if (catalogSession != null) {
@@ -2002,12 +2042,28 @@ internal class LocalAcpRuntime(
             val cwd = normalizeCwd(
                 args.stringValue("cwd") ?: sessionCwds[sourceThreadId]
             )
-            val forked = requireClient().forkSession(
-                SessionId(currentSource.sessionId.value),
-                sessionCreationParameters(cwd, args),
-                operationsFactory()
-            )
-            registerSession(forked, cwd)
+            val activeConn = checkNotNull(connection) { "ACP agent is not connected." }
+            val lease = prepareSessionMcpLease(null, activeConn)
+            var bound = false
+            val forked = try {
+                val created = requireClient().forkSession(
+                    SessionId(currentSource.sessionId.value),
+                    sessionCreationParameters(cwd, args, lease),
+                    operationsFactory()
+                )
+                registerSession(created, cwd)
+                AcpSessionMcpLeaseStore.bind(
+                    lease.leaseId,
+                    created.sessionId.value,
+                    createDeviceActionResolver(created.sessionId.value, activeConn)
+                )
+                bound = true
+                created
+            } finally {
+                if (!bound) {
+                    AcpSessionMcpLeaseStore.revokeLease(lease.leaseId)
+                }
+            }
             profileStore.bindSession(forked.sessionId.value, activeAgentId())
             val conversationId = bindingRepository.ensureBinding(
                 agentId = ownerAgentId,
@@ -2047,16 +2103,34 @@ internal class LocalAcpRuntime(
                     requireAgentInfo().capabilities.loadSession) {
                     check(turnOwnership.activeTurnId(threadId) == null) { "本轮结束后可刷新模型列表" }
                     val cwd = sessionCwds[threadId] ?: "/workspace"
+                    val activeConn = checkNotNull(connection) { "ACP agent is not connected." }
+                    AcpSessionMcpLeaseStore.revokeSession(threadId)
+                    val boundConversationId = bindingRepository.getBindingByThreadId(threadId)?.conversationId
+                    val lease = prepareSessionMcpLease(boundConversationId, activeConn)
+                    var bound = false
                     val refreshed = try {
-                        replaySuppressedThreads.add(threadId)
-                        requireClient().loadSession(
-                            SessionId(threadId), sessionCreationParameters(cwd, args), operationsFactory()
+                        val loaded = try {
+                            replaySuppressedThreads.add(threadId)
+                            requireClient().loadSession(
+                                SessionId(threadId), sessionCreationParameters(cwd, args, lease), operationsFactory()
+                            )
+                        } finally {
+                            replaySuppressedThreads.remove(threadId)
+                        }
+                        require(loaded.sessionId.value == threadId) {
+                            "agent_owner_conflict: ACP refresh returned a different session for $threadId."
+                        }
+                        AcpSessionMcpLeaseStore.bind(
+                            lease.leaseId,
+                            loaded.sessionId.value,
+                            createDeviceActionResolver(loaded.sessionId.value, activeConn)
                         )
+                        bound = true
+                        loaded
                     } finally {
-                        replaySuppressedThreads.remove(threadId)
-                    }
-                    require(refreshed.sessionId.value == threadId) {
-                        "agent_owner_conflict: ACP refresh returned a different session for $threadId."
+                        if (!bound) {
+                            AcpSessionMcpLeaseStore.revokeLease(lease.leaseId)
+                        }
                     }
                     registerSession(refreshed, cwd)
                     return@withLock sessionPayload(refreshed, bindingRepository.getBindingByThreadId(threadId)?.conversationId)
@@ -2075,36 +2149,54 @@ internal class LocalAcpRuntime(
                 args.stringValue("cwd")
                     ?: bindingRepository.getBindingByThreadId(threadId)?.cwd
             )
-            val parameters = sessionCreationParameters(cwd, args)
-            val restored = when {
-                preferResume && capabilities.sessionCapabilities.resume != null ->
-                    requireClient().resumeSession(
-                        SessionId(threadId), parameters, operationsFactory()
-                    )
-                capabilities.loadSession -> {
-                    replayingThreads.add(threadId)
-                    if (shouldSuppressAcpReplay(threadId)) {
-                        replaySuppressedThreads.add(threadId)
-                    }
-                    try {
-                        requireClient().loadSession(
+            val activeConn = checkNotNull(connection) { "ACP agent is not connected." }
+            AcpSessionMcpLeaseStore.revokeSession(threadId)
+            val boundConversationId = bindingRepository.getBindingByThreadId(threadId)?.conversationId
+            val lease = prepareSessionMcpLease(boundConversationId, activeConn)
+            var bound = false
+            val restored = try {
+                val parameters = sessionCreationParameters(cwd, args, lease)
+                val loaded = when {
+                    preferResume && capabilities.sessionCapabilities.resume != null ->
+                        requireClient().resumeSession(
                             SessionId(threadId), parameters, operationsFactory()
                         )
-                    } finally {
-                        replayingThreads.remove(threadId)
-                        replaySuppressedThreads.remove(threadId)
+                    capabilities.loadSession -> {
+                        replayingThreads.add(threadId)
+                        if (shouldSuppressAcpReplay(threadId)) {
+                            replaySuppressedThreads.add(threadId)
+                        }
+                        try {
+                            requireClient().loadSession(
+                                SessionId(threadId), parameters, operationsFactory()
+                            )
+                        } finally {
+                            replayingThreads.remove(threadId)
+                            replaySuppressedThreads.remove(threadId)
+                        }
                     }
-                }
-                !preferResume && capabilities.sessionCapabilities.resume != null ->
-                    requireClient().resumeSession(
-                        SessionId(threadId), parameters, operationsFactory()
+                    !preferResume && capabilities.sessionCapabilities.resume != null ->
+                        requireClient().resumeSession(
+                            SessionId(threadId), parameters, operationsFactory()
+                        )
+                    else -> throw UnsupportedOperationException(
+                        "ACP agent $ownerAgentId does not support session/load or session/resume."
                     )
-                else -> throw UnsupportedOperationException(
-                    "ACP agent $ownerAgentId does not support session/load or session/resume."
+                }
+                require(loaded.sessionId.value == threadId) {
+                    "agent_owner_conflict: ACP restore returned a different session for $threadId."
+                }
+                AcpSessionMcpLeaseStore.bind(
+                    lease.leaseId,
+                    loaded.sessionId.value,
+                    createDeviceActionResolver(loaded.sessionId.value, activeConn)
                 )
-            }
-            require(restored.sessionId.value == threadId) {
-                "agent_owner_conflict: ACP restore returned a different session for $threadId."
+                bound = true
+                loaded
+            } finally {
+                if (!bound) {
+                    AcpSessionMcpLeaseStore.revokeLease(lease.leaseId)
+                }
             }
             registerSession(restored, cwd)
             Log.i(
@@ -2685,6 +2777,7 @@ internal class LocalAcpRuntime(
                             true
                         }
                         is Event.PromptResponseEvent -> {
+                            execution.cancelActionJob(CancellationException("Prompt response received; turn actions ended"))
                             promptResponseReceived = true
                             stopReason = event.response.stopReason.name.lowercase()
                             promptHarnessAdapter.promptFailure(event.response._meta as? JsonObject)?.let {
@@ -2735,6 +2828,7 @@ internal class LocalAcpRuntime(
                 Log.e(TAG, "ACP prompt failed", error)
                 failure = error
             } finally {
+                execution.cancelActionJob(CancellationException("Turn ended"))
                 promptExecutions.remove(threadId, execution)
                 val status = resolveTurnTerminalStatus(
                     stopReason = stopReason,
@@ -2960,6 +3054,7 @@ internal class LocalAcpRuntime(
             // prevents the later prompt call, so session/cancel is never sent as
             // a misleading substitute for a prompt that did not exist.
             val execution = promptExecutions[threadId]
+            execution?.cancelActionJob(CancellationException("ACP prompt turn was interrupted"))
             val promptStarted = execution?.requestCancellation() == true
             if (promptStarted) {
                 withTimeout(CANCEL_REQUEST_TIMEOUT_MS) {
@@ -3278,20 +3373,52 @@ internal class LocalAcpRuntime(
                 return@withLock it
             }
             val cwd = normalizeCwd(args.stringValue("cwd"))
-            requireClient().newSession(
-                sessionCreationParameters(cwd),
-                operationsFactory()
-            ).also { session ->
-                registerSession(session, cwd)
-                profileStore.bindSession(session.sessionId.value, activeAgentId())
-                catalogSessionId = session.sessionId.value
+            val activeConn = checkNotNull(connection) { "ACP agent is not connected." }
+            val lease = prepareSessionMcpLease(null, activeConn)
+            var bound = false
+            try {
+                val session = requireClient().newSession(
+                    sessionCreationParameters(cwd, emptyMap(), lease),
+                    operationsFactory()
+                ).also { session ->
+                    registerSession(session, cwd)
+                    profileStore.bindSession(session.sessionId.value, activeAgentId())
+                    catalogSessionId = session.sessionId.value
+                }
+                AcpSessionMcpLeaseStore.bind(
+                    lease.leaseId,
+                    session.sessionId.value,
+                    createDeviceActionResolver(session.sessionId.value, activeConn)
+                )
+                bound = true
+                session
+            } finally {
+                if (!bound) {
+                    AcpSessionMcpLeaseStore.revokeLease(lease.leaseId)
+                }
             }
         }
+    }
+    private fun prepareSessionMcpLease(
+        conversationId: Long?,
+        sourceConnection: AcpRuntimeConnection,
+    ): AcpSessionMcpLease {
+        val profile = ownerProfile()
+        val agentCapabilities = requireAgentInfo().capabilities
+        val supportsHttp = agentCapabilities.mcpCapabilities.http
+        val shouldDeclareLocalServer = sessionMcpEnabled &&
+            supportsHttp &&
+            profile.id != AcpAgentProfileStore.XIAOWAN_AGENT_ID
+        if (shouldDeclareLocalServer) {
+            McpServerManager.ensureRunning(appContext)
+        }
+        return AcpSessionMcpLeaseStore.prepare(ownerAgentId, conversationId, sourceConnection)
     }
 
     private fun sessionCreationParameters(
         cwd: String,
-        args: Map<String, Any?> = emptyMap()
+        args: Map<String, Any?> = emptyMap(),
+        lease: AcpSessionMcpLease? = null,
     ): SessionCreationParameters {
         val profile = ownerProfile()
         val agentCapabilities = requireAgentInfo().capabilities
@@ -3317,15 +3444,17 @@ internal class LocalAcpRuntime(
             supportsHttp &&
             profile.id != AcpAgentProfileStore.XIAOWAN_AGENT_ID
         val declaredServers = if (sessionMcpEnabled) {
-            val mcpState = if (shouldDeclareLocalServer) {
-                McpServerManager.ensureRunning(appContext)
+            val mcpState = McpServerManager.currentState()
+            val localServers = if (shouldDeclareLocalServer && lease != null) {
+                buildLocalAgentAcpMcpServers(
+                    supportsHttp = shouldDeclareLocalServer,
+                    state = mcpState,
+                    lease = lease,
+                )
             } else {
-                McpServerManager.currentState()
+                emptyList()
             }
-            buildLocalAgentAcpMcpServers(
-                supportsHttp = shouldDeclareLocalServer,
-                state = mcpState
-            ) + buildConfiguredRemoteAcpMcpServers(
+            localServers + buildConfiguredRemoteAcpMcpServers(
                 supportsHttp = supportsHttp,
                 supportsSse = supportsSse,
             )
@@ -3596,6 +3725,187 @@ internal class LocalAcpRuntime(
         }
     }
 
+    private fun createDeviceActionResolver(
+        sessionId: String,
+        sourceConnection: AcpRuntimeConnection,
+    ): suspend (String) -> StructuredDeviceActionContext = { toolCallId ->
+        if (connection !== sourceConnection) {
+            throw IllegalStateException("session_unavailable")
+        }
+        val activeTurnId = turnOwnership.activeTurnId(sessionId)
+            ?: throw IllegalStateException("turn_inactive")
+        val execution = promptExecutions[sessionId]
+            ?: throw IllegalStateException("turn_inactive")
+        val promptJob = execution.promptJob()
+            ?: throw IllegalStateException("turn_inactive")
+        val actionJob = execution.actionJob()
+            ?: throw IllegalStateException("turn_inactive")
+        if (!promptJob.isActive || !actionJob.isActive) {
+            throw IllegalStateException("turn_inactive")
+        }
+        val conversationId = bindingRepository.getBindingByThreadId(sessionId)?.conversationId
+            ?: throw IllegalStateException("conversation_required")
+
+        val permissionRequester = object : AgentPermissionRequester {
+            override suspend fun requestPermission(
+                toolCallId: String,
+                title: String,
+                detail: String,
+            ): Boolean = requestPermission(toolCallId, title, detail, null, null, null)
+
+            override suspend fun requestPermission(
+                toolCallId: String,
+                title: String,
+                detail: String,
+                action: String?,
+                targetResource: String?,
+                rawInput: JsonObject?,
+            ): Boolean {
+                val officialOptions = listOf(
+                    PermissionOption(
+                        optionId = PermissionOptionId("allow_once"),
+                        name = "仅本次允许",
+                        kind = PermissionOptionKind.ALLOW_ONCE
+                    ),
+                    PermissionOption(
+                        optionId = PermissionOptionId("allow_task"),
+                        name = "本任务中始终允许",
+                        kind = PermissionOptionKind.ALLOW_ALWAYS
+                    ),
+                    PermissionOption(
+                        optionId = PermissionOptionId("reject_once"),
+                        name = "拒绝",
+                        kind = PermissionOptionKind.REJECT_ONCE
+                    )
+                )
+                val rawJson = rawInput ?: buildJsonObject {
+                    action?.let { put("action", it) }
+                    targetResource?.let { put("targetResource", it) }
+                }
+                val toolCallUpdate = SessionUpdate.ToolCallUpdate(
+                    toolCallId = ToolCallId(toolCallId),
+                    title = title,
+                    rawInput = rawJson
+                )
+                val response = requestSessionPermission(
+                    threadId = sessionId,
+                    sourceConnection = sourceConnection,
+                    toolCall = toolCallUpdate,
+                    permissions = officialOptions,
+                    meta = null
+                )
+                return when (val outcome = response.outcome) {
+                    is RequestPermissionOutcome.Selected -> {
+                        val selectedOption = officialOptions.firstOrNull { it.optionId == outcome.optionId }
+                        selectedOption?.kind == PermissionOptionKind.ALLOW_ONCE ||
+                            selectedOption?.kind == PermissionOptionKind.ALLOW_ALWAYS
+                    }
+                    else -> false
+                }
+            }
+        }
+
+        StructuredDeviceActionContext(
+            conversationId = conversationId,
+            sessionId = sessionId,
+            turnId = activeTurnId,
+            ownerId = ownerAgentId,
+            toolCallId = toolCallId,
+            permissionRequester = permissionRequester,
+            isValid = {
+                connection === sourceConnection &&
+                    turnOwnership.activeTurnId(sessionId) == activeTurnId &&
+                    promptJob.isActive &&
+                    actionJob.isActive
+            },
+            turnJob = actionJob,
+        )
+    }
+
+    private suspend fun requestSessionPermission(
+        threadId: String,
+        sourceConnection: AcpRuntimeConnection,
+        toolCall: SessionUpdate.ToolCallUpdate,
+        permissions: List<PermissionOption>,
+        meta: JsonElement?,
+    ): RequestPermissionResponse {
+        requireCurrentConnection(sourceConnection)
+        if (
+            sessionPermissionBehaviors[threadId] ==
+            AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
+        ) {
+            val selected = permissions.firstOrNull {
+                it.kind == PermissionOptionKind.ALLOW_ALWAYS
+            } ?: permissions.firstOrNull {
+                it.kind == PermissionOptionKind.ALLOW_ONCE
+            }
+            return RequestPermissionResponse(
+                outcome = selected?.let {
+                    RequestPermissionOutcome.Selected(it.optionId)
+                } ?: RequestPermissionOutcome.Cancelled
+            )
+        }
+        val activeTurnId = turnOwnership.activeTurnId(threadId)
+        val scope = extractPermissionScope(toolCall)
+        if (activeTurnId != null && AcpTurnGrantRegistry.isGranted(threadId, activeTurnId, scope)) {
+            val selected = permissions.firstOrNull { it.optionId.value == "allow_task" }
+                ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ALWAYS }
+                ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ONCE }
+            if (selected != null) {
+                return RequestPermissionResponse(
+                    outcome = RequestPermissionOutcome.Selected(selected.optionId)
+                )
+            }
+        }
+        val additionalScopes = extractAdditionalPermissionScopes(toolCall)
+        val requestId = UUID.randomUUID().toString()
+        val pending = PendingPermissionRequest(
+            sessionId = threadId,
+            turnId = activeTurnId,
+            options = permissions,
+            response = CompletableDeferred(),
+            scope = scope,
+            additionalScopes = additionalScopes,
+        )
+        pendingPermissions[requestId] = pending
+        serverRequestOwners.register(requestId, activeAgentId(), threadId)
+        try {
+            val activeTurnId = turnOwnership.activeTurnId(threadId)
+            emitHostMessage(
+                linkedMapOf(
+                    "jsonrpc" to "2.0",
+                    "id" to requestId,
+                    "method" to "session/request_permission",
+                    "turnId" to activeTurnId,
+                    "params" to mapOf(
+                        "sessionId" to threadId,
+                        "toolCall" to standardAcpPermissionToolCallPayload(toolCall),
+                        "options" to permissions.map {
+                            mapOf(
+                                "optionId" to it.optionId.value,
+                                "name" to it.name,
+                                "kind" to it.kind.name.lowercase()
+                            )
+                        }
+                    )
+                ),
+                sourceConnection,
+            )
+            requireCurrentConnection(sourceConnection)
+            val selected = pending.response.await()
+            requireCurrentConnection(sourceConnection)
+            return RequestPermissionResponse(
+                outcome = selected?.let {
+                    RequestPermissionOutcome.Selected(it.optionId)
+                } ?: RequestPermissionOutcome.Cancelled
+            )
+        } finally {
+            if (pendingPermissions.remove(requestId, pending)) {
+                serverRequestOwners.remove(requestId, activeAgentId(), threadId)
+            }
+        }
+    }
+
     private inner class AcpClientOperations(
         private val threadId: String,
         private val sourceConnection: AcpRuntimeConnection,
@@ -3604,83 +3914,14 @@ internal class LocalAcpRuntime(
             toolCall: SessionUpdate.ToolCallUpdate,
             permissions: List<PermissionOption>,
             _meta: JsonElement?
-        ): RequestPermissionResponse {
-            requireCurrentConnection(sourceConnection)
-            if (
-                sessionPermissionBehaviors[threadId] ==
-                AcpPermissionBehavior.ALLOW_WITHOUT_PROMPT
-            ) {
-                val selected = permissions.firstOrNull {
-                    it.kind == PermissionOptionKind.ALLOW_ALWAYS
-                } ?: permissions.firstOrNull {
-                    it.kind == PermissionOptionKind.ALLOW_ONCE
-                }
-                return RequestPermissionResponse(
-                    outcome = selected?.let {
-                        RequestPermissionOutcome.Selected(it.optionId)
-                    } ?: RequestPermissionOutcome.Cancelled
-                )
-            }
-            val activeTurnId = turnOwnership.activeTurnId(threadId)
-            val scope = extractPermissionScope(toolCall)
-            if (activeTurnId != null && AcpTurnGrantRegistry.isGranted(threadId, activeTurnId, scope)) {
-                val selected = permissions.firstOrNull { it.optionId.value == "allow_task" }
-                    ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ALWAYS }
-                    ?: permissions.firstOrNull { it.kind == PermissionOptionKind.ALLOW_ONCE }
-                if (selected != null) {
-                    return RequestPermissionResponse(
-                        outcome = RequestPermissionOutcome.Selected(selected.optionId)
-                    )
-                }
-            }
-            val additionalScopes = extractAdditionalPermissionScopes(toolCall)
-            val requestId = UUID.randomUUID().toString()
-            val pending = PendingPermissionRequest(
-                sessionId = threadId,
-                turnId = activeTurnId,
-                options = permissions,
-                response = CompletableDeferred(),
-                scope = scope,
-                additionalScopes = additionalScopes,
+        ): RequestPermissionResponse =
+            requestSessionPermission(
+                threadId = threadId,
+                sourceConnection = sourceConnection,
+                toolCall = toolCall,
+                permissions = permissions,
+                meta = _meta,
             )
-            pendingPermissions[requestId] = pending
-            serverRequestOwners.register(requestId, activeAgentId(), threadId)
-            try {
-                val activeTurnId = turnOwnership.activeTurnId(threadId)
-                emitHostMessage(
-                    linkedMapOf(
-                        "jsonrpc" to "2.0",
-                        "id" to requestId,
-                        "method" to "session/request_permission",
-                        "turnId" to activeTurnId,
-                        "params" to mapOf(
-                            "sessionId" to threadId,
-                            "toolCall" to standardAcpPermissionToolCallPayload(toolCall),
-                            "options" to permissions.map {
-                                mapOf(
-                                    "optionId" to it.optionId.value,
-                                    "name" to it.name,
-                                    "kind" to it.kind.name.lowercase()
-                                )
-                            }
-                        )
-                    ),
-                    sourceConnection,
-                )
-                requireCurrentConnection(sourceConnection)
-                val selected = pending.response.await()
-                requireCurrentConnection(sourceConnection)
-                return RequestPermissionResponse(
-                    outcome = selected?.let {
-                        RequestPermissionOutcome.Selected(it.optionId)
-                    } ?: RequestPermissionOutcome.Cancelled
-                )
-            } finally {
-                if (pendingPermissions.remove(requestId, pending)) {
-                    serverRequestOwners.remove(requestId, activeAgentId(), threadId)
-                }
-            }
-        }
 
         override suspend fun terminalCreate(
             command: String,

@@ -18,6 +18,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CancellationException
 import cn.com.omnimind.baselib.util.OmniLog
+import android.app.role.RoleManager
+import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
+import cn.com.omnimind.bot.assistant.OmniVoiceInteractionService
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalAutoStartManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
@@ -77,6 +80,64 @@ class SpecialPermissionManager(private val context: Context) {
                 result.success(PrivilegedCapabilityManager.get(context).rootStatus().toMap())
             } catch (error: Exception) {
                 result.error("ROOT_ACCESS_FAILED", "Could not update root access.", null)
+            }
+        }
+    }
+
+    fun getAssistantStatus(result: MethodChannel.Result) {
+        try {
+            val activeVoice = OmniVoiceInteractionService.isActive(context)
+            val roleManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                context.getSystemService(Context.ROLE_SERVICE) as? RoleManager
+            } else null
+            val roleSelected = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && roleManager != null) {
+                roleManager.isRoleHeld(RoleManager.ROLE_ASSISTANT)
+            } else false
+            val roleSupported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && roleManager != null) {
+                roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT)
+            } else true
+
+            val supported = roleSupported && OmniVoiceInteractionService.isSupported(context)
+            val selected = roleSelected || activeVoice
+
+            result.success(
+                mapOf(
+                    "supported" to supported,
+                    "selected" to selected,
+                )
+            )
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "获取数字助理状态失败", e)
+            result.error("ASSISTANT_STATUS_FAILED", "获取系统数字助理状态失败: ${e.message}", null)
+        }
+    }
+
+    fun openAssistantSettings(result: MethodChannel.Result) {
+        try {
+            OmniVoiceInteractionService.openSettings(context)
+            result.success(true)
+        } catch (e: Exception) {
+            OmniLog.e(TAG, "打开数字助理设置失败", e)
+            result.error("INTENT_FAILED", "无法打开数字助理设置页面: ${e.message}", null)
+        }
+    }
+
+    fun getSystemDeviceCapabilities(result: MethodChannel.Result) {
+        rootSettingsScope.launch {
+            try {
+                val privilegedManager = PrivilegedCapabilityManager.get(context)
+                val access = privilegedManager.reserve(ownerId = "system_capabilities")
+                val privilegedResult = withContext(Dispatchers.IO) {
+                    access.executeAgentAction(
+                        action = PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES,
+                        arguments = emptyMap(),
+                        requiresConfirmation = false,
+                    )
+                }
+                result.success(privilegedResult.toMap())
+            } catch (e: Exception) {
+                OmniLog.e(TAG, "获取系统设备能力失败", e)
+                result.error("CAPABILITIES_QUERY_FAILED", "读取系统设备能力失败: ${e.message}", null)
             }
         }
     }

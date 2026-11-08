@@ -86,7 +86,7 @@ Enable individual sources in **Settings → App permissions → Personal context
 
 Notification access is separate from receiving Omnibot notifications. Observed notifications are cached locally for up to 7 days and 10,000 records, excluded from system backups, and can be cleared manually. Previously dismissed notifications and system-redacted content cannot be recovered. Revocation stops recording and querying without deleting conversations.
 
-File queries return metadata first; requested contents are imported into the existing file inbox. Files and folders can be selected and access removed through the system-picker entry. SMS and call history are read-only and depend on installer/system eligibility; Omnibot does not request default SMS, phone or assistant roles. These features require neither root, Shizuku nor accessibility and do not access other apps' private databases.
+File queries return metadata first; requested contents are imported into the existing file inbox. Files and folders can be selected and access removed through the system-picker entry. SMS and call history are read-only and depend on installer/system eligibility; Omnibot does not automatically request or change default SMS or phone roles. The system digital assistant is enabled only when manually chosen by the user in system settings; the app requests no microphone permission and makes no claim of voice recognition readiness. These features require neither root, Shizuku nor accessibility and do not access other apps' private databases.
 
 Device MCP and the built-in Agent share tool definitions and execution. `context_capabilities` reports actual access; missing permissions do not open dialogs or terminate ordinary chat. Contact mutations use `rawContactId` and `version` from queries and affect only the selected account record. Calendar queries accept an `offset`; all-day dates use UTC and an exclusive end date.
 
@@ -95,6 +95,13 @@ Device MCP and the built-in Agent share tool definitions and execution. `context
 Direct Root access is off by default. Enable **Root access** under **Settings → App permissions → Advanced Access** to request authorization from your device's Root manager. When available, direct Root takes priority over Shizuku; disabling it stops its commands and persistent shells. Shizuku remains independently available.
 
 The agent can query and change supported system toggles, display and sound settings, manage app permissions, run diagnostics, and execute privileged shell commands. Mutations and shell commands require ACP client confirmation. State changes are checked against the device before being reported as successful; unsupported ROM interfaces return an explicit error. See [Android privileged actions](docs/android-privileged-actions.md) for the tool contract and compatibility details.
+
+系统增强能力说明：
+- **设备开关与控制**：支持手电筒、标准护眼、Android 16+（API 36+）Wi-Fi 热点（取决于 ROM 支持）及响铃模式控制；可在设置中查看系统能力详情；仅基于标准 Android 接口，无小爱接管或厂商私有时钟支持。
+- **受管本地 Claude/Codex 设备 MCP**：专用 `android_system_action` 工具受本地会话租约与 ACP 授权严格隔离，无全局新 shell。
+- **日历与时钟**：日历提供原子批量操作（1–50 项，不超过 256KiB，冲突整体回滚）；标准时钟仅分发 Intent（`dispatched: true`, `verified: false`），不伪造读回。
+- **虚拟屏与用户接管**：支持 10fps 实时预览与画中画（PiP）；用户接管先官方取消原 Turn，再将同一 task 完整迁移至主屏（不承诺所有应用免于重建）。
+- **任务通知**：API 36+ 申请 Promoted Ongoing 展示（具体是否呈现胶囊由系统决定，不声称目标 ROM 胶囊已实测支持），旧版回退普通前台通知；等待人工验证保留专用提示渠道。
 
 ### Skills
 

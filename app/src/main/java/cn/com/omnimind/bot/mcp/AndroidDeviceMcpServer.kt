@@ -2,12 +2,16 @@ package cn.com.omnimind.bot.mcp
 
 import android.content.Context
 import cn.com.omnimind.baselib.i18n.PromptLocale
+import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.personal.PersonalContextTools
 import cn.com.omnimind.bot.agent.personal.PersonalContextService
+import cn.com.omnimind.bot.agent.runtime.AcpSessionMcpLeaseStore
+import cn.com.omnimind.bot.agent.AgentToolDefinitions
+import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
+import cn.com.omnimind.bot.agent.tool.handlers.StructuredDeviceActionExecutor
 import cn.com.omnimind.bot.agent.AgentRuntimeContextRepository
 import cn.com.omnimind.bot.agent.AgentAlarmCreateRequest
 import cn.com.omnimind.bot.agent.AgentAlarmToolService
-import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
 import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.omniflow.OmniFlow
 import cn.com.omnimind.bot.omniflow.OmniFlowFunctionRegistration
@@ -38,6 +42,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+import java.util.UUID
 internal object AndroidDeviceMcpServer {
     internal data class DeviceTool(
         val name: String,
@@ -205,7 +210,19 @@ internal object AndroidDeviceMcpServer {
      * available to the in-app Agent runtime, but do not inject them into a
      * Harness session.
      */
-    private val deviceTools = omniFlowTools + PersonalContextTools.definitions(PromptLocale.EN_US).map { definition ->
+    private val clockDeviceTools = AgentToolDefinitions.clockTools(PromptLocale.EN_US).map { definition ->
+        val function = definition.getValue("function").jsonObject
+        val parameters = function.getValue("parameters").jsonObject
+        DeviceTool(
+            name = function.getValue("name").jsonPrimitive.content,
+            operation = "system_clock",
+            description = function.getValue("description").jsonPrimitive.content,
+            properties = parameters.getValue("properties").jsonObject.mapValues { it.value.jsonObject },
+            required = (parameters["required"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty(),
+        )
+    }
+
+    private val deviceTools = omniFlowTools + clockDeviceTools + PersonalContextTools.definitions(PromptLocale.EN_US).map { definition ->
         val function = definition.getValue("function").jsonObject
         val parameters = function.getValue("parameters").jsonObject
         DeviceTool(
@@ -216,6 +233,19 @@ internal object AndroidDeviceMcpServer {
             required = (parameters["required"] as? JsonArray)?.map { it.jsonPrimitive.content }.orEmpty(),
         )
     }
+
+    internal const val SYSTEM_ACTION_TOOL_NAME = "android_system_action"
+
+    private val systemActionTool = DeviceTool(
+        name = SYSTEM_ACTION_TOOL_NAME,
+        operation = "android_system_action",
+        description = "Execute structured privileged device control actions on this Android device.",
+        properties = mapOf(
+            "action" to schema("string", "Privileged action identifier to execute."),
+            "arguments" to schema("object", "Arguments map for the specified device action."),
+        ),
+        required = listOf("action"),
+    )
 
     internal val publicToolNames: Set<String> = deviceTools.map { it.name }.toSet()
 
@@ -228,11 +258,13 @@ internal object AndroidDeviceMcpServer {
     internal fun modernToolDescriptors(
         context: Context,
         scope: CoroutineScope,
+        caller: McpDeviceCaller = McpDeviceCaller.Global,
     ): List<DeviceTool> {
-        // Only Android/device tools are part of the public ACP surface.  The
-        // Harness owns its built-in/general tools and must discover those from
-        // its own protocol instead of receiving OmniBot's native catalog.
-        return deviceTools
+        return if (caller is McpDeviceCaller.Acp) {
+            deviceTools + systemActionTool
+        } else {
+            deviceTools
+        }
     }
 
     internal suspend fun modernCallTool(
@@ -240,7 +272,16 @@ internal object AndroidDeviceMcpServer {
         scope: CoroutineScope,
         name: String,
         arguments: Map<String, JsonElement>,
+        caller: McpDeviceCaller = McpDeviceCaller.Global,
+        rawPayloadBytes: Int? = null,
     ): CallToolResult {
+        if (name == SYSTEM_ACTION_TOOL_NAME) {
+            return callSystemActionTool(
+                context = context,
+                arguments = arguments.toKotlinMap(),
+                caller = caller,
+            )
+        }
         val modelClient = HttpAgentLlmClient(scope).asOmniFlowModelClient()
         val tool = deviceTools.firstOrNull { it.name == name }
             ?: return errorResult(IllegalArgumentException("Unknown MCP tool: $name"))
@@ -253,6 +294,7 @@ internal object AndroidDeviceMcpServer {
                 tool = tool,
                 arguments = arguments.toKotlinMap(),
                 modelClient = modelClient,
+                rawPayloadBytes = rawPayloadBytes,
             )
         }.fold(
             onSuccess = ::successResult,
@@ -263,8 +305,15 @@ internal object AndroidDeviceMcpServer {
     fun create(
         context: Context,
         scope: CoroutineScope,
+        caller: McpDeviceCaller = McpDeviceCaller.Global,
     ): Server {
         val modelClient = HttpAgentLlmClient(scope).asOmniFlowModelClient()
+        val toolsToRegister = if (caller is McpDeviceCaller.Acp) {
+            deviceTools + systemActionTool
+        } else {
+            deviceTools
+        }
+        OmniLog.i("[AndroidDeviceMcpServer]", "MCP server created: isAcp=${caller is McpDeviceCaller.Acp} toolsCount=${toolsToRegister.size}")
         return Server(
             serverInfo = Implementation(
                 // Keep the MCP server identity identical across ACP adapters,
@@ -280,7 +329,7 @@ internal object AndroidDeviceMcpServer {
             ),
             instructions = MCP_INSTRUCTIONS,
         ).apply {
-            deviceTools.forEach { tool ->
+            toolsToRegister.forEach { tool ->
                 addTool(
                     name = tool.name,
                     description = tool.description,
@@ -289,23 +338,96 @@ internal object AndroidDeviceMcpServer {
                         required = tool.required.takeIf(List<String>::isNotEmpty),
                     ),
                 ) { request ->
-                    runCatching {
-                        if (tool.requiresOmniFlowPlugin) {
-                            ensureOmniFlowReady(context)
-                        }
-                        callOmniFlowTool(
+                    if (tool.name == SYSTEM_ACTION_TOOL_NAME) {
+                        callSystemActionTool(
                             context = context,
-                            tool = tool,
                             arguments = request.params.arguments.orEmpty().toKotlinMap(),
-                            modelClient = modelClient,
+                            caller = caller,
                         )
-                    }.fold(
-                        onSuccess = ::successResult,
-                        onFailure = ::errorResult,
-                    )
+                    } else {
+                        runCatching {
+                            if (tool.requiresOmniFlowPlugin) {
+                                ensureOmniFlowReady(context)
+                            }
+                            callOmniFlowTool(
+                                context = context,
+                                tool = tool,
+                                arguments = request.params.arguments.orEmpty().toKotlinMap(),
+                                modelClient = modelClient,
+                            )
+                        }.fold(
+                            onSuccess = ::successResult,
+                            onFailure = ::errorResult,
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private suspend fun callSystemActionTool(
+        context: Context,
+        arguments: Map<String, Any?>,
+        caller: McpDeviceCaller,
+    ): CallToolResult {
+        val acpCaller = caller as? McpDeviceCaller.Acp
+            ?: return errorResult(IllegalStateException("android_system_action is only available within an authorized ACP session lease"))
+
+        val lease = AcpSessionMcpLeaseStore.resolve(acpCaller.leaseId, acpCaller.token)
+            ?: return errorResult(IllegalStateException("session_unavailable"))
+
+        val action = arguments["action"]?.toString()?.trim().orEmpty()
+        if (action.isEmpty()) {
+            return errorResult(IllegalArgumentException("action is required"))
+        }
+        if (action !in StructuredDeviceActionExecutor.deviceActions) {
+            return errorResult(IllegalArgumentException("Unsupported device action: $action"))
+        }
+
+        val rawArgs = arguments["arguments"] as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        val forbiddenKeys = setOf(
+            "confirmed",
+            "allow_task",
+            "isFullPower",
+            "userId",
+            "conversationId",
+            "sessionId",
+            "turnId",
+            "ownerId",
+            "toolCallId",
+        )
+        for (key in forbiddenKeys) {
+            if (rawArgs.containsKey(key) || (arguments.containsKey(key) && key != "action" && key != "arguments")) {
+                return errorResult(IllegalArgumentException("Parameter override not allowed: $key"))
+            }
+        }
+        val stringArgs = rawArgs.entries.associate { (k, v) ->
+            k.toString() to (v?.toString() ?: "")
+        }
+
+        val toolCallId = "call_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+        val executionContext = try {
+            AcpSessionMcpLeaseStore.executionContext(acpCaller.leaseId, toolCallId)
+        } catch (e: Exception) {
+            return errorResult(e)
+        }
+
+        val privilegedResult = try {
+            StructuredDeviceActionExecutor(context).execute(
+                action = action,
+                arguments = stringArgs,
+                context = executionContext,
+            )
+        } catch (e: Exception) {
+            return errorResult(e)
+        }
+
+        val resultMap = privilegedResult.toMap()
+        return CallToolResult(
+            content = listOf(TextContent(McpJson.encodeToString(JsonObject(resultMap.toJson())))),
+            isError = !privilegedResult.success,
+            structuredContent = JsonObject(resultMap.toJson()),
+        )
     }
 
     private suspend fun ensureOmniFlowReady(context: Context) {
@@ -344,8 +466,13 @@ internal object AndroidDeviceMcpServer {
         tool: DeviceTool,
         arguments: Map<String, Any?>,
         modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient,
+        rawPayloadBytes: Int? = null,
     ): Map<String, Any?> = when (tool.operation) {
-        "personal_context" -> PersonalContextService(context).execute(tool.name, JsonObject(arguments.toJson()))
+        "personal_context" -> PersonalContextService(context).execute(
+            name = tool.name,
+            args = JsonObject(arguments.toJson()),
+            rawPayloadBytes = rawPayloadBytes,
+        )
         "run_gui" -> {
             val goal = arguments["goal"]?.toString().orEmpty().trim()
             require(goal.isNotEmpty()) { "omniflow_goal_required" }
@@ -442,6 +569,19 @@ internal object AndroidDeviceMcpServer {
         "alarm_reminder_delete" -> AgentAlarmToolService(context).deleteExactReminder(
             arguments["alarmId"]?.toString().orEmpty()
         )
+        "system_clock" -> {
+            val action = arguments["action"]?.toString().orEmpty()
+            val rawDuration = arguments["durationSeconds"]
+            val durationSeconds = parseStrictDurationSeconds(rawDuration)
+            val title = arguments["title"]?.toString()
+            val skipUi = arguments["skipUi"] as? Boolean ?: false
+            AgentAlarmToolService(context).executeClockAction(
+                action = action,
+                durationSeconds = durationSeconds,
+                title = title,
+                skipUi = skipUi,
+            )
+        }
         else -> OmniFlow.callTool(
             context = context,
             toolCall = OmniFlow.ToolCall(tool.operation, arguments),
@@ -469,6 +609,32 @@ internal object AndroidDeviceMcpServer {
         )
     }
 
+
+    private fun parseStrictDurationSeconds(value: Any?): Int? {
+        if (value == null) return null
+        return when (value) {
+            is Int -> if (value in 1..86400) value else -1
+            is Long -> if (value in 1L..86400L) value.toInt() else -1
+            is Double -> {
+                val l = value.toLong()
+                if (value == l.toDouble() && l in 1L..86400L) l.toInt() else -1
+            }
+            is Float -> {
+                val l = value.toLong()
+                if (value == l.toFloat() && l in 1L..86400L) l.toInt() else -1
+            }
+            is Number -> {
+                val l = value.toLong()
+                if (value.toDouble() == l.toDouble() && l in 1L..86400L) l.toInt() else -1
+            }
+            is String -> {
+                val trimmed = value.trim()
+                val l = trimmed.toLongOrNull()
+                if (l != null && l in 1L..86400L) l.toInt() else -1
+            }
+            else -> -1
+        }
+    }
     private fun schema(type: String, description: String): JsonObject = JsonObject(
         mapOf(
             "type" to JsonPrimitive(type),

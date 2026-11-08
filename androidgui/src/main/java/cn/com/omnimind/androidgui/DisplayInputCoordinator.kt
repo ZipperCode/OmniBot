@@ -115,6 +115,105 @@ object DisplayInputCoordinator {
         }
     }
 
+    /**
+     * Acquires exclusive leases on multiple displays in strictly deduplicated, ascending order,
+     * executing [block] and releasing in reverse order upon completion or failure.
+     *
+     * Guarantees:
+     * - Sorts displayIds ascending to prevent cyclic lock inversions (deadlocks).
+     * - Uses [Mutex.tryLock] without blocking; if any display is locked or held by another owner,
+     *   immediately releases all newly acquired locks in reverse order and throws [IllegalStateException] with "display_busy".
+     * - Reentrancy: displays already held by the same [ownerId] increment their reentrant count and do NOT re-lock.
+     */
+    suspend fun <T> withDisplayLeases(
+        displayIds: List<Int>,
+        ownerId: String,
+        block: suspend () -> T,
+    ): T {
+        require(ownerId.isNotBlank()) { "lease ownerId cannot be blank" }
+        val sortedDisplayIds = displayIds.distinct().sorted()
+
+        val acquired = mutableListOf<Pair<Int, Boolean>>()
+
+        try {
+            for (id in sortedDisplayIds) {
+                val mutex = getMutex(id)
+
+                val isReentrant = synchronized(this) {
+                    val current = activeLeases[id]
+                    if (current != null && current.ownerId == ownerId) {
+                        reentrantCounts[id] = (reentrantCounts[id] ?: 1) + 1
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                if (isReentrant) {
+                    acquired.add(id to true)
+                } else {
+                    val locked = mutex.tryLock()
+                    if (!locked) {
+                        throw IllegalStateException("display_busy")
+                    }
+
+                    synchronized(this) {
+                        val current = activeLeases[id]
+                        if (current != null) {
+                            mutex.unlock()
+                            throw IllegalStateException("display_busy")
+                        }
+                        val lease = DisplayLease(
+                            displayId = id,
+                            ownerId = ownerId,
+                            acquiredAtMs = System.currentTimeMillis(),
+                            leaseId = leaseIdGenerator.getAndIncrement(),
+                        )
+                        activeLeases[id] = lease
+                        reentrantCounts[id] = 1
+                    }
+                    acquired.add(id to false)
+                }
+            }
+            return block()
+        } finally {
+            for ((id, wasReentrant) in acquired.reversed()) {
+                val mutex = getMutex(id)
+                if (wasReentrant) {
+                    synchronized(this) {
+                        val current = activeLeases[id]
+                        if (current != null && current.ownerId == ownerId) {
+                            val count = (reentrantCounts[id] ?: 1) - 1
+                            if (count > 0) {
+                                reentrantCounts[id] = count
+                            } else {
+                                reentrantCounts[id] = 1
+                            }
+                        }
+                    }
+                } else {
+                    synchronized(this) {
+                        val current = activeLeases[id]
+                        if (current != null && current.ownerId == ownerId) {
+                            activeLeases.remove(id)
+                            reentrantCounts.remove(id)
+                            activeJobs.remove(id)
+                            if (leaseExecutors[id]?.first == ownerId) {
+                                leaseExecutors.remove(id)
+                            }
+                            if (leaseUnlockAwaiters[id]?.first == ownerId) {
+                                leaseUnlockAwaiters.remove(id)
+                            }
+                        }
+                    }
+                    if (mutex.isLocked) {
+                        runCatching { mutex.unlock() }
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun <T> withDisplayLock(
         displayId: Int,
         ownerId: String? = null,

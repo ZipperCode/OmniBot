@@ -21,19 +21,20 @@ private const val LOCAL_AGENT_MCP_HOST = "127.0.0.1"
 internal fun buildLocalAgentAcpMcpServers(
     supportsHttp: Boolean,
     state: McpServerState,
+    lease: AcpSessionMcpLease,
 ): List<McpServer> {
     if (!supportsHttp) return emptyList()
     require(state.running) { "Omnibot MCP server is not running." }
     require(state.port in 1..65535) { "Omnibot MCP server port is invalid." }
-    require(state.token.isNotBlank()) { "Omnibot MCP server token is missing." }
+    require(lease.token.isNotBlank()) { "ACP session MCP lease token is missing." }
     return listOf(
         McpServer.Http(
             name = LOCAL_AGENT_MCP_SERVER_NAME,
-            url = localAgentMcpUrl(state),
+            url = localAgentMcpUrl(state, lease.leaseId),
             headers = listOf(
                 HttpHeader(
                     name = "Authorization",
-                    value = "Bearer ${state.token}"
+                    value = "Bearer ${lease.token}"
                 )
             )
         )
@@ -121,6 +122,9 @@ internal fun buildEnvironmentMcpBinding(
         "OMNIBOT_MCP_TOKEN" to state.token,
     )
 }
+
+private fun localAgentMcpUrl(state: McpServerState, leaseId: String): String =
+    "http://$LOCAL_AGENT_MCP_HOST:${state.port}/mcp/acp/$leaseId"
 
 private fun localAgentMcpUrl(state: McpServerState): String =
     "http://$LOCAL_AGENT_MCP_HOST:${state.port}/mcp"

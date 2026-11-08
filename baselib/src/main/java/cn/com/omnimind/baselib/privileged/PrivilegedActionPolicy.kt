@@ -3,7 +3,7 @@ package cn.com.omnimind.baselib.privileged
 import cn.com.omnimind.baselib.privileged.management.PrivilegedManagementActions
 
 object PrivilegedActionPolicy {
-    val deviceStateTargets: List<String> = listOf("wifi", "bluetooth", "mobile_data", "airplane_mode", "location", "nfc", "battery_saver", "auto_rotate", "auto_brightness", "dark_mode")
+    val deviceStateTargets: List<String> = listOf("wifi", "bluetooth", "mobile_data", "airplane_mode", "location", "nfc", "battery_saver", "auto_rotate", "auto_brightness", "dark_mode", "hotspot", "night_light", "flashlight")
 
     private data class CommandBlockRule(
         val regex: Regex,
@@ -39,6 +39,8 @@ object PrivilegedActionPolicy {
     const val ACTION_DEVICE_GET_SOUND = "device_control.get_sound"
     const val ACTION_DEVICE_SET_VOLUME = "device_control.set_volume"
     const val ACTION_DEVICE_SET_DND = "device_control.set_do_not_disturb"
+    const val ACTION_DEVICE_SET_RINGER_MODE = "device_control.set_ringer_mode"
+    const val ACTION_DEVICE_CAPABILITIES = "device_control.capabilities"
 
     const val ACTION_SHELL_EXEC = "shell.exec"
 
@@ -58,6 +60,8 @@ object PrivilegedActionPolicy {
         ACTION_DEVICE_GET_SOUND,
         ACTION_DEVICE_SET_VOLUME,
         ACTION_DEVICE_SET_DND,
+        ACTION_DEVICE_SET_RINGER_MODE,
+        ACTION_DEVICE_CAPABILITIES,
         ACTION_PACKAGE_LAUNCH,
         ACTION_PACKAGE_FORCE_STOP,
         ACTION_PACKAGE_GRANT_PERMISSION,
@@ -207,6 +211,7 @@ object PrivilegedActionPolicy {
             ACTION_DEVICE_SET_SCREEN_TIMEOUT,
             ACTION_DEVICE_SET_VOLUME,
             ACTION_DEVICE_SET_DND,
+            ACTION_DEVICE_SET_RINGER_MODE,
             ACTION_PACKAGE_FORCE_STOP,
             ACTION_PACKAGE_GRANT_PERMISSION,
             ACTION_PACKAGE_REVOKE_PERMISSION,

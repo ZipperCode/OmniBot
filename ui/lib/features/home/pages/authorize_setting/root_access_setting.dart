@@ -70,8 +70,8 @@ class _RootAccessSettingState extends State<RootAccessSetting>
         context,
         title: _english ? 'Enable Root access' : '启用 Root 高级能力',
         content: _english
-            ? 'Allow the agent to use Root shell and system controls. Privileged commands and changes still require your confirmation. You can disable access at any time.'
-            : '允许 Agent 使用 Root shell 和系统控制能力。高权限命令与状态修改仍需逐次确认，你可以随时关闭。',
+            ? 'Allow the agent to use Root shell and system controls. Executed according to current session authorization mode, and you can disable access at any time.'
+            : '允许 Agent 使用 Root shell 和系统控制能力。按当前会话授权模式执行，可随时关闭。',
         cancelText: _english ? 'Cancel' : '取消',
         confirmText: _english ? 'Enable and authorize' : '启用并授权',
       );

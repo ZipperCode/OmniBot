@@ -19,6 +19,8 @@ import cn.com.omnimind.bot.plugin.sandbox.SandboxPluginPool
 import cn.com.omnimind.bot.plugin.sandbox.SandboxProjectManifest
 import com.google.gson.GsonBuilder
 import java.io.File
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -176,6 +178,9 @@ class DebugSandboxProjectReceiver : BroadcastReceiver() {
         }
         val startedAt = System.currentTimeMillis()
         val result = withTimeout(timeoutMillis) {
+            val callerJob = checkNotNull(coroutineContext[Job]) {
+                "Missing coroutine Job for debug agent execution"
+            }
             OmniAgentExecutor(context, scope, scheduleBridge).processUserMessage(
                 userMessage = message,
                 conversationHistory = emptyList(),
@@ -187,6 +192,7 @@ class DebugSandboxProjectReceiver : BroadcastReceiver() {
                 reasoningEffort = "none",
                 terminalEnvironment = emptyMap(),
                 callback = callback,
+                turnJob = callerJob,
             )
         }
         return mapOf(

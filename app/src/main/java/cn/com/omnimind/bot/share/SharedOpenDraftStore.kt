@@ -73,6 +73,11 @@ data class SharedOpenDraft(
     }
 }
 
+class SharedOpenDraftConflictException(
+    val existingRequestKey: String,
+    val incomingRequestKey: String,
+) : IllegalStateException("Pending draft conflict: existing requestKey=$existingRequestKey, incoming requestKey=$incomingRequestKey")
+
 object SharedOpenDraftStore {
     private const val TAG = "[SharedOpenDraftStore]"
     private const val PREFS_NAME = "shared_open_draft"
@@ -132,6 +137,43 @@ object SharedOpenDraftStore {
             text = normalizedText,
             attachments = attachments,
             createdAt = now,
+        )
+
+        prefs(context)
+            .edit()
+            .putString(KEY_PENDING_DRAFT, draft.toJson().toString())
+            .apply()
+        return draft
+    }
+
+    fun checkPendingConflict(context: Context, requestKey: String) {
+        val sharedPrefs = prefs(context)
+        val existingRaw = sharedPrefs.getString(KEY_PENDING_DRAFT, null)
+        if (!existingRaw.isNullOrBlank()) {
+            val existingDraft = runCatching { fromJson(JSONObject(existingRaw)) }.getOrNull()
+            if (existingDraft != null && existingDraft.requestKey != requestKey) {
+                OmniLog.w(TAG, "checkPendingConflict: existing requestKey=${existingDraft.requestKey}, incoming requestKey=$requestKey")
+                throw SharedOpenDraftConflictException(
+                    existingRequestKey = existingDraft.requestKey,
+                    incomingRequestKey = requestKey,
+                )
+            }
+        }
+    }
+
+    fun storeAssistantDraft(
+        context: Context,
+        requestKey: String,
+        attachments: List<SharedOpenDraftAttachment>,
+    ): SharedOpenDraft {
+        cleanupStaleFiles(context)
+        checkPendingConflict(context, requestKey)
+
+        val draft = SharedOpenDraft(
+            requestKey = requestKey,
+            text = null,
+            attachments = attachments,
+            createdAt = System.currentTimeMillis(),
         )
 
         prefs(context)

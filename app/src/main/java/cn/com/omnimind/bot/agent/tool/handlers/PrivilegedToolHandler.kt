@@ -10,16 +10,22 @@ import cn.com.omnimind.bot.agent.runtime.TurnPermissionScope
 import cn.com.omnimind.bot.agent.runtime.isAcpFullAccessMode
 import cn.com.omnimind.bot.task.runtime.TaskContinuationCoordinator
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
-class PrivilegedToolHandler(
+class PrivilegedToolHandler internal constructor(
     private val helper: SharedHelper,
     private val workspaceManager: AgentWorkspaceManager,
+    private val deviceActionExecutor: StructuredDeviceActionExecutor,
 ) : ToolHandler {
+    constructor(
+        helper: SharedHelper,
+        workspaceManager: AgentWorkspaceManager,
+    ) : this(helper, workspaceManager, StructuredDeviceActionExecutor(helper.context))
     override val toolNames: Set<String> = setOf(
         "android_privileged_action", "android_privileged_session_start", "android_privileged_session_exec",
         "android_privileged_session_read", "android_privileged_session_stop",
@@ -36,6 +42,52 @@ class PrivilegedToolHandler(
         val name = toolCall.function.name
         return try {
             val parsed = parse(name, args)
+            if (name == "android_privileged_action" && parsed.action in StructuredDeviceActionExecutor.deviceActions) {
+                val conversationId = env.conversationId
+                val sessionId = env.acpSessionId
+                val turnId = env.acpTurnId ?: env.acpSessionId?.let { AcpTurnGrantRegistry.activeTurnId(it) }
+                val permissionRequester = env.permissionRequester
+                val realTurnJob = env.turnJob
+
+                if (conversationId == null || conversationId <= 0L ||
+                    sessionId.isNullOrBlank() ||
+                    turnId.isNullOrBlank() ||
+                    permissionRequester == null ||
+                    realTurnJob == null ||
+                    !realTurnJob.isActive
+                ) {
+                    return ToolExecutionResult.Error(name, helper.localized("缺少有效会话、Turn 或授权通道，无法执行受控设备动作。"))
+                }
+
+                val actionContext = StructuredDeviceActionContext(
+                    conversationId = conversationId,
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    ownerId = env.workspaceDescriptor.id,
+                    toolCallId = toolHandle.toolCallId,
+                    permissionRequester = permissionRequester,
+                    isValid = { !toolHandle.isManualStopRequested() && (env.acpSessionId == sessionId) && realTurnJob.isActive },
+                    turnJob = realTurnJob,
+                )
+
+                helper.reportToolProgress(
+                    callback,
+                    name,
+                    if (helper.isEnglishLocale) "Executing device action" else "正在执行设备控制动作",
+                    mapOf("action" to parsed.action),
+                    toolHandle = toolHandle,
+                )
+
+                val result = deviceActionExecutor.execute(parsed.action, parsed.arguments, actionContext)
+                if (!result.success && result.code in setOf(
+                    "permission_denied", "privileged_access_changed", "invalid_identity",
+                    "conversation_required", "turn_inactive", "session_unavailable",
+                    "invalid_arguments", "unsupported_action"
+                )) {
+                    return ToolExecutionResult.Error(name, localizedMessage(result))
+                }
+                return projectResult(name, parsed, result, env.workspaceDescriptor)
+            }
             val access = PrivilegedCapabilityManager.get(helper.context)
                 .reserve(env.workspaceDescriptor.id, parsed.sessionId, env.acpSessionId)
             val status = access.status
@@ -207,7 +259,10 @@ class PrivilegedToolHandler(
             "state_change_unconfirmed" -> "修改请求已提交，但尚未确认目标状态；请先查询状态，不要直接重复操作。"
             "state_unavailable" -> "无法读取当前设备状态。"
             "privileged_access_changed" -> "权限或后端已变化，本次操作已停止。"
-            "root_denied", "permission_denied" -> "系统拒绝了此操作，请检查 Root 或 Shizuku 授权。"
+            "root_denied" -> "系统拒绝了此操作，请检查 Root 或 Shizuku 授权。"
+            "permission_denied" -> if (result.message.isNotBlank()) helper.localized(result.message) else "系统拒绝了此操作，请检查 Root 或 Shizuku 授权。"
+            "invalid_arguments" -> if (result.message.isNotBlank()) helper.localized(result.message) else "动作参数无效。"
+            "invalid_identity", "conversation_required", "turn_inactive", "session_unavailable" -> helper.localized(result.message)
             "root_unavailable" -> "设备上的直接 Root 不可用。"
             "unsupported_action" -> "当前设备、系统版本或执行后端不支持该操作。"
             "capability_probe_failed" -> "系统命令能力检查失败，尚无法确认是否支持；请查看具体错误。"

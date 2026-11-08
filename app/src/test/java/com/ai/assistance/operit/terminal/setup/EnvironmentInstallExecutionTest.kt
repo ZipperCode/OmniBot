@@ -6,9 +6,11 @@ import org.junit.Test
 import java.io.File
 
 class EnvironmentInstallExecutionTest {
+    // 在本地跨平台运行单元测试时，通过测试 helper 动态定位真实 POSIX sh 执行环境
     private fun execute(script: String): Pair<Int, String> {
-        val shell = if (File("/bin/dash").canExecute()) "/bin/dash" else "/bin/sh"
-        val process = ProcessBuilder(shell, "-c", script).redirectErrorStream(true).start()
+        val process = PosixShellTestHelper.processBuilder("/bin/sh", "-c", script)
+            .redirectErrorStream(true)
+            .start()
         val output = process.inputStream.bufferedReader().use { it.readText() }
         return process.waitFor() to output
     }

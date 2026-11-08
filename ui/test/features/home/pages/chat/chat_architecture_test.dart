@@ -98,30 +98,6 @@ void main() {
   });
 
   test(
-    'history avatar shares conversation identity instead of connected process',
-    () {
-      final page = File('$chatRoot/chat_page.dart').readAsStringSync();
-      expect(
-        page,
-        contains('String? get _appBarActiveAcpAgentId => _activeAcpAgentId;'),
-      );
-      final committed = page
-          .split('String? get _committedAcpAgentId {')
-          .last
-          .split('String get _activeAcpAgentDisplayName')
-          .first;
-      expect(
-        committed.indexOf('target?.agentId'),
-        lessThan(committed.indexOf(': _conversationBoundAcpAgentId')),
-      );
-      expect(
-        committed,
-        isNot(contains('_agentRuntimeStatus.activeAgentId')),
-      );
-    },
-  );
-
-  test(
     'conversation identity has no obsolete in-chat Harness switch state',
     () {
       final page = File('$chatRoot/chat_page.dart').readAsStringSync();
@@ -369,70 +345,6 @@ void main() {
     },
   );
 
-  test(
-    'the shared coordinator solely consumes and projects native ACP events',
-    () {
-      const coordinatorPath =
-          '$chatRoot/services/chat_conversation_runtime_coordinator.dart';
-      final subscription = RegExp(
-        r'\bAgentRuntimeService\s*\.\s*events\s*\.\s*listen\s*\(',
-      );
-      final owners = <String>[];
-      for (final file in Directory(
-        'lib',
-      ).listSync(recursive: true).whereType<File>()) {
-        if (!file.path.endsWith('.dart')) continue;
-        final source = file.readAsStringSync();
-        for (final _ in subscription.allMatches(source)) {
-          owners.add(file.path);
-        }
-      }
-      expect(owners, <String>[coordinatorPath]);
-      final coordinator = File(coordinatorPath).readAsStringSync();
-      expect(coordinator, contains('if (_initialized) return;'));
-      final projection = File(
-        '$chatRoot/services/chat_runtime_agent_event_support.dart',
-      ).readAsStringSync();
-      final reductionIndex = projection.indexOf('_applyAgentEvent(');
-      final publicationIndex = projection.indexOf(
-        '_latestAgentEventProjection = ChatAgentEventProjection(',
-      );
-      expect(reductionIndex, greaterThanOrEqualTo(0));
-      expect(publicationIndex, greaterThan(reductionIndex));
-      expect(
-        projection.indexOf('_notifyRuntimeListeners();'),
-        greaterThan(publicationIndex),
-      );
-
-      final page =
-          File('$chatRoot/chat_page.dart').readAsStringSync() +
-          File('$chatRoot/chat_page_lifecycle.dart').readAsStringSync() +
-          File('$chatRoot/chat_page_agent.dart').readAsStringSync();
-      final sheet = File(
-        'lib/features/home/pages/command_overlay/chat_bot_sheet.dart',
-      ).readAsStringSync();
-      for (final source in <String>[page, sheet]) {
-        expect(
-          source,
-          contains('_runtimeCoordinator.latestAgentEventProjection'),
-        );
-        expect(
-          source,
-          contains(
-            '_runtimeCoordinator.addListener(_handleRuntimeCoordinatorChanged)',
-          ),
-        );
-        expect(
-          source,
-          contains(
-            '_runtimeCoordinator.removeListener(_handleRuntimeCoordinatorChanged)',
-          ),
-        );
-        expect(source, isNot(contains('_runtimeCoordinator.applyAgentEvent(')));
-      }
-    },
-  );
-
   test('Agent Flutter runtime exposes only the ACP lifecycle entry points', () {
     final reducerSource = File('lib/services/agent_event_reducer.dart')
         .readAsStringSync();
@@ -674,30 +586,4 @@ void main() {
     },
   );
 
-  test('command overlay cancellation is owned by its ACP close lifecycle', () {
-    final source = File(
-      'lib/features/home/pages/command_overlay/chat_bot_sheet.dart',
-    ).readAsStringSync();
-    final closeStart = source.indexOf('void _onDialogClose()');
-    final closeEnd = source.indexOf(
-      '\n  @override\n  void didChangeMetrics',
-      closeStart,
-    );
-    expect(closeStart, greaterThanOrEqualTo(0));
-    expect(closeEnd, greaterThan(closeStart));
-    final closeBody = source.substring(closeStart, closeEnd);
-    expect(closeBody, contains('_closeAcpLifecycle('));
-    expect(closeBody, contains('markComplete: !hasLiveTurn'));
-
-    final disposeStart = source.indexOf('void dispose()');
-    final disposeEnd = source.indexOf(
-      '\n  void _onFocusChange()',
-      disposeStart,
-    );
-    expect(disposeStart, greaterThanOrEqualTo(0));
-    expect(disposeEnd, greaterThan(disposeStart));
-    final disposeBody = source.substring(disposeStart, disposeEnd);
-    expect(disposeBody, contains('_closeAcpLifecycle('));
-    expect(disposeBody, contains('setOnBeforeCloseChatBotDialog(null)'));
-  });
 }

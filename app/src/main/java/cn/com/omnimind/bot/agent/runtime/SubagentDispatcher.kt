@@ -162,6 +162,7 @@ class SubagentDispatcher(
                 terminalEnvironment = parentEnv.terminalEnvironment,
                 runControl = NoOpAgentRunControl,
                 permissionRequester = parentEnv.permissionRequester,
+                turnJob = parentEnv.turnJob,
                 longTermMemoryIndex = parentEnv.longTermMemoryIndex
             )
             val silentCallback = ReportingSubagentCallback(

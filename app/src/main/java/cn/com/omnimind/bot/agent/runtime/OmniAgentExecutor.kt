@@ -13,6 +13,7 @@ import com.rk.terminal.runtime.TerminalDistribution
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -186,6 +187,7 @@ class OmniAgentExecutor(
         historyMessagesOverride: List<ChatCompletionMessage>? = null,
         acpSessionId: String? = null,
         acpTurnId: String? = null,
+        turnJob: Job,
     ): AgentResult {
         var toolRouter: AgentToolRouter? = null
         var pluginSession: OmniPluginSession? = null
@@ -369,6 +371,7 @@ class OmniAgentExecutor(
                         terminalEnvironment = terminalEnvironment,
                         runControl = runControl,
                         permissionRequester = permissionRequester,
+                        turnJob = turnJob,
                         longTermMemoryIndex = ltmIndex
                     )
                 )

@@ -48,7 +48,7 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
         accessDenied = { root.markDenied() },
     )
     private val rootExecutor = PrivilegedCommandExecutor(PrivilegedBackend.ROOT, PrivilegedProvider.ROOT, runner)
-    private val device = PrivilegedDeviceController(appContext, userId)
+    private val device = PrivilegedDeviceController(appContext, userId, appContext.applicationInfo?.sourceDir.orEmpty())
     private val management = PrivilegedManagementController(appContext, userId)
     init {
         // 进程恢复时撤销上次进程遗留的租约，不启动 su，也不保留跨进程 shell。
@@ -226,7 +226,20 @@ class PrivilegedCapabilityManager private constructor(context: Context) {
             if (checkSession && request.sessionId != null && !sessions.owns(request.sessionId, SessionBinding(ownerId, acpSessionId, status))) {
                 return failure(request, "session_not_found")
             }
-            if (!isValid()) return failure(request, "privileged_access_changed")
+            if (!isValid()) {
+                if (request.action == PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES) {
+                    return device.execute(request, status.backend, ::isValid) { command ->
+                        dispatch(request.copy(
+                            action = PrivilegedActionPolicy.ACTION_DEVICE_COMMAND,
+                            command = command,
+                            requiresConfirmation = false,
+                            timeoutSeconds = 8,
+                            allowSystemModifications = true,
+                        ))
+                    }
+                }
+                return failure(request, "privileged_access_changed")
+            }
             val requiresConfirm = (PrivilegedActionPolicy.requiresConfirmation(request.action) || request.requiresConfirmation) && !request.isFullPower
             if (requiresConfirm && request.arguments["confirmed"] != "true") {
                 return failure(request, "confirmation_required").copy(requiresConfirmation = true)

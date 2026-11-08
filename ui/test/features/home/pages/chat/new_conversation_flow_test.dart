@@ -24,7 +24,6 @@ import 'package:ui/models/chat_message_model.dart';
 import 'package:ui/models/conversation_thread_target.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/services/embedded_terminal_preparation_service.dart';
-import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/theme/app_theme.dart';
 
 class _DraftFilePicker extends FilePickerPlatform {
@@ -2655,6 +2654,113 @@ void main() {
       expect(
         composer(tester).agentPermissionMode,
         AgentPermissionMode.defaultMode,
+      );
+
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'assistant shared draft consumes into composer once without auto send, supports deleting attachments, and rejects key mismatch',
+    (tester) async {
+      const appStateChannel = MethodChannel('cn.com.omnimind.bot/app_state');
+      Map<dynamic, dynamic>? pendingDraft = {
+        'requestKey': 'assist_req_key_1',
+        'text': null,
+        'attachments': [
+          {
+            'id': 'context_txt',
+            'name': 'screen_context.txt',
+            'path':
+                '/workspace/assistant-input/assist_req_key_1/screen_context.txt',
+            'size': 1024,
+            'mimeType': 'text/plain',
+            'isImage': false,
+            'sendToModel': true,
+          },
+          {
+            'id': 'screenshot_png',
+            'name': 'screenshot.png',
+            'path':
+                '/workspace/assistant-input/assist_req_key_1/screenshot.png',
+            'size': 2048,
+            'mimeType': 'image/png',
+            'isImage': true,
+            'sendToModel': true,
+          },
+        ],
+      };
+
+      messenger.setMockMethodCallHandler(appStateChannel, (call) async {
+        if (call.method == 'getPendingShareDraft') {
+          return pendingDraft;
+        }
+        if (call.method == 'clearPendingShareDraft') {
+          pendingDraft = null;
+          return true;
+        }
+        return null;
+      });
+
+      // 1. 挂 normal requestKey 新页 -> 消费草稿并展示附件
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          mode: ConversationMode.normal,
+          fromNativeRoute: true,
+          requestKey: 'assist_req_key_1',
+        ),
+      );
+
+      expect(composer(tester).attachments, hasLength(2));
+      expect(
+        composer(tester).attachments.map((a) => a.id),
+        containsAll(['context_txt', 'screenshot_png']),
+      );
+
+      // 确认只导入草稿，绝不自动发送 prompt
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        isEmpty,
+      );
+
+      // 2. 真实 UI 操作：删除截图附件
+      composer(tester).onRemoveAttachment!('screenshot_png');
+      await tester.pumpAndSettle();
+
+      expect(composer(tester).attachments, hasLength(1));
+      expect(composer(tester).attachments.single.id, 'context_txt');
+
+      // 3. 准备第二个待消费草稿，但使用不同 requestKey
+      pendingDraft = {
+        'requestKey': 'assist_req_key_2',
+        'text': null,
+        'attachments': [
+          {
+            'id': 'other_attachment',
+            'name': 'other.txt',
+            'path': '/workspace/other.txt',
+            'isImage': false,
+            'sendToModel': true,
+          },
+        ],
+      };
+
+      // 跳入不同 key 的新目标：不匹配 key 绝不消费
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          mode: ConversationMode.normal,
+          fromNativeRoute: true,
+          requestKey: 'assist_req_key_mismatch',
+        ),
+      );
+
+      // 草稿未被消费，存储仍保持原状
+      expect(pendingDraft, isNotNull);
+      expect(
+        composer(tester).attachments.where((a) => a.id == 'other_attachment'),
+        isEmpty,
       );
 
       await disposeChat(tester);

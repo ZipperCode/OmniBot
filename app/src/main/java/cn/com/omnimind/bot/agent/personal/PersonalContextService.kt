@@ -10,7 +10,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 internal class PersonalContextService(private val context: Context) {
-    suspend fun execute(name: String, args: JsonObject): Map<String, Any?> = withContext(Dispatchers.IO) {
+    suspend fun execute(name: String, args: JsonObject, rawPayloadBytes: Int? = null): Map<String, Any?> = withContext(Dispatchers.IO) {
         try {
             currentCoroutineContext().ensureActive()
             val definition = PersonalContextTools.definitions(cn.com.omnimind.baselib.i18n.PromptLocale.EN_US)
@@ -19,7 +19,7 @@ internal class PersonalContextService(private val context: Context) {
             val properties = definition.getValue("function").jsonObject.getValue("parameters").jsonObject.getValue("properties").jsonObject
             require(args.keys.all { it in properties }) { "Unsupported tool argument" }
             when {
-                name.startsWith("calendar_") -> calendar(name, args)
+                name.startsWith("calendar_") -> calendar(name, args, rawPayloadBytes)
                 name == "context_capabilities" -> mapOf("success" to true, "sources" to PersonalContextAccess(context).all().map { it.payload() }, "permissionSettings" to "App permissions > Personal context")
                 name == "contacts_query" -> PersonalContacts(context).query(args)
                 name in setOf("contacts_create", "contacts_update", "contacts_delete") -> PersonalContacts(context).write(name, args)
@@ -44,13 +44,13 @@ internal class PersonalContextService(private val context: Context) {
     private fun failure(code: String, message: String, capability: String? = null) = mapOf("success" to false, "code" to code, "message" to message,
         "capabilityId" to capability, "settingsPage" to "app_permissions", "settingsRoute" to "/home/authorize_setting", "retryable" to false)
 
-    private suspend fun calendar(name: String, args: JsonObject): Map<String, Any?> = suspendCancellableCoroutine { continuation ->
+    private suspend fun calendar(name: String, args: JsonObject, rawPayloadBytes: Int? = null): Map<String, Any?> = suspendCancellableCoroutine { continuation ->
         val signal = android.os.CancellationSignal()
         continuation.invokeOnCancellation { signal.cancel() }
         Dispatchers.IO.dispatch(continuation.context, Runnable {
             try {
                 signal.throwIfCanceled()
-                val result = executeCalendar(name, args, signal)
+                val result = executeCalendar(name, args, signal, rawPayloadBytes)
                 if (continuation.isActive) continuation.resume(result)
             } catch (error: Exception) {
                 if (continuation.isActive) continuation.resumeWithException(error)
@@ -58,7 +58,12 @@ internal class PersonalContextService(private val context: Context) {
         })
     }
 
-    private fun executeCalendar(name: String, args: JsonObject, signal: android.os.CancellationSignal): Map<String, Any?> {
+    internal fun executeCalendar(
+        name: String,
+        args: JsonObject,
+        signal: android.os.CancellationSignal = android.os.CancellationSignal(),
+        rawPayloadBytes: Int? = null
+    ): Map<String, Any?> {
         val access = PersonalContextAccess(context)
         access.requireAccess("calendar_read")
         if (name !in setOf("calendar_list", "calendar_event_list")) access.requireAccess("calendar_write")
@@ -70,6 +75,131 @@ internal class PersonalContextService(private val context: Context) {
             "calendar_event_create" -> service.createEvent(CalendarEventCreateRequest(args.text("title", true)!!, args.text("startAt", true)!!, args.text("endAt", true)!!, args.text("calendarId"), args.text("description"), args.text("location"), args.text("timezone"), args.flag("allDay"), reminders()))
             "calendar_event_update" -> service.updateEvent(CalendarEventUpdateRequest(args.text("eventId", true)!!, args.text("title"), args.text("startAt"), args.text("endAt"), args.text("description"), args.text("location"), args.text("timezone"), if (args.containsKey("allDay")) args.flag("allDay") else null, if (args.containsKey("reminderMinutes")) reminders() else null))
             "calendar_event_delete" -> service.deleteEvent(args.text("eventId", true)!!)
+            "calendar_event_batch" -> {
+                if (rawPayloadBytes != null) {
+                    require(rawPayloadBytes <= 256 * 1024) { "日历批量请求数据过大（超过 256KiB）" }
+                }
+
+                val allowedTopLevelKeys = setOf("operations")
+                val unknownTopKeys = args.keys.filter { it !in allowedTopLevelKeys }
+                require(unknownTopKeys.isEmpty()) { "未知参数：${unknownTopKeys.joinToString()}" }
+
+                val operationsArray = args["operations"] as? JsonArray
+                    ?: throw IllegalArgumentException("operations 必须为数组")
+                require(operationsArray.isNotEmpty()) { "operations 不能为空" }
+                require(operationsArray.size <= 50) { "operations 不能超过 50 项（当前 ${operationsArray.size} 项）" }
+
+                val allowedOperationTypes = setOf("create", "update", "delete")
+                val allowedCreateFields = setOf("title", "startAt", "endAt", "calendarId", "description", "location", "timezone", "allDay", "reminderMinutes")
+                val allowedUpdateFields = setOf("eventId", "title", "startAt", "endAt", "description", "location", "timezone", "allDay", "reminderMinutes")
+                val allowedDeleteFields = setOf("eventId")
+                val allowedItemKeys = setOf("operation", "arguments")
+
+                val targetedEventIds = mutableSetOf<Long>()
+                val mutations = operationsArray.mapIndexed { index, element ->
+                    val opObj = element as? JsonObject
+                        ?: throw IllegalArgumentException("operations[$index] 必须为对象")
+
+                    val unknownItemKeys = opObj.keys.filter { it !in allowedItemKeys }
+                    require(unknownItemKeys.isEmpty()) { "operations[$index] 包含未知字段：${unknownItemKeys.joinToString()}" }
+
+                    val opType = opObj.text("operation", true)
+                        ?: throw IllegalArgumentException("operations[$index].operation 不能为空")
+                    require(opType in allowedOperationTypes) {
+                        "operations[$index].operation 未知操作类型: $opType（仅支持 create, update, delete）"
+                    }
+
+                    val opArgs = opObj["arguments"] as? JsonObject
+                        ?: throw IllegalArgumentException("operations[$index].arguments 必须为对象")
+
+                    fun parseReminders(obj: JsonObject): List<Int>? {
+                        if (!obj.containsKey("reminderMinutes")) return null
+                        val element = obj["reminderMinutes"]
+                        if (element == null || element is JsonNull) {
+                            throw IllegalArgumentException("reminderMinutes 不能为 null，省略该字段以保留现有提醒，或传 [] 清空提醒")
+                        }
+                        val array = element as? JsonArray
+                            ?: throw IllegalArgumentException("reminderMinutes 必须为整数数组，例如 [10, 30]")
+                        return array.map {
+                            val primitive = it as? JsonPrimitive
+                                ?: throw IllegalArgumentException("reminderMinutes 元素必须为整数")
+                            primitive.intOrNull
+                                ?: throw IllegalArgumentException("reminderMinutes 元素必须为整数")
+                        }
+                    }
+
+                    when (opType) {
+                        "create" -> {
+                            val unknownFields = opArgs.keys.filter { it !in allowedCreateFields }
+                            require(unknownFields.isEmpty()) {
+                                "operations[$index].arguments 包含未知字段：${unknownFields.joinToString()}"
+                            }
+                            CalendarBatchMutation.Create(
+                                CalendarEventCreateRequest(
+                                    title = opArgs.text("title", true)
+                                        ?: throw IllegalArgumentException("operations[$index].arguments.title 不能为空"),
+                                    startAt = opArgs.text("startAt", true)
+                                        ?: throw IllegalArgumentException("operations[$index].arguments.startAt 不能为空"),
+                                    endAt = opArgs.text("endAt", true)
+                                        ?: throw IllegalArgumentException("operations[$index].arguments.endAt 不能为空"),
+                                    calendarId = opArgs.text("calendarId"),
+                                    description = opArgs.text("description"),
+                                    location = opArgs.text("location"),
+                                    timezone = opArgs.text("timezone"),
+                                    allDay = opArgs.flag("allDay"),
+                                    reminderMinutes = parseReminders(opArgs) ?: emptyList()
+                                )
+                            )
+                        }
+                        "update" -> {
+                            val unknownFields = opArgs.keys.filter { it !in allowedUpdateFields }
+                            require(unknownFields.isEmpty()) {
+                                "operations[$index].arguments 包含未知字段：${unknownFields.joinToString()}"
+                            }
+                            val eventIdRaw = opArgs.text("eventId", true)
+                                ?: throw IllegalArgumentException("operations[$index].arguments.eventId 不能为空")
+                            val numericId = eventIdRaw.toLongOrNull()
+                                ?: throw IllegalArgumentException("operations[$index].arguments.eventId 必须为数字：$eventIdRaw")
+                            require(targetedEventIds.add(numericId)) {
+                                "批处理中存在针对同一日程 (eventId=$eventIdRaw) 的重复操作"
+                            }
+
+                            CalendarBatchMutation.Update(
+                                CalendarEventUpdateRequest(
+                                    eventId = eventIdRaw,
+                                    title = opArgs.text("title"),
+                                    startAt = opArgs.text("startAt"),
+                                    endAt = opArgs.text("endAt"),
+                                    description = opArgs.text("description"),
+                                    location = opArgs.text("location"),
+                                    timezone = opArgs.text("timezone"),
+                                    allDay = if (opArgs.containsKey("allDay")) opArgs.flag("allDay") else null,
+                                    reminderMinutes = parseReminders(opArgs)
+                                )
+                            )
+                        }
+                        "delete" -> {
+                            val unknownFields = opArgs.keys.filter { it !in allowedDeleteFields }
+                            require(unknownFields.isEmpty()) {
+                                "operations[$index].arguments 包含未知字段：${unknownFields.joinToString()}"
+                            }
+                            val eventIdRaw = opArgs.text("eventId", true)
+                                ?: throw IllegalArgumentException("operations[$index].arguments.eventId 不能为空")
+                            val numericId = eventIdRaw.toLongOrNull()
+                                ?: throw IllegalArgumentException("operations[$index].arguments.eventId 必须为数字：$eventIdRaw")
+                            require(targetedEventIds.add(numericId)) {
+                                "批处理中存在针对同一日程 (eventId=$eventIdRaw) 的重复操作"
+                            }
+
+                            CalendarBatchMutation.Delete(
+                                eventId = eventIdRaw
+                            )
+                        }
+                        else -> throw IllegalArgumentException("未知操作类型: $opType")
+                    }
+                }
+                service.applyBatch(mutations, rawPayloadBytes)
+            }
             else -> throw IllegalArgumentException("Unknown calendar tool")
         }
     }

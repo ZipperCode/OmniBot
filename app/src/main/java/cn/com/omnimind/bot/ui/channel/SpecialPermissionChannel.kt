@@ -111,6 +111,9 @@ class SpecialPermissionChannel {
                     "getRootStatus" -> specialPermissionManager!!.getRootStatus(result)
                     "setRootEnabled" -> specialPermissionManager!!.setRootEnabled(call, result)
                     "requestRootAccess" -> specialPermissionManager!!.requestRootAccess(result)
+                    "getAssistantStatus" -> specialPermissionManager!!.getAssistantStatus(result)
+                    "openAssistantSettings" -> specialPermissionManager!!.openAssistantSettings(result)
+                    "getSystemDeviceCapabilities" -> specialPermissionManager!!.getSystemDeviceCapabilities(result)
                     "getShizukuStatus" -> specialPermissionManager!!.getShizukuStatus(
                         result
                     )

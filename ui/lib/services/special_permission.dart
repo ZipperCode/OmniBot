@@ -1014,3 +1014,146 @@ Future<bool> isBackgroundRunAllowed() async {
     return false;
   }
 }
+
+class AssistantStatus {
+  final bool supported;
+  final bool selected;
+
+  const AssistantStatus({
+    required this.supported,
+    required this.selected,
+  });
+
+  factory AssistantStatus.fromMap(Map<dynamic, dynamic>? map) {
+    if (map == null) {
+      throw StateError('Assistant status payload is null');
+    }
+    return AssistantStatus(
+      supported: map['supported'] == true,
+      selected: map['selected'] == true,
+    );
+  }
+}
+
+Future<AssistantStatus> getAssistantStatus() async {
+  final result = await spePermission.invokeMapMethod<dynamic, dynamic>(
+    'getAssistantStatus',
+  );
+  return AssistantStatus.fromMap(result);
+}
+
+Future<bool> openAssistantSettings() async {
+  return await spePermission.invokeMethod<bool>('openAssistantSettings') ??
+      false;
+}
+
+class DeviceTargetCapability {
+  final String target;
+  final bool readable;
+  final bool writable;
+  final String code;
+
+  const DeviceTargetCapability({
+    required this.target,
+    required this.readable,
+    required this.writable,
+    required this.code,
+  });
+
+  factory DeviceTargetCapability.fromMap(Map<dynamic, dynamic> map) {
+    return DeviceTargetCapability(
+      target: map['target']?.toString() ?? '',
+      readable: map['readable'] == true,
+      writable: map['writable'] == true,
+      code: map['code']?.toString() ?? '',
+    );
+  }
+}
+
+class DeviceActionCapability {
+  final String action;
+  final bool available;
+  final String code;
+
+  const DeviceActionCapability({
+    required this.action,
+    required this.available,
+    required this.code,
+  });
+
+  factory DeviceActionCapability.fromMap(Map<dynamic, dynamic> map) {
+    return DeviceActionCapability(
+      action: map['action']?.toString() ?? '',
+      available: map['available'] == true,
+      code: map['code']?.toString() ?? '',
+    );
+  }
+}
+
+class SystemDeviceCapabilities {
+  final String requestId;
+  final String action;
+  final bool success;
+  final String code;
+  final String message;
+  final String backend;
+  final String provider;
+  final int? uid;
+  final List<DeviceTargetCapability> targets;
+  final List<DeviceActionCapability> actions;
+  final Map<String, dynamic> raw;
+
+  const SystemDeviceCapabilities({
+    required this.requestId,
+    required this.action,
+    required this.success,
+    required this.code,
+    required this.message,
+    required this.backend,
+    required this.provider,
+    this.uid,
+    required this.targets,
+    required this.actions,
+    required this.raw,
+  });
+
+  factory SystemDeviceCapabilities.fromMap(Map<dynamic, dynamic> map) {
+    final observation = map['observation'] is Map
+        ? map['observation'] as Map<dynamic, dynamic>
+        : null;
+    final value = observation?['value'] is Map
+        ? observation!['value'] as Map<dynamic, dynamic>
+        : null;
+    final rawTargets = value?['targets'] as List<dynamic>? ?? const [];
+    final rawActions = value?['actions'] as List<dynamic>? ?? const [];
+    return SystemDeviceCapabilities(
+      requestId: map['requestId']?.toString() ?? '',
+      action: map['action']?.toString() ?? '',
+      success: map['success'] == true,
+      code: map['code']?.toString() ?? '',
+      message: map['message']?.toString() ?? '',
+      backend: map['backend']?.toString() ?? 'NONE',
+      provider: map['provider']?.toString() ?? 'NONE',
+      uid: map['uid'] is int ? map['uid'] as int : null,
+      targets: rawTargets
+          .whereType<Map<dynamic, dynamic>>()
+          .map(DeviceTargetCapability.fromMap)
+          .toList(),
+      actions: rawActions
+          .whereType<Map<dynamic, dynamic>>()
+          .map(DeviceActionCapability.fromMap)
+          .toList(),
+      raw: Map<String, dynamic>.from(map),
+    );
+  }
+}
+
+Future<SystemDeviceCapabilities> getSystemDeviceCapabilities() async {
+  final result = await spePermission.invokeMapMethod<dynamic, dynamic>(
+    'getSystemDeviceCapabilities',
+  );
+  if (result == null) {
+    throw StateError('Device capabilities result is null');
+  }
+  return SystemDeviceCapabilities.fromMap(result);
+}
