@@ -7,6 +7,7 @@ import cn.com.omnimind.androidgui.DisplayInputCoordinator
 import cn.com.omnimind.androidgui.KeyguardStateMonitor
 import cn.com.omnimind.baselib.llm.AssistantToolCall
 import cn.com.omnimind.bot.task.runtime.TaskAuthWaitCoordinator
+import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.OfficialVlmOperationConfigStore
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
@@ -183,6 +184,15 @@ class VlmToolHandler(context: Context) : ToolHandler {
             }
             DeviceDisplayManager.connectShizukuUserService(helper.context)
             try {
+            val sessionId = env.acpSessionId ?: env.agentRunId
+            if (sessionId != null) {
+                TaskRuntime.markScreenTarget(
+                    context = helper.context,
+                    sessionId = sessionId,
+                    turnId = env.acpTurnId,
+                    displayId = targetDisplayId,
+                )
+            }
             val execution = OmniVlmPlugin.execute(
                 context = helper.context,
                 request = OmniVlmPlugin.Request(
@@ -190,6 +200,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
                     runId = runId,
                     display = displayTarget,
                     displayId = targetDisplayId,
+                    hostManagedUi = true,
                 ),
                 modelClient = HttpAgentLlmClient(
                     scope = CoroutineScope(currentCoroutineContext()),

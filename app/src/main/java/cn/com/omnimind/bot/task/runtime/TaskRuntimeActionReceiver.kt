@@ -52,7 +52,7 @@ class TaskRuntimeActionReceiver : BroadcastReceiver() {
             }
             if (sessionId.isEmpty()) {
                 OmniLog.w(TAG, "停止任务操作：taskId=$taskId 无关联的 sessionId，仅释放本地执行租约")
-                TaskRuntime.finish(context, taskId)
+                TaskRuntime.finish(context, taskId, terminalStatus = "cancelled")
                 return true
             }
             val cancelArgs = mutableMapOf<String, Any?>("sessionId" to sessionId)

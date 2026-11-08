@@ -149,6 +149,9 @@ object TaskRuntimeSettings {
         }
     }
 
+    internal fun currentActivityUiMode(): Int? =
+        currentActivityRef?.get()?.resources?.configuration?.uiMode
+
     fun setVisibleConversation(
         context: Context,
         conversationId: Long?,

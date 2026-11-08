@@ -16,6 +16,7 @@ import cn.com.omnimind.bot.agent.AgentToolRegistry
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import cn.com.omnimind.bot.agent.tool.AgentCapabilityToolDefinition
 import cn.com.omnimind.bot.task.runtime.TaskAuthWaitCoordinator
+import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -175,6 +176,7 @@ class DeviceDisplayToolHandler(
                 )
             }
             val presentLeaseOwnerId = "$sessionId:$turnId:${toolCall.id}"
+            TaskRuntime.suppressResultPresentationForSession(sessionId)
             return handlePresentToUser(args, sessionId, presentLeaseOwnerId, env, callback, toolHandle)
         }
 
@@ -219,9 +221,18 @@ class DeviceDisplayToolHandler(
             DeviceDisplayManager.connectShizukuUserService(context)
 
             try {
+            if (actionName in setOf("click", "long_press", "swipe", "input_text", "press_key", "open_app", "wait", "screenshot", "get_state")) {
+                val acpSession = env.acpSessionId ?: sessionKey
+                TaskRuntime.markScreenTarget(
+                    context = context,
+                    sessionId = acpSession,
+                    turnId = env.acpTurnId,
+                    displayId = targetDisplayId,
+                )
+            }
                 when (actionName) {
                     "list_displays" -> handleListDisplays()
-                    "create_virtual_display" -> handleCreateVirtualDisplay(args, sessionKey, env.acpSessionId)
+                    "create_virtual_display" -> handleCreateVirtualDisplay(args, sessionKey, env.acpSessionId, env.acpTurnId)
                     "destroy_virtual_display" -> handleDestroyVirtualDisplay(targetDisplayId, sessionKey)
                     "get_state" -> handleGetState(targetDisplayId, leaseOwnerId)
                     "screenshot" -> handleScreenshot(targetDisplayId, leaseOwnerId)
@@ -304,6 +315,12 @@ class DeviceDisplayToolHandler(
             val jsonStr = payload.toString()
 
             if (resSuccess) {
+                TaskRuntime.markScreenTarget(
+                    context = context,
+                    sessionId = sessionId,
+                    turnId = env.acpTurnId,
+                    displayId = Display.DEFAULT_DISPLAY,
+                )
                 sessionDisplayTargets[sessionId] = Display.DEFAULT_DISPLAY
                 ToolExecutionResult.ContextResult(
                     toolName = TOOL_NAME,
@@ -357,6 +374,7 @@ class DeviceDisplayToolHandler(
         args: JsonObject,
         sessionKey: String,
         acpSessionId: String?,
+        acpTurnId: String? = null,
     ): ToolExecutionResult {
         // 在虚拟屏创建前确保 PrivilegedService 已建立，受 ACP/Access 授权代次约束
         DeviceDisplayManager.ensurePrivilegedService(
@@ -370,6 +388,14 @@ class DeviceDisplayToolHandler(
         val result = DeviceDisplayManager.createVirtualDisplay(context, width, height, dpi, ownerId = sessionKey)
         return result.fold(
             onSuccess = { info ->
+                sessionDisplayTargets[sessionKey] = info.displayId
+                val acpSession = acpSessionId ?: sessionKey
+                TaskRuntime.markScreenTarget(
+                    context = context,
+                    sessionId = acpSession,
+                    turnId = acpTurnId,
+                    displayId = info.displayId,
+                )
                 successResult(
                     summary = "后台虚拟显示屏创建成功 (id=${info.displayId}, ${info.width}x${info.height}@${info.dpi})",
                     data = mapOf(
@@ -394,6 +420,13 @@ class DeviceDisplayToolHandler(
 
     private fun handleSwitchDisplay(targetDisplayId: Int, sessionKey: String): ToolExecutionResult {
         sessionDisplayTargets[sessionKey] = targetDisplayId
+        val acpSession = sessionKey
+        TaskRuntime.markScreenTarget(
+            context = context,
+            sessionId = acpSession,
+            turnId = null,
+            displayId = targetDisplayId,
+        )
         return successResult("已将当前会话默认显示屏切换至: $targetDisplayId", mapOf("display_id" to targetDisplayId))
     }
 

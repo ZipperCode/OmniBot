@@ -2947,7 +2947,9 @@ internal class LocalAcpRuntime(
         val turnIdentity = AcpTurnIdentity(threadId, turnId)
         turnTimings.remove(turnIdentity)
         lastAssistantMessageIds.remove(turnIdentity)
-        releaseForegroundTurn(threadId, turnId)
+        val leaseTerminalStatus = if (recordJournal) status else null
+        val leaseError = if (recordJournal) error else null
+        releaseForegroundTurn(threadId, turnId, terminalStatus = leaseTerminalStatus, error = leaseError)
     }
 
     private suspend fun acquireForegroundTurn(sessionId: String, turnId: String) {
@@ -2974,10 +2976,20 @@ internal class LocalAcpRuntime(
         }
     }
 
-    private fun releaseForegroundTurn(sessionId: String, turnId: String) {
+    private fun releaseForegroundTurn(
+        sessionId: String,
+        turnId: String,
+        terminalStatus: String? = null,
+        error: String? = null,
+    ) {
         val turnIdentity = AcpTurnIdentity(sessionId, turnId)
         if (!foregroundTurnIds.remove(turnIdentity)) return
-        TaskRuntime.finish(appContext, agentTurnRuntimeId(sessionId, turnId))
+        TaskRuntime.finish(
+            context = appContext,
+            taskId = agentTurnRuntimeId(sessionId, turnId),
+            terminalStatus = terminalStatus,
+            error = error,
+        )
         TaskRuntimeSettings.onTaskFinished(appContext)
     }
 

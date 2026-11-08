@@ -8,6 +8,11 @@ import android.os.Handler
 import android.os.Looper
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.util.TaskCompletionNavigator
+import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import cn.com.omnimind.bot.agent.display.ScreenTaskOverlayHost
 import cn.com.omnimind.uikit.loader.cat.DraggableBallInstance
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -54,7 +59,12 @@ data class TaskExecutionInfo(
     val progressMax: Int? = null,
     val stopToken: String = UUID.randomUUID().toString(),
     val startedAt: Long = System.currentTimeMillis(),
-    val waitingStatus: TaskWaitingStatus? = null
+    val waitingStatus: TaskWaitingStatus? = null,
+    val screenDisplayId: Int? = null
+)
+data class TaskTurnIdentity(
+    val sessionId: String,
+    val turnId: String,
 )
 
 /**
@@ -72,7 +82,15 @@ object TaskRuntime {
 
     @Volatile
     private var activeOverlayTaskId: String? = null
+    private val suppressedPresentationTaskIds = ConcurrentHashMap.newKeySet<String>()
 
+    private data class PendingScreenResult(
+        val context: Context,
+        val task: TaskExecutionInfo,
+        val terminalStatus: String,
+        @Volatile var hasDeliveredConcreteText: Boolean = false,
+    )
+    private val pendingScreenResults = ConcurrentHashMap<TaskTurnIdentity, PendingScreenResult>()
     /**
      * 基础启动租约（兼容已有调用方）。
      */
@@ -129,13 +147,21 @@ object TaskRuntime {
         }
 
         updateOverlayHint(context)
+        runCatching {
+            ScreenTaskOverlayHost.sync(context, getActiveTasks())
+        }
         return true
     }
 
     /**
      * 释放任务租约。
      */
-    fun finish(context: Context, taskId: String): Boolean {
+    fun finish(
+        context: Context,
+        taskId: String,
+        terminalStatus: String? = null,
+        error: String? = null,
+    ): Boolean {
         val normalizedTaskId = taskId.trim()
         if (normalizedTaskId.isEmpty()) {
             OmniLog.w(TAG, "忽略空 taskId 的前台租约释放请求")
@@ -164,7 +190,79 @@ object TaskRuntime {
                 }
             }
         }
+        val isSuppressed = suppressedPresentationTaskIds.remove(normalizedTaskId)
 
+        if (removed != null && removed.screenDisplayId != null && terminalStatus != null && !isSuppressed) {
+            val sId = removed.sessionId?.trim().orEmpty()
+            val tId = removed.turnId?.trim().orEmpty()
+            val identity = if (sId.isNotEmpty() && tId.isNotEmpty()) TaskTurnIdentity(sId, tId) else null
+
+            val resultMessage = when {
+                !error.isNullOrBlank() -> error.trim()
+                isErrorTerminalStatus(terminalStatus) -> error ?: "执行出错"
+                isCancelledTerminalStatus(terminalStatus) -> "任务已取消"
+                else -> "本轮屏幕操作已结束，请返回对话查看结果。"
+            }
+
+            val pendingRecord = if (identity != null && isSuccessTerminalStatus(terminalStatus)) {
+                PendingScreenResult(
+                    context = context.applicationContext ?: context,
+                    task = removed,
+                    terminalStatus = terminalStatus,
+                    hasDeliveredConcreteText = false,
+                ).also { pendingScreenResults[identity] = it }
+            } else null
+
+            // 1. 先展示初始卡片，确保初始状态就位
+            runCatching {
+                ScreenTaskOverlayHost.showResult(
+                    context = context,
+                    task = removed,
+                    terminalStatus = terminalStatus,
+                    message = resultMessage,
+                )
+            }.onFailure { e ->
+                OmniLog.w(TAG, "ScreenTaskOverlayHost.showResult 失败: ${e.javaClass.simpleName}")
+            }
+
+            // 2. 初始卡片展示后，异步精确查找数据库最新入库正文，避开 snapshot 竞态
+            if (pendingRecord != null) {
+                removed.conversationId?.let { convId ->
+                    if (convId > 0L) {
+                        CoroutineScope(Dispatchers.IO).launch {
+                            val exactText = runCatching {
+                                AgentConversationHistoryRepository(context.applicationContext ?: context)
+                                    .findExactTurnAssistantMessage(
+                                        conversationId = convId,
+                                        sessionId = sId,
+                                        turnId = tId,
+                                    )
+                            }.onFailure { e ->
+                                OmniLog.w(TAG, "findExactTurnAssistantMessage 失败: ${e.javaClass.simpleName}")
+                            }.getOrNull()
+                            if (!exactText.isNullOrBlank() && !pendingRecord.hasDeliveredConcreteText) {
+                                onAssistantMessagePersisted(sId, tId, exactText)
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (!isSuppressed) {
+            runCatching {
+                ScreenTaskOverlayHost.dismissTask(normalizedTaskId)
+            }.onFailure { e ->
+                OmniLog.w(TAG, "ScreenTaskOverlayHost.dismissTask 失败: ${e.javaClass.simpleName}")
+            }
+        }
+
+        // 接管期间不强拆 Host 状态，非接管才同步活跃任务列表
+        if (!isSuppressed) {
+            runCatching {
+                ScreenTaskOverlayHost.sync(context, getActiveTasks())
+            }.onFailure { e ->
+                OmniLog.w(TAG, "ScreenTaskOverlayHost.sync 失败: ${e.javaClass.simpleName}")
+            }
+        }
         if (activeTasks.isNotEmpty()) {
             sendServiceCommand(context, TaskRuntimeService.ACTION_UPDATE)
             return true
@@ -305,6 +403,137 @@ object TaskRuntime {
         val task = activeTasks[taskId.trim()] ?: return false
         return task.stopToken == token
     }
+    fun suppressResultPresentation(taskId: String) {
+        val norm = taskId.trim()
+        if (norm.isNotEmpty()) {
+            suppressedPresentationTaskIds.add(norm)
+        }
+    }
+    fun suppressResultPresentationForSession(sessionId: String, expectedTurnId: String? = null) {
+        val norm = sessionId.trim()
+        if (norm.isEmpty()) return
+        val active = findActiveTaskBySession(norm)
+        if (active != null) {
+            if (expectedTurnId == null || active.turnId == expectedTurnId) {
+                suppressedPresentationTaskIds.add(active.taskId)
+            }
+        }
+    }
+
+    fun isSuccessTerminalStatus(status: String?): Boolean {
+        if (status.isNullOrBlank()) return false
+        return when (status.trim().lowercase()) {
+            "completed", "end_turn", "stop", "success" -> true
+            else -> false
+        }
+    }
+
+    fun isCancelledTerminalStatus(status: String?): Boolean {
+        if (status.isNullOrBlank()) return false
+        return when (status.trim().lowercase()) {
+            "cancelled", "canceled", "user_cancelled", "interrupted" -> true
+            else -> false
+        }
+    }
+
+    fun isErrorTerminalStatus(status: String?): Boolean {
+        if (status.isNullOrBlank()) return false
+        val s = status.trim().lowercase()
+        return s in setOf("error", "failed", "failure", "timeout")
+    }
+
+    fun clearResultPresentation(taskId: String) {
+        val norm = taskId.trim()
+        if (norm.isEmpty()) return
+        pendingScreenResults.entries.removeIf { it.value.task.taskId == norm }
+    }
+
+    fun clearResultPresentationAll() {
+        pendingScreenResults.clear()
+    }
+
+    fun isPendingScreenResult(sessionId: String, turnId: String): Boolean {
+        val normSession = sessionId.trim()
+        val normTurn = turnId.trim()
+        if (normSession.isEmpty() || normTurn.isEmpty()) return false
+        return pendingScreenResults.containsKey(TaskTurnIdentity(normSession, normTurn))
+    }
+
+    fun onAssistantMessagePersisted(sessionId: String, turnId: String, text: String) {
+        val normSession = sessionId.trim()
+        val normTurn = turnId.trim()
+        val cleanText = text.trim()
+        if (normSession.isEmpty() || normTurn.isEmpty() || cleanText.isBlank()) return
+        val identity = TaskTurnIdentity(normSession, normTurn)
+        val pending = pendingScreenResults[identity] ?: return
+        // 仅成功终态允许更新正文，严禁覆盖取消/错误
+        if (!isSuccessTerminalStatus(pending.terminalStatus)) {
+            return
+        }
+        pending.hasDeliveredConcreteText = true
+        runCatching {
+            ScreenTaskOverlayHost.showResult(
+                context = pending.context,
+                task = pending.task,
+                terminalStatus = pending.terminalStatus,
+                message = cleanText,
+            )
+        }.onFailure { e ->
+            OmniLog.w(TAG, "ScreenTaskOverlayHost.showResult 失败: ${e.javaClass.simpleName}")
+        }
+    }
+
+    fun markScreenTarget(
+        context: Context,
+        sessionId: String,
+        turnId: String?,
+        displayId: Int,
+    ): Boolean {
+        val normSession = sessionId.trim()
+        if (normSession.isEmpty()) return false
+        val normTurn = turnId?.trim()?.ifEmpty { null }
+
+        // 精确活跃身份匹配：无 turn 仅允许 session 唯一匹配，不能标记多个
+        val candidates = activeTasks.values.filter { it.sessionId == normSession }
+        val targetTask = if (normTurn != null) {
+            candidates.firstOrNull { it.turnId == normTurn }
+        } else {
+            if (candidates.size == 1) candidates.single() else null
+        }
+
+        if (targetTask == null) {
+            OmniLog.w(TAG, "markScreenTarget: 未找到匹配的活跃任务 (sessionId=$normSession, turnId=$normTurn, candidates=${candidates.size})")
+            return false
+        }
+
+        val expectedStopToken = targetTask.stopToken
+        var updated = false
+        activeTasks.computeIfPresent(targetTask.taskId) { _, current ->
+            if (current.sessionId == normSession &&
+                (normTurn == null || current.turnId == normTurn) &&
+                current.stopToken == expectedStopToken
+            ) {
+                updated = true
+                current.copy(screenDisplayId = displayId)
+            } else {
+                current
+            }
+        }
+
+        if (!updated) {
+            OmniLog.w(TAG, "markScreenTarget: 任务并发状态已变更，放弃标记 taskId=${targetTask.taskId}")
+            return false
+        }
+
+        notifyStateChanged(context)
+        updateOverlayHint(context)
+        runCatching {
+            ScreenTaskOverlayHost.sync(context, getActiveTasks())
+        }.onFailure { e ->
+            OmniLog.w(TAG, "ScreenTaskOverlayHost.sync 失败: ${e.javaClass.simpleName}")
+        }
+        return true
+    }
 
     private fun updateOverlayHint(context: Context) {
         val activeList = activeTasks.values.toList()
@@ -312,12 +541,24 @@ object TaskRuntime {
         val taskId = primaryTask.taskId
         val convId = primaryTask.conversationId
 
+        // 普通任务球若已由新屏幕浮层接管避免重复展示同任务提示
+        if (primaryTask.screenDisplayId != null) {
+            if (activeOverlayTaskId != null) {
+                activeOverlayTaskId = null
+                mainHandler.post {
+                    runCatching {
+                        DraggableBallInstance.clearTaskCompletionHint()
+                    }
+                }
+            }
+            return
+        }
+
         val message = when (val waiting = primaryTask.waitingStatus) {
             is TaskWaitingStatus.WaitingForManualAuth -> "需要人工验证：${waiting.promptMessage.take(32)}"
             is TaskWaitingStatus.WaitingForUnlock -> "等待屏幕解锁以继续"
             null -> "${primaryTask.taskTitle ?: "小万任务"}: ${primaryTask.statusText ?: "执行中"}"
         }.take(64)
-
         activeOverlayTaskId = taskId
         mainHandler.post {
             runCatching {
@@ -390,5 +631,7 @@ object TaskRuntime {
         activeTasks.clear()
         waitingStatusByConversation.clear()
         activeOverlayTaskId = null
+        suppressedPresentationTaskIds.clear()
+        pendingScreenResults.clear()
     }
 }

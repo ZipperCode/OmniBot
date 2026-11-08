@@ -148,25 +148,28 @@ class TaskRuntimeService : Service() {
                     ).build()
                 )
             }
-            // 操作按钮：查看屏幕（仅在 primaryTask.sessionId 拥有活跃虚拟屏时展示）
+            // 操作按钮：查看屏幕（仅在 primaryTask.sessionId 拥有活跃虚拟屏或指向虚拟屏时展示）
             val primarySessionId = primaryTask?.sessionId
             val activeVdId = DeviceDisplayManager.activeVirtualDisplayId()
-            val ownsVirtualDisplay = activeVdId != Display.DEFAULT_DISPLAY &&
+            val targetVdId = primaryTask?.screenDisplayId?.takeIf { it != Display.DEFAULT_DISPLAY } ?: activeVdId
+            val ownsVirtualDisplay = targetVdId != Display.DEFAULT_DISPLAY &&
                 primarySessionId != null &&
-                DisplayInputCoordinator.getVirtualDisplayOwner(activeVdId) == primarySessionId
+                (DisplayInputCoordinator.getVirtualDisplayOwner(targetVdId) == primarySessionId ||
+                 DisplayInputCoordinator.getVirtualDisplayOwner(activeVdId) == primarySessionId ||
+                 (primaryTask.screenDisplayId != null && primaryTask.screenDisplayId != Display.DEFAULT_DISPLAY))
 
             if (ownsVirtualDisplay && primarySessionId != null) {
                 val previewIntent = VirtualDisplayPreviewActivity.createIntent(
                     context = context,
                     sessionId = primarySessionId,
-                    displayId = activeVdId,
+                    displayId = targetVdId,
                     taskId = primaryTask.taskId,
                     turnId = primaryTask.turnId,
                     stopToken = primaryTask.stopToken,
                 )
                 val previewPendingIntent = PendingIntent.getActivity(
                     context,
-                    ("preview_${primarySessionId}_$activeVdId").hashCode(),
+                    ("preview_${primarySessionId}_$targetVdId").hashCode(),
                     previewIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or immutableFlag()
                 )

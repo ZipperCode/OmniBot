@@ -118,6 +118,15 @@ class VirtualDisplayTakeoverAndNotificationTest {
         }
     }
 
+    private fun renderPreview(view: View, canvas: Canvas) {
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+        )
+        view.layout(0, 0, 100, 100)
+        view.draw(canvas)
+    }
+
     @Test
     fun `unauthorized display id or mismatched session is rejected on create`() {
         setVirtualDisplayForTesting(3, "session-authorized")
@@ -647,6 +656,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
         )
 
         val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume().visible()
+        ShadowLooper.idleMainLooper()
         val activity = controller.get()
         try {
             val previewView = ReflectionHelpers.getField<View>(activity, "previewView")
@@ -660,7 +670,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
             val renderCanvas = Canvas(renderBitmap)
             // 1. 正常状态：成功绘制最新红帧
             renderBitmap.eraseColor(Color.TRANSPARENT)
-            previewView.draw(renderCanvas)
+            renderPreview(previewView, renderCanvas)
             assertEquals("初始正常状态必须绘制当前红帧", Color.RED, renderBitmap.getPixel(50, 50))
 
             // 2. 锁屏/息屏状态：强制清黑且 drawguard 拒绝绘制旧红帧
@@ -670,7 +680,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
             ShadowLooper.idleMainLooper()
 
             renderBitmap.eraseColor(Color.TRANSPARENT)
-            previewView.draw(renderCanvas)
+            renderPreview(previewView, renderCanvas)
             assertEquals("锁屏时画布必须为全黑，严禁显示上一帧残影", Color.BLACK, renderBitmap.getPixel(50, 50))
 
             // 3. 用户解锁（ACTION_USER_PRESENT）：采集当前红帧序号作为水位，旧红帧继续被拒绝
@@ -679,7 +689,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
             ShadowLooper.idleMainLooper()
 
             renderBitmap.eraseColor(Color.TRANSPARENT)
-            previewView.draw(renderCanvas)
+            renderPreview(previewView, renderCanvas)
             assertEquals("解锁瞬间因尚未产生新帧，旧红帧必须被水位拒绝，保持全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
 
             // 4. 发布全新蓝帧（序号严格大于水位）：成功绘制新蓝帧
@@ -687,28 +697,27 @@ class VirtualDisplayTakeoverAndNotificationTest {
             publishFrameForTesting(frameSource, blueBitmap)
 
             renderBitmap.eraseColor(Color.TRANSPARENT)
-            previewView.draw(renderCanvas)
+            renderPreview(previewView, renderCanvas)
             assertEquals("发布新帧后必须成功绘制全新蓝帧", Color.BLUE, renderBitmap.getPixel(50, 50))
             // 5. 验证在非 RESUMED 的 PiP 模式下，锁屏停止循环且解锁恢复循环
             activity.onPictureInPictureModeChanged(true, activity.resources.configuration)
-            val isLoopRunningField = VirtualDisplayPreviewActivity::class.java.getDeclaredField("isFrameLoopRunning").apply { isAccessible = true }
+            val frameView = previewView as VirtualDisplayFrameView
 
             Shadows.shadowOf(km).setKeyguardLocked(true)
             context.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
             ShadowLooper.idleMainLooper()
-            assertFalse("锁屏后帧循环必须停止", isLoopRunningField.getBoolean(activity))
+            assertFalse("锁屏后组件帧循环必须停止", frameView.isFrameLoopRunning)
 
             Shadows.shadowOf(km).setKeyguardLocked(false)
             context.sendBroadcast(Intent(Intent.ACTION_USER_PRESENT))
             ShadowLooper.idleMainLooper()
-            assertTrue("非 RESUMED 的 PiP 模式下收到解锁广播必须恢复帧循环", isLoopRunningField.getBoolean(activity))
+            assertTrue("非 RESUMED 的 PiP 模式下组件帧循环必须恢复", frameView.isFrameLoopRunning)
 
             // 6. 验证 activity destroy 时广播接收器解绑
-            val receiverRegisteredField = VirtualDisplayPreviewActivity::class.java.getDeclaredField("isScreenLockReceiverRegistered").apply { isAccessible = true }
-            assertTrue("运行中 receiver 处于注册状态", receiverRegisteredField.getBoolean(activity))
+            assertTrue("运行中组件 receiver 处于注册状态", frameView.isScreenLockReceiverRegistered)
 
             controller.destroy()
-            assertFalse("Activity 销毁时 receiver 必须安全解绑", receiverRegisteredField.getBoolean(activity))
+            assertFalse("Activity 销毁时组件 receiver 必须安全解绑", frameView.isScreenLockReceiverRegistered)
         } finally {
             frameSource.close()
         }
@@ -1101,6 +1110,390 @@ class VirtualDisplayTakeoverAndNotificationTest {
                 }
             }
         }
+    }
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `virtual display frame view respects binding previewActive and lock screen gates`() {
+        val sessionId = "session-frame-view-test"
+        val displayId = 12
+        val frameSource = VirtualScreenFrameSource(100, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, frameSource)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+
+        val redBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        publishFrameForTesting(frameSource, redBitmap)
+
+        val frameView = VirtualDisplayFrameView(context)
+        frameView.bind(displayId, sessionId)
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+        )
+        frameView.layout(0, 0, 100, 100)
+
+        val renderBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val renderCanvas = Canvas(renderBitmap)
+
+        // 1. 未附着时不绘图，保持全黑
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals(Color.BLACK, renderBitmap.getPixel(50, 50))
+        // 2. 真实挂载到 Activity Window 并 visible，驱动 looper idle
+        val activityController = Robolectric.buildActivity(android.app.Activity::class.java).create().start().resume()
+        val testActivity = activityController.get()
+        testActivity.setContentView(frameView)
+        activityController.visible()
+        ShadowLooper.idleMainLooper()
+        assertTrue("附着后 receiver 已注册", frameView.isScreenLockReceiverRegistered)
+        assertTrue("满足条件时帧循环开启", frameView.isFrameLoopRunning)
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("附着后成功绘制最新红帧", Color.RED, renderBitmap.getPixel(50, 50))
+
+        // 3. setPreviewActive(false) 时停帧并清黑，置新帧门槛
+        frameView.setPreviewActive(false)
+        assertFalse(frameView.isFrameLoopRunning)
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals(Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 恢复 previewActive(true)，因置门槛，未发布新帧前拦截旧红帧保持全黑
+        frameView.setPreviewActive(true)
+        assertTrue(frameView.isFrameLoopRunning)
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("恢复 previewActive 时若无新帧，保持全黑拦截旧红帧", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        val yellowBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.YELLOW) }
+        publishFrameForTesting(frameSource, yellowBitmap)
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("发布新黄帧后成功绘制", Color.YELLOW, renderBitmap.getPixel(50, 50))
+        // 4. 模拟锁屏与解锁门槛
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        Shadows.shadowOf(km).setKeyguardLocked(true)
+        context.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+        ShadowLooper.idleMainLooper()
+        assertFalse("锁屏后帧循环停止", frameView.isFrameLoopRunning)
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("锁屏时画布强制全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 解锁（此时无新帧产生，保持全黑）
+        Shadows.shadowOf(km).setKeyguardLocked(false)
+        context.sendBroadcast(Intent(Intent.ACTION_USER_PRESENT))
+        ShadowLooper.idleMainLooper()
+        assertTrue("解锁后恢复帧循环", frameView.isFrameLoopRunning)
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("解锁后未产生新帧前保持全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 发布新蓝帧后成功渲染
+        val blueBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        publishFrameForTesting(frameSource, blueBitmap)
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("发布新帧后成功绘制蓝帧", Color.BLUE, renderBitmap.getPixel(50, 50))
+
+        // 5. 销毁 Activity 解绑
+        activityController.destroy()
+        ShadowLooper.idleMainLooper()
+        assertFalse(frameView.isFrameLoopRunning)
+        assertFalse(frameView.isScreenLockReceiverRegistered)
+        frameSource.close()
+    }
+
+    @Test
+    fun `takeover controller handles cancellation timeout and successful presentation`() {
+        runBlocking {
+            withTimeout(10_000L) {
+                val sessionId = "session-controller-test"
+                val displayId = 14
+                setVirtualDisplayForTesting(displayId, sessionId)
+                val fakeBridge = FakeTestDisplayBridge()
+                DeviceDisplayManager.displayBridge = fakeBridge
+
+                val controller = VirtualDisplayTakeoverController(context)
+                var lastStatus = ""
+
+                // 1. isBindingCurrent 为 false 时抛出 CancellationException
+                try {
+                    controller.present(
+                        sessionId = sessionId,
+                        displayId = displayId,
+                        taskId = null,
+                        turnId = null,
+                        stopToken = null,
+                        isBindingCurrent = { false },
+                        onStatus = { lastStatus = it },
+                    )
+                    fail("Binding 失效时必须抛出 CancellationException")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    assertEquals("接管已被取代或取消", e.message)
+                }
+
+                // 2. 存在多根任务时拒绝移交并报告歧义
+                fakeBridge.customRootTasksJson = """[{"taskId":1,"taskKind":"root_task","displayId":$displayId,"userId":0,"packageName":"p1","childTaskIds":[1]},{"taskId":2,"taskKind":"root_task","displayId":$displayId,"userId":0,"packageName":"p2","childTaskIds":[2]}]"""
+                val multiResult = controller.present(
+                    sessionId = sessionId,
+                    displayId = displayId,
+                    taskId = null,
+                    turnId = null,
+                    stopToken = null,
+                    isBindingCurrent = { true },
+                    onStatus = { lastStatus = it },
+                )
+                assertFalse("存在多个根任务时必须移交失败", multiResult)
+                assertEquals("虚拟屏存在多个根任务，移交目标歧义", lastStatus)
+
+                // 3. 正常单根任务且无活跃 Turn，成功移交主屏
+                fakeBridge.customRootTasksJson = null
+                val successResult = controller.present(
+                    sessionId = sessionId,
+                    displayId = displayId,
+                    taskId = null,
+                    turnId = null,
+                    stopToken = null,
+                    isBindingCurrent = { true },
+                    onStatus = { lastStatus = it },
+                )
+                assertTrue("单根任务正常移交必须返回 true", successResult)
+                assertEquals("已成功移交至主屏", lastStatus)
+                assertEquals(1, fakeBridge.moveCalls.size)
+                assertEquals(101, fakeBridge.moveCalls[0].first)
+                assertEquals(displayId, fakeBridge.moveCalls[0].second)
+                assertEquals(Display.DEFAULT_DISPLAY, fakeBridge.moveCalls[0].third)
+            }
+        }
+    }
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `parent container hidden stops loop and clears canvas to black with zero drawing`() {
+        val sessionId = "session-parent-hidden"
+        val displayId = 20
+        val frameSource = VirtualScreenFrameSource(100, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, frameSource)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+        publishFrameForTesting(frameSource, Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) })
+        val activityController = Robolectric.buildActivity(android.app.Activity::class.java).create().start().resume()
+        val testActivity = activityController.get()
+
+        val parentContainer = android.widget.FrameLayout(testActivity).apply {
+            visibility = View.VISIBLE
+        }
+        val frameView = VirtualDisplayFrameView(testActivity).apply {
+            visibility = View.VISIBLE
+        }
+        parentContainer.addView(frameView)
+        testActivity.setContentView(parentContainer)
+        activityController.visible()
+        ShadowLooper.idleMainLooper()
+
+        frameView.bind(displayId, sessionId)
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+        )
+        frameView.layout(0, 0, 100, 100)
+
+        val renderBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val renderCanvas = Canvas(renderBitmap)
+
+        // 父容器与 View 均为 VISIBLE，且真实 mount 到 Window，正常渲染
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("父容器可见时必须绘制红帧", Color.RED, renderBitmap.getPixel(50, 50))
+        assertTrue("满足条件时帧循环处于运行状态", frameView.isFrameLoopRunning)
+
+        // 父容器隐藏 (GONE)，触发框架原生 onVisibilityChanged
+        parentContainer.visibility = View.GONE
+        ShadowLooper.idleMainLooper()
+        assertFalse("父容器隐藏时帧循环必须立即停止", frameView.isFrameLoopRunning)
+        assertFalse("父容器隐藏时 shouldDrawFrames 必须为 false", frameView.shouldDrawFrames())
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("父容器隐藏时画布必须全黑零绘制", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 重新恢复父容器可见
+        parentContainer.visibility = View.VISIBLE
+        ShadowLooper.idleMainLooper()
+        assertTrue("父容器重新可见时帧循环恢复", frameView.isFrameLoopRunning)
+        assertTrue("父容器重新可见时 shouldDrawFrames 恢复", frameView.shouldDrawFrames())
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("父容器恢复后能够正常绘制当前帧", Color.RED, renderBitmap.getPixel(50, 50))
+
+        // 验证真正从 Window 移除 detach 后，必须置 fresh gate，旧红帧被拦截，唯有全新绿帧发布才再显示
+        parentContainer.removeView(frameView)
+        ShadowLooper.idleMainLooper()
+        parentContainer.addView(frameView)
+        ShadowLooper.idleMainLooper()
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("重新附着时门槛拦截旧红帧保持全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        val greenBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
+        publishFrameForTesting(frameSource, greenBitmap)
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("重新附着后发布新绿帧成功绘制", Color.GREEN, renderBitmap.getPixel(50, 50))
+
+        activityController.destroy()
+        ShadowLooper.idleMainLooper()
+        frameSource.close()
+    }
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `screen on while locked forbids old frame and requires new frame after unlock`() {
+        val sessionId = "session-screen-on-gate"
+        val displayId = 21
+        val frameSource = VirtualScreenFrameSource(100, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, frameSource)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+
+        val redBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        publishFrameForTesting(frameSource, redBitmap)
+
+        val activityController = Robolectric.buildActivity(android.app.Activity::class.java).create().start().resume()
+        val testActivity = activityController.get()
+        val frameView = VirtualDisplayFrameView(testActivity)
+        testActivity.setContentView(frameView)
+        activityController.visible()
+        ShadowLooper.idleMainLooper()
+
+        frameView.bind(displayId, sessionId)
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+        )
+        frameView.layout(0, 0, 100, 100)
+        val renderBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val renderCanvas = Canvas(renderBitmap)
+
+        // 正常状态
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("初始状态正常绘制红帧", Color.RED, renderBitmap.getPixel(50, 50))
+
+        // 息屏并锁屏
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        Shadows.shadowOf(km).setKeyguardLocked(true)
+        context.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+        ShadowLooper.idleMainLooper()
+
+        // 亮屏但仍处于锁屏（未解锁 ACTION_USER_PRESENT）
+        context.sendBroadcast(Intent(Intent.ACTION_SCREEN_ON))
+        ShadowLooper.idleMainLooper()
+
+        assertFalse("锁屏期间帧循环必须停止", frameView.isFrameLoopRunning)
+        assertFalse("锁屏期间严禁绘图", frameView.shouldDrawFrames())
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("亮屏未解锁时画布必须强制全黑，严禁偷放旧红帧", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 用户解锁（USER_PRESENT）
+        Shadows.shadowOf(km).setKeyguardLocked(false)
+        context.sendBroadcast(Intent(Intent.ACTION_USER_PRESENT))
+        ShadowLooper.idleMainLooper()
+
+        // 解锁后若尚无新帧，旧红帧依然被水位门槛拦截，继续保持全黑
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("解锁瞬间无新帧时依然全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // 全新蓝帧到达后正常显示
+        val blueBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        publishFrameForTesting(frameSource, blueBitmap)
+
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("新蓝帧到达后成功绘制", Color.BLUE, renderBitmap.getPixel(50, 50))
+
+        activityController.destroy()
+        ShadowLooper.idleMainLooper()
+        frameSource.close()
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `manual state detection sets watermark without broadcast and controller aborts early if cancelled`() {
+        val sessionId = "session-manual-gate"
+        val displayId = 22
+        val frameSource = VirtualScreenFrameSource(100, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, frameSource)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+
+        val redBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        publishFrameForTesting(frameSource, redBitmap)
+        val activityController = Robolectric.buildActivity(android.app.Activity::class.java).create().start().resume()
+        val testActivity = activityController.get()
+        val frameView = VirtualDisplayFrameView(testActivity)
+        testActivity.setContentView(frameView)
+        activityController.visible()
+        ShadowLooper.idleMainLooper()
+
+        frameView.bind(displayId, sessionId)
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(100, View.MeasureSpec.EXACTLY),
+        )
+        frameView.layout(0, 0, 100, 100)
+        // 模拟锁屏：手工标记锁屏状态，未通过广播
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        Shadows.shadowOf(km).setKeyguardLocked(true)
+        assertFalse("通过 KeyguardStateMonitor 检测到锁屏，shouldDrawFrames 返回 false", frameView.shouldDrawFrames())
+        assertTrue("检测到锁屏后自动置位 requireNewFrameAfterUnlock", frameView.requireNewFrameAfterUnlock)
+
+        // 模拟解锁：手工解除锁屏，不发送 ACTION_USER_PRESENT 广播
+        Shadows.shadowOf(km).setKeyguardLocked(false)
+        val renderBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        val renderCanvas = Canvas(renderBitmap)
+
+        // shouldDrawFrames 首次在解锁状态下执行，自动建立当前序号水位并清除 requireNewFrameAfterUnlock
+        assertTrue("锁解除后 shouldDrawFrames 恢复 true", frameView.shouldDrawFrames())
+        assertFalse("执行后 requireNewFrameAfterUnlock 被清除", frameView.requireNewFrameAfterUnlock)
+        assertTrue("水位序号已成功建立为当前红帧序号", frameView.minRequiredFrameSequence >= 1L)
+
+        // 绘制旧红帧被水位拒绝，保持全黑
+        renderBitmap.eraseColor(Color.TRANSPARENT)
+        renderPreview(frameView, renderCanvas)
+        assertEquals("手工解锁无新帧前旧红帧被水位门槛拦截保持全黑", Color.BLACK, renderBitmap.getPixel(50, 50))
+
+        // Controller 测试：首次调用前已处于取消状态的协程立即抛出异常且不执行停止任务
+        runBlocking {
+            val controller = VirtualDisplayTakeoverController(context)
+            val parentJob = Job()
+            parentJob.cancel()
+            val deferred = async(parentJob) {
+                controller.present(
+                    sessionId = sessionId,
+                    displayId = displayId,
+                    taskId = "task-cancelled-early",
+                    turnId = "turn-cancelled-early",
+                    stopToken = "token-cancelled-early",
+                    isBindingCurrent = { true },
+                    onStatus = {},
+                )
+            }
+            try {
+                deferred.await()
+                fail("已取消协程必须抛出 CancellationException")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 预期行为
+            }
+            assertNull("早期取消的协程绝不得在 TaskRuntime 中遗留停止任务", TaskRuntime.getActiveTask("task-cancelled-early"))
+        }
+
+        activityController.destroy()
+        ShadowLooper.idleMainLooper()
+        frameSource.close()
     }
 
     private fun findButtonWithText(activity: VirtualDisplayPreviewActivity, text: String): Button? {

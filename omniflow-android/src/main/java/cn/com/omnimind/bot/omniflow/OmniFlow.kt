@@ -59,6 +59,7 @@ object OmniFlow {
         val beforeOperation: suspend () -> Unit = {},
         val stopRequested: () -> Boolean = { false },
         val onProgress: suspend (String, Map<String, Any?>) -> Unit = { _, _ -> },
+        val hostManagedUi: Boolean = false,
     )
 
     data class Result(
@@ -168,6 +169,7 @@ object OmniFlow {
                             initialPhase = initialExecutionPhase(usesModel = modelClient != null),
                             onStop = requestStop,
                             onComplete = requestComplete,
+                            showOverlay = !hooks.hostManagedUi,
                         )
                         val registration = executions.begin(
                             runId = request.id,

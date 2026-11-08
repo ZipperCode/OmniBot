@@ -256,6 +256,12 @@ class AgentConversationHistoryRepository(
             status = if (isError) STATUS_ERROR else STATUS_SUCCESS,
             createdAt = createdAt
         )
+        val sId = streamMeta?.get("sessionId")?.toString()?.trim()
+        val tId = streamMeta?.get("turnId")?.toString()?.trim()
+        if (!sId.isNullOrEmpty() && !tId.isNullOrEmpty() && text.isNotBlank() &&
+            cn.com.omnimind.bot.task.runtime.TaskRuntime.isPendingScreenResult(sId, tId)) {
+            cn.com.omnimind.bot.task.runtime.TaskRuntime.onAssistantMessagePersisted(sId, tId, text)
+        }
     }
 
     suspend fun upsertUiCard(
@@ -411,7 +417,10 @@ class AgentConversationHistoryRepository(
         // A UI snapshot may contain only one display page. Import legacy data
         // through its existing owner, then mutate only explicit item identities.
         importLegacyHistory(conversationId, mode)
-        replaceStoredThreadMessages(conversationId, mode, messages, removals)
+        val pendingTurnFinalAssistantText = replaceStoredThreadMessages(conversationId, mode, messages, removals)
+        pendingTurnFinalAssistantText.forEach { (key, text) ->
+            cn.com.omnimind.bot.task.runtime.TaskRuntime.onAssistantMessagePersisted(key.first, key.second, text)
+        }
     }
 
     private suspend fun replaceStoredThreadMessages(
@@ -419,12 +428,12 @@ class AgentConversationHistoryRepository(
         conversationMode: String,
         messages: List<Map<String, Any?>>,
         removedMessageIds: List<String> = emptyList(),
-    ) = DatabaseHelper.withTransaction {
+    ): Map<Pair<String, String>, String> = DatabaseHelper.withTransaction {
         // Removing a retry round must not erase unloaded pages, concurrent new
         // items or complete offloaded records. Existing rows retain their IDs.
         val existingConversation = DatabaseHelper.getConversationById(conversationId)
         val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
-        if (messages.isEmpty() && removedMessageIds.isEmpty()) return@withTransaction
+        if (messages.isEmpty() && removedMessageIds.isEmpty()) return@withTransaction emptyMap()
         val dao = DatabaseHelper.getAgentConversationEntryDao()
         val modes = conversationModeCandidates(effectiveConversationMode)
         val cutoff = existingConversation?.contextSummaryCutoffEntryDbId
@@ -437,6 +446,7 @@ class AgentConversationHistoryRepository(
         val acknowledgedMessages = AgentConversationHistorySupport.mergePendingExternalUserMessages(
             existingMessages = emptyList(), incomingMessages = messages,
         )
+        val pendingTurnFinalAssistantText = mutableMapOf<Pair<String, String>, String>()
         ConversationSnapshotOrdering.prepareForStorage(acknowledgedMessages).forEach { prepared ->
             val message = prepared.payload
             if (AgentHistoryDisplayProjection.isOffloadedMessage(message)) {
@@ -495,11 +505,26 @@ class AgentConversationHistoryRepository(
                     updatedAt = prepared.createdAt
                 )
             )
+            if (type == ENTRY_TYPE_ASSISTANT_MESSAGE) {
+                val streamMeta = toStringAnyMap(message["streamMeta"])
+                val sId = streamMeta["sessionId"]?.toString()?.trim()
+                val tId = streamMeta["turnId"]?.toString()?.trim()
+                if (!sId.isNullOrEmpty() && !tId.isNullOrEmpty()) {
+                    val text = summary.ifBlank {
+                        val content = toStringAnyMap(message["content"])
+                        content["text"]?.toString().orEmpty()
+                    }.trim()
+                    if (text.isNotEmpty() && cn.com.omnimind.bot.task.runtime.TaskRuntime.isPendingScreenResult(sId, tId)) {
+                        pendingTurnFinalAssistantText[Pair(sId, tId)] = text
+                    }
+                }
+            }
         }
         if (invalidatesCheckpoint && !existingConversation?.contextSummary.isNullOrBlank()) {
             resetContextSummary(conversationId)
         }
         refreshConversationMetadata(conversationId)
+        return@withTransaction pendingTurnFinalAssistantText
     }
 
     suspend fun listConversationMessages(
@@ -544,6 +569,46 @@ class AgentConversationHistoryRepository(
         }
         val sorted = ConversationSnapshotOrdering.sortForDisplay(messagePayloads)
         MessagePage(sorted, page.hasMore, page.nextOffset)
+    }
+    suspend fun findExactTurnAssistantMessage(
+        conversationId: Long,
+        sessionId: String,
+        turnId: String,
+        conversationMode: String = "agent",
+    ): String? = withContext(Dispatchers.IO) {
+        val normSession = sessionId.trim()
+        val normTurn = turnId.trim()
+        if (normSession.isEmpty() || normTurn.isEmpty()) return@withContext null
+
+        val effectiveConversationMode = resolveConversationMode(conversationId, conversationMode)
+        var offset = 0
+        val pageSize = SAFE_HISTORY_PAGE_SIZE
+        while (true) {
+            val entries = loadThreadEntriesDescPagedSafe(
+                conversationId = conversationId,
+                conversationMode = effectiveConversationMode,
+                limit = pageSize,
+                offset = offset,
+            )
+            if (entries.isEmpty()) break
+            for (entry in entries) {
+                if (entry.entryType != ENTRY_TYPE_ASSISTANT_MESSAGE) continue
+                val payload = AgentConversationHistorySupport.readMap(entry.payloadJson)
+                val streamMeta = toStringAnyMap(payload["streamMeta"])
+                val metaSession = streamMeta["sessionId"]?.toString()?.trim()
+                val metaTurn = streamMeta["turnId"]?.toString()?.trim()
+                if (metaSession == normSession && metaTurn == normTurn) {
+                    val content = toStringAnyMap(payload["content"])
+                    val text = (content["text"] ?: payload["text"] ?: entry.summary)?.toString()?.trim()
+                    if (!text.isNullOrBlank()) {
+                        return@withContext text
+                    }
+                }
+            }
+            if (entries.size < pageSize) break
+            offset += entries.size
+        }
+        null
     }
 
     suspend fun clearConversationMessages(

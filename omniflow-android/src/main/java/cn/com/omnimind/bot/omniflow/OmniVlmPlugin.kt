@@ -17,6 +17,7 @@ class OmniVlmPlugin internal constructor(
         val maxRejectedActionRetries: Int? = null,
         val display: String? = null,
         val displayId: Int? = null,
+        val hostManagedUi: Boolean = false,
     )
 
     data class Hooks(
@@ -110,6 +111,7 @@ private object DefaultOmniVlmBackend : OmniVlmBackend {
                 beforeOperation = hooks.beforeOperation,
                 stopRequested = hooks.stopRequested,
                 onProgress = hooks.onProgress,
+                hostManagedUi = request.hostManagedUi,
             ),
         )
         return OmniVlmPlugin.Result(

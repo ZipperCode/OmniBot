@@ -379,13 +379,14 @@ class AgentRuntimeManager private constructor(
         threadId: String,
         expectedTurnId: String? = null,
         terminalStatus: String = "completed",
+        error: String? = null,
     ): Boolean {
         val turnId = remoteTurnOwnership.activeTurnId(threadId) ?: return false
         if (expectedTurnId != null && expectedTurnId != turnId) return false
         if (remoteTurnOwnership.finish(threadId, turnId, status = terminalStatus) == null) {
             return false
         }
-        releaseTurnRuntime(threadId, turnId)
+        releaseTurnRuntime(threadId, turnId, terminalStatus = terminalStatus, error = error)
         return true
     }
 
@@ -401,7 +402,7 @@ class AgentRuntimeManager private constructor(
         return sessionTurnMutex(sessionId).withLock {
             val execution = remotePromptExecutions.remove(sessionId)
             execution?.cancelActionJob(CancellationException("远程提示词轮次已结束 ($status)"))
-            val cleared = clearActiveTurn(sessionId, turnId, terminalStatus = status)
+            val cleared = clearActiveTurn(sessionId, turnId, terminalStatus = status, error = error)
             if (cleared) {
                 AcpTaskTerminalJournal.recordTerminal(
                     context = appContext,
@@ -423,13 +424,23 @@ class AgentRuntimeManager private constructor(
         remotePromptExecutions.clear()
         remoteTurnOwnership.activeRecords().forEach { record ->
             if (remoteTurnOwnership.finish(record.sessionId, record.turnId, status = "cancelled") != null) {
-                releaseTurnRuntime(record.sessionId, record.turnId)
+                releaseTurnRuntime(record.sessionId, record.turnId, terminalStatus = "cancelled")
             }
         }
     }
 
-    private fun releaseTurnRuntime(sessionId: String, turnId: String) {
-        TaskRuntime.finish(appContext, agentTurnRuntimeId(sessionId, turnId))
+    private fun releaseTurnRuntime(
+        sessionId: String,
+        turnId: String,
+        terminalStatus: String? = null,
+        error: String? = null,
+    ) {
+        TaskRuntime.finish(
+            context = appContext,
+            taskId = agentTurnRuntimeId(sessionId, turnId),
+            terminalStatus = terminalStatus,
+            error = error,
+        )
         TaskRuntimeSettings.onTaskFinished(appContext)
     }
 
@@ -2867,7 +2878,7 @@ class AgentRuntimeManager private constructor(
             status = "error",
             error = failureMessage,
         ).forEach { record ->
-            releaseTurnRuntime(record.sessionId, record.turnId)
+            releaseTurnRuntime(record.sessionId, record.turnId, terminalStatus = "error", error = failureMessage)
         }
         return true
     }

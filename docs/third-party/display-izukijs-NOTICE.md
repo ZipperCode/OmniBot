@@ -44,6 +44,12 @@
    - 客户端与服务端通过随机 Nonce 一次性显式广播与 `Bundle.putBinder` 完成 Binder 交接并双向校验 UID，彻底规避 `untrusted_app` 在 SELinux 下访问 `ServiceManager` 的不可行路径。
    - 常驻 Helper 进程纳入 `PrivilegedCapabilityManager` 的受控会话与进程组统一管理，随授权撤销、ACP 会话关闭或取消而级联销毁。
 
+## 悬浮交互参考（不含代码移植）
+
+- 交互参考：[Mangi-11/Eta](https://github.com/Mangi-11/Eta)，观察版本 `c866a747ba89787d15beed5030aa8513960aea45` 的 `AgentOverlayCapsule.kt`、`VirtualDisplayStageCard.kt` 与 `AgentOverlayContent.kt`：顶部胶囊 / 微缩取景器、展开装裱式预览、主屏边缘流光及底部结果选择。
+- 上游采用 [PolyForm Noncommercial 1.0.0](https://github.com/Mangi-11/Eta/blob/c866a747ba89787d15beed5030aa8513960aea45/LICENSE)，并要求保留 `Required Notice: Copyright © 2026 蛮吉 (Mangi-11).`；本次未复制或移植其源码、资源、图标、状态模型或依赖，仅据可见交互独立实现。
+- OmniBot 的 `ScreenTaskOverlayHost` / `ScreenTaskOverlayViews` 使用自身品牌配色与原生 View，复用原有 ACP / TaskRuntime、显示帧源及取消移交流程；该参考不改变既有 IzukiJS 移植代码的许可证归属。
+
 ---
 
 ## 验证边界声明

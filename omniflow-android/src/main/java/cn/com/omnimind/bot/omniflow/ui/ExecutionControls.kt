@@ -75,6 +75,7 @@ internal class ExecutionControls private constructor(
             initialPhase: ExecutionPhase,
             onStop: () -> Unit,
             onComplete: () -> Unit,
+            showOverlay: Boolean = true,
         ): ExecutionControls {
             val stopRequested = AtomicBoolean(false)
             val completionRequested = AtomicBoolean(false)
@@ -91,14 +92,18 @@ internal class ExecutionControls private constructor(
             ) {
                 guiEnvironment.awaitReady()
             }
-            val controls = withContext(Dispatchers.Main) {
-                ExecutionOverlay.show(
-                    context = context,
-                    goal = title,
-                    initialPhase = initialPhase,
-                    onComplete = dispatchComplete,
-                    onStop = dispatchStop,
-                )
+            val controls = if (showOverlay) {
+                withContext(Dispatchers.Main) {
+                    ExecutionOverlay.show(
+                        context = context,
+                        goal = title,
+                        initialPhase = initialPhase,
+                        onComplete = dispatchComplete,
+                        onStop = dispatchStop,
+                    )
+                }
+            } else {
+                null
             }
             return ExecutionControls(
                 controls,
