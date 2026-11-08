@@ -167,3 +167,22 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 
 每次提交的测试报告必须单独标记：已验证不变量、尚未验证的不变量、属于上游环境
 还是本地代码、可修改项、不可修改项，以及哪些行为已经对齐官方且以后不得重新引入旁路。
+
+## 小万 Subagent 配置与执行
+
+入口为 `Agents → 小万 → 配置`，读写仍走既有 `agent/config/read`、`agent/config/write`。配置按 Turn 读取同一快照，保存只影响下一轮；Provider/模型只保存引用，不复制认证信息。模型列表在用户主动点开选择器时由现有 Provider 入口加载。其他 Harness 与公共设备 MCP 不提供分派能力。
+
+配置包括总开关、专用模型、思考档位、内置与自定义角色提示词以及工具允许/禁止列表。基础角色权限与父目录是上限，空允许列表表示无工具，所有子角色均禁止递归分派。配置损坏、禁用角色、已删除 Provider 与过期 revision 明确报错，不重新启用较宽的默认权限。
+
+维护入口已包含 `SubagentRuntimeExecutionTest` 和 `XiaowanSubagentConfigBehaviorTest`；后者覆盖失败提交后的旧快照、跨实例 revision 冲突、冷读取、损坏配置与 null/空工具策略。`AgentOrchestratorTest` 覆盖父审批允许/拒绝的实际副作用，以及父取消后仍可挂起发送且只发送一次的子取消终态。
+
+本次实际执行结果：
+
+- 原生聚焦回归 108 项通过；`assembleDevelopStandardDebug` 成功，真机覆盖安装成功。构建未安装依赖；Windows 跨盘缓存使用命令行 `-Pkotlin.incremental=false -Pkotlin.compiler.execution.strategy=in-process`。
+- Flutter 设置页、工具详情卡片与共享 reducer 合计 249 项通过；修改角色表单滚动与模型选择器后，设置页 13 项再次通过；改动文件 `flutter analyze --no-pub` 无问题。
+- 真机从旧版小万配置仅显示启动命令复现缺口；新版总开关关闭后保存、退出重开仍为关闭。新增 `smoke-reviewer`（探索者基础、无工具）后保存并重新加载，角色与权限保留。
+- 默认继承模型和显式配置 `deepseek-v4-pro` / `low` 两条路径均从聊天界面实际调用一次 `subagent_dispatch`，并发两个角色分别得到 `ROLE_42`、`PLAN_42`；工具详情中的两个结果均为 `completed`，`toolCalls` 为空，主回复包含两项结果。
+- 真机运行子任务期间点击“停止”，父任务显示“任务已取消”；最终工具详情保留 `subagent_cancelled` / `status: cancelled`，而不是被旧进度覆盖。同一会话下一轮实际返回 `RECOVERY_OK`，未重放取消的子任务。
+- 最终安装 APK 的 SHA256 为 `d99fd6ba515268d229983f3b98c4ca44e2f9056b52ce483149914722c8b0099e`；该版本取消后实际返回 `FINAL_RECOVERY_OK`。验收创建的自定义角色已通过设置页删除，模型与思考恢复跟随主 Agent；保留测试对话记录，不删除用户历史。
+- 未以浏览器自动化、HTTP 200 或仅工具卡片存在作为验收；未修改长期记忆、未输出凭据。审批允许/拒绝与取消终态的细分边界由上述原生行为测试覆盖，发布全量门禁与全部 ROM 未执行。
+

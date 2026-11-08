@@ -1,16 +1,20 @@
 package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
+import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
+import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-
 /**
  * Spawns and supervises real subagents.
  *
@@ -38,7 +42,13 @@ class SubagentDispatcher(
     private val model: String,
     private val toolImageContinuationPolicy: AgentToolImageContinuationPolicy =
         AgentToolImageContinuationPolicy.DEFAULT,
-    private val contextCompactorFactory: (() -> AgentContextCompactionController)? = null
+    private val contextCompactorFactory: (() -> AgentContextCompactionController)? = null,
+    private val config: XiaowanSubagentConfig = XiaowanSubagentConfig(),
+    private val configError: Throwable? = null,
+    private val subagentLlmClientFactory: ((model: String, override: AgentModelOverride?) -> AgentLlmClient)? = null,
+    private val providerProfileResolver: (String) -> ModelProviderProfile? = ModelProviderConfigStore::getProfile,
+    private val subagentImagePolicyResolver: ((model: String, override: AgentModelOverride?) -> AgentToolImageContinuationPolicy)? = null,
+    private val subagentCompactorFactory: ((model: String, override: AgentModelOverride?, reasoningEffort: String?) -> AgentContextCompactionController)? = null,
 ) {
 
     data class SubagentTaskSpec(
@@ -83,14 +93,85 @@ class SubagentDispatcher(
         }
     }
 
+    private data class ChildModelContext(
+        val model: String,
+        val llmClient: AgentLlmClient,
+        val toolImageContinuationPolicy: AgentToolImageContinuationPolicy,
+        val contextCompactorFactory: (() -> AgentContextCompactionController?)?,
+        val reasoningEffort: String?,
+        val modelProviderProfileId: String?,
+    )
+
+    private fun resolveChildModelContext(parentEnv: AgentExecutionEnvironment): ChildModelContext {
+        val providerId = config.providerProfileId?.trim()?.ifEmpty { null }
+        val modelId = config.modelId?.trim()?.ifEmpty { null }
+        val reasoningEffort = config.reasoningEffort?.trim()?.ifEmpty { null }
+            ?: parentEnv.reasoningEffort
+
+        if (providerId != null || modelId != null) {
+            require(providerId != null && modelId != null) {
+                "子代理模型配置错误：providerProfileId 与 modelId 必须同时指定"
+            }
+            val providerProfile = providerProfileResolver(providerId)
+                ?: throw IllegalStateException("子代理指定的 ModelProvider 不存在: $providerId")
+            val childModelOverride = AgentModelOverride.fromProviderProfile(providerProfile, modelId)
+                ?: throw IllegalStateException("子代理指定的 ModelProvider 未完成配置或模型无效: $providerId / $modelId")
+
+            val childLlm = checkNotNull(subagentLlmClientFactory) {
+                "子代理独立模型缺少执行器"
+            }.invoke(modelId, childModelOverride)
+            val childImagePolicy = checkNotNull(subagentImagePolicyResolver) {
+                "子代理独立模型缺少图像能力解析器"
+            }.invoke(modelId, childModelOverride)
+            val childCompactor = subagentCompactorFactory?.let { factory ->
+                { factory(modelId, childModelOverride, reasoningEffort) }
+            }
+
+            return ChildModelContext(
+                model = modelId,
+                llmClient = childLlm,
+                toolImageContinuationPolicy = childImagePolicy,
+                contextCompactorFactory = childCompactor,
+                reasoningEffort = reasoningEffort,
+                modelProviderProfileId = providerId,
+            )
+        } else {
+            val childCompactor = {
+                subagentCompactorFactory?.invoke(model, null, reasoningEffort)
+                    ?: contextCompactorFactory?.invoke()
+            }
+            return ChildModelContext(
+                model = model,
+                llmClient = llmClient,
+                toolImageContinuationPolicy = toolImageContinuationPolicy,
+                contextCompactorFactory = childCompactor,
+                reasoningEffort = reasoningEffort,
+                modelProviderProfileId = parentEnv.modelProviderProfileId,
+            )
+        }
+    }
+
     suspend fun dispatch(
         parentEnv: AgentExecutionEnvironment,
         tasks: List<SubagentTaskSpec>,
         concurrency: Int,
+        parentToolCallId: String? = null,
         progressReporter: (suspend (SubagentProgressEvent) -> Unit)? = null
     ): List<SubagentRunResult> {
+        if (configError != null) {
+            throw IllegalStateException("子代理配置读取失败，请检查配置: ${configError.message}", configError)
+        }
+        require(config.enabled) { "子代理功能未启用" }
         if (tasks.isEmpty()) return emptyList()
         require(concurrency > 0) { "concurrency must be positive" }
+        // 显式模型与 Provider 配置验证：报错明确告知调用者，不静默回退
+        val modelContext = resolveChildModelContext(parentEnv)
+
+        // 校验所有任务的角色均存在且已启用
+        for (spec in tasks) {
+            config.requireProfile(spec.profileId)
+        }
+
         val limit = concurrency
         val progressSequence = AtomicLong(0)
         emitProgress(
@@ -108,6 +189,8 @@ class SubagentDispatcher(
                             parentEnv = parentEnv,
                             taskIndex = index,
                             spec = spec,
+                            parentToolCallId = parentToolCallId,
+                            modelContext = modelContext,
                             progressReporter = progressReporter,
                             progressSequence = progressSequence
                         )
@@ -121,10 +204,12 @@ class SubagentDispatcher(
         parentEnv: AgentExecutionEnvironment,
         taskIndex: Int,
         spec: SubagentTaskSpec,
+        parentToolCallId: String?,
+        modelContext: ChildModelContext,
         progressReporter: (suspend (SubagentProgressEvent) -> Unit)?,
         progressSequence: AtomicLong
     ): SubagentRunResult {
-        val profile = SubagentProfileRegistry.get(spec.profileId)
+        val profile = config.requireProfile(spec.profileId)
         val subagentId = "subagent-${UUID.randomUUID().toString().take(8)}"
         return try {
             emitProgress(
@@ -145,6 +230,50 @@ class SubagentDispatcher(
                 role = "user",
                 content = JsonPrimitive(spec.instruction)
             )
+            val mappedPermissionRequester = parentEnv.permissionRequester?.let { parentRequester ->
+                object : AgentPermissionRequester {
+                    override suspend fun requestPermission(
+                        toolCallId: String,
+                        title: String,
+                        detail: String
+                    ): Boolean = parentRequester.requestPermission(
+                        toolCallId = parentToolCallId ?: toolCallId,
+                        title = title,
+                        detail = detail
+                    )
+
+                    override suspend fun requestPermission(
+                        toolCallId: String,
+                        title: String,
+                        detail: String,
+                        action: String?,
+                        targetResource: String?
+                    ): Boolean = parentRequester.requestPermission(
+                        toolCallId = parentToolCallId ?: toolCallId,
+                        title = title,
+                        detail = detail,
+                        action = action,
+                        targetResource = targetResource
+                    )
+
+                    override suspend fun requestPermission(
+                        toolCallId: String,
+                        title: String,
+                        detail: String,
+                        action: String?,
+                        targetResource: String?,
+                        rawInput: JsonObject?
+                    ): Boolean = parentRequester.requestPermission(
+                        toolCallId = parentToolCallId ?: toolCallId,
+                        title = title,
+                        detail = detail,
+                        action = action,
+                        targetResource = targetResource,
+                        rawInput = rawInput
+                    )
+                }
+            }
+
             val subEnv = DefaultAgentExecutionEnvironment(
                 acpSessionId = parentEnv.acpSessionId,
                 acpTurnId = parentEnv.acpTurnId,
@@ -157,11 +286,11 @@ class SubagentDispatcher(
                 workspaceManager = parentEnv.workspaceManager,
                 workspaceMemoryService = parentEnv.workspaceMemoryService,
                 conversationMode = parentEnv.conversationMode,
-                reasoningEffort = parentEnv.reasoningEffort,
-                modelProviderProfileId = parentEnv.modelProviderProfileId,
+                reasoningEffort = modelContext.reasoningEffort,
+                modelProviderProfileId = modelContext.modelProviderProfileId,
                 terminalEnvironment = parentEnv.terminalEnvironment,
                 runControl = NoOpAgentRunControl,
-                permissionRequester = parentEnv.permissionRequester,
+                permissionRequester = mappedPermissionRequester,
                 turnJob = parentEnv.turnJob,
                 longTermMemoryIndex = parentEnv.longTermMemoryIndex
             )
@@ -173,12 +302,12 @@ class SubagentDispatcher(
                 progressSequence = progressSequence
             )
             val orchestrator = AgentOrchestrator(
-                llmClient = llmClient,
+                llmClient = modelContext.llmClient,
                 toolRegistry = harnessCatalog,
                 toolRouter = toolExecutorProvider(),
                 eventAdapter = eventAdapter,
-                model = model,
-                toolImageContinuationPolicy = toolImageContinuationPolicy,
+                model = modelContext.model,
+                toolImageContinuationPolicy = modelContext.toolImageContinuationPolicy,
                 ownsToolRouter = false
             )
             val result = orchestrator.run(
@@ -187,7 +316,7 @@ class SubagentDispatcher(
                     initialMessages = listOf(systemMessage, userMessage),
                     executionEnv = subEnv,
                     conversationId = null,
-                    contextCompactor = contextCompactorFactory?.invoke(),
+                    contextCompactor = modelContext.contextCompactorFactory?.invoke(),
                 )
             )
             when (result) {
@@ -212,13 +341,15 @@ class SubagentDispatcher(
                     )
                 }
                 is AgentResult.Error -> {
+                    val cause = result.exception
+                    if (cause is CancellationException) throw cause
                     emitProgress(
                         progressReporter,
                         progressSequence,
                         kind = "subagent_failed",
-                        taskIndex = taskIndex,
                         subagentId = subagentId,
                         profileId = profile.id,
+                        taskIndex = taskIndex,
                         status = "failed",
                         summary = "SubAgent #${taskIndex + 1} 失败：${normalizeSubagentProgressText(result.message)}"
                     )
@@ -234,6 +365,18 @@ class SubagentDispatcher(
                 }
             }
         } catch (ce: CancellationException) {
+            withContext(NonCancellable) {
+                emitProgress(
+                    progressReporter,
+                    progressSequence,
+                    kind = "subagent_cancelled",
+                    taskIndex = taskIndex,
+                    subagentId = subagentId,
+                    profileId = profile.id,
+                    status = "cancelled",
+                    summary = "SubAgent #${taskIndex + 1} 已取消"
+                )
+            }
             throw ce
         } catch (e: Exception) {
             emitProgress(
@@ -291,7 +434,7 @@ class SubagentDispatcher(
 internal fun inheritedSubagentCatalog(
     parent: AgentToolCatalog,
     profile: SubagentProfile = SubagentProfileRegistry.general,
-): AgentToolCatalog = if (profile.id == "general") parent else SubagentToolCatalogView(parent, profile.id)
+): AgentToolCatalog = SubagentToolCatalogView(parent, profile)
 
 /**
  * Callback that swallows subagent streaming output (we don't want subagent

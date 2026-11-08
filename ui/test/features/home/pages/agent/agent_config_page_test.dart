@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +10,7 @@ import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
 import 'package:ui/widgets/navigation/page_route.dart';
+import 'package:ui/widgets/settings_ui.dart';
 
 Future<void> _sendBackGesture(
   WidgetTester tester,
@@ -83,7 +85,6 @@ void main() {
         });
 
     await _pumpPage(tester, 'my-acp-agent');
-    expect(find.textContaining('保存不会中断当前对话'), findsOneWidget);
     const command = '/workspace/my agent/bin/acp';
     const arguments = '--config\n/workspace/my agent/settings.json';
     const environment =
@@ -439,6 +440,551 @@ void main() {
     expect(saved?['content'], updated);
     expect(find.textContaining('claude-opus'), findsOneWidget);
   });
+
+  testWidgets(
+    'Xiaowan Subagent configuration panel loads, saves with content and expectedRevision 0, and updates on reopening',
+    (tester) async {
+      var readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': null,
+          'modelId': null,
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general system prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+            },
+            <String, dynamic>{
+              'id': 'explorer',
+              'displayName': '探索者',
+              'systemPrompt': 'explorer system prompt',
+              'description': 'explorer desc',
+              'baseProfileId': 'explorer',
+              'enabled': true,
+              'allowedTools': <String>['file_read'],
+              'disallowedTools': <String>['file_write'],
+            },
+          ],
+        },
+      };
+
+      Map<String, dynamic>? lastWriteArgs;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        if (call.method == 'agent/config/write') {
+          final args = Map<String, dynamic>.from(call.arguments as Map);
+          lastWriteArgs = args;
+          final updatedSubagent =
+              jsonDecode(args['content'] as String) as Map<String, dynamic>;
+          readPayload = <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': (args['expectedRevision'] as int? ?? 0) + 1,
+            'subagent': updatedSubagent,
+          };
+          return readPayload;
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{
+            'editingProfileId': null,
+            'profiles': <dynamic>[],
+          };
+        }
+        if (call.method == 'getSceneModelBindings') {
+          return <dynamic>[];
+        }
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-dedicated-model-tile')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-reasoning-dropdown')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-general')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-explorer')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('agent-raw-config-content')), findsNothing);
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-profile-switch-explorer')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastWriteArgs, isNotNull);
+      expect(lastWriteArgs!['agentId'], 'xiaowan-acp');
+      expect(lastWriteArgs!['expectedRevision'], 0);
+      final savedSubagent =
+          jsonDecode(lastWriteArgs!['content'] as String) as Map<String, dynamic>;
+      final explorerMap = (savedSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'explorer') as Map;
+      expect(explorerMap['enabled'], false);
+
+      await _pumpPage(tester, 'xiaowan-acp');
+      expect(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-explorer')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'Xiaowan Subagent allows adding and editing custom role with baseProfileId and custom tool policy',
+    (tester) async {
+      var readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': null,
+          'modelId': null,
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general system prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+            },
+          ],
+        },
+      };
+
+      Map<String, dynamic>? lastWriteArgs;
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        if (call.method == 'agent/config/write') {
+          lastWriteArgs = Map<String, dynamic>.from(call.arguments as Map);
+          return <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': 1,
+            'subagent': jsonDecode(lastWriteArgs!['content'] as String),
+          };
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{'editingProfileId': null, 'profiles': <dynamic>[]};
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-add-profile-button')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('xiaowan-subagent-sheet-id-input')),
+        'custom-reviewer',
+      );
+      await tester.enterText(
+        find.byKey(const Key('xiaowan-subagent-sheet-name-input')),
+        '代码审查员',
+      );
+      await tester.enterText(
+        find.byKey(const Key('xiaowan-subagent-sheet-prompt-input')),
+        '审查 PR 代码质量',
+      );
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-sheet-tool-mode-dropdown')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('无工具').last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-sheet-save-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-custom-reviewer')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      expect(lastWriteArgs, isNotNull);
+      final savedSubagent =
+          jsonDecode(lastWriteArgs!['content'] as String) as Map<String, dynamic>;
+      final customRole = (savedSubagent['profiles'] as List)
+          .firstWhere((p) => p['id'] == 'custom-reviewer') as Map;
+      expect(customRole['displayName'], '代码审查员');
+      expect(customRole['allowedTools'], isEmpty);
+      expect(customRole['baseProfileId'], 'general');
+    },
+  );
+
+  testWidgets(
+    'Xiaowan Subagent save failure preserves user edits and displays error',
+    (tester) async {
+      final readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': null,
+          'modelId': null,
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general system prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+            },
+          ],
+        },
+      };
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        if (call.method == 'agent/config/write') {
+          throw PlatformException(
+            code: 'revision_conflict',
+            message: 'Stale revision',
+          );
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{'editingProfileId': null, 'profiles': <dynamic>[]};
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('agent-config-save')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('agent-config-error-text')), findsOneWidget);
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'non-Xiaowan agents do not display Subagent panel',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('codex-acp', 'Codex'));
+        }
+        if (call.method == 'agent/config/read') {
+          return <String, dynamic>{
+            'agentId': 'codex-acp',
+            'kind': 'codex',
+            'configPath': '~/.codex/config.toml',
+            'authPath': '~/.codex/auth.json',
+          };
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{'editingProfileId': null, 'profiles': <dynamic>[]};
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'codex-acp');
+
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('xiaowan-subagent-add-profile-button')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('agent-shared-provider-model-selector')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'Xiaowan general profile cannot be disabled and built-in profiles cannot be deleted',
+    (tester) async {
+      final readPayload = <String, dynamic>{
+        'agentId': 'xiaowan-acp',
+        'kind': 'xiaowan',
+        'revision': 0,
+        'subagent': <String, dynamic>{
+          'enabled': true,
+          'providerProfileId': null,
+          'modelId': null,
+          'reasoningEffort': null,
+          'profiles': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'id': 'general',
+              'displayName': '通用子任务',
+              'systemPrompt': 'general prompt',
+              'description': 'general desc',
+              'baseProfileId': 'general',
+              'enabled': true,
+              'allowedTools': null,
+              'disallowedTools': <String>[],
+            },
+          ],
+        },
+      };
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return readPayload;
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{'editingProfileId': null, 'profiles': <dynamic>[]};
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      expect(
+        find.byKey(const Key('xiaowan-subagent-profile-switch-general')),
+        findsNothing,
+      );
+
+      await tester.tap(
+        find.byKey(const Key('xiaowan-subagent-profile-tile-general')),
+      );
+      await tester.pumpAndSettle();
+
+      final switchFinder =
+          find.byKey(const Key('xiaowan-subagent-sheet-enabled-switch'));
+      expect(switchFinder, findsOneWidget);
+      expect(tester.widget<OmniSettingsSwitch>(switchFinder).value, true);
+      await tester.tap(switchFinder);
+      await tester.pumpAndSettle();
+      expect(tester.widget<OmniSettingsSwitch>(switchFinder).value, true);
+      expect(
+        find.byKey(const Key('xiaowan-subagent-sheet-delete-button')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'Xiaowan missing subagent payload on initial load shows error state without editable save',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          return <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': 0,
+          };
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{
+            'editingProfileId': null,
+            'profiles': <dynamic>[],
+          };
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      expect(find.textContaining('小万配置缺失 subagent 载荷'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-save')), findsNothing);
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'Xiaowan reload failure clears subagent draft, surfaces error and disables save',
+    (tester) async {
+      var readCount = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+        if (call.method == 'agent/list') {
+          return _catalog(_agent('xiaowan-acp', '小万'));
+        }
+        if (call.method == 'agent/config/read') {
+          readCount++;
+          if (readCount == 1) {
+            return <String, dynamic>{
+              'agentId': 'xiaowan-acp',
+              'kind': 'xiaowan',
+              'revision': 0,
+              'subagent': <String, dynamic>{
+                'enabled': true,
+                'providerProfileId': null,
+                'modelId': null,
+                'reasoningEffort': null,
+                'profiles': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'id': 'general',
+                    'displayName': '通用子任务',
+                    'systemPrompt': 'general prompt',
+                    'description': 'desc',
+                    'baseProfileId': 'general',
+                    'enabled': true,
+                    'allowedTools': null,
+                    'disallowedTools': <String>[],
+                  },
+                ],
+              },
+            };
+          }
+          return <String, dynamic>{
+            'agentId': 'xiaowan-acp',
+            'kind': 'xiaowan',
+            'revision': 1,
+          };
+        }
+        return null;
+      });
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(assistCoreChannel, (call) async {
+        if (call.method == 'listModelProviderProfiles') {
+          return <String, dynamic>{
+            'editingProfileId': null,
+            'profiles': <dynamic>[],
+          };
+        }
+        if (call.method == 'getSceneModelBindings') return <dynamic>[];
+        return null;
+      });
+
+      await _pumpPage(tester, 'xiaowan-acp');
+
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsOneWidget,
+      );
+      final saveFinder = find.byKey(const Key('agent-config-save'));
+      expect(saveFinder, findsOneWidget);
+      expect(tester.widget<FilledButton>(saveFinder).onPressed, isNotNull);
+
+      await tester.tap(find.byKey(const Key('agent-config-reload')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('agent-config-error-text')), findsOneWidget);
+      expect(tester.widget<FilledButton>(saveFinder).onPressed, isNull);
+      expect(
+        find.byKey(const Key('xiaowan-subagent-enabled-switch')),
+        findsNothing,
+      );
+    },
+  );
 }
 
 Future<void> _pumpPage(WidgetTester tester, String agentId) async {

@@ -144,6 +144,8 @@ if [[ "$RUN_GRADLE" == "1" ]]; then
     --tests 'cn.com.omnimind.bot.agent.SubagentProfileRegistryTest' \
     --tests 'cn.com.omnimind.bot.agent.SubagentCapabilityInheritanceTest' \
     --tests 'cn.com.omnimind.bot.agent.AgentToolDefinitionsSubagentTest' \
+      --tests 'cn.com.omnimind.bot.agent.SubagentRuntimeExecutionTest' \
+      --tests 'cn.com.omnimind.bot.agent.runtime.XiaowanSubagentConfigBehaviorTest' \
       --tests 'cn.com.omnimind.bot.agent.AgentToolDefinitionsUnboundedParametersTest' \
       --tests 'cn.com.omnimind.bot.agent.SkillRuntimeBehaviorTest' \
       --tests 'cn.com.omnimind.bot.agent.CalendarListLimitTest' \

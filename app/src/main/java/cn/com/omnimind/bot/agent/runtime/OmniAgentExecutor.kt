@@ -244,6 +244,17 @@ class OmniAgentExecutor(
                 null
             }
             pluginSession = activePluginSession
+            // 每个用户 Turn 读取一次配置快照，统一送至 Registry 与 Dispatcher
+            val subagentConfigResult = runCatching {
+                XiaowanSubagentConfigStore(context).read()
+            }
+            val subagentConfig = subagentConfigResult.getOrNull()
+            val effectiveSubagentConfig = if (subagentConfig != null && subagentConfigResult.isSuccess) {
+                subagentConfig
+            } else {
+                XiaowanSubagentConfig(enabled = false)
+            }
+            val subagentConfigError = subagentConfigResult.exceptionOrNull()
             val toolRegistry = AgentToolRegistry(
                 context = context,
                 conversationMode = conversationMode,
@@ -252,6 +263,7 @@ class OmniAgentExecutor(
                 capabilityToolDefinitions = sessionCapabilityModules.flatMap {
                     it.toolDefinitions
                 },
+                subagentConfig = effectiveSubagentConfig,
             )
             val llmClient = HttpAgentLlmClient(
                 scope = scope,
@@ -302,6 +314,42 @@ class OmniAgentExecutor(
                 model = agentModelScene,
                 toolImageContinuationPolicy = toolImageContinuationPolicy,
                 contextCompactorFactory = contextCompactorFactory,
+                config = effectiveSubagentConfig,
+                configError = subagentConfigError,
+                subagentLlmClientFactory = { _, subagentOverride ->
+                    HttpAgentLlmClient(
+                        scope = scope,
+                        json = json,
+                        modelOverride = subagentOverride ?: modelOverride,
+                    )
+                },
+                subagentImagePolicyResolver = { subagentModel, subagentOverride ->
+                    val effectiveOverride = subagentOverride ?: modelOverride
+                        AgentToolImageContinuationPolicyResolver.resolve(
+                            HttpController.resolveChatCompletionRouteInfo(
+                                modelOrScene = subagentModel,
+                                explicitApiBase = effectiveOverride?.apiBase,
+                                explicitApiKey = effectiveOverride?.apiKey,
+                                explicitCustomHeaders = effectiveOverride?.customHeaders,
+                                explicitModel = effectiveOverride?.modelId,
+                                explicitProtocolType = effectiveOverride?.protocolType,
+                                explicitWireApi = effectiveOverride?.wireApi,
+                                explicitProviderProfileId = effectiveOverride?.oauthProfileId,
+                            )
+                        )
+                },
+                subagentCompactorFactory = { subagentModel, subagentOverride, subagentReasoningEffort ->
+                    AgentConversationContextCompactor(
+                        historyRepository = historyRepository,
+                        modelScene = subagentModel,
+                        modelOverride = subagentOverride ?: modelOverride,
+                        reasoningEffort = subagentReasoningEffort,
+                        promptCacheKey = promptCacheKey,
+                        offloadToolOutput = { text ->
+                            workspaceManager.writeOffload(workspaceDescriptor.id, "txt", text).workspacePath
+                        },
+                    )
+                },
             )
             toolRouter = AgentToolRouter(
                 context = context,

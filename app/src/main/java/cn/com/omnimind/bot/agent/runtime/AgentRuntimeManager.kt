@@ -29,6 +29,7 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
+import cn.com.omnimind.bot.agent.XiaowanSubagentConfigStore
 import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
@@ -172,6 +173,9 @@ class AgentRuntimeManager private constructor(
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
+    internal val xiaowanSubagentConfigStore by lazy {
+        XiaowanSubagentConfigStore(appContext)
+    }
     private val managedAgentUpdates = ManagedAgentUpdates(
         probe = { profiles, distributionId ->
             check(TerminalDistribution.selected().id == distributionId &&
@@ -1611,6 +1615,9 @@ class AgentRuntimeManager private constructor(
     private suspend fun readAgentConfig(args: Map<String, Any?>): Map<String, Any?> {
         val agentId = args.stringValue("agentId")
             ?: throw IllegalArgumentException("agentId is required.")
+        if (agentId == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
+            return xiaowanSubagentConfigStore.readPayload()
+        }
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == agentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $agentId")
         val harnessAdapter = AcpHarnessAdapters.forProfile(profile)
@@ -1642,6 +1649,12 @@ class AgentRuntimeManager private constructor(
     private suspend fun writeAgentConfig(args: Map<String, Any?>): Map<String, Any?> {
         val agentId = args.stringValue("agentId")
             ?: throw IllegalArgumentException("agentId is required.")
+        if (agentId == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
+            val content = args.stringValue("content")
+                ?: throw IllegalArgumentException("content is required.")
+            val expectedRevision = args.longValue("expectedRevision")
+            return xiaowanSubagentConfigStore.write(content, expectedRevision)
+        }
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == agentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $agentId")
         return localRuntimeFor(agentId).withLaunchConfiguration { providerAccess ->
@@ -1711,6 +1724,9 @@ class AgentRuntimeManager private constructor(
     private suspend fun rollbackAgentConfig(args: Map<String, Any?>): Map<String, Any?> {
         val agentId = args.stringValue("agentId")
             ?: throw IllegalArgumentException("agentId is required.")
+        if (agentId == AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
+            throw UnsupportedOperationException("Rollback is not supported for xiaowan-acp.")
+        }
         val profile = acpAgentProfileStore.list().firstOrNull { it.id == agentId }
             ?: throw IllegalArgumentException("Unknown ACP agent: $agentId")
         return localRuntimeFor(agentId).withLaunchConfiguration { providerAccess ->

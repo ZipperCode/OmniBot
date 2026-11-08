@@ -62,17 +62,33 @@ class SubagentToolHandler(
                 parentEnv = env,
                 tasks = specs,
                 concurrency = concurrency,
+                parentToolCallId = toolHandle.toolCallId,
                 progressReporter = { event ->
-                    helper.reportToolProgress(
-                        callback = callback,
-                        toolName = toolName,
-                        progress = event.summary,
-                        extras = mapOf(
-                            "subagentStatusText" to event.summary,
+                    if (event.kind == "subagent_cancelled") {
+                        val localizedSummary = helper.localized(event.summary)
+                        val extras = mapOf(
+                            "subagentStatusText" to localizedSummary,
                             "subagentEvents" to listOf(event.toPayload())
-                        ),
-                        toolHandle = toolHandle
-                    )
+                        )
+                        toolHandle.recordProgress(localizedSummary, extras)
+                        callback.onToolCallProgress(
+                            toolHandle.toolCallId,
+                            toolName,
+                            localizedSummary,
+                            extras
+                        )
+                    } else {
+                        helper.reportToolProgress(
+                            callback = callback,
+                            toolName = toolName,
+                            progress = event.summary,
+                            extras = mapOf(
+                                "subagentStatusText" to event.summary,
+                                "subagentEvents" to listOf(event.toPayload())
+                            ),
+                            toolHandle = toolHandle
+                        )
+                    }
                 }
             )
 

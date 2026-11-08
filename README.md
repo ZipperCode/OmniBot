@@ -114,6 +114,12 @@ Enable or disable skills from the skill repository:
   <img src="docs/tutorial/seven.png" alt="Skill example" width="260" />
 </p>
 
+### 小万子 Agent（Subagent）
+
+在 **Agents → 小万 → 配置** 中启停子代理、选择专用 Provider/模型与思考档位，默认跟随主 Agent；保存后下一轮生效。模型目录在点开选择器时加载，认证仍由现有 Provider 管理。
+
+内置角色可编辑提示词、描述与工具限制；自定义角色可增删。工具允许与禁止列表只能收窄父任务及基础角色权限，空白名单表示无工具，子代理不可递归分派。小万使用已有 `subagent_dispatch` 汇总独立上下文任务，审批、取消和工具详情仍归父 ACP Turn；其他 Agent 和公共设备 MCP 不开放此配置或分派工具。
+
 ### Scheduled tasks
 
 <p align="center">

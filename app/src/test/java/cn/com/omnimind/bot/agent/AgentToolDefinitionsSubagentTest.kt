@@ -1,80 +1,108 @@
 package cn.com.omnimind.bot.agent
 
+import android.app.Application
 import cn.com.omnimind.baselib.i18n.PromptLocale
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class, manifest = Config.NONE)
 class AgentToolDefinitionsSubagentTest {
 
     @Test
-    fun `subagent schema makes delegation explicit and profile guidance optional`() {
-        val function = subagentFunction(PromptLocale.ZH_CN)
-        val parameters = function["parameters"] as JsonObject
-        val properties = parameters["properties"] as JsonObject
-        val tasks = properties["tasks"] as JsonObject
-        val item = tasks["items"] as JsonObject
-        val itemProperties = item["properties"] as JsonObject
-        val profile = itemProperties["profileId"] as JsonObject
-        val defaultProfile = properties["defaultProfileId"] as JsonObject
-        val profileIds = (profile["enum"] as JsonArray).map {
-            it.jsonPrimitive.contentOrNull
-        }
-
-        assertEquals("object", item["type"]?.jsonPrimitive?.contentOrNull)
-        assertEquals(listOf("instruction"), (item["required"] as JsonArray).map {
-            it.jsonPrimitive.contentOrNull
-        })
-        assertEquals(
-            listOf("general", "explorer", "memory-curator", "planner"),
-            profileIds
+    fun `disabled subagent config produces empty tool list`() {
+        val tools = AgentToolDefinitions.subagentTools(
+            PromptLocale.ZH_CN,
+            XiaowanSubagentConfig(enabled = false)
         )
-        assertEquals(profile["enum"], defaultProfile["enum"])
-        assertTrue(
-            function["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("隔离上下文") == true
-        )
-        assertTrue(
-            function["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("用户明确要求分派或并行") == true
-        )
-        assertTrue(
-            profile["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("planner 只生成计划、不执行工具") == true
-        )
+        assertTrue(tools.isEmpty())
     }
 
     @Test
-    fun `english subagent schema explains delegation boundaries`() {
-        val function = subagentFunction(PromptLocale.EN_US)
+    fun `dynamic custom profiles update enum and filter disabled profiles`() {
+        val customProfile = SubagentProfile(
+            id = "code-reviewer",
+            displayName = "代码审查员",
+            systemPrompt = "审阅代码变更",
+            description = "专注代码质量检查",
+            baseProfileId = "explorer",
+            enabled = true,
+            allowedTools = listOf("file_read", "file_list")
+        )
+        val disabledProfile = SubagentProfile(
+            id = "disabled-curator",
+            displayName = "已禁用角色",
+            systemPrompt = "",
+            enabled = false
+        )
+        val config = XiaowanSubagentConfig(
+            enabled = true,
+            profiles = SubagentProfileRegistry.all() + listOf(customProfile, disabledProfile)
+        )
+
+        val tool = AgentToolDefinitions.subagentTools(PromptLocale.ZH_CN, config).single()
+        val function = tool["function"] as JsonObject
         val parameters = function["parameters"] as JsonObject
         val properties = parameters["properties"] as JsonObject
         val tasks = properties["tasks"] as JsonObject
         val item = tasks["items"] as JsonObject
         val itemProperties = item["properties"] as JsonObject
-        val instruction = itemProperties["instruction"] as JsonObject
         val profile = itemProperties["profileId"] as JsonObject
+        val profileIds = (profile["enum"] as JsonArray).map { it.jsonPrimitive.contentOrNull }
 
-        assertTrue(
-            function["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("isolated contexts") == true
-        )
-        assertTrue(
-            instruction["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("self-contained") == true
-        )
-        assertTrue(
-            profile["description"]?.jsonPrimitive?.contentOrNull
-                ?.contains("planner creates plans without executing tools") == true
-        )
-    }
+        assertTrue(profileIds.contains("code-reviewer"))
+        assertTrue(!profileIds.contains("disabled-curator"))
 
-    private fun subagentFunction(locale: PromptLocale): JsonObject {
-        val definition = AgentToolDefinitions.subagentTools(locale).single()
-        return definition["function"] as JsonObject
+        // 通过 Registry 的 validateArguments 进行消费者强校验：有效 profileId 通过，禁用/非法 profileId 拒绝
+        val context = RuntimeEnvironment.getApplication()
+        val registry = AgentToolRegistry(
+            context = context,
+            subagentConfig = config
+        )
+
+        val validArgs = buildJsonObject {
+            put("defaultProfileId", "code-reviewer")
+            put("tasks", buildJsonArray {
+                add(buildJsonObject {
+                    put("instruction", "review code")
+                    put("profileId", "code-reviewer")
+                })
+            })
+        }
+        registry.validateArguments("subagent_dispatch", validArgs)
+
+        val disabledArgs = buildJsonObject {
+            put("defaultProfileId", "disabled-curator")
+            put("tasks", buildJsonArray {
+                add(buildJsonObject {
+                    put("instruction", "curate memory")
+                    put("profileId", "disabled-curator")
+                })
+            })
+        }
+        assertTrue(runCatching { registry.validateArguments("subagent_dispatch", disabledArgs) }.isFailure)
+
+        val unknownArgs = buildJsonObject {
+            put("defaultProfileId", "non-existent")
+            put("tasks", buildJsonArray {
+                add(buildJsonObject {
+                    put("instruction", "unknown")
+                    put("profileId", "non-existent")
+                })
+            })
+        }
+        assertTrue(runCatching { registry.validateArguments("subagent_dispatch", unknownArgs) }.isFailure)
     }
 }

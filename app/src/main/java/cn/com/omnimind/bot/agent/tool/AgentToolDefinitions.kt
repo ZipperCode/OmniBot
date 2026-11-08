@@ -2598,8 +2598,129 @@ object AgentToolDefinitions {
     fun memoryTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
         memoryToolDefinitions.map { decorateToolDefinition(it, locale) }
 
-    fun subagentTools(locale: PromptLocale = currentLocale()): List<JsonObject> =
-        subagentToolDefinitions.map { decorateToolDefinition(it, locale) }
+    fun buildSubagentDispatchTool(
+        enabledProfiles: List<SubagentProfile>,
+        locale: PromptLocale = currentLocale(),
+    ): JsonObject {
+        val roleDescription = buildString {
+            append(if (locale == PromptLocale.EN_US) "Available roles: " else "可选角色：")
+            append(
+                enabledProfiles.joinToString(if (locale == PromptLocale.EN_US) "; " else "；") { profile ->
+                    val desc = profile.description.ifBlank { profile.displayName }
+                    "${profile.id}（${profile.displayName}）：$desc"
+                }
+            )
+        }
+
+        return buildJsonObject {
+            put("type", "function")
+            putJsonObject("function") {
+                put("name", "subagent_dispatch")
+                put("displayName", if (locale == PromptLocale.EN_US) "Dispatch Subagent" else "分派子任务")
+                put("toolType", "subagent")
+                put(
+                    "description",
+                    if (locale == PromptLocale.EN_US)
+                        "Only when the user explicitly asks to delegate or parallelize, dispatch independent subtasks to subagents with isolated contexts and return the aggregated result."
+                    else
+                        "仅当用户明确要求分派或并行时，把多个相互独立的小任务交给具有隔离上下文的 subagent，并返回聚合结果。"
+                )
+                put(
+                    "postToolRule",
+                    if (locale == PromptLocale.EN_US)
+                        "Wait for the tool result after dispatching, then summarize it for the user."
+                    else
+                        "分派后等待工具结果，再汇总给用户。"
+                )
+                putJsonObject("parameters") {
+                    put("type", "object")
+                    putJsonObject("properties") {
+                        putJsonObject("tasks") {
+                            put("type", "array")
+                            putJsonObject("items") {
+                                put("type", "object")
+                                putJsonObject("properties") {
+                                    putJsonObject("instruction") {
+                                        put("type", "string")
+                                        put(
+                                            "description",
+                                            if (locale == PromptLocale.EN_US)
+                                                "A self-contained instruction for the subtask; do not rely on context not included here."
+                                            else
+                                                "子任务的完整、自足指令，不要依赖主会话中未写入此处的上下文。"
+                                        )
+                                    }
+                                    putJsonObject("profileId") {
+                                        put("type", "string")
+                                        putJsonArray("enum") {
+                                            enabledProfiles.forEach { add(it.id) }
+                                        }
+                                        put("description", roleDescription)
+                                    }
+                                }
+                                putJsonArray("required") {
+                                    add("instruction")
+                                }
+                            }
+                            put(
+                                "description",
+                                if (locale == PromptLocale.EN_US)
+                                    "List of subtasks to dispatch. Each item must contain a self-contained instruction; profileId is optional."
+                                else
+                                    "要分派的子任务列表。每项都要包含自足的 instruction；profileId 为可选任务提示。"
+                            )
+                        }
+                        putJsonObject("defaultProfileId") {
+                            put("type", "string")
+                            putJsonArray("enum") {
+                                enabledProfiles.forEach { add(it.id) }
+                            }
+                            put(
+                                "description",
+                                if (locale == PromptLocale.EN_US)
+                                    "Optional fallback role for subtasks that omit profileId, default general."
+                                else
+                                    "子任务省略 profileId 时使用的可选任务提示，默认 general。"
+                            )
+                        }
+                        putJsonObject("concurrency") {
+                            put("type", "integer")
+                            put(
+                                "description",
+                                if (locale == PromptLocale.EN_US)
+                                    "Optional concurrency limit; runs all tasks in parallel when omitted."
+                                else
+                                    "可选并发度；省略时按本次子任务数并行执行。"
+                            )
+                        }
+                        putJsonObject("mergeInstruction") {
+                            put("type", "string")
+                            put(
+                                "description",
+                                if (locale == PromptLocale.EN_US)
+                                    "Optional instructions for result aggregation."
+                                else
+                                    "结果聚合要求，可选。"
+                            )
+                        }
+                    }
+                    putJsonArray("required") {
+                        add("tasks")
+                    }
+                }
+            }
+        }
+    }
+
+    fun subagentTools(
+        locale: PromptLocale = currentLocale(),
+        config: XiaowanSubagentConfig = XiaowanSubagentConfig(),
+    ): List<JsonObject> {
+        if (!config.enabled) return emptyList()
+        val enabledProfiles = config.profiles.filter { it.enabled }
+        if (enabledProfiles.isEmpty()) return emptyList()
+        return listOf(buildSubagentDispatchTool(enabledProfiles, locale))
+    }
 
     fun staticTools(
         locale: PromptLocale = currentLocale(),

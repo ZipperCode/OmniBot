@@ -4,6 +4,11 @@ import cn.com.omnimind.baselib.llm.ChatCompletionUsage
 import cn.com.omnimind.bot.agent.runtime.acpEventBridgeTestContext
 import cn.com.omnimind.baselib.llm.contentText
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
@@ -32,7 +37,17 @@ class AgentOrchestratorTest {
             ))
             var approvals = 0
             var effects = 0
-            val requester = AgentPermissionRequester { _, _, _ -> approvals++; allow }
+            var receivedCallId: String? = null
+            var receivedTitle: String? = null
+            var receivedDetail: String? = null
+            val expectedParentCallId = "parent-dispatch-call-id-123"
+            val requester = AgentPermissionRequester { callId, title, detail ->
+                approvals++
+                receivedCallId = callId
+                receivedTitle = title
+                receivedDetail = detail
+                allow
+            }
             val parent = object : AgentExecutionEnvironment by FakeExecutionEnvironment("delegate") {
                 override val runtimeContextRepository = org.mockito.Mockito.mock(AgentRuntimeContextRepository::class.java)
                 override val workspaceDescriptor = org.mockito.Mockito.mock(AgentWorkspaceDescriptor::class.java)
@@ -45,7 +60,7 @@ class AgentOrchestratorTest {
                 override suspend fun execute(toolCall: AssistantToolCall, args: JsonObject,
                     runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor, env: AgentExecutionEnvironment,
                     callback: AgentCallback, toolHandle: AgentToolExecutionHandle): ToolExecutionResult {
-                    assertTrue(env.permissionRequester === requester)
+                    assertNotNull(env.permissionRequester)
                     if (env.permissionRequester!!.requestPermission(toolCall.id, "approval", "operation")) effects++
                     return ToolExecutionResult.Error(toolCall.function.name, "test permission outcome")
                 }
@@ -53,15 +68,65 @@ class AgentOrchestratorTest {
             val dispatcher = SubagentDispatcher(llm, { executor },
                 { FakeToolCatalog(availableToolNames = setOf("android_privileged_action")) },
                 AgentEventAdapter(eventJson), "test-model")
-            val result = dispatcher.dispatch(parent,
-                listOf(SubagentDispatcher.SubagentTaskSpec("general", "delegate")), 1)
+            val result = dispatcher.dispatch(
+                parentEnv = parent,
+                tasks = listOf(SubagentDispatcher.SubagentTaskSpec("general", "delegate")),
+                concurrency = 1,
+                parentToolCallId = expectedParentCallId
+            )
             assertEquals("completed", result.single().status)
             assertEquals(1, approvals)
+            assertEquals(expectedParentCallId, receivedCallId)
+            assertEquals("approval", receivedTitle)
+            assertEquals("operation", receivedDetail)
             assertEquals(if (allow) 1 else 0, effects)
             assertEquals(0, backing.disposeCalls)
             assertEquals(1, llm.requests.last().messages.count { it.role == "user" })
             assertEquals(1, llm.requests.last().messages.count { it.role == "tool" })
         }
+    }
+
+    @Test
+    fun cancellingParentDispatchEmitsOneCancelledChildAfterSuspending() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val llm = object : AgentLlmClient {
+            override suspend fun streamTurn(
+                request: ChatCompletionRequest,
+                onReasoningUpdate: (suspend (String) -> Unit)?,
+                onContentUpdate: (suspend (String) -> Unit)?,
+                onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+                allowTransportRetry: Boolean,
+            ): ChatCompletionTurn {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val parent = object : AgentExecutionEnvironment by FakeExecutionEnvironment("delegate") {
+            override val runtimeContextRepository = org.mockito.Mockito.mock(AgentRuntimeContextRepository::class.java)
+            override val workspaceDescriptor = org.mockito.Mockito.mock(AgentWorkspaceDescriptor::class.java)
+            override val workspaceManager = org.mockito.Mockito.mock(AgentWorkspaceManager::class.java)
+            override val workspaceMemoryService = org.mockito.Mockito.mock(WorkspaceMemoryService::class.java)
+        }
+        val dispatcher = SubagentDispatcher(llm, { FakeToolExecutor() },
+            { FakeToolCatalog() }, AgentEventAdapter(eventJson), "test-model")
+        val events = mutableListOf<SubagentDispatcher.SubagentProgressEvent>()
+
+        withTimeout(5_000L) {
+            val execution = async {
+                dispatcher.dispatch(parent,
+                    listOf(SubagentDispatcher.SubagentTaskSpec("general", "wait")), 1,
+                    progressReporter = { event ->
+                        // 真实取消后仍须允许回调挂起，不能在发送前再次抛出取消。
+                        if (event.kind == "subagent_cancelled") delay(1L)
+                        events += event
+                    })
+            }
+            started.await()
+            execution.cancelAndJoin()
+        }
+
+        assertEquals(listOf("cancelled"), events.filter { it.kind == "subagent_cancelled" }.map { it.status })
+        assertFalse(events.any { it.kind == "subagent_failed" || it.kind == "subagent_completed" })
     }
 
     @Test

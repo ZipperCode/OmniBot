@@ -1,5 +1,6 @@
 import 'package:ui/widgets/omni_adaptive_layout.dart';
 import 'package:ui/widgets/conversation_model_selector.dart';
+import 'package:ui/features/home/pages/agent/xiaowan_subagent_settings_editor.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -51,6 +52,7 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
   List<ModelProviderProfileSummary> _providerProfiles = const [];
   SceneModelBindingEntry? _sharedModelBinding;
   String? _error;
+  XiaowanSubagentConfigData? _subagentConfig;
 
   bool get _english =>
       Localizations.localeOf(context).languageCode.toLowerCase() == 'en';
@@ -101,14 +103,15 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
       }
       if (!mounted) return;
       _syncAgent(agent);
-      _syncPayload(payload);
+      final nextKind = !agent.configurationAvailable
+          ? ''
+          : agent.builtIn
+          ? (payload['kind']?.toString() ?? '')
+          : 'profile';
+      _syncPayload(payload, kind: nextKind);
       setState(() {
         _agent = agent;
-        _kind = !agent.configurationAvailable
-            ? ''
-            : agent.builtIn
-            ? (payload['kind']?.toString() ?? '')
-            : 'profile';
+        _kind = nextKind;
         _loading = false;
         _error = null;
       });
@@ -120,6 +123,7 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
       setState(() {
         _loading = false;
         _error = error.toString();
+        _subagentConfig = null;
       });
     }
   }
@@ -136,7 +140,8 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
     _enabled = agent.enabled;
   }
 
-  void _syncPayload(Map<String, dynamic> payload) {
+  void _syncPayload(Map<String, dynamic> payload, {String? kind}) {
+    final effectiveKind = kind ?? _kind;
     _configRevision = switch (payload['revision']) {
       int value => value,
       num value => value.toInt(),
@@ -150,24 +155,22 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
     _configPath =
         payload['configPath']?.toString() ?? payload['path']?.toString() ?? '';
     _authPath = payload['authPath']?.toString() ?? '';
+    if (effectiveKind == 'xiaowan') {
+      _subagentConfig = null;
+      final subagent = payload['subagent'];
+      if (subagent is! Map) {
+        throw const FormatException('小万配置缺失 subagent 载荷。');
+      }
+      _subagentConfig = XiaowanSubagentConfigData.fromJson(
+        Map<String, dynamic>.from(subagent),
+      );
+    }
   }
 
   Future<void> _loadSharedModelSelection() async {
     try {
       final profilesPayload = await ModelProviderConfigService.listProfiles();
       final bindings = await SceneModelConfigService.getSceneModelBindings();
-      final models = <String, List<ProviderModelOption>>{};
-      for (final profile in profilesPayload.profiles) {
-        // This page reads the persisted Provider document. It must not turn
-        // merely opening Agent settings into a serialized /models sweep.
-        models[profile.id] = profile.configured
-            ? await ModelProviderConfigService.getStoredModelOptionsForProfile(
-                profile.id,
-                profile: profile,
-                enrichMetadata: false,
-              )
-            : const <ProviderModelOption>[];
-      }
       final persistedBinding = bindings
           .where((item) => item.sceneId == 'scene.dispatch.model')
           .firstOrNull;
@@ -302,6 +305,53 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
           if (!mounted) return;
           _syncPayload(payload);
           break;
+        case 'xiaowan':
+          final subagent = _subagentConfig;
+          if (subagent == null) {
+            throw StateError(
+              _text(
+                '未加载有效的小万 Subagent 配置。',
+                'No valid Xiaowan Subagent configuration loaded.',
+              ),
+            );
+          }
+          final general = subagent.profiles
+              .where((p) => p.id == 'general')
+              .firstOrNull;
+          if (general == null) {
+            throw ArgumentError(
+              _text(
+                '缺失 general 通用角色配置。',
+                'The general profile is missing.',
+              ),
+            );
+          }
+          if (!general.enabled) {
+            throw ArgumentError(
+              _text(
+                'general 通用角色必须保持启用。',
+                'The general profile must remain enabled.',
+              ),
+            );
+          }
+          final hasEnabled = subagent.profiles.any((p) => p.enabled);
+          if (!hasEnabled) {
+            throw ArgumentError(
+              _text(
+                '至少需要启用一个子任务角色。',
+                'At least one profile must be enabled.',
+              ),
+            );
+          }
+          final content = jsonEncode(subagent.toJson());
+          final payload = await AgentRuntimeService.writeAgentConfig(
+            _agent!.id,
+            content: content,
+            expectedRevision: _configRevision,
+          );
+          if (!mounted) return;
+          _syncPayload(payload, kind: 'xiaowan');
+          break;
         case 'profile':
           final command = _commandController.text.trim();
           if (command.isEmpty) {
@@ -425,6 +475,13 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
           primary: true,
           onBackPressed: _close,
           actions: [
+            if (widget.agentId == 'xiaowan-acp' && _kind == 'xiaowan')
+              IconButton(
+                key: const Key('agent-config-reload'),
+                tooltip: _text('重新加载配置', 'Reload configuration'),
+                onPressed: _loading || _saving ? null : _load,
+                icon: const Icon(LucideIcons.rotateCw),
+              ),
             if (_agent?.builtIn == false)
               IconButton(
                 tooltip: _text('删除 Agent', 'Delete Agent'),
@@ -453,14 +510,41 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
                         label: _pageTitle,
                         subtitle: _pageSubtitle,
                       ),
-                      OmniSettingsCard(
-                        padding: const EdgeInsets.all(16),
-                        child: _buildEditor(),
-                      ),
+                      if (widget.agentId == 'xiaowan-acp' && _kind == 'xiaowan')
+                        if (_subagentConfig != null)
+                          XiaowanSubagentSettingsEditor(
+                            config: _subagentConfig!,
+                            mainBinding: _sharedModelBinding,
+                            providerProfiles: _providerProfiles,
+                            saving: _saving,
+                            onReload: _load,
+                            onChanged: (updated) {
+                              setState(() {
+                                _subagentConfig = updated;
+                                _changed = true;
+                              });
+                            },
+                          )
+                        else
+                          OmniSettingsCard(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              _text(
+                                '未能加载小万 Subagent 配置。',
+                                'Failed to load Xiaowan Subagent configuration.',
+                              ),
+                            ),
+                          )
+                      else
+                        OmniSettingsCard(
+                          padding: const EdgeInsets.all(16),
+                          child: _buildEditor(),
+                        ),
                       if (_error != null) ...[
                         const SizedBox(height: 12),
                         Text(
                           _error!,
+                          key: const Key('agent-config-error-text'),
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.error,
                             fontSize: 12,
@@ -471,7 +555,10 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
                         const SizedBox(height: 18),
                         FilledButton.icon(
                           key: const Key('agent-config-save'),
-                          onPressed: _saving ? null : _save,
+                          onPressed: (_saving ||
+                                  (_kind == 'xiaowan' && _subagentConfig == null))
+                              ? null
+                              : _save,
                           icon: _saving
                               ? const SizedBox(
                                   width: 16,
@@ -515,6 +602,7 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
       'json' => _text('Claude Code 配置', 'Claude Code configuration'),
       'jsonc' => _text('OpenCode 配置', 'OpenCode configuration'),
       'profile' => _text('ACP 启动配置', 'ACP launch configuration'),
+      'xiaowan' => _text('小万 Subagent 配置', 'Xiaowan Subagent configuration'),
       _ => _text('Agent 配置', 'Agent configuration'),
     };
   }
@@ -537,6 +625,10 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
         '保存不会中断当前对话；启动命令、参数与环境变量在下次启动 Agent 进程时生效。Provider 和模型由该 Agent 自身的配置管理。',
         'Saving does not interrupt the current conversation. Command, arguments, and environment changes apply when the Agent process next starts. Provider and model settings are managed by the Agent itself.',
       ),
+      'xiaowan' => _text(
+        '配置小万在复杂任务中可调用的子代理、独立模型与推理档位。保存后下一轮对话生效。',
+        'Configure the subagents, dedicated model, and reasoning effort for Xiaowan. Changes apply on the next turn.',
+      ),
       _ => '',
     };
   }
@@ -546,6 +638,7 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
       'codex' => _buildCodexEditor(),
       'json' || 'jsonc' => _buildRawFileEditor(),
       'profile' => _buildProfileEditor(),
+      'xiaowan' => const SizedBox.shrink(),
       _ => Text(_text('没有可编辑的配置。', 'No editable configuration.')),
     };
   }

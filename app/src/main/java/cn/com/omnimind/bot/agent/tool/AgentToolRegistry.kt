@@ -31,7 +31,8 @@ class AgentToolRegistry(
     // Keep the visual-operation entry visible so the Agent can explain how
     // to enable it. VlmToolHandler gates execution until OmniFlow is enabled.
     includeVlmTool: Boolean = true,
-    ) : AgentToolCatalog {
+    subagentConfig: XiaowanSubagentConfig = XiaowanSubagentConfigStore(context).read(),
+) : AgentToolCatalog {
     data class RuntimeToolDescriptor(
         val name: String,
         val displayName: String,
@@ -106,7 +107,7 @@ class AgentToolRegistry(
             )
         }
         runtimeDefinitions.addAll(AgentToolDefinitions.memoryTools(locale))
-        runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale))
+        runtimeDefinitions.addAll(AgentToolDefinitions.subagentTools(locale, subagentConfig))
         if (pluginToolDefinitions.isNotEmpty() || capabilityDefinitions.isNotEmpty()) {
             val occupiedNames = runtimeDefinitions.mapNotNullTo(linkedSetOf()) { definition ->
                 (definition["function"] as? JsonObject)
