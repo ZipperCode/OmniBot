@@ -7,6 +7,9 @@ import android.content.IntentFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.RectF
+import android.hardware.display.DisplayManager
+import android.util.DisplayMetrics
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -68,6 +71,43 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
 
     var onKeyguardChanged: (() -> Unit)? = null
     var onFrameDrawn: (() -> Unit)? = null
+    val lastDrawnContentRect = Rect()
+
+    /**
+     * 计算当前虚拟屏画面在组件内的实际绘制矩形。
+     * 直接使用底层 VirtualScreenFrameSource 真实帧绘制的物理矩形（完全同源）；
+     * 首帧前、清黑或停帧后为空边界（outRect.setEmpty()），不显示光晕比猜测更安全。
+     */
+    fun getContentRect(outRect: RectF) {
+        if (lastDrawnContentRect.width() > 0 && lastDrawnContentRect.height() > 0) {
+            outRect.set(
+                lastDrawnContentRect.left.toFloat(),
+                lastDrawnContentRect.top.toFloat(),
+                lastDrawnContentRect.right.toFloat(),
+                lastDrawnContentRect.bottom.toFloat()
+            )
+        } else {
+            outRect.setEmpty()
+        }
+    }
+
+    private fun resolveDisplayAspectRatio(): Float {
+        if (targetDisplayId > 0) {
+            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val display = dm?.getDisplay(targetDisplayId)
+            if (display != null) {
+                val metrics = DisplayMetrics()
+                @Suppress("DEPRECATION")
+                display.getRealMetrics(metrics)
+                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                    return metrics.widthPixels.toFloat() / metrics.heightPixels.toFloat()
+                }
+            }
+        }
+        // 默认虚拟屏规格：1080 x 2400 (纵向全面屏)
+        return 1080f / 2400f
+    }
+
 
     private val destRect = Rect()
     private val frameHandler = Handler(Looper.getMainLooper())
@@ -98,8 +138,9 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
             val action = intent?.action ?: return
             when (action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    // 屏幕关闭/息屏：标记需要等待解锁后新帧、停帧、画布强制清黑
+                    // 屏幕关闭/息屏：标记需要等待解锁后新帧、停帧、画布强制清黑与几何清空
                     requireNewFrameAfterUnlock = true
+                    lastDrawnContentRect.setEmpty()
                     stopFrameLoop()
                     invalidate()
                     onKeyguardChanged?.invoke()
@@ -136,6 +177,7 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
             minRequiredFrameSequence = -1L
             requireNewFrameAfterUnlock = false
             hasWindowBeenVisible = (isAttachedToWindow && windowVisibility == VISIBLE)
+            lastDrawnContentRect.setEmpty()
         }
         updateLoopState()
     }
@@ -146,8 +188,11 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
     fun setPreviewActive(active: Boolean) {
         if (this.previewActive == active) return
         this.previewActive = active
-        if (!active && hasWindowBeenVisible) {
-            requireNewFrameAfterUnlock = true
+        if (!active) {
+            lastDrawnContentRect.setEmpty()
+            if (hasWindowBeenVisible) {
+                requireNewFrameAfterUnlock = true
+            }
         }
         updateLoopState()
     }
@@ -188,6 +233,7 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
     internal fun stopFrameLoop() {
         isFrameLoopRunning = false
         frameHandler.removeCallbacks(frameRunnable)
+        lastDrawnContentRect.setEmpty()
     }
 
     private fun scheduleNextFrame() {
@@ -221,13 +267,20 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
         if (hasWindowBeenVisible) {
             requireNewFrameAfterUnlock = true
         }
+        lastDrawnContentRect.setEmpty()
         stopFrameLoop()
         unregisterScreenLockReceiver()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        lastDrawnContentRect.setEmpty()
     }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
         if (!isShown || this.visibility != VISIBLE) {
+            lastDrawnContentRect.setEmpty()
             stopFrameLoop()
             invalidate()
         } else {
@@ -241,6 +294,7 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
             hasWindowBeenVisible = true
             updateLoopState()
         } else {
+            lastDrawnContentRect.setEmpty()
             if (hasWindowBeenVisible) {
                 requireNewFrameAfterUnlock = true
             }
@@ -252,19 +306,27 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(Color.BLACK)
-        if (width <= 0 || height <= 0) return
-        if (!shouldDrawFrames()) return
+        if (width <= 0 || height <= 0 || !shouldDrawFrames()) {
+            lastDrawnContentRect.setEmpty()
+            return
+        }
         destRect.set(paddingLeft, paddingTop, width - paddingRight, height - paddingBottom)
-        if (destRect.width() <= 0 || destRect.height() <= 0) return
+        if (destRect.width() <= 0 || destRect.height() <= 0) {
+            lastDrawnContentRect.setEmpty()
+            return
+        }
         val drawn = DeviceDisplayManager.drawVirtualFrame(
             targetDisplayId,
             targetSessionId,
             canvas,
             destRect,
             minRequiredFrameSequence,
+            lastDrawnContentRect,
         )
-        if (drawn) {
+        if (drawn && lastDrawnContentRect.width() > 0 && lastDrawnContentRect.height() > 0) {
             onFrameDrawn?.invoke()
+        } else {
+            lastDrawnContentRect.setEmpty()
         }
     }
 

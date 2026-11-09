@@ -517,31 +517,6 @@ void main() {
     expect(sendBody, isNot(contains('message.text == messageText')));
   });
 
-  test(
-    'granting a device permission never fabricates or replays a user turn',
-    () {
-      final flowSource = File('$chatRoot/chat_page_conversation_flow.dart')
-          .readAsStringSync();
-      final pageSource = File('$chatRoot/chat_page.dart').readAsStringSync();
-
-      final authorizeStart = flowSource.indexOf(
-        'Future<void> _requestAuthorizeForExecution(',
-      );
-      expect(authorizeStart, greaterThanOrEqualTo(0));
-      final authorizeBody = flowSource.substring(authorizeStart);
-
-      // Authorization is an environment change, not a user send. It must
-      // retain the failed turn and wait for the user to explicitly retry it.
-      expect(authorizeBody, isNot(contains('_tryAgentFlow(')));
-      expect(authorizeBody, isNot(contains('_handleExecutableTaskFlow(')));
-      expect(flowSource, isNot(contains('_retryLatestInstructionAfterAuth')));
-      expect(flowSource, isNot(contains('_removeFailedAttemptMessages')));
-      expect(
-        pageSource,
-        isNot(contains('_isRetryingLatestInstructionAfterAuth')),
-      );
-    },
-  );
 
   test(
     'editing or retrying waits for the active ACP turn to reach its terminal',

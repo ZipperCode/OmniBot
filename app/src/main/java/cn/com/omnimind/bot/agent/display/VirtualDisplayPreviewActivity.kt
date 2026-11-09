@@ -6,10 +6,15 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.view.WindowManager
+import android.widget.ImageView
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Rational
 import android.util.TypedValue
 import android.view.Display
@@ -26,6 +31,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.androidgui.DisplayInputCoordinator
@@ -93,21 +99,21 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private var lastBarsBottom = 0
 
 
-    private lateinit var rootContainer: LinearLayout
+    private lateinit var rootContainer: FrameLayout
     private lateinit var headerBar: LinearLayout
     private lateinit var sessionTagView: TextView
     private lateinit var displayTagView: TextView
     private lateinit var statusTextView: TextView
     private lateinit var previewContainer: FrameLayout
     private lateinit var previewView: VirtualDisplayFrameView
+    private lateinit var previewEdgeLightView: ScreenTaskEdgeLightView
     private lateinit var bottomBar: LinearLayout
     private lateinit var stopButton: Button
     private lateinit var presentButton: Button
     private lateinit var closeButton: Button
-
+    private val tempContentRect = RectF()
     override fun onCreate(savedInstanceState: Bundle?) {
-        val dark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-            Configuration.UI_MODE_NIGHT_YES
+        val dark = ScreenTaskTheme.isNight(this)
         setTheme(
             if (dark) android.R.style.Theme_Material_NoActionBar
             else android.R.style.Theme_Material_Light_NoActionBar
@@ -124,6 +130,10 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         window.navigationBarColor = Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = !dark
@@ -200,8 +210,9 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
         if (::previewView.isInitialized) {
             previewView.bind(displayId, sessionId)
+            updateEdgeLightBounds()
+            updateEdgeLightState()
         }
-
         updatePipParams()
     }
 
@@ -209,92 +220,30 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         val dp = resources.displayMetrics.density
         fun dpToPx(value: Float): Int = (value * dp + 0.5f).toInt()
 
-        val bgColor = if (dark) Color.rgb(18, 18, 18) else Color.rgb(245, 245, 247)
-        val cardBg = if (dark) Color.rgb(28, 28, 30) else Color.WHITE
-        val primaryText = if (dark) Color.rgb(240, 240, 240) else Color.rgb(30, 30, 30)
-        val secondaryText = if (dark) Color.rgb(160, 160, 160) else Color.rgb(110, 110, 110)
-        val accentColor = Color.rgb(0, 122, 255)
-        val dangerColor = Color.rgb(255, 69, 58)
+        val scrimBg = if (dark) 0xD018181A.toInt() else 0xD0F5F5F7.toInt()
+        val primaryText = ScreenTaskTheme.textPrimary(dark)
+        val secondaryText = ScreenTaskTheme.textSecondary(dark)
+        val accentColor = ScreenTaskTheme.brandPrimary(dark)
+        val dangerColor = ScreenTaskTheme.errorColor()
 
-        rootContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(bgColor)
+        rootContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, insets ->
-            val bars = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            lastBarsLeft = bars.left
-            lastBarsTop = bars.top
-            lastBarsRight = bars.right
-            lastBarsBottom = bars.bottom
-            if (isInPipModeCompat()) {
-                view.setPadding(0, 0, 0, 0)
-            } else {
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            }
-            insets
-        }
 
-        // 顶部信息栏：会话标识与屏幕标签
-        headerBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dpToPx(16f), dpToPx(12f), dpToPx(16f), dpToPx(8f))
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        sessionTagView = TextView(this).apply {
-            text = "会话: $sessionId"
-            setTextColor(secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        headerBar.addView(sessionTagView)
-
-        displayTagView = TextView(this).apply {
-            text = "虚拟屏 ($displayId)"
-            setTextColor(accentColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.END
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-        headerBar.addView(displayTagView)
-        rootContainer.addView(headerBar)
-
-        // 状态提示文本
-        statusTextView = TextView(this).apply {
-            text = "任务执行中"
-            setTextColor(secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dpToPx(16f), 0, dpToPx(16f), dpToPx(8f))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-        rootContainer.addView(statusTextView)
-
-        // 中间画面预览容器
+        // 全面屏底层：画面预览与贴合光晕（不被安全区 padding 裁剪）
         previewContainer = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { toggleControls() }
         }
 
         previewView = VirtualDisplayFrameView(this).apply {
@@ -303,76 +252,340 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
+            contentDescription = "虚拟屏画面"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { toggleControls() }
             onKeyguardChanged = {
                 updatePipParams()
+                updateEdgeLightState()
+            }
+            onFrameDrawn = {
+                updateEdgeLightState()
             }
             addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                 if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
                     updatePipParams()
+                    updateEdgeLightBounds()
+                    updateEdgeLightState()
                 }
             }
         }
         previewContainer.addView(previewView)
+
+        previewEdgeLightView = ScreenTaskEdgeLightView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        previewContainer.addView(previewEdgeLightView)
         rootContainer.addView(previewContainer)
 
-        // 底部操作按钮栏（符合 Android 48dp 最小触控目标）
-        bottomBar = LinearLayout(this).apply {
+        // 浮层顶栏：返回按钮、会话与屏幕标识、PiP 按钮与状态文本
+        headerBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(scrimBg)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            )
+        }
+
+        val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(cardBg)
-            setPadding(dpToPx(12f), dpToPx(10f), dpToPx(12f), dpToPx(10f))
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dpToPx(48f)
+            )
+        }
+
+        val backButton = FrameLayout(this).apply {
+            val sz = dpToPx(48f)
+            layoutParams = LinearLayout.LayoutParams(sz, sz)
+            markAsAccessibilityButton(this, "返回")
+            setOnClickListener { finish() }
+            val icon = ImageView(this@VirtualDisplayPreviewActivity).apply {
+                val iconSz = dpToPx(20f)
+                layoutParams = FrameLayout.LayoutParams(iconSz, iconSz, Gravity.CENTER)
+                setImageDrawable(IconDrawables.createChevron(primaryText, isUp = false))
+                rotation = 90f
+            }
+            addView(icon)
+        }
+        headerRow.addView(backButton)
+
+        sessionTagView = TextView(this).apply {
+            text = "会话: $sessionId"
+            setTextColor(primaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dpToPx(4f)
+            }
+            layoutParams = lp
+        }
+        headerRow.addView(sessionTagView)
+
+        displayTagView = TextView(this).apply {
+            text = "虚拟屏 ($displayId)"
+            setTextColor(accentColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.END
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dpToPx(8f)
+            }
+            layoutParams = lp
+        }
+        headerRow.addView(displayTagView)
+
+        val pipButton = FrameLayout(this).apply {
+            val sz = dpToPx(48f)
+            layoutParams = LinearLayout.LayoutParams(sz, sz)
+            markAsAccessibilityButton(this, "画中画")
+            setOnClickListener { handleEnterPip() }
+            val icon = ImageView(this@VirtualDisplayPreviewActivity).apply {
+                val iconSz = dpToPx(18f)
+                layoutParams = FrameLayout.LayoutParams(iconSz, iconSz, Gravity.CENTER)
+                setImageDrawable(IconDrawables.createPip(primaryText))
+            }
+            addView(icon)
+        }
+        headerRow.addView(pipButton)
+        headerBar.addView(headerRow)
+
+        statusTextView = TextView(this).apply {
+            text = "任务执行中"
+            setTextColor(secondaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dpToPx(16f), 0, dpToPx(16f), dpToPx(6f))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
+        headerBar.addView(statusTextView)
+        rootContainer.addView(headerBar)
+
+        // 浮层底栏：操作按钮（停止任务、移交主屏、关闭预览）
+        bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(scrimBg)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+        }
 
         val btnMinHeight = dpToPx(48f)
 
-        // 停止任务按钮
         stopButton = Button(this).apply {
             text = "停止任务"
+            contentDescription = "停止任务"
             setTextColor(dangerColor)
             minHeight = btnMinHeight
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            params.setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
+            }
             layoutParams = params
             setOnClickListener { handleStopTask() }
         }
         bottomBar.addView(stopButton)
 
-        // 移交主屏按钮
         presentButton = Button(this).apply {
             text = "移交主屏"
+            contentDescription = "移交主屏"
             setTextColor(accentColor)
             minHeight = btnMinHeight
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            params.setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
+            }
             layoutParams = params
             setOnClickListener { handlePresentToMainDisplay() }
         }
         bottomBar.addView(presentButton)
 
-        // 关闭预览按钮
         closeButton = Button(this).apply {
             text = "关闭预览"
+            contentDescription = "关闭预览"
             setTextColor(primaryText)
             minHeight = btnMinHeight
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            params.setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
-            layoutParams = params
-            setOnClickListener {
-                // 点击关闭预览不取消任务，不关闭会话，不销毁虚拟屏
-                finish()
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
             }
+            layoutParams = params
+            setOnClickListener { finish() }
         }
         bottomBar.addView(closeButton)
-
         rootContainer.addView(bottomBar)
+
+        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { _, insets ->
+            val bars = insets.getInsetsIgnoringVisibility(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            lastBarsLeft = bars.left
+            lastBarsTop = bars.top
+            lastBarsRight = bars.right
+            lastBarsBottom = bars.bottom
+            if (isInPipModeCompat()) {
+                headerBar.visibility = View.GONE
+                statusTextView.visibility = View.GONE
+                bottomBar.visibility = View.GONE
+                rootContainer.setPadding(0, 0, 0, 0)
+                previewEdgeLightView.stop()
+            } else {
+                headerBar.visibility = if (areControlsVisible) View.VISIBLE else View.GONE
+                statusTextView.visibility = View.VISIBLE
+                bottomBar.visibility = if (areControlsVisible) View.VISIBLE else View.GONE
+                rootContainer.setPadding(0, 0, 0, 0)
+                headerBar.setPadding(
+                    bars.left + dpToPx(8f),
+                    bars.top + dpToPx(4f),
+                    bars.right + dpToPx(8f),
+                    dpToPx(4f)
+                )
+                bottomBar.setPadding(
+                    bars.left + dpToPx(8f),
+                    dpToPx(8f),
+                    bars.right + dpToPx(8f),
+                    bars.bottom + dpToPx(8f)
+                )
+                updateEdgeLightBounds()
+                updateEdgeLightState()
+            }
+            insets
+        }
+
         setContentView(rootContainer)
+        hideControlsHandler.postDelayed(hideControlsRunnable, 4000L)
     }
+
+    private fun handleEnterPip() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val params = buildPipParams(autoEnter = false)
+            if (params != null) {
+                try {
+                    enterPictureInPictureMode(params)
+                } catch (e: Exception) {
+                    OmniLog.w(TAG, "进入画中画模式失败", e)
+                }
+            }
+        }
+    }
+
+    private var areControlsVisible: Boolean = true
+    private val hideControlsHandler = Handler(Looper.getMainLooper())
+    private val hideControlsRunnable = Runnable { setControlsVisible(false, animate = true) }
+
+    private fun setControlsVisible(visible: Boolean, animate: Boolean = true) {
+        if (isInPipModeCompat()) {
+            headerBar.visibility = View.GONE
+            bottomBar.visibility = View.GONE
+            return
+        }
+        areControlsVisible = visible
+        hideControlsHandler.removeCallbacks(hideControlsRunnable)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (visible) show(WindowInsetsCompat.Type.systemBars())
+            else hide(WindowInsetsCompat.Type.systemBars())
+        }
+        if (visible) {
+            headerBar.visibility = View.VISIBLE
+            bottomBar.visibility = View.VISIBLE
+            if (animate) {
+                headerBar.animate().alpha(1f).setDuration(200).start()
+                bottomBar.animate().alpha(1f).setDuration(200).start()
+            } else {
+                headerBar.alpha = 1f
+                bottomBar.alpha = 1f
+            }
+            hideControlsHandler.postDelayed(hideControlsRunnable, 4000L)
+        } else {
+            if (animate) {
+                headerBar.animate().alpha(0f).setDuration(200).withEndAction {
+                    if (!areControlsVisible) {
+                        headerBar.visibility = View.GONE
+                    }
+                }.start()
+                bottomBar.animate().alpha(0f).setDuration(200).withEndAction {
+                    if (!areControlsVisible) {
+                        bottomBar.visibility = View.GONE
+                    }
+                }.start()
+            } else {
+                headerBar.alpha = 0f
+                bottomBar.alpha = 0f
+                headerBar.visibility = View.GONE
+                bottomBar.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun toggleControls() {
+        setControlsVisible(!areControlsVisible, animate = true)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        if (areControlsVisible && !isInPipModeCompat()) {
+            hideControlsHandler.removeCallbacks(hideControlsRunnable)
+            hideControlsHandler.postDelayed(hideControlsRunnable, 4000L)
+        }
+    }
+
+    private fun isTaskRunningForCurrentTurn(): Boolean {
+        val sid = sessionId.trim()
+        if (sid.isEmpty()) return false
+        val task = TaskRuntime.findActiveTaskBySession(sid) ?: return false
+        if (!initialTurnId.isNullOrBlank() && task.turnId != initialTurnId) {
+            return false
+        }
+        if (task.waitingStatus != null) {
+            return false
+        }
+        if (task.screenDisplayId != null && task.screenDisplayId != displayId) {
+            return false
+        }
+        return true
+    }
+
+    private fun updateEdgeLightState() {
+        if (!::previewEdgeLightView.isInitialized || !::previewView.isInitialized) return
+        if (isInPipModeCompat()) {
+            previewEdgeLightView.stop()
+            return
+        }
+        val isRunning = isTaskRunningForCurrentTurn()
+        if (isRunning && previewView.shouldDrawFrames()) {
+            updateEdgeLightBounds()
+            previewEdgeLightView.start()
+        } else {
+            previewEdgeLightView.stop()
+        }
+    }
+
+    private fun updateEdgeLightBounds() {
+        if (!::previewView.isInitialized || !::previewEdgeLightView.isInitialized) return
+        previewView.getContentRect(tempContentRect)
+        previewEdgeLightView.setTargetRect(tempContentRect, cornerRadius = 0f)
+    }
+
+    fun getPreviewEdgeLight(): ScreenTaskEdgeLightView = previewEdgeLightView
+    fun getPreviewView(): VirtualDisplayFrameView = previewView
+
 
     override fun onStart() {
         super.onStart()
@@ -380,6 +593,8 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             previewView.setPreviewActive(true)
         }
         updatePipParams()
+        updateEdgeLightBounds()
+        updateEdgeLightState()
     }
 
     override fun onResume() {
@@ -388,12 +603,19 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             previewView.setPreviewActive(true)
         }
         updatePipParams()
+        ScreenTaskOverlayHost.setPreviewActivityForeground(!isInPipModeCompat())
+        updateEdgeLightBounds()
+        updateEdgeLightState()
     }
 
     override fun onPause() {
         super.onPause()
         if (!isInPipModeCompat() && ::previewView.isInitialized) {
             previewView.setPreviewActive(false)
+        }
+        ScreenTaskOverlayHost.setPreviewActivityForeground(false)
+        if (::previewEdgeLightView.isInitialized) {
+            previewEdgeLightView.stop()
         }
     }
 
@@ -402,14 +624,23 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         if (!isInPipModeCompat() && ::previewView.isInitialized) {
             previewView.setPreviewActive(false)
         }
+        ScreenTaskOverlayHost.setPreviewActivityForeground(false)
+        if (::previewEdgeLightView.isInitialized) {
+            previewEdgeLightView.stop()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        hideControlsHandler.removeCallbacks(hideControlsRunnable)
         takeoverJob?.cancel()
         takeoverJob = null
         if (::previewView.isInitialized) {
             previewView.setPreviewActive(false)
+        }
+        ScreenTaskOverlayHost.setPreviewActivityForeground(false)
+        if (::previewEdgeLightView.isInitialized) {
+            previewEdgeLightView.stop()
         }
     }
 
@@ -443,6 +674,10 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             statusTextView.visibility = View.GONE
             bottomBar.visibility = View.GONE
             rootContainer.setPadding(0, 0, 0, 0)
+            ScreenTaskOverlayHost.setPreviewActivityForeground(false)
+            if (::previewEdgeLightView.isInitialized) {
+                previewEdgeLightView.stop()
+            }
             if (::previewView.isInitialized) {
                 previewView.setPreviewActive(true)
             }
@@ -450,12 +685,15 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             headerBar.visibility = View.VISIBLE
             statusTextView.visibility = View.VISIBLE
             bottomBar.visibility = View.VISIBLE
-            rootContainer.setPadding(lastBarsLeft, lastBarsTop, lastBarsRight, lastBarsBottom)
+            rootContainer.setPadding(0, 0, 0, 0)
+            ScreenTaskOverlayHost.setPreviewActivityForeground(true)
             ViewCompat.requestApplyInsets(rootContainer)
             updatePipParams()
             if (::previewView.isInitialized) {
                 previewView.setPreviewActive(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             }
+            updateEdgeLightBounds()
+            updateEdgeLightState()
         }
     }
 

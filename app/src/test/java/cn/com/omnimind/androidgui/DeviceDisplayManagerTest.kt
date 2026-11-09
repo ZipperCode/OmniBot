@@ -324,6 +324,28 @@ class DeviceDisplayManagerTest {
         assertTrue("Migrating single existing task returns true", launched)
         assertTrue("Never issues force-stop", stub.executedCommands.none { cmd -> cmd.contains("force-stop") })
     }
+    @Test
+    fun `launchActivity refuses to migrate task if existing task on main display is in foreground`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = listOf(
+                PrivilegedDisplayServiceStub.TaskSnapshot(
+                    taskId = 55,
+                    taskKind = "root_task",
+                    displayId = 0,
+                    userId = 0,
+                    packageName = "com.example.calc",
+                    childTaskIds = listOf(55),
+                    visible = true,
+                    isFocused = true,
+                )
+            )
+        )
+
+        val launched = stub.launchActivity(displayId = 3, packageName = "com.example.calc")
+        assertFalse("Refuses to migrate task when in foreground on main display", launched)
+        assertEquals("Task remains on main display 0", 0, stub.tasksOnDisplays[0]?.single()?.displayId)
+    }
+
 
     @Test
     fun `launchActivity with multiple candidates refuses to guess and never calls force-stop`() {

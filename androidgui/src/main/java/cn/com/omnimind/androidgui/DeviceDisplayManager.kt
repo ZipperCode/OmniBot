@@ -42,6 +42,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class DisplayInfo(
     val displayId: Int,
@@ -67,6 +70,8 @@ data class PrivilegedRootTaskInfo(
     val userId: Int,
     val packageName: String,
     val childTaskIds: List<Int> = emptyList(),
+    val visible: Boolean = false,
+    val isFocused: Boolean = false,
 )
 
 data class TaskMigrationResult(
@@ -100,6 +105,8 @@ private fun parseRootTasksJson(jsonStr: String): List<PrivilegedRootTaskInfo> = 
         } else {
             emptyList()
         }
+        val visible = obj.optBoolean("visible", false)
+        val isFocused = obj.optBoolean("isFocused", false)
         list.add(
             PrivilegedRootTaskInfo(
                 taskId = taskId,
@@ -108,6 +115,8 @@ private fun parseRootTasksJson(jsonStr: String): List<PrivilegedRootTaskInfo> = 
                 userId = userId,
                 packageName = packageName,
                 childTaskIds = childTaskIds,
+                visible = visible,
+                isFocused = isFocused,
             )
         )
     }
@@ -190,6 +199,136 @@ object DeviceDisplayManager {
     @Volatile
     private var privilegedServiceOwner: String? = null
 
+    private val sessionDisplayTargets = ConcurrentHashMap<String, Int>()
+    private val virtualDisplayPrepMutex = Mutex()
+
+    fun getSessionDisplayTarget(sessionKey: String): Int? = sessionDisplayTargets[sessionKey]
+
+    fun setSessionDisplayTarget(sessionKey: String, displayId: Int) {
+        sessionDisplayTargets[sessionKey] = displayId
+    }
+
+    fun clearSessionDisplayTarget(sessionKey: String) {
+        sessionDisplayTargets.remove(sessionKey)
+    }
+
+    suspend fun ensureSessionVirtualDisplay(
+        context: Context,
+        sessionKey: String,
+        acpSessionId: String? = null,
+        width: Int = DEFAULT_VIRTUAL_WIDTH,
+        height: Int = DEFAULT_VIRTUAL_HEIGHT,
+        dpi: Int = DEFAULT_VIRTUAL_DPI,
+    ): Result<Int> = virtualDisplayPrepMutex.withLock {
+        val currentOwner = activeVirtualDisplayOwner
+        val currentId = activeVirtualDisplayId
+
+        // 1. 若当前活跃虚拟屏被其他会话占用，严禁接管或篡改
+        if (currentOwner != null && currentOwner != sessionKey && isVirtualDisplayActive()) {
+            return Result.failure(
+                IllegalStateException("A virtual display (id=$currentId) is already held by another active task ($currentOwner).")
+            )
+        }
+
+        // 2. 若当前会话已持有有效活跃虚拟屏且底层仍然可用，直接复用，绝不重复销毁与重建
+        if (currentOwner == sessionKey && isVirtualDisplayActive() && hasDisplay(context, currentId)) {
+            setSessionDisplayTarget(sessionKey, currentId)
+            return Result.success(currentId)
+        }
+
+        // 3. 准备 privileged 服务（Shizuku 或 KernelSU Root）
+        ensurePrivilegedService(
+            context = context,
+            ownerId = sessionKey,
+            acpSessionId = acpSessionId,
+        )
+
+        // 4. 创建虚拟屏
+        val result = createVirtualDisplay(
+            context = context,
+            width = width,
+            height = height,
+            dpi = dpi,
+            ownerId = sessionKey,
+        )
+
+        return result.fold(
+            onSuccess = { info ->
+                setSessionDisplayTarget(sessionKey, info.displayId)
+                Result.success(info.displayId)
+            },
+            onFailure = { error ->
+                Result.failure(error)
+            }
+        )
+    }
+
+    suspend fun resolveOrPrepareDisplayId(
+        context: Context,
+        target: String?,
+        sessionKey: String,
+        acpSessionId: String? = null,
+    ): Int {
+        val normalized = target?.trim()?.lowercase().orEmpty()
+        return when {
+            // 显式指定主屏
+            normalized == DISPLAY_MAIN || normalized == "0" -> Display.DEFAULT_DISPLAY
+
+            // 显式指定具体编号（例如物理屏或已建虚拟屏 ID）
+            normalized.isNotEmpty() && normalized != DISPLAY_VIRTUAL -> {
+                val parsed = normalized.toIntOrNull()
+                    ?: throw IllegalArgumentException("Invalid display target: '$target'. Expected 'main', 'virtual', or display integer ID.")
+                if (parsed == Display.DEFAULT_DISPLAY) {
+                    Display.DEFAULT_DISPLAY
+                } else {
+                    if (!hasDisplay(context, parsed)) {
+                        throw IllegalArgumentException("Display id $parsed is not connected or available.")
+                    }
+                    val owner = DisplayInputCoordinator.getVirtualDisplayOwner(parsed)
+                    if (owner != null && owner != sessionKey) {
+                        throw IllegalStateException("虚拟显示屏 $parsed 属于其他会话 ($owner)，当前会话 ($sessionKey) 无权操作。")
+                    }
+                    parsed
+                }
+            }
+
+            // 显式指定 virtual：必须安全准备或复用虚拟屏
+            normalized == DISPLAY_VIRTUAL -> {
+                ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
+            }
+
+            // 省略（null 或空）：按会话默认路由
+            else -> {
+                val currentTarget = getSessionDisplayTarget(sessionKey)
+                if (currentTarget != null) {
+                    if (currentTarget == Display.DEFAULT_DISPLAY) {
+                        Display.DEFAULT_DISPLAY
+                    } else if (activeVirtualDisplayOwner == sessionKey && isVirtualDisplayActive() && hasDisplay(context, currentTarget)) {
+                        currentTarget
+                    } else {
+                        // 记录的虚拟屏已失效，自动准备新虚拟屏
+                        ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
+                    }
+                } else {
+                    // 全新会话默认：必须走后台虚拟屏，绝不占用前台主屏
+                    ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
+                }
+            }
+        }
+    }
+
+    fun resetForTesting() {
+        sessionDisplayTargets.clear()
+        activeVirtualDisplayId = Display.DEFAULT_DISPLAY
+        activeVirtualDisplayOwner = null
+        virtualDisplay = null
+        frameSource = null
+        lastError = null
+        privilegedService = null
+        displayBridge = null
+        privilegedSessionId = null
+        privilegedServiceOwner = null
+    }
     const val ACTION_ROOT_DISPLAY_BINDER = "cn.com.omnimind.androidgui.ACTION_ROOT_DISPLAY_BINDER"
     const val EXTRA_NONCE = "nonce"
     const val EXTRA_BINDER_BUNDLE = "binder_bundle"
@@ -433,6 +572,8 @@ object DeviceDisplayManager {
                 access.stopPrivilegedSession(sid)
             }
         }
+        ownerId?.let { clearSessionDisplayTarget(it) }
+        acpSessionId?.let { clearSessionDisplayTarget(it) }
     }
 
     /**
@@ -462,6 +603,9 @@ object DeviceDisplayManager {
     }
 
     fun hasDisplay(context: Context, displayId: Int): Boolean {
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == activeVirtualDisplayId && isVirtualDisplayActive()) {
+            return true
+        }
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return false
         return dm.getDisplay(displayId) != null
     }
@@ -527,7 +671,13 @@ object DeviceDisplayManager {
                     activeVirtualDisplayId = createdId
                     activeVirtualDisplayOwner = ownerId
                     ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(createdId, it) }
+                    ownerId?.let { setSessionDisplayTarget(it, createdId) }
                     return Result.success(VirtualDisplayInfo(createdId, width, height, dpi))
+                } else {
+                    return failWithCleanup(
+                        source,
+                        createdResult.exceptionOrNull()?.message ?: "Privileged bridge failed to create virtual display",
+                    )
                 }
             }
 
@@ -540,7 +690,10 @@ object DeviceDisplayManager {
                     activeVirtualDisplayId = createdId
                     activeVirtualDisplayOwner = ownerId
                     ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(createdId, it) }
+                    ownerId?.let { setSessionDisplayTarget(it, createdId) }
                     return Result.success(VirtualDisplayInfo(createdId, width, height, dpi))
+                } else {
+                    return failWithCleanup(source, "Privileged service failed to create virtual display")
                 }
             }
 
@@ -560,6 +713,7 @@ object DeviceDisplayManager {
                 activeVirtualDisplayOwner = ownerId
                 applyDisplayTweaks(displayId)
                 ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(displayId, it) }
+                ownerId?.let { setSessionDisplayTarget(it, displayId) }
                 return Result.success(VirtualDisplayInfo(displayId, width, height, dpi))
             }
 
@@ -605,6 +759,10 @@ object DeviceDisplayManager {
             activeVirtualDisplayId = Display.DEFAULT_DISPLAY
             activeVirtualDisplayOwner = null
             DisplayInputCoordinator.releaseVirtualDisplayOwnership(targetId, ownerId)
+            if (ownerId != null) {
+                sessionDisplayTargets.remove(ownerId)
+            }
+            sessionDisplayTargets.entries.removeIf { it.value == targetId }
         }
     }
 
@@ -651,9 +809,10 @@ object DeviceDisplayManager {
         canvas: Canvas,
         destination: Rect,
         afterSequence: Long = -1L,
+        outDrawRect: Rect? = null,
     ): Boolean {
         val source = validateVirtualFrameSource(displayId, ownerId) ?: return false
-        return source.drawLatestFrame(canvas, destination, afterSequence)
+        return source.drawLatestFrame(canvas, destination, afterSequence, outDrawRect)
     }
 
     /**
@@ -698,6 +857,22 @@ object DeviceDisplayManager {
                     "candidateTaskIds" to activeTasks.map { it.taskId }.joinToString(","),
                 ),
             )
+        }
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            val foregroundOnMain = activeTasks.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY && (it.visible || it.isFocused) }
+            if (foregroundOnMain != null) {
+                return AndroidGuiActionResult(
+                    success = false,
+                    message = "app_in_foreground_on_main_display:$packageName. 应用当前正在主屏前台使用，无法在后台虚拟屏打开，避免干扰用户当前操作。",
+                    diagnostics = mapOf(
+                        "success" to "false",
+                        "code" to "app_in_foreground_on_main_display",
+                        "packageName" to packageName,
+                        "taskId" to foregroundOnMain.taskId.toString(),
+                        "targetDisplayId" to displayId.toString(),
+                    ),
+                )
+            }
         }
 
         val bridge = displayBridge
@@ -923,6 +1098,7 @@ object DeviceDisplayManager {
                 )
 
                 if (migration.verified) {
+                    setSessionDisplayTarget(sessionOwnerId, Display.DEFAULT_DISPLAY)
                     AndroidGuiActionResult(
                         success = true,
                         message = "task_presented_to_user",

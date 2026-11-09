@@ -1,7 +1,10 @@
 package cn.com.omnimind.bot.mcp
 
 import android.content.Context
+import android.view.Display
+import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.baselib.i18n.PromptLocale
+import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.agent.personal.PersonalContextTools
 import cn.com.omnimind.bot.agent.personal.PersonalContextService
@@ -61,12 +64,13 @@ internal object AndroidDeviceMcpServer {
         DeviceTool(
             name = "run_gui",
             operation = "run_gui",
-            description = "Execute a new Android GUI task with the installed OmniFlow runtime.",
+            description = "Execute a new Android GUI task with the installed OmniFlow runtime. Defaults to background virtual display.",
             properties = mapOf(
                 "goal" to schema("string", "GUI task to complete."),
                 "max_steps" to schema("integer", "Maximum execution steps."),
                 "defer_user_input" to schema("boolean", "Return when user input is required."),
                 "step_skill_guidance" to schema("string", "Optional step guidance."),
+                "display" to schema("string", "Target display: 'virtual' (default) or 'main' (explicit user request only)."),
             ),
             required = listOf("goal"),
             requiresOmniFlowPlugin = true,
@@ -74,13 +78,13 @@ internal object AndroidDeviceMcpServer {
         DeviceTool(
             name = "run_function",
             operation = "run_function",
-            description = "Replay one registered OmniFlow Function.",
+            description = "Replay one registered OmniFlow Function. Defaults to background virtual display.",
             properties = mapOf(
                 "function_id" to schema("string", "Registered Function id."),
                 "arguments" to schema("object", "Semantic Function arguments."),
                 "goal" to schema("string", "Optional display goal."),
+                "display" to schema("string", "Target display: 'virtual' (default) or 'main' (explicit user request only)."),
             ),
-            required = listOf("function_id"),
             requiresOmniFlowPlugin = true,
         ),
         DeviceTool(
@@ -286,6 +290,7 @@ internal object AndroidDeviceMcpServer {
         val tool = deviceTools.firstOrNull { it.name == name }
             ?: return errorResult(IllegalArgumentException("Unknown MCP tool: $name"))
         return runCatching {
+            validateCaller(caller, tool)
             if (tool.requiresOmniFlowPlugin) {
                 ensureOmniFlowReady(context)
             }
@@ -295,6 +300,7 @@ internal object AndroidDeviceMcpServer {
                 arguments = arguments.toKotlinMap(),
                 modelClient = modelClient,
                 rawPayloadBytes = rawPayloadBytes,
+                caller = caller,
             )
         }.fold(
             onSuccess = ::successResult,
@@ -346,6 +352,7 @@ internal object AndroidDeviceMcpServer {
                         )
                     } else {
                         runCatching {
+                            validateCaller(caller, tool)
                             if (tool.requiresOmniFlowPlugin) {
                                 ensureOmniFlowReady(context)
                             }
@@ -354,6 +361,7 @@ internal object AndroidDeviceMcpServer {
                                 tool = tool,
                                 arguments = request.params.arguments.orEmpty().toKotlinMap(),
                                 modelClient = modelClient,
+                                caller = caller,
                             )
                         }.fold(
                             onSuccess = ::successResult,
@@ -460,6 +468,24 @@ internal object AndroidDeviceMcpServer {
         }
         throw IllegalStateException(guidance)
     }
+    private suspend fun validateCaller(caller: McpDeviceCaller, tool: DeviceTool) {
+        if (caller is McpDeviceCaller.Acp) {
+            AcpSessionMcpLeaseStore.resolve(caller.leaseId, caller.token)
+                ?: throw IllegalStateException("session_unavailable")
+            if (tool.operation in setOf("run_gui", "run_function")) {
+                val toolCallId = "call_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+                val executionContext = try {
+                    AcpSessionMcpLeaseStore.executionContext(caller.leaseId, toolCallId)
+                } catch (e: Exception) {
+                    throw IllegalStateException("session_unavailable", e)
+                }
+                if (!executionContext.isValid() || !executionContext.turnJob.isActive) {
+                    throw IllegalStateException("session_unavailable")
+                }
+            }
+        }
+    }
+
 
     private suspend fun callOmniFlowTool(
         context: Context,
@@ -467,6 +493,7 @@ internal object AndroidDeviceMcpServer {
         arguments: Map<String, Any?>,
         modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient,
         rawPayloadBytes: Int? = null,
+        caller: McpDeviceCaller = McpDeviceCaller.Global,
     ): Map<String, Any?> = when (tool.operation) {
         "personal_context" -> PersonalContextService(context).execute(
             name = tool.name,
@@ -476,32 +503,24 @@ internal object AndroidDeviceMcpServer {
         "run_gui" -> {
             val goal = arguments["goal"]?.toString().orEmpty().trim()
             require(goal.isNotEmpty()) { "omniflow_goal_required" }
-            OmniVlmPlugin.execute(
+            executeRunGui(
                 context = context,
-                request = OmniVlmPlugin.Request(
-                    goal = goal,
-                    stepSkillGuidance = arguments["step_skill_guidance"]?.toString().orEmpty(),
-                    deferUserInput = arguments["defer_user_input"] as? Boolean ?: true,
-                    maxSteps = (arguments["max_steps"] as? Number)?.toInt(),
-                ),
+                goal = goal,
+                arguments = arguments,
                 modelClient = modelClient,
-            ).payload
+                caller = caller,
+            )
         }
         "run_function" -> {
             val functionId = arguments["function_id"]?.toString().orEmpty().trim()
             require(functionId.isNotEmpty()) { "omniflow_function_id_required" }
-            val functionArguments = (arguments["arguments"] as? Map<*, *>)
-                .orEmpty()
-                .entries
-                .associate { (key, value) -> key.toString() to value }
-            OmniFlow.callTool(
+            executeRunFunction(
                 context = context,
-                toolCall = OmniFlow.ToolCall(functionId, functionArguments),
-                goal = arguments["goal"]?.toString().orEmpty().ifBlank { functionId },
-                source = "mcp",
-                runLogToolName = functionId,
+                functionId = functionId,
+                arguments = arguments,
                 modelClient = modelClient,
-            ).payload
+                caller = caller,
+            )
         }
         "save_function" -> {
             val runId = arguments["run_id"]?.toString().orEmpty().trim()
@@ -588,6 +607,175 @@ internal object AndroidDeviceMcpServer {
             source = "mcp",
             modelClient = modelClient,
         ).payload
+    }
+
+    private suspend fun executeRunGui(
+        context: Context,
+        goal: String,
+        arguments: Map<String, Any?>,
+        modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient,
+        caller: McpDeviceCaller,
+    ): Map<String, Any?> {
+        val targetArg = arguments["display"]?.toString() ?: arguments["display_id"]?.toString()
+        val runId = "gui-${UUID.randomUUID()}"
+        return when (caller) {
+            is McpDeviceCaller.Acp -> {
+                val lease = AcpSessionMcpLeaseStore.resolve(caller.leaseId, caller.token)
+                    ?: throw IllegalStateException("session_unavailable")
+                val toolCallId = "call_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+                val executionContext = try {
+                    AcpSessionMcpLeaseStore.executionContext(caller.leaseId, toolCallId)
+                } catch (e: Exception) {
+                    throw IllegalStateException("session_unavailable", e)
+                }
+                if (!executionContext.isValid() || !executionContext.turnJob.isActive) {
+                    throw IllegalStateException("session_unavailable")
+                }
+                val resolvedDisplayId = DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = context,
+                    target = targetArg,
+                    sessionKey = executionContext.sessionId,
+                    acpSessionId = executionContext.sessionId,
+                )
+                TaskRuntime.markScreenTarget(
+                    context = context,
+                    sessionId = executionContext.sessionId,
+                    turnId = executionContext.turnId,
+                    displayId = resolvedDisplayId,
+                )
+                OmniVlmPlugin.execute(
+                    context = context,
+                    request = OmniVlmPlugin.Request(
+                        goal = goal,
+                        runId = runId,
+                        stepSkillGuidance = arguments["step_skill_guidance"]?.toString().orEmpty(),
+                        deferUserInput = arguments["defer_user_input"] as? Boolean ?: true,
+                        maxSteps = (arguments["max_steps"] as? Number)?.toInt(),
+                        display = resolvedDisplayId.toString(),
+                        displayId = resolvedDisplayId,
+                    ),
+                    modelClient = modelClient,
+                    hooks = OmniVlmPlugin.Hooks(
+                        stopRequested = { !executionContext.turnJob.isActive || !executionContext.isValid() },
+                    ),
+                ).payload
+            }
+            is McpDeviceCaller.Global -> {
+                val resolvedDisplayId = DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = context,
+                    target = targetArg,
+                    sessionKey = runId,
+                    acpSessionId = null,
+                )
+                try {
+                    OmniVlmPlugin.execute(
+                        context = context,
+                        request = OmniVlmPlugin.Request(
+                            goal = goal,
+                            runId = runId,
+                            stepSkillGuidance = arguments["step_skill_guidance"]?.toString().orEmpty(),
+                            deferUserInput = arguments["defer_user_input"] as? Boolean ?: true,
+                            maxSteps = (arguments["max_steps"] as? Number)?.toInt(),
+                            display = resolvedDisplayId.toString(),
+                            displayId = resolvedDisplayId,
+                        ),
+                        modelClient = modelClient,
+                    ).payload
+                } finally {
+                    if (resolvedDisplayId != Display.DEFAULT_DISPLAY) {
+                        DeviceDisplayManager.destroyVirtualDisplay(resolvedDisplayId, ownerId = runId)
+                        DeviceDisplayManager.clearSessionDisplayTarget(runId)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun executeRunFunction(
+        context: Context,
+        functionId: String,
+        arguments: Map<String, Any?>,
+        modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient,
+        caller: McpDeviceCaller,
+    ): Map<String, Any?> {
+        val functionArguments = (arguments["arguments"] as? Map<*, *>)
+            .orEmpty()
+            .entries
+            .associate { (key, value) -> key.toString() to value }
+        val targetArg = arguments["display"]?.toString()
+            ?: arguments["display_id"]?.toString()
+            ?: functionArguments["display"]?.toString()
+            ?: functionArguments["display_id"]?.toString()
+        val runId = "flow-${UUID.randomUUID()}"
+        return when (caller) {
+            is McpDeviceCaller.Acp -> {
+                val lease = AcpSessionMcpLeaseStore.resolve(caller.leaseId, caller.token)
+                    ?: throw IllegalStateException("session_unavailable")
+                val toolCallId = "call_${UUID.randomUUID().toString().replace("-", "").take(16)}"
+                val executionContext = try {
+                    AcpSessionMcpLeaseStore.executionContext(caller.leaseId, toolCallId)
+                } catch (e: Exception) {
+                    throw IllegalStateException("session_unavailable", e)
+                }
+                if (!executionContext.isValid() || !executionContext.turnJob.isActive) {
+                    throw IllegalStateException("session_unavailable")
+                }
+                val resolvedDisplayId = DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = context,
+                    target = targetArg,
+                    sessionKey = executionContext.sessionId,
+                    acpSessionId = executionContext.sessionId,
+                )
+                TaskRuntime.markScreenTarget(
+                    context = context,
+                    sessionId = executionContext.sessionId,
+                    turnId = executionContext.turnId,
+                    displayId = resolvedDisplayId,
+                )
+                val functionArgsWithDisplay = functionArguments + mapOf(
+                    "display" to resolvedDisplayId.toString(),
+                    "display_id" to resolvedDisplayId,
+                )
+                OmniFlow.callTool(
+                    context = context,
+                    toolCall = OmniFlow.ToolCall(functionId, functionArgsWithDisplay),
+                    goal = arguments["goal"]?.toString().orEmpty().ifBlank { functionId },
+                    source = "mcp",
+                    runLogToolName = functionId,
+                    modelClient = modelClient,
+                    hooks = OmniFlow.Hooks(
+                        stopRequested = { !executionContext.turnJob.isActive || !executionContext.isValid() },
+                    ),
+                ).payload
+            }
+            is McpDeviceCaller.Global -> {
+                val resolvedDisplayId = DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = context,
+                    target = targetArg,
+                    sessionKey = runId,
+                    acpSessionId = null,
+                )
+                try {
+                    val functionArgsWithDisplay = functionArguments + mapOf(
+                        "display" to resolvedDisplayId.toString(),
+                        "display_id" to resolvedDisplayId,
+                    )
+                    OmniFlow.callTool(
+                        context = context,
+                        toolCall = OmniFlow.ToolCall(functionId, functionArgsWithDisplay),
+                        goal = arguments["goal"]?.toString().orEmpty().ifBlank { functionId },
+                        source = "mcp",
+                        runLogToolName = functionId,
+                        modelClient = modelClient,
+                    ).payload
+                } finally {
+                    if (resolvedDisplayId != Display.DEFAULT_DISPLAY) {
+                        DeviceDisplayManager.destroyVirtualDisplay(resolvedDisplayId, ownerId = runId)
+                        DeviceDisplayManager.clearSessionDisplayTarget(runId)
+                    }
+                }
+            }
+        }
     }
 
     private fun successResult(result: Map<String, Any?>): CallToolResult = CallToolResult(

@@ -12,9 +12,11 @@ import cn.com.omnimind.bot.task.runtime.TaskContinuationCoordinator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.File
 
 class PrivilegedToolHandler internal constructor(
@@ -26,6 +28,8 @@ class PrivilegedToolHandler internal constructor(
         helper: SharedHelper,
         workspaceManager: AgentWorkspaceManager,
     ) : this(helper, workspaceManager, StructuredDeviceActionExecutor(helper.context))
+
+    private val displayHandler by lazy { DeviceDisplayToolHandler(helper.context) }
     override val toolNames: Set<String> = setOf(
         "android_privileged_action", "android_privileged_session_start", "android_privileged_session_exec",
         "android_privileged_session_read", "android_privileged_session_stop",
@@ -178,6 +182,48 @@ class PrivilegedToolHandler internal constructor(
                 "action" to parsed.action, "backend" to status.backend.name, "provider" to status.provider.name,
                 "sessionId" to parsed.sessionId, "command" to parsed.command,
             ), toolHandle = toolHandle)
+
+            if (name == "android_privileged_action" && parsed.action == PrivilegedActionPolicy.ACTION_PACKAGE_LAUNCH) {
+                val packageName = parsed.arguments["packageName"]
+                    ?: parsed.arguments["package_name"]
+                    ?: parsed.arguments["package"]
+                    ?: parsed.arguments["pkg_name"]
+                    ?: parsed.arguments["target_package"]
+                    ?: parsed.arguments["targetPackage"]
+                    ?: parsed.arguments["module_pkg_name"]
+                if (packageName.isNullOrBlank()) {
+                    return ToolExecutionResult.Error(name, helper.localized("package_name is required for launch_activity"))
+                }
+                val displayArg = parsed.arguments["display"]
+                    ?: parsed.arguments["display_id"]
+                    ?: (args["arguments"] as? JsonObject)?.get("display")?.jsonPrimitive?.contentOrNull
+                    ?: (args["arguments"] as? JsonObject)?.get("display_id")?.jsonPrimitive?.contentOrNull
+                    ?: args["display"]?.jsonPrimitive?.contentOrNull
+                    ?: args["display_id"]?.jsonPrimitive?.contentOrNull
+
+                val displayArgs = buildJsonObject {
+                    put("action", "open_app")
+                    put("package_name", packageName)
+                    displayArg?.let { put("display", it) }
+                }
+                val displayToolCall = toolCall.copy(
+                    function = toolCall.function.copy(name = DeviceDisplayToolHandler.TOOL_NAME)
+                )
+                val displayResult = displayHandler.execute(
+                    toolCall = displayToolCall,
+                    args = displayArgs,
+                    runtimeDescriptor = runtimeDescriptor,
+                    env = env,
+                    callback = callback,
+                    toolHandle = toolHandle,
+                )
+                return when (displayResult) {
+                    is ToolExecutionResult.ContextResult -> displayResult.copy(toolName = name)
+                    is ToolExecutionResult.Error -> displayResult.copy(toolName = name)
+                    is ToolExecutionResult.Interrupted -> displayResult.copy(toolName = name)
+                    else -> displayResult
+                }
+            }
             val result = when (name) {
                 "android_privileged_action" -> if (parsed.action == PrivilegedActionPolicy.ACTION_SHELL_EXEC) {
                     access.executeRawShell(

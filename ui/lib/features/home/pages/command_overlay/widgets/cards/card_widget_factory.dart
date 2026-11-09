@@ -14,7 +14,9 @@ import 'package:ui/services/agent_acp_card_normalizer.dart';
 
 /// 任务执行前的回调类型
 typedef OnBeforeTaskExecute = Future<void> Function();
-typedef OnRequestAuthorize = void Function(List<String> requiredPermissionIds);
+typedef OnRequestAuthorize = Future<void> Function(
+  List<String> requiredPermissionIds,
+);
 
 /// 卡片组件工厂
 ///

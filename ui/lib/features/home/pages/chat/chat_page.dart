@@ -26,6 +26,7 @@ import '../../../../services/agent_identity.dart';
 import '../../../../services/assists_core_service.dart';
 import '../../widgets/home_drawer.dart';
 import '../authorize/authorize_page_args.dart';
+import '../../../../services/permission_service.dart';
 import '../command_overlay/widgets/chat_input_area.dart';
 import '../command_overlay/services/manual_recording_flow_controller.dart';
 import '../command_overlay/services/manual_recording_result_card.dart';

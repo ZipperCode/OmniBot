@@ -62,17 +62,21 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 helper.localized("缺少 goal"),
             )
         val runId = "gui-${UUID.randomUUID()}"
+        val sessionKey = env.acpSessionId ?: env.agentRunId
         val displayTarget = args["display"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
-        val targetDisplayId = if (displayTarget == null || displayTarget == "main" || displayTarget == "0") {
-            Display.DEFAULT_DISPLAY
-        } else {
-            try {
-                DeviceDisplayManager.resolveDisplayId(helper.context, displayTarget)
-            } catch (e: Exception) {
-                val msg = "指定的显示屏 '$displayTarget' 不可用或未创建: ${e.message}。请显式选择 'main' 或先创建虚拟屏。"
-                persistFailure(runId, goal, "display_unavailable", msg)
-                return failedRunResult(runId, goal, "display_unavailable", msg)
-            }
+        val targetDisplayId = try {
+            DeviceDisplayManager.resolveOrPrepareDisplayId(
+                context = helper.context,
+                target = displayTarget,
+                sessionKey = sessionKey,
+                acpSessionId = env.acpSessionId,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val msg = "指定的显示屏 '$displayTarget' 不可用或准备失败: ${e.message}"
+            persistFailure(runId, goal, "display_unavailable", msg)
+            return failedRunResult(runId, goal, "display_unavailable", msg)
         }
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
@@ -138,7 +142,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
             }
         }
         // 虚拟屏动作校验所有权，防止跨会话操作他人屏幕
-        val sessionKey = env.acpSessionId ?: env.agentRunId
         if (targetDisplayId != Display.DEFAULT_DISPLAY) {
             val vdOwner = DisplayInputCoordinator.getVirtualDisplayOwner(targetDisplayId)
             if (vdOwner != null && vdOwner != sessionKey) {
@@ -198,7 +201,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 request = OmniVlmPlugin.Request(
                     goal = goal,
                     runId = runId,
-                    display = displayTarget,
+                    display = targetDisplayId.toString(),
                     displayId = targetDisplayId,
                     hostManagedUi = true,
                 ),

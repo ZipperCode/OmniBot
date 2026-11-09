@@ -46,7 +46,7 @@ class DeviceDisplayToolHandler(
     )
 
     override suspend fun dispose() {
-        sessionDisplayTargets.clear()
+        // 跨轮必须保留会话目标与虚拟屏状态，仅在会话 close/delete 时清理
     }
 
     override val toolNames: Set<String> = setOf(TOOL_NAME)
@@ -68,18 +68,17 @@ class DeviceDisplayToolHandler(
 
         val sessionKey = env.acpSessionId ?: env.agentRunId
         val displayArg = args["display"]?.jsonPrimitive?.contentOrNull?.trim()
-            ?: sessionDisplayTargets[sessionKey]?.toString()
-        val targetDisplayId = when {
-            actionName == "list_displays" -> Display.DEFAULT_DISPLAY
-            actionName == "create_virtual_display" -> {
+        val targetDisplayId = when (actionName) {
+            "list_displays" -> Display.DEFAULT_DISPLAY
+            "create_virtual_display" -> {
                 // 创建虚拟屏时无需提前校验虚拟屏已存在，使用默认主屏申请操作租约
                 Display.DEFAULT_DISPLAY
             }
-            actionName == "present_to_user" -> {
+            "present_to_user" -> {
                 // 移交主屏目标为主屏，双屏租约在外部单独分流处理
                 Display.DEFAULT_DISPLAY
             }
-            actionName == "destroy_virtual_display" -> {
+            "destroy_virtual_display" -> {
                 // 已持有的虚拟屏即使对应用不可见，也必须能送达所属 Helper 清理。
                 val currentActiveId = DeviceDisplayManager.activeVirtualDisplayId()
                 val parsed = displayArg?.toIntOrNull()
@@ -92,13 +91,36 @@ class DeviceDisplayToolHandler(
                     }
                     else -> try {
                         DeviceDisplayManager.resolveDisplayId(context, displayArg)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "无效的显示屏目标：$displayArg")
                     }
                 }
             }
+            "switch_display" -> {
+                try {
+                    DeviceDisplayManager.resolveOrPrepareDisplayId(
+                        context = context,
+                        target = displayArg,
+                        sessionKey = sessionKey,
+                        acpSessionId = env.acpSessionId,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid display target: $displayArg")
+                }
+            }
             else -> try {
-                DeviceDisplayManager.resolveDisplayId(context, displayArg)
+                DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = context,
+                    target = displayArg,
+                    sessionKey = sessionKey,
+                    acpSessionId = env.acpSessionId,
+                )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid display target: $displayArg")
             }
@@ -321,7 +343,7 @@ class DeviceDisplayToolHandler(
                     turnId = env.acpTurnId,
                     displayId = Display.DEFAULT_DISPLAY,
                 )
-                sessionDisplayTargets[sessionId] = Display.DEFAULT_DISPLAY
+                DeviceDisplayManager.setSessionDisplayTarget(sessionId, Display.DEFAULT_DISPLAY)
                 ToolExecutionResult.ContextResult(
                     toolName = TOOL_NAME,
                     summaryText = "已将应用 $packageName (taskId=$resTaskId) 移交至主屏显示",
@@ -388,7 +410,7 @@ class DeviceDisplayToolHandler(
         val result = DeviceDisplayManager.createVirtualDisplay(context, width, height, dpi, ownerId = sessionKey)
         return result.fold(
             onSuccess = { info ->
-                sessionDisplayTargets[sessionKey] = info.displayId
+                DeviceDisplayManager.setSessionDisplayTarget(sessionKey, info.displayId)
                 val acpSession = acpSessionId ?: sessionKey
                 TaskRuntime.markScreenTarget(
                     context = context,
@@ -419,7 +441,7 @@ class DeviceDisplayToolHandler(
 
 
     private fun handleSwitchDisplay(targetDisplayId: Int, sessionKey: String): ToolExecutionResult {
-        sessionDisplayTargets[sessionKey] = targetDisplayId
+        DeviceDisplayManager.setSessionDisplayTarget(sessionKey, targetDisplayId)
         val acpSession = sessionKey
         TaskRuntime.markScreenTarget(
             context = context,
@@ -678,10 +700,8 @@ class DeviceDisplayToolHandler(
     }
 
     companion object {
-        private val sessionDisplayTargets = java.util.concurrent.ConcurrentHashMap<String, Int>()
-
         fun clearSession(sessionKey: String) {
-            sessionDisplayTargets.remove(sessionKey)
+            DeviceDisplayManager.clearSessionDisplayTarget(sessionKey)
         }
         const val TOOL_NAME = "device_display_action"
 
@@ -689,7 +709,7 @@ class DeviceDisplayToolHandler(
             AgentCapabilityToolDefinition(
                 name = TOOL_NAME,
                 displayName = "设备显示与屏幕操作",
-                description = "直接对 Android 手机主屏或后台虚拟屏执行读屏、截图、点击、长按、滑动、输入文本、按键、启动应用和多屏管理。同一屏幕输入自动排队。当操作主屏遇到安全锁屏时会等待解锁。屏幕操作统一使用 0..1000 规范相对坐标（0为屏幕最左/顶，1000为最右/底；若由 XML bounds [left,top][right,bottom] 计算目标中心：x = (left+right)/2 / width * 1000，y = (top+bottom)/2 / height * 1000）。",
+                description = "直接对 Android 手机后台虚拟屏（默认）或主屏执行读屏、截图、点击、长按、滑动、输入文本、按键、启动应用和多屏管理。默认在后台虚拟屏执行，不占用或干扰用户当前主屏；仅当用户明确要求在前台/主屏操作，或执行 present_to_user 移交时才使用主屏。同一屏幕输入自动排队。当操作主屏遇到安全锁屏时会等待解锁。屏幕操作统一使用 0..1000 规范相对坐标（0为屏幕最左/顶，1000为最右/底；若由 XML bounds [left,top][right,bottom] 计算目标中心：x = (left+right)/2 / width * 1000，y = (top+bottom)/2 / height * 1000）。",
                 parameters = buildJsonObject {
                     put("type", "object")
                     putJsonObject("properties") {
@@ -715,7 +735,7 @@ class DeviceDisplayToolHandler(
                         }
                         putJsonObject("display") {
                             put("type", "string")
-                            put("description", "目标屏幕：'main'（主屏，0）、'virtual'（后台虚拟屏），或具体屏幕数字 ID。省略时默认主屏。")
+                            put("description", "目标屏幕：'virtual'（默认，后台虚拟屏）、'main'（主屏，0，仅在用户明确要求操作主屏时使用），或具体屏幕数字 ID。省略时默认后台虚拟屏。")
                         }
                         putJsonObject("x") {
                             put("type", "number")

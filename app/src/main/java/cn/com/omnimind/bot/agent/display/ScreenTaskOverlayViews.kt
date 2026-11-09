@@ -96,17 +96,17 @@ internal object ScreenTaskTheme {
 
     val LIGHT_EDGE_COLORS = intArrayOf(
         0xFF2C7FEB.toInt(),
-        0x662C7FEB.toInt(),
-        0x1A2C7FEB.toInt(),
-        0x802C7FEB.toInt(),
+        0xB32C7FEB.toInt(),
+        0x4D2C7FEB.toInt(),
+        0xCC2C7FEB.toInt(),
         0xFF2C7FEB.toInt()
     )
 
     val DARK_EDGE_COLORS = intArrayOf(
         0xFF98AD90.toInt(),
-        0x6698AD90.toInt(),
-        0x1A98AD90.toInt(),
-        0x8098AD90.toInt(),
+        0xB398AD90.toInt(),
+        0x4D98AD90.toInt(),
+        0xCC98AD90.toInt(),
         0xFF98AD90.toInt()
     )
 
@@ -336,6 +336,11 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
     private var isGlowRunning = false
     private var reducedMotion = false
 
+    private val targetBounds = RectF()
+    private var hasTargetBounds = false
+    private var explicitCornerRadius: Float? = null
+    private var gradientCenterX = 0f
+    private var gradientCenterY = 0f
     init {
         updateReducedMotion()
         updatePaintsAndShaders()
@@ -350,26 +355,72 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
         val isNight = ScreenTaskTheme.isNight(context)
         val brandColor = ScreenTaskTheme.brandPrimary(isNight)
 
-        haloPaint.strokeWidth = 8f * density
-        haloPaint.maskFilter = BlurMaskFilter(6f * density, BlurMaskFilter.Blur.NORMAL)
-        haloPaint.alpha = (0.28f * 255).toInt()
+        val rectW = if (hasTargetBounds) targetBounds.width() else width.toFloat()
+        val rectH = if (hasTargetBounds) targetBounds.height() else height.toFloat()
+        val minDim = minOf(rectW, rectH).coerceAtLeast(1f)
 
-        linePaint.strokeWidth = 2f * density
-        linePaint.alpha = (0.85f * 255).toInt()
+        // 自适应笔触缩放：小尺寸内容缩略缩放光晕粗细，避免遮挡内容
+        val scale = if (hasTargetBounds) (minDim / (160f * density)).coerceIn(0.25f, 1f) else 1f
 
-        staticPaint.strokeWidth = 2f * density
+        haloPaint.strokeWidth = 14f * density * scale
+        haloPaint.maskFilter = BlurMaskFilter((8f * density * scale).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
+        haloPaint.alpha = (0.70f * 255).toInt()
+
+        linePaint.strokeWidth = (2.5f * density * scale).coerceAtLeast(1.5f)
+        linePaint.alpha = 255
+
+        staticPaint.strokeWidth = (2.5f * density * scale).coerceAtLeast(1.5f)
         staticPaint.color = brandColor
-        staticPaint.alpha = (0.75f * 255).toInt()
+        staticPaint.alpha = 255
 
-        val w = width
-        val h = height
-        if (w > 0 && h > 0) {
+        val cx = if (hasTargetBounds) targetBounds.centerX() else width / 2f
+        val cy = if (hasTargetBounds) targetBounds.centerY() else height / 2f
+        gradientCenterX = cx
+        gradientCenterY = cy
+
+        if (rectW > 0f && rectH > 0f) {
             val colors = ScreenTaskTheme.edgeLightColors(isNight)
-            sweepGradient = SweepGradient(w / 2f, h / 2f, colors, null)
+            sweepGradient = SweepGradient(cx, cy, colors, null)
             haloPaint.shader = sweepGradient
             linePaint.shader = sweepGradient
         }
     }
+
+    /**
+     * 设置自定义贴合矩形与圆角半径（用于虚拟屏内容 fit-center 贴合）。
+     * 仅在几何尺寸真正改变时更新 Path 与 Shader，无每帧重复分配。
+     */
+    fun setTargetRect(rect: RectF, cornerRadius: Float? = null) {
+        if (hasTargetBounds &&
+            targetBounds.left == rect.left &&
+            targetBounds.top == rect.top &&
+            targetBounds.right == rect.right &&
+            targetBounds.bottom == rect.bottom &&
+            explicitCornerRadius == cornerRadius
+        ) {
+            return
+        }
+        hasTargetBounds = true
+        targetBounds.set(rect)
+        explicitCornerRadius = cornerRadius
+        updatePaintsAndShaders()
+        rebuildPath()
+        invalidate()
+    }
+
+    fun clearTargetRect() {
+        if (!hasTargetBounds) return
+        hasTargetBounds = false
+        targetBounds.setEmpty()
+        explicitCornerRadius = null
+        updatePaintsAndShaders()
+        rebuildPath()
+        invalidate()
+    }
+
+    fun isRunning(): Boolean = isGlowRunning
+
+    fun getTargetBounds(): RectF? = if (hasTargetBounds) RectF(targetBounds) else null
 
     fun start() {
         if (isGlowRunning) return
@@ -410,7 +461,9 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         updateReducedMotion()
-        start()
+        if (!hasTargetBounds) {
+            start()
+        }
     }
 
     override fun onDetachedFromWindow() {
@@ -421,21 +474,24 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w > 0 && h > 0) {
-            val isNight = ScreenTaskTheme.isNight(context)
-            val colors = ScreenTaskTheme.edgeLightColors(isNight)
-            sweepGradient = SweepGradient(w / 2f, h / 2f, colors, null)
-            haloPaint.shader = sweepGradient
-            linePaint.shader = sweepGradient
+            updatePaintsAndShaders()
             rebuildPath()
         }
     }
 
     private fun rebuildPath() {
+        edgePath.reset()
+        if (hasTargetBounds) {
+            if (targetBounds.width() <= 0f || targetBounds.height() <= 0f) return
+            val r = explicitCornerRadius ?: dpF(context, 12f)
+            edgePath.addRoundRect(targetBounds, r, r, Path.Direction.CW)
+            return
+        }
+
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        edgePath.reset()
         val inset = dpF(context, 1.5f)
         var cornerRadius = dpF(context, 28f)
 
@@ -456,22 +512,25 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         if (!isGlowRunning) return
-        val w = width.toFloat()
-        val h = height.toFloat()
+        val w = if (hasTargetBounds) targetBounds.width() else width.toFloat()
+        val h = if (hasTargetBounds) targetBounds.height() else height.toFloat()
         if (w <= 0f || h <= 0f) return
 
+        val saveCount = canvas.save()
+        if (hasTargetBounds) canvas.clipRect(targetBounds)
         if (reducedMotion) {
             canvas.drawPath(edgePath, staticPaint)
-            return
+        } else {
+            val shader = sweepGradient
+            if (shader != null) {
+                matrixTransform.reset()
+                matrixTransform.setRotate(rotationAngle, gradientCenterX, gradientCenterY)
+                shader.setLocalMatrix(matrixTransform)
+                canvas.drawPath(edgePath, haloPaint)
+                canvas.drawPath(edgePath, linePaint)
+            }
         }
-
-        val shader = sweepGradient ?: return
-        matrixTransform.reset()
-        matrixTransform.setRotate(rotationAngle, w / 2f, h / 2f)
-        shader.setLocalMatrix(matrixTransform)
-
-        canvas.drawPath(edgePath, haloPaint)
-        canvas.drawPath(edgePath, linePaint)
+        canvas.restoreToCount(saveCount)
     }
 }
 
@@ -503,7 +562,10 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val statusTextView: TextView
     private val microLensFrame: FrameLayout
     private val lensFrameView: VirtualDisplayFrameView
+    private val lensEdgeLightView: ScreenTaskEdgeLightView
     private val expandHintView: ImageView
+    private val tempLensRect = RectF()
+    private val tempCanvasRect = RectF()
 
     private val stageContainer: LinearLayout
     private val stageTitleView: TextView
@@ -512,6 +574,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val stageCollapseIconView: ImageView
     private val canvasWrapper: FrameLayout
     private val canvasFrameView: VirtualDisplayFrameView
+    private val canvasEdgeLightView: ScreenTaskEdgeLightView
     private val stopButton: FrameLayout
     private val stopIconView: ImageView
     private val stopTextView: TextView
@@ -533,6 +596,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             isFocusable = true
             setOnClickListener { toggleExpand(true) }
         }
+        markAsAccessibilityButton(pillContainer, "展开虚拟屏小窗")
 
         statusIndicatorDot = View(context).apply {
             val size = dp(context, 8)
@@ -562,8 +626,15 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+        lensEdgeLightView = ScreenTaskEdgeLightView(context)
         microLensFrame.addView(lensFrameView)
-
+        microLensFrame.addView(lensEdgeLightView)
+        lensFrameView.onFrameDrawn = ::updateLensEdgeLightBounds
+        lensFrameView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || b != ob) {
+                updateLensEdgeLightBounds()
+            }
+        }
         expandHintView = ImageView(context).apply {
             val size = dp(context, 14)
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
@@ -645,15 +716,29 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 topMargin = dp(context, 4)
                 bottomMargin = dp(context, 12)
             }
+            isClickable = true
+            isFocusable = true
+            markAsAccessibilityButton(this, "进入全屏独立观看")
+            setOnClickListener {
+                onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
+            }
         }
         canvasFrameView = VirtualDisplayFrameView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            contentDescription = "虚拟屏小窗画面"
         }
+        canvasEdgeLightView = ScreenTaskEdgeLightView(context)
         canvasWrapper.addView(canvasFrameView)
-
+        canvasWrapper.addView(canvasEdgeLightView)
+        canvasFrameView.onFrameDrawn = ::updateCanvasEdgeLightBounds
+        canvasFrameView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || b != ob) {
+                updateCanvasEdgeLightBounds()
+            }
+        }
         // 控制栏：48dp 按钮，停止为中性底+error文字，移交主屏为 accent 黑白反差
         val controlBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -689,7 +774,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         pipButton = FrameLayout(context).apply {
             val size = dp(context, 48)
             layoutParams = LinearLayout.LayoutParams(size, size)
-            markAsAccessibilityButton(this, "打开独立预览")
+            markAsAccessibilityButton(this, "全屏独立观看")
             setOnClickListener {
                 onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
             }
@@ -830,9 +915,22 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             pipButton.visibility = View.VISIBLE
             stageTitleView.text = "虚拟屏"
             stageHeaderBadge.text = if (isWaiting) "等待人工确认" else "协同运行中"
+
+            updateLensEdgeLightBounds()
+            updateCanvasEdgeLightBounds()
+
+            if (!isWaiting) {
+                lensEdgeLightView.start()
+                canvasEdgeLightView.start()
+            } else {
+                lensEdgeLightView.stop()
+                canvasEdgeLightView.stop()
+            }
         } else {
             lensFrameView.setPreviewActive(false)
             canvasFrameView.setPreviewActive(false)
+            lensEdgeLightView.stop()
+            canvasEdgeLightView.stop()
             canvasWrapper.visibility = View.GONE
             takeoverButton.visibility = View.GONE
             pipButton.visibility = View.GONE
@@ -873,6 +971,20 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         lp.height = dp(context, maxH)
         canvasWrapper.layoutParams = lp
     }
+    private fun updateLensEdgeLightBounds() {
+        lensFrameView.getContentRect(tempLensRect)
+        lensEdgeLightView.setTargetRect(tempLensRect, cornerRadius = dpF(context, 4f))
+    }
+
+    private fun updateCanvasEdgeLightBounds() {
+        canvasFrameView.getContentRect(tempCanvasRect)
+        canvasEdgeLightView.setTargetRect(tempCanvasRect, cornerRadius = dpF(context, 10f))
+    }
+
+    fun getLensEdgeLight(): ScreenTaskEdgeLightView = lensEdgeLightView
+    fun getCanvasEdgeLight(): ScreenTaskEdgeLightView = canvasEdgeLightView
+    fun getCanvasWrapper(): FrameLayout = canvasWrapper
+
 
     fun applyTheme() {
         val isNight = ScreenTaskTheme.isNight(context)
@@ -886,12 +998,11 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         val errorColor = ScreenTaskTheme.errorColor()
 
         // 胶囊外壳
-        val pillBg = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpF(context, 24f)
-            setColor(surfaceBg)
-            setStroke(dp(context, 1), borderSubtle)
-        }
+        val pillBg = createRippleBackground(
+            surfaceBg,
+            ScreenTaskTheme.rippleColor(surfaceBg),
+            dpF(context, 24f)
+        )
         pillContainer.background = pillBg
         statusTextView.setTextColor(textPrimary)
         expandHintView.setImageDrawable(IconDrawables.createChevron(textSecondary, false))
@@ -926,12 +1037,11 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         stageCollapseIconView.setImageDrawable(IconDrawables.createChevron(textSecondary, true))
 
         // 画布包装器
-        val canvasBg = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpF(context, 14f)
-            setColor(0xFF101214.toInt())
-            setStroke(dp(context, 1), borderSubtle)
-        }
+        val canvasBg = createRippleBackground(
+            0xFF101214.toInt(),
+            ScreenTaskTheme.rippleColor(0xFF101214.toInt()),
+            dpF(context, 14f)
+        )
         canvasWrapper.background = canvasBg
         canvasWrapper.clipToOutline = true
 
@@ -965,16 +1075,24 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     fun onConfigChanged() {
         applyTheme()
         adaptCanvasHeight()
+        lensEdgeLightView.onConfigChanged()
+        canvasEdgeLightView.onConfigChanged()
+        updateLensEdgeLightBounds()
+        updateCanvasEdgeLightBounds()
     }
 
     fun onScreenOff() {
         lensFrameView.setPreviewActive(false)
         canvasFrameView.setPreviewActive(false)
+        lensEdgeLightView.stop()
+        canvasEdgeLightView.stop()
     }
 
     fun cleanup() {
         lensFrameView.setPreviewActive(false)
         canvasFrameView.setPreviewActive(false)
+        lensEdgeLightView.stop()
+        canvasEdgeLightView.stop()
     }
 
     fun showToastOrStatus(message: String) {

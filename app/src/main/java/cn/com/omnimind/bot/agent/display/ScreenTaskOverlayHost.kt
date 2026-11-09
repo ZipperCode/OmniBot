@@ -54,6 +54,10 @@ object ScreenTaskOverlayHost {
     @Volatile
     private var isExpanded: Boolean = false
 
+    // 独立全屏预览 Activity 前台展示标记（前台时不遮挡全屏画面）
+    @Volatile
+    private var isPreviewActivityForeground: Boolean = false
+
     // 移交主屏防中断与防误杀保护
     @Volatile
     private var activeTakeoverTaskId: String? = null
@@ -116,7 +120,11 @@ object ScreenTaskOverlayHost {
             return
         }
 
-        topOverlayView?.visibility = View.VISIBLE
+        if (isPreviewActivityForeground) {
+            topOverlayView?.visibility = View.GONE
+        } else {
+            topOverlayView?.visibility = View.VISIBLE
+        }
 
         // 主线程消费时以 TaskRuntime.getActiveTasks 实时事实为准，防止旧 snapshot 排队复活已结束任务
         val liveActiveTasks = TaskRuntime.getActiveTasks()
@@ -249,6 +257,9 @@ object ScreenTaskOverlayHost {
         activeStopToken = targetStopToken
         activeDisplayId = targetDisplayId
         isExpanded = false
+        if (isPreviewActivityForeground) {
+            topOverlayView?.visibility = View.GONE
+        }
 
         if (targetDisplayId == 0 && !isWaiting) {
             ensureEdgeLightAttached(appContext)
@@ -624,6 +635,27 @@ object ScreenTaskOverlayHost {
 
     internal fun getShowingResultTaskId(): String? = showingResultTaskId
     internal fun getResultCardView(): ScreenTaskResultCardView? = resultCardOverlayView
+    internal fun getTopOverlayView(): ScreenTaskCapsuleView? = topOverlayView
+    internal fun getEdgeLightOverlayView(): ScreenTaskEdgeLightView? = edgeLightOverlayView
+    internal fun getActiveDisplayId(): Int? = activeDisplayId
+    internal fun getActiveTaskId(): String? = activeTaskId
+    internal fun isCapsuleExpanded(): Boolean = isExpanded
+
+    fun setPreviewActivityForeground(foreground: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { setPreviewActivityForeground(foreground) }
+            return
+        }
+        isPreviewActivityForeground = foreground
+        if (foreground) {
+            topOverlayView?.visibility = View.GONE
+        } else {
+            val ctx = windowContext
+            if (activeTaskId != null && ctx != null && !KeyguardStateMonitor.isKeyguardLocked(ctx)) {
+                topOverlayView?.visibility = View.VISIBLE
+            }
+        }
+    }
 
     private fun ensureWindowManager(context: Context): WindowManager? {
         if (windowManager != null && windowContext != null) {

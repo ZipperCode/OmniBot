@@ -594,7 +594,7 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("display") {
                         put("type", "string")
-                        put("description", "目标屏幕：main 为主屏，virtual 为已创建后台虚拟屏，或传实际显示编号；省略使用主屏。不兼容时明确报告，不暗中切屏。")
+                        put("description", "目标屏幕：'virtual' 为后台虚拟屏（默认，安全在后台运行不干扰主屏），'main' 为主屏（仅当用户明确要求在当前主屏操作时使用），或传实际显示编号；省略时默认使用后台虚拟屏。不兼容时明确报告，不暗中切屏。")
                     }
                 }
                 putJsonArray("required") {

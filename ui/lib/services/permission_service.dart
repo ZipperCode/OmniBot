@@ -257,28 +257,19 @@ class PermissionService {
           onAuthorize: () async {
             await showAccessibilityPermissionPrompt(context);
           },
-          checkAuthorization: () async {
-            try {
-              return await spePermission.invokeMethod<bool>(
-                    'isAndroidGuiAccessibilityReady',
-                  ) ??
-                  false;
-            } catch (_) {
-              return false;
-            }
-          },
+          checkAuthorization: () => isPermissionGranted(id),
         );
       case kWorkspaceStoragePermissionId:
         return _buildDisplayPermissionData(
           spec,
           onAuthorize: openWorkspaceStorageSettings,
-          checkAuthorization: isWorkspaceStorageAccessGranted,
+          checkAuthorization: () => isPermissionGranted(id),
         );
       case kPublicStoragePermissionId:
         return _buildDisplayPermissionData(
           spec,
           onAuthorize: openPublicStorageSettings,
-          checkAuthorization: isPublicStorageAccessGranted,
+          checkAuthorization: () => isPermissionGranted(id),
         );
       case kShizukuPermissionId:
         return _buildDisplayPermissionData(
@@ -286,13 +277,83 @@ class PermissionService {
           onAuthorize: () async {
             await ensureShizukuPermission(context);
           },
-          checkAuthorization: () async {
-            final status = await getShizukuStatus();
-            return status.isGranted;
-          },
+          checkAuthorization: () => isPermissionGranted(id),
         );
     }
     return null;
+  }
+
+  /// 统一只读检查单个权限是否已授权/就绪
+  static Future<bool> isPermissionGranted(String id) async {
+    switch (id) {
+      case kAccessibilityPermissionId:
+        try {
+          return await spePermission.invokeMethod<bool>(
+                'isAndroidGuiAccessibilityReady',
+              ) ??
+              false;
+        } catch (_) {
+          return false;
+        }
+      case kOverlayPermissionId:
+        try {
+          return await spePermission.invokeMethod<bool>(
+                'isOverlayPermission',
+              ) ??
+              false;
+        } catch (_) {
+          return false;
+        }
+      case kInstalledAppsPermissionId:
+        try {
+          return await spePermission.invokeMethod<bool>(
+                'isInstalledAppsPermissionGranted',
+              ) ??
+              false;
+        } catch (_) {
+          return false;
+        }
+      case kShizukuPermissionId:
+        try {
+          final status = await getShizukuStatus();
+          return status.isGranted;
+        } catch (_) {
+          return false;
+        }
+      case kWorkspaceStoragePermissionId:
+        try {
+          return await isWorkspaceStorageAccessGranted();
+        } catch (_) {
+          return false;
+        }
+      case kPublicStoragePermissionId:
+        try {
+          return await isPublicStorageAccessGranted();
+        } catch (_) {
+          return false;
+        }
+      default:
+        // 未知权限 ID，不误判全满足
+        return false;
+    }
+  }
+
+  /// 检查所需权限集合是否全部已授权
+  /// 若所需权限集合为空或包含未知/未授权权限，返回 false
+  static Future<bool> areRequiredPermissionsGranted(
+    Iterable<String> requiredIds,
+  ) async {
+    final ids = requiredIds.toList(growable: false);
+    if (ids.isEmpty) {
+      return false;
+    }
+    for (final id in ids) {
+      final granted = await isPermissionGranted(id);
+      if (!granted) {
+        return false;
+      }
+    }
+    return true;
   }
 
   static List<PermissionData> buildDisplayPermissionsForIds(
@@ -305,7 +366,7 @@ class PermissionService {
             return _buildDisplayPermissionData(
               special,
               onAuthorize: () async {},
-              checkAuthorization: () async => false,
+              checkAuthorization: () => isPermissionGranted(id),
             );
           }
           return switch (id) {
@@ -321,7 +382,7 @@ class PermissionService {
                   ? 'Desktop overlay for quick access'
                   : '桌面悬浮显示，快速唤起小万',
               onAuthorize: () async {},
-              checkAuthorization: () async => false,
+              checkAuthorization: () => isPermissionGranted(id),
             ),
             kInstalledAppsPermissionId => PermissionData(
               id: kInstalledAppsPermissionId,
@@ -335,21 +396,7 @@ class PermissionService {
                   ? 'Identify installed apps for app context'
                   : '识别已安装应用并提供应用上下文',
               onAuthorize: () async {},
-              checkAuthorization: () async => false,
-            ),
-            kShizukuPermissionId => PermissionData(
-              id: kShizukuPermissionId,
-              iconPath: 'assets/welcome/permission_installed_apps.svg',
-              iconWidth: 32,
-              iconHeight: 32,
-              name: LegacyTextLocalizer.isEnglish
-                  ? 'Shizuku Permission'
-                  : 'Shizuku 权限',
-              description: LegacyTextLocalizer.isEnglish
-                  ? 'Optional advanced system actions for the agent'
-                  : '可选的高级系统能力，用于扩展 agent 的系统级操作边界',
-              onAuthorize: () async {},
-              checkAuthorization: () async => false,
+              checkAuthorization: () => isPermissionGranted(id),
             ),
             _ => null,
           };

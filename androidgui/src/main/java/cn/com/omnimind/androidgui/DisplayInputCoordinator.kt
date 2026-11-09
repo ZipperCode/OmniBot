@@ -311,6 +311,7 @@ object DisplayInputCoordinator {
         toDestroy.forEach { displayId ->
             DeviceDisplayManager.destroyVirtualDisplay(displayId, sessionOwnerId)
         }
+        DeviceDisplayManager.clearSessionDisplayTarget(sessionOwnerId)
     }
 
     fun registerActiveJob(displayId: Int, ownerId: String, job: Job) {
@@ -350,6 +351,7 @@ object DisplayInputCoordinator {
             leaseUnlockAwaiters.clear()
             sessionVirtualDisplays.clear()
         }
+            DeviceDisplayManager.resetForTesting()
         displayMutexes.values.forEach { mutex ->
             if (mutex.isLocked) {
                 runCatching { mutex.unlock() }

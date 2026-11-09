@@ -105,7 +105,9 @@ class VirtualScreenFrameSource(
         canvas: Canvas,
         destination: Rect,
         afterSequence: Long = -1L,
+        outDrawRect: Rect? = null,
     ): Boolean = lock.withLock {
+        outDrawRect?.setEmpty()
         if (closed) return false
         if (latestFrameSequence <= afterSequence) return false
         val bitmap = latestBitmap ?: return false
@@ -129,6 +131,7 @@ class VirtualScreenFrameSource(
 
         srcRect.set(0, 0, srcWidth, srcHeight)
         canvas.drawBitmap(bitmap, srcRect, drawRect, drawPaint)
+        outDrawRect?.set(drawRect)
         true
     }
 

@@ -1826,14 +1826,21 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
   ) async {
     if (_isAwaitingAuthorizeResult) return;
 
+    final targetIds = requiredPermissionIds.isEmpty
+        ? kTaskExecutionRequiredPermissionIds
+        : requiredPermissionIds;
+
+    // 前置只读检查：若所需权限当前已全部授权，直接返回，避免无意义的 push/pop 闪屏
+    if (await PermissionService.areRequiredPermissionsGranted(targetIds)) {
+      return;
+    }
+
     _isAwaitingAuthorizeResult = true;
     try {
       await GoRouterManager.pushForResult<bool>(
         '/home/authorize',
         extra: AuthorizePageArgs(
-          requiredPermissionIds: requiredPermissionIds.isEmpty
-              ? kTaskExecutionRequiredPermissionIds
-              : requiredPermissionIds,
+          requiredPermissionIds: targetIds,
         ),
       );
       // Granting a device permission changes only that permission. It is not

@@ -23,6 +23,7 @@ class DebugVlmTaskReceiver : BroadcastReceiver() {
         Log.i(TAG, "vlm_task_received")
         scope.launch {
             val runId = "debug-vlm-${UUID.randomUUID()}"
+            var preparedDisplayId: Int? = null
             val payload = runCatching {
                     val goal = intent?.getStringExtra("goalBase64")
                         ?.let { String(Base64.decode(it, Base64.DEFAULT), Charsets.UTF_8) }
@@ -31,11 +32,19 @@ class DebugVlmTaskReceiver : BroadcastReceiver() {
                         .ifBlank { intent?.getStringExtra("goal")?.trim().orEmpty() }
                     require(goal.isNotEmpty()) { "goal is required" }
                     Log.i(TAG, "vlm_task_execute runId=$runId")
+                    val displayId = cn.com.omnimind.androidgui.DeviceDisplayManager.resolveOrPrepareDisplayId(
+                        context = appContext,
+                        target = "virtual",
+                        sessionKey = runId,
+                    )
+                    preparedDisplayId = displayId
                     val result = OmniVlmPlugin.execute(
                         context = appContext,
                         request = OmniVlmPlugin.Request(
                             goal = goal,
                             runId = runId,
+                            display = displayId.toString(),
+                            displayId = displayId,
                         ),
                         modelClient = HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
                             .asOmniFlowModelClient(),
@@ -47,6 +56,11 @@ class DebugVlmTaskReceiver : BroadcastReceiver() {
                         "run_id" to resultRunId,
                         "final_state_id" to result.finalStateId,
                     )
+                }.also {
+                    preparedDisplayId?.let { dispId ->
+                        cn.com.omnimind.androidgui.DeviceDisplayManager.destroyVirtualDisplay(dispId, runId)
+                        cn.com.omnimind.androidgui.DisplayInputCoordinator.closeSessionVirtualDisplays(runId)
+                    }
                 }.getOrElse { error ->
                     linkedMapOf(
                         "success" to false,

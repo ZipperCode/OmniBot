@@ -11,11 +11,13 @@ import android.content.res.AssetManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.RectF
 import android.os.Build
 import android.os.PowerManager
 import android.view.Display
 import android.view.View
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -79,6 +81,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
         context = RuntimeEnvironment.getApplication()
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         Shadows.shadowOf(pm).setIsInteractive(true)
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(true)
         TaskRuntime.resetForTesting()
         DisplayInputCoordinator.resetForTesting()
         setVirtualDisplayForTesting(Display.DEFAULT_DISPLAY, null)
@@ -86,6 +89,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
 
     @After
     fun tearDown() {
+        ScreenTaskOverlayHost.dismissAll()
         TaskRuntime.resetForTesting()
         DisplayInputCoordinator.resetForTesting()
         setVirtualDisplayForTesting(Display.DEFAULT_DISPLAY, null)
@@ -544,7 +548,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
         val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume()
         val activity = controller.get()
         try {
-            val root = ReflectionHelpers.getField<LinearLayout>(activity, "rootContainer")
+            val root = ReflectionHelpers.getField<FrameLayout>(activity, "rootContainer")
             val header = ReflectionHelpers.getField<LinearLayout>(activity, "headerBar")
             val bottom = ReflectionHelpers.getField<LinearLayout>(activity, "bottomBar")
             val status = ReflectionHelpers.getField<TextView>(activity, "statusTextView")
@@ -1494,6 +1498,302 @@ class VirtualDisplayTakeoverAndNotificationTest {
         activityController.destroy()
         ShadowLooper.idleMainLooper()
         frameSource.close()
+    }
+    @Test
+    fun `click canvas wrapper enters preview without cancelling or migrating turn`() {
+        val sessionId = "session-canvas-click"
+        val taskId = "task-canvas-1"
+        val turnId = "turn-1"
+        val stopToken = "token-1"
+        val displayId = 5
+        setVirtualDisplayForTesting(displayId, sessionId)
+
+        TaskRuntime.start(
+            context = context,
+            taskId = taskId,
+            conversationId = 1L,
+            sessionId = sessionId,
+            turnId = turnId,
+            title = "小窗点击测试任务",
+        )
+        TaskRuntime.markScreenTarget(context, sessionId, turnId, displayId)
+
+        var openedPip = false
+        var stopped = false
+        var takenOver = false
+
+        val capsule = ScreenTaskCapsuleView(context).apply {
+            initBinding(
+                taskId = taskId,
+                sessionId = sessionId,
+                turnId = turnId,
+                stopToken = stopToken,
+                displayId = displayId,
+                statusText = "执行中",
+                isWaiting = false,
+                onToggleExpand = {},
+                onStop = { _, _, _, _ -> stopped = true },
+                onTakeover = { _, _, _, _, _ -> takenOver = true },
+                onOpenPip = { _, _, _, _, _ -> openedPip = true },
+            )
+            setExpanded(true)
+        }
+
+        val canvasWrapper = capsule.getCanvasWrapper()
+        assertTrue("画布外框必须是可点击的", canvasWrapper.isClickable)
+        canvasWrapper.performClick()
+
+        assertTrue("点击小窗画布必须触发独立全屏观看", openedPip)
+        assertFalse("点击小窗画布绝不可触发移交主屏", takenOver)
+        assertFalse("点击小窗画布绝不可触发停止任务", stopped)
+        assertNotNull("TaskRuntime 中任务仍然活跃", TaskRuntime.getActiveTask(taskId))
+        assertEquals("虚拟屏依然归原会话保留", displayId, DeviceDisplayManager.activeVirtualDisplayId())
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `fit-center boundary computation landscape and portrait letterbox`() {
+        val sessionId = "session-fit-center"
+        val displayId = 15
+        val portraitFrameSource = VirtualScreenFrameSource(100, 200)
+        setVirtualDisplayForTesting(displayId, sessionId, portraitFrameSource)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+
+        val activityController = Robolectric.buildActivity(android.app.Activity::class.java).create().start().resume()
+        val testActivity = activityController.get()
+        val frameView = VirtualDisplayFrameView(testActivity).apply {
+            bind(displayId, sessionId)
+        }
+        testActivity.setContentView(frameView)
+        activityController.visible()
+        ShadowLooper.idleMainLooper()
+
+        // 0. 首帧前：边框为空，绝不猜测光晕
+        val emptyRect = RectF()
+        frameView.getContentRect(emptyRect)
+        assertTrue("未绘制首帧前必须为空矩形避免虚假光晕", emptyRect.isEmpty)
+
+        val renderBitmap = Bitmap.createBitmap(1000, 1000, Bitmap.Config.ARGB_8888)
+        val renderCanvas = Canvas(renderBitmap)
+
+        // 1. 纵向画面 (100x200, aspect 0.5) 放入正方形 (1000x1000) 绘制: 两侧黑边 (pillarbox)
+        publishFrameForTesting(portraitFrameSource, Bitmap.createBitmap(100, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) })
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY)
+        )
+        frameView.layout(0, 0, 1000, 1000)
+        frameView.draw(renderCanvas)
+
+        val portraitRect = RectF()
+        frameView.getContentRect(portraitRect)
+        assertEquals("正方形中纵向屏幕画面靠上顶满", 0f, portraitRect.top, 0.5f)
+        assertEquals("正方形中纵向屏幕画面靠底顶满", 1000f, portraitRect.bottom, 0.5f)
+        assertEquals("正方形中纵向屏幕画面宽度按比例压缩", 500f, portraitRect.width(), 0.5f)
+        assertEquals("正方形中纵向屏幕画面水平居中左边界", 250f, portraitRect.left, 0.5f)
+        assertEquals("正方形中纵向屏幕画面水平居中右边界", 750f, portraitRect.right, 0.5f)
+
+        // 2. 横向宽屏 (200x100, aspect 2.0) 放入纵向 (1000x2000) 绘制: 上下黑边 (letterbox)
+        val landscapeFrameSource = VirtualScreenFrameSource(200, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, landscapeFrameSource)
+        frameView.bind(displayId, sessionId)
+        publishFrameForTesting(landscapeFrameSource, Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) })
+
+        val landscapeBitmap = Bitmap.createBitmap(1000, 2000, Bitmap.Config.ARGB_8888)
+        val landscapeCanvas = Canvas(landscapeBitmap)
+        frameView.measure(
+            View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(2000, View.MeasureSpec.EXACTLY)
+        )
+        frameView.layout(0, 0, 1000, 2000)
+        frameView.draw(landscapeCanvas)
+
+        val landscapeRect = RectF()
+        frameView.getContentRect(landscapeRect)
+        assertEquals("纵向容器中横向屏幕画面水平满幅左边界", 0f, landscapeRect.left, 0.5f)
+        assertEquals("纵向容器中横向屏幕画面水平满幅右边界", 1000f, landscapeRect.right, 0.5f)
+        assertEquals("纵向容器中横向屏幕画面高度按比例计算", 500f, landscapeRect.height(), 0.5f)
+        assertEquals("纵向容器中横向屏幕画面垂直居中上边界", 750f, landscapeRect.top, 0.5f)
+        assertEquals("纵向容器中横向屏幕画面垂直居中下边界", 1250f, landscapeRect.bottom, 0.5f)
+
+        // 3. 光晕真正绘制到内容边缘，柔光不能溢入上下黑边。
+        val edgeLight = ScreenTaskEdgeLightView(context)
+        edgeLight.measure(
+            View.MeasureSpec.makeMeasureSpec(1000, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(2000, View.MeasureSpec.EXACTLY),
+        )
+        edgeLight.layout(0, 0, 1000, 2000)
+        edgeLight.setTargetRect(landscapeRect, cornerRadius = 0f)
+        val glowBitmap = Bitmap.createBitmap(1000, 2000, Bitmap.Config.ARGB_8888)
+        edgeLight.start()
+        edgeLight.draw(Canvas(glowBitmap))
+        edgeLight.stop()
+        assertTrue("实际画面内边缘必须有可见光晕", Color.alpha(glowBitmap.getPixel(500, 751)) > 0)
+        assertEquals("画面上方的黑边不得被柔光污染", 0, Color.alpha(glowBitmap.getPixel(500, 749)))
+        assertEquals("画面下方的黑边不得被柔光污染", 0, Color.alpha(glowBitmap.getPixel(500, 1250)))
+        glowBitmap.recycle()
+
+        // 4. 绑定切换后几何矩形立即清空
+        frameView.bind(999, "other-session")
+        val resetRect = RectF()
+        frameView.getContentRect(resetRect)
+        assertTrue("解绑切换后几何矩形必须立即清空，绝不跨会话遗留", resetRect.isEmpty)
+
+        activityController.destroy()
+        portraitFrameSource.close()
+        landscapeFrameSource.close()
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun `edge light follows active turn and does not persist on terminal or new turn`() {
+        val sessionId = "session-halo-turn"
+        val taskId = "task-halo-1"
+        val turn1 = "turn-1"
+        val displayId = 7
+        setVirtualDisplayForTesting(displayId, sessionId)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+
+        TaskRuntime.start(
+            context = context,
+            taskId = taskId,
+            conversationId = 2L,
+            sessionId = sessionId,
+            turnId = turn1,
+            title = "光晕测试任务",
+        )
+        TaskRuntime.markScreenTarget(context, sessionId, turn1, displayId)
+
+        val intent = VirtualDisplayPreviewActivity.createIntent(
+            context = context,
+            sessionId = sessionId,
+            displayId = displayId,
+            taskId = taskId,
+            turnId = turn1,
+            stopToken = "token-1",
+        )
+
+        val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume().visible()
+        val activity = controller.get()
+        try {
+            val edgeLight = activity.getPreviewEdgeLight()
+            val previewView = activity.getPreviewView()
+            previewView.measure(
+                View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(1600, View.MeasureSpec.EXACTLY)
+            )
+            previewView.layout(0, 0, 800, 1600)
+            ShadowLooper.idleMainLooper()
+
+            assertTrue("运行中且非等待的当前 Turn 必须开启光晕", edgeLight.isRunning())
+
+            // 1. 进入等待人工确认状态：光晕必须立即停滞
+            TaskRuntime.updateWaitingStatus(
+                context = context,
+                conversationId = 2L,
+                waitingStatus = TaskWaitingStatus.WaitingForUnlock(conversationId = 2L, sessionId = sessionId),
+            )
+            ShadowLooper.idleMainLooper()
+            controller.pause().resume()
+            assertFalse("等待人工确认时绝不显示运行光晕", edgeLight.isRunning())
+
+            // 2. 恢复非等待运行：光晕恢复
+            TaskRuntime.updateWaitingStatus(
+                context = context,
+                conversationId = 2L,
+                waitingStatus = null,
+            )
+            ShadowLooper.idleMainLooper()
+            controller.pause().resume()
+            assertTrue("非等待运行中光晕恢复", edgeLight.isRunning())
+
+            // 3. 产生新 Turn：旧 Turn 绑定的预览绝不得残留光晕
+            TaskRuntime.finish(context, taskId, "end_turn")
+            val task2Id = "task-halo-2"
+            val turn2 = "turn-2"
+            TaskRuntime.start(
+                context = context,
+                taskId = task2Id,
+                conversationId = 2L,
+                sessionId = sessionId,
+                turnId = turn2,
+                title = "新Turn任务",
+            )
+            TaskRuntime.markScreenTarget(context, sessionId, turn2, displayId)
+            ShadowLooper.idleMainLooper()
+            controller.pause().resume()
+            assertFalse("新 Turn 开启后，旧 Turn 绑定页面绝不得残留光晕", edgeLight.isRunning())
+
+            // 4. 任务全部终结：光晕绝不残留
+            TaskRuntime.finish(context, task2Id, "end_turn")
+            ShadowLooper.idleMainLooper()
+            controller.pause().resume()
+            assertFalse("任务全部结束后光晕绝不残留", edgeLight.isRunning())
+        } finally {
+            controller.destroy()
+        }
+    }
+
+    @Test
+    fun `virtual display task does not attach main screen edge light and preview foreground hides top capsule`() {
+        org.robolectric.shadows.ShadowSettings.setCanDrawOverlays(true)
+        ScreenTaskOverlayHost.dismissAll()
+        ShadowLooper.idleMainLooper()
+
+        val sessionId = "session-main-screen-guard"
+        val vdTaskId = "task-vd-99"
+        val displayId = 9
+        setVirtualDisplayForTesting(displayId, sessionId)
+        DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+        // 1. 虚拟屏任务启动并在后台运行
+        TaskRuntime.start(
+            context = context,
+            taskId = vdTaskId,
+            conversationId = 3L,
+            sessionId = sessionId,
+            turnId = "turn-vd",
+            title = "虚拟屏任务",
+        )
+        TaskRuntime.markScreenTarget(context, sessionId, "turn-vd", displayId)
+        ScreenTaskOverlayHost.sync(context, TaskRuntime.getActiveTasks())
+        ShadowLooper.idleMainLooper()
+
+        assertEquals("必须绑定活跃虚拟屏任务", vdTaskId, ScreenTaskOverlayHost.getActiveTaskId())
+        assertNull("后台虚拟屏任务绝不得向主屏挂载全屏边缘光晕", ScreenTaskOverlayHost.getEdgeLightOverlayView())
+
+        // 2. 独立预览 Activity 处于前台时，顶部浮层胶囊必须主动隐藏避免遮挡
+        ScreenTaskOverlayHost.setPreviewActivityForeground(true)
+        ShadowLooper.idleMainLooper()
+        val topOverlay = ScreenTaskOverlayHost.getTopOverlayView()
+        assertNotNull("存在活跃顶部胶囊", topOverlay)
+        assertEquals("预览在前台时顶部胶囊必须隐藏不遮挡沉浸画面", View.GONE, topOverlay!!.visibility)
+
+        ScreenTaskOverlayHost.setPreviewActivityForeground(false)
+        ShadowLooper.idleMainLooper()
+        assertEquals("预览切回后台时顶部胶囊恢复可见", View.VISIBLE, topOverlay.visibility)
+
+        // 3. 显式授权主屏操作 (displayId == 0) 时，必须展示主屏边光
+        val mainTaskId = "task-main-00"
+        TaskRuntime.start(
+            context = context,
+            taskId = mainTaskId,
+            conversationId = 4L,
+            sessionId = "session-main-00",
+            turnId = "turn-main",
+            title = "主屏任务",
+        )
+        TaskRuntime.markScreenTarget(context, "session-main-00", "turn-main", 0)
+        ScreenTaskOverlayHost.sync(context, TaskRuntime.getActiveTasks())
+        ShadowLooper.idleMainLooper()
+
+        assertNotNull("显式主屏操作任务必须挂载主屏边缘流光", ScreenTaskOverlayHost.getEdgeLightOverlayView())
+
+        // 4. 清理或终态后边光必须完全清除
+        ScreenTaskOverlayHost.dismissTask(mainTaskId)
+        ShadowLooper.idleMainLooper()
+        assertNull("任务退出后主屏边缘流光必须完全清除", ScreenTaskOverlayHost.getEdgeLightOverlayView())
+
+        ScreenTaskOverlayHost.dismissAll()
     }
 
     private fun findButtonWithText(activity: VirtualDisplayPreviewActivity, text: String): Button? {

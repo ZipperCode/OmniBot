@@ -142,10 +142,10 @@ object OmniFlow {
             executionMutex.withLock {
                 val targetDisplayArg = request.toolCall.arguments["display"]?.toString()
                     ?: request.toolCall.arguments["display_id"]?.toString()
-                val targetDisplayId = if (targetDisplayArg.isNullOrBlank() || targetDisplayArg == "main" || targetDisplayArg == "0") {
-                    Display.DEFAULT_DISPLAY
-                } else {
-                    DeviceDisplayManager.resolveDisplayId(context, targetDisplayArg)
+                val targetDisplayId = when {
+                    targetDisplayArg == "main" || targetDisplayArg == "0" -> Display.DEFAULT_DISPLAY
+                    !targetDisplayArg.isNullOrBlank() -> DeviceDisplayManager.resolveDisplayId(context, targetDisplayArg)
+                    else -> throw IllegalArgumentException("Missing target display for interactive execution. Target display must be resolved and passed by caller.")
                 }
                 DisplayInputCoordinator.withDisplayLease(displayId = targetDisplayId, ownerId = request.id) {
                     coroutineScope {
@@ -368,10 +368,10 @@ class OmniFlowDeviceDispatcher internal constructor(
     private val targetDisplayId: Int = run {
         val displayArg = request?.toolCall?.arguments?.get("display")?.toString()
             ?: request?.toolCall?.arguments?.get("display_id")?.toString()
-        if (displayArg.isNullOrBlank() || displayArg == "main" || displayArg == "0") {
-            Display.DEFAULT_DISPLAY
-        } else {
-            DeviceDisplayManager.resolveDisplayId(appContext, displayArg)
+        when {
+            displayArg == "main" || displayArg == "0" -> Display.DEFAULT_DISPLAY
+            !displayArg.isNullOrBlank() -> DeviceDisplayManager.resolveDisplayId(appContext, displayArg)
+            else -> throw IllegalArgumentException("Missing target display for interactive execution. Target display must be resolved and passed by caller.")
         }
     }
     private val environment = AndroidGuiEnvironment(appContext)

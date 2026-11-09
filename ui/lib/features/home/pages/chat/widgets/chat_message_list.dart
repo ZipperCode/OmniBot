@@ -36,7 +36,7 @@ class ChatMessageList extends StatefulWidget {
   final Future<void> Function() onBeforeTaskExecute;
   final void Function(String taskId)? onCancelTask;
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
-  final void Function(List<String> requiredPermissionIds)? onRequestAuthorize;
+  final OnRequestAuthorize? onRequestAuthorize;
   final double bottomOverlayInset;
   final void Function(ChatMessageModel message, LongPressStartDetails details)?
   onUserMessageLongPressStart;
@@ -905,7 +905,7 @@ class _ChatTimelineListRow extends StatelessWidget {
   final ValueChanged<ChatMessageModel>? onRetryAgentMessage;
   final ScrollController? parentScrollController;
   final VoidCallback? onParentScrollHandoff;
-  final void Function(List<String> requiredPermissionIds)? onRequestAuthorize;
+  final OnRequestAuthorize? onRequestAuthorize;
   final void Function(ChatMessageModel message, LongPressStartDetails details)?
   onUserMessageLongPressStart;
   final VoidCallback? onStreamingTextLayoutChanged;

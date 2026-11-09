@@ -18,6 +18,8 @@ import '../chat_page_models.dart';
 import '../utils/agent_run_timeline.dart';
 
 import '../../command_overlay/widgets/message_bubble.dart';
+import '../../command_overlay/widgets/cards/card_widget_factory.dart'
+    show OnRequestAuthorize;
 import '../../command_overlay/widgets/chat_input_area.dart';
 import 'agent_run_group_message.dart';
 import 'chat_empty_greeting.dart';

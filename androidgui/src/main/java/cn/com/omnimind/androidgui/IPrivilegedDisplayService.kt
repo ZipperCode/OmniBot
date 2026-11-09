@@ -493,7 +493,11 @@ open class PrivilegedDisplayServiceStub(
                 }
                 return true
             } else {
-                // 存在现有根任务，无损迁移保留 taskId
+                // 如果已有任务位于主屏且正在前台使用（可见或聚焦），严禁迁移到后台虚拟屏，防止干扰用户当前主屏操作
+                if (existing.displayId == Display.DEFAULT_DISPLAY && displayId != Display.DEFAULT_DISPLAY && (existing.visible || existing.isFocused)) {
+                    return false
+                }
+                // 存在非主屏前台的现有根任务，无损迁移保留 taskId
                 val moveResultStr = moveRootTask(existing.taskId, existing.displayId, displayId)
                 return runCatching {
                     val json = JSONObject(moveResultStr)
@@ -533,6 +537,8 @@ open class PrivilegedDisplayServiceStub(
         val userId: Int,
         val packageName: String,
         val childTaskIds: List<Int>,
+        val visible: Boolean = false,
+        val isFocused: Boolean = false,
     )
 
     sealed class AtmOps {
@@ -634,6 +640,23 @@ open class PrivilegedDisplayServiceStub(
                         res?.toList()
                     }.getOrNull() ?: return@mapNotNull null
 
+                    val visible = runCatching {
+                        itemClass.getField("visible").getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("visible").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrDefault(false)
+
+                    val isFocused = runCatching {
+                        itemClass.getField("isFocused").getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("isFocused").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("focused").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrDefault(false)
+
                     TaskSnapshot(
                         taskId = taskId,
                         taskKind = "root_task",
@@ -641,6 +664,8 @@ open class PrivilegedDisplayServiceStub(
                         userId = itemUserId,
                         packageName = pkgName,
                         childTaskIds = childIds,
+                        visible = visible,
+                        isFocused = isFocused,
                     )
                 }
             }
@@ -685,6 +710,23 @@ open class PrivilegedDisplayServiceStub(
                         }
                         res?.toList()
                     }.getOrNull() ?: return@mapNotNull null
+                    val visible = runCatching {
+                        itemClass.getField("visible").getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("visible").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrDefault(false)
+
+                    val isFocused = runCatching {
+                        itemClass.getField("isFocused").getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("isFocused").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrNull() ?: runCatching {
+                        val f = itemClass.getDeclaredField("focused").apply { isAccessible = true }
+                        f.getBoolean(item)
+                    }.getOrDefault(false)
+
                     TaskSnapshot(
                         taskId = stackId,
                         taskKind = "stack",
@@ -692,6 +734,8 @@ open class PrivilegedDisplayServiceStub(
                         userId = itemUserId,
                         packageName = pkgName,
                         childTaskIds = childIds,
+                        visible = visible,
+                        isFocused = isFocused,
                     )
                 }
             }
@@ -766,6 +810,8 @@ open class PrivilegedDisplayServiceStub(
                 childArray.put(cid)
             }
             obj.put("childTaskIds", childArray)
+            obj.put("visible", task.visible)
+            obj.put("isFocused", task.isFocused)
             array.put(obj)
         }
         return array.toString()
