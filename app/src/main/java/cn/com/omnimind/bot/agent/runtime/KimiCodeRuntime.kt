@@ -29,6 +29,9 @@ internal fun buildKimiCodeEnvironment(
     model: String,
     reasoningEffort: String? = null,
 ): Map<String, String> {
+    require(provider.protocolType != "gemini") {
+        "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+    }
     val providerType = resolveKimiProviderType(provider)
     val effort = reasoningEffort?.trim()?.lowercase()?.takeIf(String::isNotEmpty)
     require(effort == null || effort in KIMI_REASONING_EFFORTS) {
@@ -76,6 +79,9 @@ internal fun buildKimiCodeManagedFiles(
     reasoningEffort: String? = null,
     providerModels: List<ProviderModelOption>? = null,
 ): Map<String, String> {
+    require(provider.protocolType != "gemini") {
+        "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+    }
     // The Web entry retains its documented environment model. ACP uses the
     // official catalog so session/set_config_option can select every entry.
     if (providerModels == null &&

@@ -114,11 +114,25 @@ class PiModelCapabilitiesIntegrationTest {
                     mapOf("reasoning_effort" to if (level == "off") "none" else level)
                 },
             ),
+            Case(
+                "gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3-flash-preview", "gemini", "chat_completions", "{}",
+                listOf("minimal", "low", "medium", "high"), "low",
+                listOf("minimal", "low", "medium", "high").associateWith { level ->
+                    mapOf("generationConfig" to mapOf("thinkingConfig" to mapOf("thinkingLevel" to level.uppercase())))
+                },
+                declaredDefault = "low",
+            ),
         )
         for (case in cases) {
             val profile = ModelProviderProfile(case.name, case.name, baseUrl = case.baseUrl,
                 protocolType = case.protocol, wireApi = case.wire, revision = 1)
-            val resolved = ModelProviderConfigStore.resolveModelCapabilities(context, profile, listOf(ProviderModelOption(case.modelId)))
+            val resolved = ModelProviderConfigStore.resolveModelCapabilities(
+                context, profile, listOf(ProviderModelOption(
+                    case.modelId,
+                    supportedReasoningLevels = case.levels.takeIf { case.declaredDefault != null }.orEmpty(),
+                    defaultReasoningLevel = case.declaredDefault,
+                )),
+            )
             assertEquals("bundled_catalog", resolved.single().reasoningCapabilitySource)
             writeFixture(directory, case, resolved)
         }
@@ -155,5 +169,6 @@ class PiModelCapabilitiesIntegrationTest {
         val defaultLevel: String,
         val expectedWire: Map<String, Map<String, Any>>,
         val expectedAbsent: Map<String, List<String>> = emptyMap(),
+        val declaredDefault: String? = null,
     )
 }

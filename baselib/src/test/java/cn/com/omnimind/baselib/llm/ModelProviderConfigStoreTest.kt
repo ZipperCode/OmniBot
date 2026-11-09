@@ -147,4 +147,23 @@ class ModelProviderConfigStoreTest {
             )
         )
     }
+
+    @Test
+    fun nativeEndpointsSurviveProfileStorageRoundTrip() {
+        for (protocol in listOf("gemini", "anthropic")) {
+            val profiles = listOf(ModelProviderProfile(
+                id = "native-$protocol",
+                name = "原生提供商",
+                baseUrl = "https://provider.example/native",
+                protocolType = protocol,
+                wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+            ))
+            val saved = ModelProviderConfigStore.decodeProfilesJson(
+                ModelProviderConfigStore.encodeProfilesJson(profiles),
+            ).single()
+            assertEquals(protocol, saved.protocolType)
+            assertEquals(OpenAiWireApi.CHAT_COMPLETIONS, saved.wireApi)
+            assertEquals("https://provider.example/native", saved.baseUrl)
+        }
+    }
 }

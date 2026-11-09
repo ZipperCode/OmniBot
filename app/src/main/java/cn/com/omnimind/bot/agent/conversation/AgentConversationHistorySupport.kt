@@ -357,28 +357,62 @@ internal object AgentConversationHistorySupport {
                         if (canonicalAssistant == null) {
                             replayMessages += buildToolReplayMessages(entry)
                         } else {
-                            val group = relevantEntries
-                                .asSequence()
-                                .drop(index)
-                                .takeWhile {
-                                    it.entryType == AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT
+                            val currentSessionId = payload["sessionId"]?.toString()?.trim()
+                            val currentTurnId = payload["turnId"]?.toString()?.trim()
+                            val assistantCallCount = canonicalAssistant.toolCalls.orEmpty().size
+                            val group = mutableListOf<Pair<AgentConversationEntry, Map<String, Any?>>>()
+                            val seenCallIdsInGroup = mutableSetOf<String>()
+                            for (i in index until relevantEntries.size) {
+                                val candidate = relevantEntries[i]
+                                if (candidate.entryType != AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT) {
+                                    break
                                 }
-                                .map { candidate -> candidate to readMap(candidate.payloadJson) }
-                                .filter { (_, payload) ->
-                                    payload["modelAssistantMessageJson"]?.toString() == canonicalAssistantJson
+                                val candidatePayload = readMap(candidate.payloadJson)
+                                if (candidatePayload["toolType"]?.toString() == "status") {
+                                    continue
                                 }
-                                .toList()
-                            val resultByCallId = group.mapNotNull { (candidate, payload) ->
-                                val callId = payload["modelToolCallId"]?.toString()?.trim()
+                                val candidateAssistantJson = candidatePayload["modelAssistantMessageJson"]?.toString()?.trim()
+                                if (candidateAssistantJson != canonicalAssistantJson) {
+                                    break
+                                }
+                                val candidateSession = candidatePayload["sessionId"]?.toString()?.trim()
+                                val candidateTurn = candidatePayload["turnId"]?.toString()?.trim()
+                                if (!currentSessionId.isNullOrEmpty() && candidateSession != currentSessionId) {
+                                    break
+                                }
+                                if (!currentTurnId.isNullOrEmpty() && candidateTurn != currentTurnId) {
+                                    break
+                                }
+                                val candidateCallId = candidatePayload["modelToolCallId"]?.toString()?.trim()
+                                    ?: candidatePayload["toolCallId"]?.toString()?.trim()
+                                if (candidateCallId != null && !seenCallIdsInGroup.add(candidateCallId)) {
+                                    break
+                                }
+                                group.add(candidate to candidatePayload)
+                                if (assistantCallCount > 0 && seenCallIdsInGroup.size >= assistantCallCount) {
+                                    break
+                                }
+                            }
+                            val resultByCallId = mutableMapOf<String, ChatCompletionMessage>()
+                            group.forEach { (candidate, candidatePayload) ->
+                                consumedCanonicalToolEntryIds += candidate.id
+                                val callId = candidatePayload["modelToolCallId"]?.toString()?.trim()
                                     ?.takeIf { it.isNotEmpty() }
-                                    ?: return@mapNotNull null
-                                val result = payload["modelToolResultMessageJson"]
+                                val result = candidatePayload["modelToolResultMessageJson"]
                                     ?.toString()
                                     ?.let(::decodeCanonicalMessage)
-                                    ?: return@mapNotNull null
-                                consumedCanonicalToolEntryIds += candidate.id
-                                callId to result
-                            }.toMap()
+                                if (callId != null && result != null) {
+                                    resultByCallId[callId] = result
+                                }
+                                val groupJson = candidatePayload["modelToolResultMessagesJson"]?.toString()?.trim()
+                                if (!groupJson.isNullOrEmpty()) {
+                                    decodeCanonicalMessagesList(groupJson)?.forEach { msg ->
+                                        msg.toolCallId?.let { id ->
+                                            resultByCallId.putIfAbsent(id, msg)
+                                        }
+                                    }
+                                }
+                            }
                             replayMessages += canonicalAssistant
                             canonicalAssistant.toolCalls.orEmpty().forEach { toolCall ->
                                 resultByCallId[toolCall.id]?.let(replayMessages::add)
@@ -404,6 +438,15 @@ internal object AgentConversationHistorySupport {
     private fun decodeCanonicalMessage(raw: String): ChatCompletionMessage? {
         return runCatching {
             canonicalMessageJson.decodeFromString<ChatCompletionMessage>(raw)
+        }.getOrNull()
+    }
+
+    private fun decodeCanonicalMessagesList(raw: String): List<ChatCompletionMessage>? {
+        return runCatching {
+            canonicalMessageJson.decodeFromString(
+                kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+                raw
+            )
         }.getOrNull()
     }
 
@@ -681,6 +724,8 @@ internal object AgentConversationHistorySupport {
                 .ifEmpty { rawText(existing, "modelAssistantMessageJson") },
             "modelToolResultMessageJson" to rawText(incoming, "modelToolResultMessageJson")
                 .ifEmpty { rawText(existing, "modelToolResultMessageJson") },
+            "modelToolResultMessagesJson" to rawText(incoming, "modelToolResultMessagesJson")
+                .ifEmpty { rawText(existing, "modelToolResultMessagesJson") },
             "resultPreviewJson" to chooseText("resultPreviewJson"),
             "rawResultJson" to chooseText("rawResultJson"),
             "terminalOutput" to terminalOutput,
@@ -1294,6 +1339,9 @@ internal object AgentConversationHistorySupport {
             "modelToolResultMessageJson" to payload["modelToolResultMessageJson"]
                 ?.toString()
                 ?.takeIf { it.isNotBlank() },
+            "modelToolResultMessagesJson" to payload["modelToolResultMessagesJson"]
+                ?.toString()
+                ?.takeIf { it.isNotBlank() },
             "resultPreviewJson" to compactJsonText(
                 payload["resultPreviewJson"]?.toString().orEmpty(),
                 MAX_STORAGE_TOOL_JSON_CHARS
@@ -1375,6 +1423,7 @@ internal object AgentConversationHistorySupport {
             "modelToolCallId" to payload["modelToolCallId"]?.toString().orEmpty(),
             "modelAssistantMessageJson" to assistantJson,
             "modelToolResultMessageJson" to resultJson,
+            "modelToolResultMessagesJson" to payload["modelToolResultMessagesJson"]?.toString().orEmpty(),
             "payloadCompacted" to true,
             "canonicalReplayPreserved" to true
         ).filterValues { it != null }

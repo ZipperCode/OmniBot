@@ -17,6 +17,7 @@ class PiConfigAdapterTest {
             Triple("openai_compatible", "chat_completions", "openai-completions"),
             Triple("openai_compatible", "responses", "openai-responses"),
             Triple("anthropic", "chat_completions", "anthropic-messages"),
+            Triple("gemini", "chat_completions", "google-generative-ai"),
         )) {
             val provider = AgentProviderCredentials(
                 "https://fixture.invalid/v1", "private-key", wireApi = wire, protocolType = protocol,
@@ -170,5 +171,50 @@ class PiConfigAdapterTest {
         )
         assertEquals(mapOf("CUSTOM" to "keep", "OMNIBOT_PI_MODEL" to "selected"),
             mergeAcpLaunchEnvironment(profile, mapOf("OMNIBOT_PI_MODEL" to "selected")))
+    }
+
+    @Test
+    fun geminiNormalizesBaseUrlWithoutAddingOpenAiV1() {
+        val root = AgentProviderCredentials(
+            "https://generativelanguage.googleapis.com", "private-key", protocolType = "gemini",
+        )
+        val mappingRoot = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput("pi-acp", root, "gemini-2.5-pro", AcpHarnessAdapters.pi)
+        )
+        val filesRoot = AgentConfigAdapterRegistry.launchConfigWrites(
+            AgentProviderMappingInput("pi-acp", root, "gemini-2.5-pro", AcpHarnessAdapters.pi),
+            mappingRoot, emptyList(), "{}"
+        )
+        val configRoot = JsonParser.parseString(filesRoot.single().content).asJsonObject
+            .getAsJsonObject("providers").getAsJsonObject("omnibot")
+        assertEquals("google-generative-ai", configRoot["api"].asString)
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", configRoot["baseUrl"].asString)
+
+        val proxy = AgentProviderCredentials(
+            "https://proxy.example.com/v1beta", "private-key", protocolType = "gemini",
+        )
+        val mappingProxy = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput("pi-acp", proxy, "gemini-2.5-pro", AcpHarnessAdapters.pi)
+        )
+        val filesProxy = AgentConfigAdapterRegistry.launchConfigWrites(
+            AgentProviderMappingInput("pi-acp", proxy, "gemini-2.5-pro", AcpHarnessAdapters.pi),
+            mappingProxy, emptyList(), "{}"
+        )
+        val configProxy = JsonParser.parseString(filesProxy.single().content).asJsonObject
+            .getAsJsonObject("providers").getAsJsonObject("omnibot")
+        assertEquals("https://proxy.example.com/v1beta", configProxy["baseUrl"].asString)
+    }
+
+    @Test
+    fun geminiRejectsDirectUrlMarkerForPiSdk() {
+        val direct = AgentProviderCredentials(
+            "https://generativelanguage.googleapis.com#", "private-key", protocolType = "gemini",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            val input = AgentProviderMappingInput("pi-acp", direct, "gemini-2.5-pro", AcpHarnessAdapters.pi)
+            AgentConfigAdapterRegistry.launchConfigWrites(
+                input, AgentConfigAdapterRegistry.map(input), emptyList(), "{}",
+            )
+        }
     }
 }

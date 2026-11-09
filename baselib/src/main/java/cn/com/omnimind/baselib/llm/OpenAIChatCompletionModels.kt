@@ -76,7 +76,8 @@ data class ChatCompletionMessage(
  */
 @Serializable
 data class ChatCompletionProtocolState(
-    val anthropic: AnthropicMessageProtocolState? = null
+    val anthropic: AnthropicMessageProtocolState? = null,
+    val gemini: GeminiMessageProtocolState? = null
 )
 
 @Serializable
@@ -89,9 +90,19 @@ data class AnthropicMessageProtocolState(
     val toolResultIsError: Boolean? = null
 )
 
+@Serializable
+data class GeminiMessageProtocolState(
+    @SerialName("source_model")
+    val sourceModel: String? = null,
+    val parts: JsonArray? = null,
+    @SerialName("tool_result_is_error")
+    val toolResultIsError: Boolean? = null
+)
+
 object ChatCompletionProtocolMetadata {
     const val STATE_FIELD = "_omnibot_protocol_state"
     const val ANTHROPIC_STREAM_BLOCK_FIELD = "_omnibot_anthropic_content_block"
+    const val GEMINI_STREAM_PART_FIELD = "_omnibot_gemini_part"
 }
 
 @Serializable

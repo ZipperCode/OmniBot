@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { methods } from "@agentclientprotocol/sdk/unstable";
-import { harness, httpFixture, stream } from "./fixtures.js";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { harness, httpFixture, sendGoogleChunk, stream, streamGoogle } from "./fixtures.js";
 
 test("agent_end during native compaction recovery does not complete the ACP prompt", { timeout: 20000 }, async () => {
   let requests = 0;
@@ -173,4 +175,104 @@ test("Responses Provider returns standard text and usage through ACP", { timeout
     assert.equal(result.usage?.outputTokens, 8);
     assert.match(JSON.stringify(host.updates), /Responses answer/);
   } finally { await host.close(); await provider.close(); }
+});
+
+test("Google Generative AI messages use configured endpoint, headers, and stream through ACP", { timeout: 15000 }, async () => {
+  const provider = await httpFixture((_body, response) => {
+    streamGoogle(response, { text: "Google answer", usage: { prompt: 24, candidates: 6, total: 30 } });
+  });
+  const host = await harness(provider.url, {
+    configure: (config) => {
+      config.provider.api = "google-generative-ai";
+      config.provider.baseUrl = `${provider.url}/v1beta`;
+      config.provider.headers = { "X-Custom-Google": "custom-val" };
+      config.provider.models!.forEach((model) => { model.reasoning = false; });
+    },
+  });
+  try {
+    const session = await host.newSession();
+    const result = await host.prompt(session.sessionId, "google query");
+    assert.equal(result.stopReason, "end_turn");
+    assert.match(provider.requests[0].url, /^\/v1beta\/models\/fixture:streamGenerateContent/);
+    assert.equal(provider.requests[0].headers["x-goog-api-key"], "test-key");
+    assert.equal(provider.requests[0].headers["x-custom-google"], "custom-val");
+    assert.equal(result.usage?.outputTokens, 6);
+    assert.match(JSON.stringify(host.updates), /Google answer/);
+  } finally {
+    await host.close();
+    await provider.close();
+  }
+});
+
+test("Google Generative AI executes tool calling across rounds and completes", { timeout: 20000 }, async () => {
+  let round = 0;
+  const provider = await httpFixture((_body, response) => {
+    round++;
+    if (round === 1) {
+      streamGoogle(response, {
+        tool: { id: "call-1", name: "read", arguments: { path: "result.txt" } },
+      });
+    } else {
+      streamGoogle(response, {
+        text: "File read successfully",
+        usage: { prompt: 40, candidates: 10, total: 50 },
+      });
+    }
+  });
+  const host = await harness(provider.url, {
+    configure: (config) => {
+      config.provider.api = "google-generative-ai";
+      config.provider.baseUrl = `${provider.url}/v1beta`;
+      config.provider.models!.forEach((model) => { model.reasoning = false; });
+    },
+  });
+  try {
+    const session = await host.newSession();
+    writeFileSync(join(host.root, "result.txt"), "hello from file");
+    const result = await host.prompt(session.sessionId, "please read result.txt");
+    assert.equal(result.stopReason, "end_turn");
+    assert.equal(round, 2);
+    const firstBodyText = JSON.stringify(provider.requests[0].body);
+    assert.ok(firstBodyText.includes('"name":"read"'));
+    const secondBodyText = JSON.stringify(provider.requests[1].body);
+    assert.ok(secondBodyText.includes('"functionResponse"'));
+    assert.ok(secondBodyText.includes('"name":"read"'));
+    assert.match(JSON.stringify(host.updates), /File read successfully/);
+  } finally {
+    await host.close();
+    await provider.close();
+  }
+});
+
+test("cancel during Google Generative AI stream cleanly aborts and admits next prompt", { timeout: 15000 }, async () => {
+  const visible = Promise.withResolvers<void>();
+  const provider = await httpFixture((body, response) => {
+    if (JSON.stringify(body).includes("next")) {
+      streamGoogle(response, { text: "next answer" });
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    sendGoogleChunk(response, [{ text: "first streaming part" }]);
+    visible.resolve();
+  });
+  const host = await harness(provider.url, {
+    configure: (config) => {
+      config.provider.api = "google-generative-ai";
+      config.provider.baseUrl = `${provider.url}/v1beta`;
+      config.provider.models!.forEach((model) => { model.reasoning = false; });
+    },
+  });
+  try {
+    const session = await host.newSession();
+    const prompt = host.prompt(session.sessionId, "cancel-me");
+    await visible.promise;
+    await host.remote.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
+    assert.equal((await prompt).stopReason, "cancelled");
+    assert.equal(provider.requests.length, 1);
+    assert.equal((await host.prompt(session.sessionId, "next")).stopReason, "end_turn");
+    assert.equal(provider.requests.length, 2);
+  } finally {
+    await host.close();
+    await provider.close();
+  }
 });

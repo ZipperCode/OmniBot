@@ -72,6 +72,27 @@ class WorkspaceMemoryEmbeddingIndexTest {
     }
 
     @Test
+    fun `原生聊天端点不会被视作 OpenAI 嵌入路由`() {
+        val editing = ModelProviderProfile(
+            id = "editing", name = "编辑中的提供商", baseUrl = "https://editing.example/v1",
+        )
+        for (protocol in listOf("gemini", "anthropic")) {
+            val selected = ModelProviderProfile(
+                id = "native-$protocol", name = "原生提供商", baseUrl = "https://native.example",
+                apiKey = "fixture-key", protocolType = protocol,
+            )
+            val config = resolveEmbeddingConfigForBinding(
+                enabled = true, bindingProviderProfileId = selected.id, bindingModelId = "native-model",
+                boundProfile = selected, fallbackEditingProfile = editing, fallbackModelId = "fallback-model",
+            )
+            assertFalse(config.configured)
+            assertEquals(selected.id, config.providerProfileId)
+            assertEquals(selected.baseUrl, config.apiBase)
+            assertEquals("native-model", config.modelId)
+        }
+    }
+
+    @Test
     fun `request profile resolution rejects missing or changed endpoint profile without leaking editing key`() {
         val config = embeddingConfig().copy(
             providerProfileId = "target-provider",

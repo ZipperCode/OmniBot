@@ -1204,4 +1204,131 @@ class AgentConfigAdaptersTest {
         )
         assertEquals("MiniMax-M3", mapping.environment["ANTHROPIC_MODEL"])
     }
+
+    @Test
+    fun codexRejectsNativeGeminiProtocol() {
+        val provider = AgentProviderCredentials(
+            baseUrl = "https://generativelanguage.googleapis.com",
+            apiKey = "gemini-key",
+            protocolType = "gemini",
+        )
+        val ex = org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            AgentConfigAdapterRegistry.map(
+                AgentProviderMappingInput(
+                    agentId = "codex",
+                    provider = provider,
+                    model = "gemini-2.5-pro",
+                    harnessAdapter = AcpHarnessAdapters.codex,
+                )
+            )
+        }
+        assertTrue(ex.message!!.contains("Gemini"))
+    }
+
+    @Test
+    fun claudeCodeRejectsNativeGeminiProtocol() {
+        val provider = AgentProviderCredentials(
+            baseUrl = "https://generativelanguage.googleapis.com",
+            apiKey = "gemini-key",
+            protocolType = "gemini",
+        )
+        val ex = org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            AgentConfigAdapterRegistry.map(
+                AgentProviderMappingInput(
+                    agentId = "claude-code-acp",
+                    provider = provider,
+                    model = "gemini-2.5-pro",
+                    harnessAdapter = AcpHarnessAdapters.claudeCode,
+                )
+            )
+        }
+        assertTrue(ex.message!!.contains("Gemini"))
+    }
+
+    @Test
+    fun kimiCodeRejectsNativeGeminiProtocol() {
+        val provider = AgentProviderCredentials(
+            baseUrl = "https://generativelanguage.googleapis.com",
+            apiKey = "gemini-key",
+            protocolType = "gemini",
+        )
+        val ex = org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            AgentConfigAdapterRegistry.map(
+                AgentProviderMappingInput(
+                    agentId = "kimi-code",
+                    provider = provider,
+                    model = "gemini-2.5-pro",
+                    harnessAdapter = AcpHarnessAdapters.kimiCode,
+                )
+            )
+        }
+        assertTrue(ex.message!!.contains("Gemini"))
+    }
+
+    @Test
+    fun openCodeConfiguresGeminiWithAiSdkGooglePackageAndNormalizedBaseUrl() {
+        val provider = AgentProviderCredentials(
+            baseUrl = "https://generativelanguage.googleapis.com",
+            apiKey = "gemini-key",
+            protocolType = "gemini",
+        )
+        val mapping = AgentConfigAdapterRegistry.map(
+            AgentProviderMappingInput(
+                agentId = "open-code",
+                provider = provider,
+                model = "gemini-2.5-flash",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            )
+        )
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", mapping.openCodeBaseUrl)
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", mapping.environment["OPENAI_BASE_URL"])
+        val writes = AgentConfigAdapterRegistry.launchConfigWrites(
+            input = AgentProviderMappingInput(
+                agentId = "open-code",
+                provider = provider,
+                model = "gemini-2.5-flash",
+                harnessAdapter = AcpHarnessAdapters.openCode,
+            ),
+            mapping = mapping,
+            providerModels = listOf(ProviderModelOption(id = "gemini-2.5-flash")),
+            existingConfig = "",
+        )
+        val config = JsonParser.parseString(writes.single().content).asJsonObject
+        val omnibot = config["providers"].asJsonObject["omnibot"].asJsonObject
+        assertEquals("aisdk:@ai-sdk/google", omnibot["package"].asString)
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", omnibot["settings"].asJsonObject["baseURL"].asString)
+    }
+
+    @Test
+    fun normalizeGeminiBaseUrlPreservesVersionsAndCustomProxiesWithoutAddingOpenAiV1() {
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com"))
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/"))
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1beta"))
+        assertEquals("https://generativelanguage.googleapis.com/v1alpha", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1alpha"))
+        assertEquals("https://generativelanguage.googleapis.com/v1", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1"))
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1beta/models"))
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"))
+        assertEquals("https://generativelanguage.googleapis.com/v1beta", normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"))
+        assertEquals("https://proxy.example.com/v1beta", normalizeGeminiBaseUrl("https://proxy.example.com"))
+        assertEquals("https://proxy.example.com/v1beta", normalizeGeminiBaseUrl("https://proxy.example.com/v1beta"))
+        assertEquals("https://proxy.example.com/custom/path", normalizeGeminiBaseUrl("https://proxy.example.com/custom/path"))
+        assertEquals("https://proxy.example.com/prefix/v1beta", normalizeGeminiBaseUrl("https://proxy.example.com/prefix/v1beta/models"))
+        assertEquals("https://proxy.example.com/prefix/v1beta", normalizeGeminiBaseUrl("https://proxy.example.com/prefix/v1beta/models/gemini-1.5-pro:generateContent"))
+        assertEquals("http://localhost:8080/v1beta", normalizeGeminiBaseUrl("http://localhost:8080"))
+        assertEquals("http://localhost:8080/v1beta", normalizeGeminiBaseUrl("http://localhost:8080/v1beta/models"))
+        assertEquals("https://proxy.example.com/v1beta", normalizeGeminiBaseUrl("https://proxy.example.com/chat/completions"))
+    }
+
+    @Test
+    fun normalizeGeminiBaseUrlRejectsDirectMarkerForSdk() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            normalizeGeminiBaseUrl("https://generativelanguage.googleapis.com#")
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            normalizeGeminiBaseUrl("https://proxy.example.com/v1beta#")
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            normalizeGeminiBaseUrl("https://proxy.example.com/#direct")
+        }
+    }
 }

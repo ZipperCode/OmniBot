@@ -76,11 +76,13 @@ class AgentConversationHistoryRepository(
             if (incoming["payloadCompacted"] == true && existing.isNotEmpty()) return existing
             return incoming.toMutableMap().apply {
                 listOf("toolCallId", "sessionId", "turnId", "modelToolCallId",
-                    "modelAssistantMessageJson", "modelToolResultMessageJson").forEach { key ->
+                    "modelAssistantMessageJson", "modelToolResultMessageJson", "modelToolResultMessagesJson").forEach { key ->
                     // Presentation snapshots may have empty placeholders before
                     // the canonical tool messages arrive. Only retain real values.
-                    existing[key]?.takeIf { it.toString().isNotBlank() }
-                        ?.let { put(key, it) }
+                    if (get(key)?.toString().isNullOrBlank()) {
+                        existing[key]?.takeIf { it.toString().isNotBlank() }
+                            ?.let { put(key, it) }
+                    }
                 }
             }
         }
@@ -98,20 +100,69 @@ class AgentConversationHistoryRepository(
             val required = assistant.toolCalls.orEmpty().map { it.id }.toSet()
             val codec = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
             fun resultId(payload: Map<String, Any?>): String? =
-                payload["toolCallId"]?.toString()?.takeIf { it.isNotBlank() }
-                    ?: payload["modelToolCallId"]?.toString()?.takeIf { it.isNotBlank() }
+                payload["modelToolCallId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
                     ?: payload["modelToolResultMessageJson"]?.toString()?.let {
                         runCatching { codec.decodeFromString(ChatCompletionMessage.serializer(), it).toolCallId }.getOrNull()
-                    }
-            val groups = entries.filter { it.entryType == ENTRY_TYPE_TOOL_EVENT && it.id > afterEntryId && it.status != STATUS_RUNNING }
-                .map { entry -> entry to AgentConversationHistorySupport.readMap(entry.payloadJson) }
-                .filter { (entry, payload) -> "restored_${entry.entryId}" in required || resultId(payload) in required }
-                .groupBy { (_, payload) -> listOf(payload["sessionId"], payload["turnId"], payload["taskId"]) }
-            return groups.values.mapNotNull { group ->
-                val ids = group.map { (entry, payload) ->
-                    "restored_${entry.entryId}".takeIf { it in required } ?: resultId(payload)
+                    }?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: payload["toolCallId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+
+            val candidateEntries = entries.filter {
+                it.entryType == ENTRY_TYPE_TOOL_EVENT && it.id > afterEntryId
+            }.map { entry -> entry to AgentConversationHistorySupport.readMap(entry.payloadJson) }
+
+            val groups = candidateEntries
+                .filter { (entry, payload) ->
+                    "restored_${entry.entryId}" in required ||
+                        resultId(payload) in required ||
+                        payload["modelToolResultMessagesJson"]?.toString()?.let { groupJson ->
+                            runCatching {
+                                codec.decodeFromString(
+                                    kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+                                    groupJson
+                                ).any { it.toolCallId?.trim() in required }
+                            }.getOrDefault(false)
+                        } == true
                 }
-                if (ids.size == required.size && ids.toSet() == required) group.maxOf { it.first.id } else null
+                .groupBy { (_, payload) -> listOf(payload["sessionId"], payload["turnId"], payload["taskId"]) }
+
+            return groups.values.mapNotNull { group ->
+                val hasPending = group.any { (entry, payload) ->
+                    entry.status == STATUS_RUNNING || entry.status == "pending" || payload["status"] == "pending"
+                }
+                if (hasPending) return@mapNotNull null
+
+                val realIds = group.mapNotNull { (_, payload) -> resultId(payload) }
+                if (realIds.size != realIds.toSet().size) {
+                    return@mapNotNull null
+                }
+
+                val collectedIds = mutableSetOf<String>()
+                group.forEach { (entry, payload) ->
+                    val restoredId = "restored_${entry.entryId}".takeIf { it in required }
+                    if (restoredId != null) {
+                        collectedIds += restoredId
+                    }
+                    val callId = resultId(payload)?.takeIf { it in required }
+                    if (callId != null) {
+                        collectedIds += callId
+                    }
+                    val groupJson = payload["modelToolResultMessagesJson"]?.toString()?.trim()
+                    if (!groupJson.isNullOrEmpty()) {
+                        val syntheticList = runCatching {
+                            codec.decodeFromString(
+                                kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+                                groupJson
+                            )
+                        }.getOrNull()
+                        syntheticList?.forEach { msg ->
+                            val synthId = msg.toolCallId?.trim()
+                            if (synthId != null && synthId in required) {
+                                collectedIds += synthId
+                            }
+                        }
+                    }
+                }
+                if (collectedIds == required) group.maxOf { it.first.id } else null
             }.singleOrNull()
 
         }

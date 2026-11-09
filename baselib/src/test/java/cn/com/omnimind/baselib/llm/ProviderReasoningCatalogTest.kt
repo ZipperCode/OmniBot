@@ -166,6 +166,30 @@ class ProviderReasoningCatalogTest {
     }
 
     @Test
+    fun geminiMetadataRequiresTheNativeProtocolAndExactApiVersion() {
+        val raw = ProviderModelOption("gemini-3-flash-preview")
+        for (base in listOf(
+            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent#",
+        )) {
+            val native = profile(base).copy(protocolType = "gemini")
+            val model = catalog.enrich(native, raw)
+            assertEquals(true, model.reasoning)
+            assertEquals(listOf("minimal", "low", "medium", "high"), model.supportedReasoningLevels)
+            assertEquals(false, model.reasoningCanDisable)
+            assertSame(raw, catalog.enrich(profile(base), raw))
+        }
+        for (base in listOf(
+            "https://proxy.example/v1beta",
+            "https://generativelanguage.googleapis.com/v1",
+            "https://generativelanguage.googleapis.com/proxy/v1beta",
+        )) {
+            assertSame(raw, catalog.enrich(profile(base).copy(protocolType = "gemini"), raw))
+        }
+    }
+
+    @Test
     fun additionalOfficialProvidersUseOnlyTheirPinnedProtocolAndExactRoute() {
         val xiaomi = catalog.enrich(profile("https://api.xiaomimimo.com/v1"), ProviderModelOption("mimo-v2.6-pro"))
         assertEquals(true, xiaomi.reasoning)

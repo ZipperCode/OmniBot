@@ -1044,13 +1044,13 @@ class ModelProviderConfigService {
     String? explicitWireApi,
     String protocolType = 'openai_compatible',
   }) {
+    if (protocolType.trim().toLowerCase() != 'openai_compatible') {
+      return 'chat_completions';
+    }
     final normalizedExplicit = explicitWireApi?.trim().toLowerCase();
     if (normalizedExplicit == 'responses' ||
         normalizedExplicit == 'chat_completions') {
       return normalizedExplicit!;
-    }
-    if (protocolType.trim().toLowerCase() != 'openai_compatible') {
-      return 'chat_completions';
     }
     final raw = _stripDirectRequestUrlMarker(baseUrl.trim()).toLowerCase();
     if (raw.endsWith('/v1/responses') || raw.endsWith('/responses')) {
@@ -1111,6 +1111,13 @@ class ModelProviderConfigService {
           break;
         }
       }
+      result = result.replaceFirst(
+        RegExp(
+          r'/models/[^/]+:(?:generateContent|streamGenerateContent)$',
+          caseSensitive: false,
+        ),
+        '',
+      );
     }
     result = result.replaceAll(RegExp(r'/+$'), '');
     if (result.isEmpty) {
@@ -1149,6 +1156,23 @@ class ModelProviderConfigService {
       suffixAfterV1: '/messages',
       suffixWithVersion: '/v1/messages',
     );
+  }
+
+  static String? buildGeminiRequestUrl(String value) {
+    final normalizedBase = normalizeApiBase(value);
+    if (normalizedBase == null) {
+      return null;
+    }
+    final base = _stripDirectRequestUrlMarker(normalizedBase);
+    if (_hasDirectRequestUrlMarker(normalizedBase)) {
+      return base;
+    }
+    final uri = Uri.tryParse(base);
+    final path = uri?.path.replaceAll(RegExp(r'/+$'), '') ?? '';
+    if (path.isEmpty) {
+      return '$base/v1beta/models/{model}:generateContent';
+    }
+    return '$base/models/{model}:generateContent';
   }
 
   static String? _buildRequestUrl(

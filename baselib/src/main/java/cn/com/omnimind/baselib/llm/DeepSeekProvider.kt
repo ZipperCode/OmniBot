@@ -29,7 +29,9 @@ object DeepSeekProvider {
     }
 
     fun shouldUseOfficialAdapter(protocolType: String?, apiBase: String?): Boolean {
-        return normalizeProtocolType(protocolType) != "anthropic" && isOfficialBaseUrl(apiBase)
+        val protocol = normalizeProtocolType(protocolType)
+        return (protocol == "openai_compatible" || protocol == PROTOCOL_TYPE) &&
+            isOfficialBaseUrl(apiBase)
     }
 
     /**
@@ -48,7 +50,7 @@ object DeepSeekProvider {
             supportsChatPromptCacheKey = normalizedProtocol == "openai_compatible" &&
                 OfficialProviderUrlMatcher.matchesHttpsHostWithOptionalV1(apiBase, "api.openai.com"),
             supportsExplicitAutoToolChoice = !(
-                normalizedProtocol != "anthropic" &&
+                (normalizedProtocol == "openai_compatible" || normalizedProtocol == PROTOCOL_TYPE) &&
                     isOfficialBaseUrl(apiBase) &&
                     isV4Model(model)
                 ),
@@ -70,7 +72,9 @@ object DeepSeekProvider {
         apiBase: String?,
         model: String?,
     ): Boolean? {
-        if (normalizeProtocolType(protocolType) == "anthropic" || !isOfficialBaseUrl(apiBase)) {
+        val protocol = normalizeProtocolType(protocolType)
+        if ((protocol != "openai_compatible" && protocol != PROTOCOL_TYPE) ||
+            !isOfficialBaseUrl(apiBase)) {
             return null
         }
         val normalizedModel = model
@@ -115,6 +119,7 @@ object DeepSeekProvider {
         return when (value?.trim()?.lowercase().orEmpty()) {
             PROTOCOL_TYPE -> PROTOCOL_TYPE
             "anthropic" -> "anthropic"
+            "gemini" -> "gemini"
             else -> "openai_compatible"
         }
     }

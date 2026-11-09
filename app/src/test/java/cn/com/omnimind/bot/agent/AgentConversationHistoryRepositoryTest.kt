@@ -140,6 +140,131 @@ class AgentConversationHistoryRepositoryTest {
     }
 
     @Test
+    fun `real and synthetic tool group commits compaction cutoff on max real card id`() {
+        val codec = Json { encodeDefaults = true }
+        val callReal = AssistantToolCall(id = "real_call", type = "function", function = AssistantToolCallFunction("read", "{}"))
+        val callSkip = AssistantToolCall(id = "skip_call", type = "function", function = AssistantToolCallFunction("write", "{}"))
+        val assistant = ChatCompletionMessage(role = "assistant", toolCalls = listOf(callReal, callSkip))
+        val realResult = ChatCompletionMessage(role = "tool", toolCallId = "real_call", content = JsonPrimitive("read done"))
+        val skipResult = ChatCompletionMessage(role = "tool", toolCallId = "skip_call", content = JsonPrimitive("skipped"))
+
+        val syntheticArrayJson = codec.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+            listOf(skipResult)
+        )
+
+        // 数据库中只有 1 个真实工具卡行（id=15），其挂载包含 skip_call 的 modelToolResultMessagesJson
+        val rowReal = entry("turn-real", "agent", "tool_event", 1500, 15).copy(
+            status = "success",
+            payloadJson = buildJsonObject {
+                put("taskId", "turn-mix")
+                put("modelToolCallId", "real_call")
+                put("modelAssistantMessageJson", codec.encodeToString(assistant))
+                put("modelToolResultMessageJson", codec.encodeToString(realResult))
+                put("modelToolResultMessagesJson", syntheticArrayJson)
+            }.toString()
+        )
+
+        val compacted = listOf(
+            ChatCompletionMessage(role = "user", content = JsonPrimitive("start")),
+            assistant,
+            realResult,
+            skipResult
+        )
+
+        val cutoff = AgentConversationHistoryRepository.resolveCompactionToolCutoff(listOf(rowReal), compacted, 0)
+        assertEquals(15L, cutoff)
+    }
+
+    @Test
+    fun `cross round acp id alias matches compaction cutoff by model provider id`() {
+        val codec = Json { encodeDefaults = true }
+        val call = AssistantToolCall(id = "orig_provider_call", type = "function", function = AssistantToolCallFunction("fetch", "{}"))
+        val assistant = ChatCompletionMessage(role = "assistant", toolCalls = listOf(call))
+        val result = ChatCompletionMessage(role = "tool", toolCallId = "orig_provider_call", content = JsonPrimitive("data"))
+
+        // 真实卡上的 toolCallId 带有跨 round ACP 别名 "orig_provider_call-round-2"，而 modelToolCallId 为原 provider id
+        val rowAliased = entry("turn-alias", "agent", "tool_event", 2000, 20).copy(
+            status = "success",
+            payloadJson = buildJsonObject {
+                put("taskId", "turn-alias")
+                put("toolCallId", "orig_provider_call-round-2")
+                put("modelToolCallId", "orig_provider_call")
+                put("modelAssistantMessageJson", codec.encodeToString(assistant))
+                put("modelToolResultMessageJson", codec.encodeToString(result))
+            }.toString()
+        )
+
+        val compacted = listOf(assistant, result)
+        val cutoff = AgentConversationHistoryRepository.resolveCompactionToolCutoff(listOf(rowAliased), compacted, 0)
+        assertEquals(20L, cutoff)
+    }
+
+    @Test
+    fun `pending tool card in group waits and does not commit cutoff prematurely`() {
+        val codec = Json { encodeDefaults = true }
+        val call = AssistantToolCall(id = "pending_call", type = "function", function = AssistantToolCallFunction("wait_input", "{}"))
+        val assistant = ChatCompletionMessage(role = "assistant", toolCalls = listOf(call))
+        val result = ChatCompletionMessage(role = "tool", toolCallId = "pending_call", content = JsonPrimitive("done"))
+
+        val rowPending = entry("turn-pending", "agent", "tool_event", 3000, 30).copy(
+            status = "pending",
+            payloadJson = buildJsonObject {
+                put("taskId", "turn-pending")
+                put("modelToolCallId", "pending_call")
+                put("status", "pending")
+                put("modelAssistantMessageJson", codec.encodeToString(assistant))
+                put("modelToolResultMessageJson", codec.encodeToString(result))
+            }.toString()
+        )
+
+        val compacted = listOf(assistant, result)
+        val cutoff = AgentConversationHistoryRepository.resolveCompactionToolCutoff(listOf(rowPending), compacted, 0)
+        assertNull(cutoff)
+    }
+
+    @Test
+    fun `two rounds with duplicate model tool id in same turn scope reject ambiguous cutoff`() {
+        val codec = Json { encodeDefaults = true }
+        val call = AssistantToolCall(id = "shared_id", type = "function", function = AssistantToolCallFunction("fetch", "{}"))
+        val assistant = ChatCompletionMessage(role = "assistant", toolCalls = listOf(call))
+        val result1 = ChatCompletionMessage(role = "tool", toolCallId = "shared_id", content = JsonPrimitive("r1 data"))
+
+        // 同一个 turn 内（相同 sessionId, turnId, taskId），两轮复用相同 modelToolCallId "shared_id"
+        val rowRound1 = entry("turn-dup-r1", "agent", "tool_event", 1000, 10).copy(
+            status = "success",
+            payloadJson = buildJsonObject {
+                put("taskId", "turn-dup-scope")
+                put("sessionId", "session-dup")
+                put("turnId", "turn-dup-scope")
+                put("toolCallId", "shared_id")
+                put("modelToolCallId", "shared_id")
+                put("modelAssistantMessageJson", codec.encodeToString(assistant))
+                put("modelToolResultMessageJson", codec.encodeToString(result1))
+            }.toString()
+        )
+        val rowRound2 = entry("turn-dup-r2", "agent", "tool_event", 2000, 20).copy(
+            status = "success",
+            payloadJson = buildJsonObject {
+                put("taskId", "turn-dup-scope")
+                put("sessionId", "session-dup")
+                put("turnId", "turn-dup-scope")
+                put("toolCallId", "shared_id-round-2")
+                put("modelToolCallId", "shared_id")
+                put("modelAssistantMessageJson", codec.encodeToString(assistant))
+                put("modelToolResultMessageJson", codec.encodeToString(result1))
+            }.toString()
+        )
+
+        // compacted prefix 仅包含第一轮的 assistant 和结果
+        val prefix = listOf(assistant, result1)
+        val cutoff = AgentConversationHistoryRepository.resolveCompactionToolCutoff(listOf(rowRound1, rowRound2), prefix, 0)
+
+        // 候选组内存在重复的 real modelToolCallId，必须保守拒绝（返回 null），绝不能误截断到第二轮的 20L
+        assertNull(cutoff)
+    }
+
+    @Test
     fun `fork snapshot prefers canonical rows and keeps chronological visible cards`() {
         val snapshot = AgentConversationHistoryRepository.entriesForFork(
             listOf(

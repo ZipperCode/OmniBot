@@ -532,6 +532,266 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
+    fun `parallel multi tool group with synthetic skipped tool restores full canonical seed in declared order`() {
+        val call1 = AssistantToolCall(
+            id = "call_alpha",
+            function = AssistantToolCallFunction("read_data", """{"file":"1.txt"}""")
+        )
+        val call2 = AssistantToolCall(
+            id = "call_beta",
+            function = AssistantToolCallFunction("parse_data", """{"mode":"fast"}""")
+        )
+        val call3 = AssistantToolCall(
+            id = "call_gamma",
+            function = AssistantToolCallFunction("save_data", """{"out":"res.txt"}""")
+        )
+        val assistantMessage = ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(call1, call2, call3)
+        )
+        val assistantJson = canonicalJson.encodeToString(assistantMessage)
+        val result1 = ChatCompletionMessage(role = "tool", toolCallId = "call_alpha", content = JsonPrimitive("raw data 1"))
+        val result2 = ChatCompletionMessage(role = "tool", toolCallId = "call_beta", content = JsonPrimitive("skipped: parse error in prior turn"))
+        val result3 = ChatCompletionMessage(role = "tool", toolCallId = "call_gamma", content = JsonPrimitive("saved 0 records"))
+        // 合成专用数组：仅 call_beta 为 synthetic skipped
+        val groupResults = listOf(result2)
+        val groupJson = canonicalJson.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+            groupResults
+        )
+
+        // Entry for call_alpha (real executed)
+        val entry1 = AgentConversationEntry(
+            id = 10, conversationId = 8, conversationMode = "agent", entryId = "task-tool-1",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "read",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to "call_alpha",
+                "modelAssistantMessageJson" to assistantJson,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(result1),
+                "sessionId" to "session-group", "turnId" to "turn-group",
+            )),
+            createdAt = 10, updatedAt = 10
+        )
+        // call_beta 被 Orchestrator 跳过：不生成独立的可见卡片！
+        // 最后一个执行的真实工具卡 entry3 挂载包含 synthetic 结果的 modelToolResultMessagesJson
+        val entry3 = AgentConversationEntry(
+            id = 11, conversationId = 8, conversationMode = "agent", entryId = "task-tool-3",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "saved",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to "call_gamma",
+                "modelAssistantMessageJson" to assistantJson,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(result3),
+                "modelToolResultMessagesJson" to groupJson,
+                "sessionId" to "session-group", "turnId" to "turn-group",
+            )),
+            createdAt = 11, updatedAt = 11
+        )
+
+        val replay = AgentConversationHistorySupport.buildPromptRelevantMessages(listOf(entry1, entry3))
+        // 必须按原声明顺序还原：assistant -> tool 1 -> tool 2（来自合成组）-> tool 3
+        assertEquals(listOf("assistant", "tool", "tool", "tool"), replay.map { it.role })
+        assertEquals(listOf("call_alpha", "call_beta", "call_gamma"), replay[0].toolCalls?.map { it.id })
+        assertEquals("call_alpha", replay[1].toolCallId)
+        assertEquals("raw data 1", replay[1].content?.jsonPrimitive?.content)
+        assertEquals("call_beta", replay[2].toolCallId)
+        assertEquals("skipped: parse error in prior turn", replay[2].content?.jsonPrimitive?.content)
+        assertEquals("call_gamma", replay[3].toolCallId)
+        assertEquals("saved 0 records", replay[3].content?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `identical tool call id across different turns do not cross-contaminate`() {
+        val sharedCallId = "call_identical_id"
+        val callTurn1 = AssistantToolCall(id = sharedCallId, function = AssistantToolCallFunction("run", "{}"))
+        val assistantTurn1 = ChatCompletionMessage(role = "assistant", toolCalls = listOf(callTurn1))
+        val assistantJson1 = canonicalJson.encodeToString(assistantTurn1)
+        val resultTurn1 = ChatCompletionMessage(role = "tool", toolCallId = sharedCallId, content = JsonPrimitive("result from turn 1"))
+
+        val callTurn2 = AssistantToolCall(id = sharedCallId, function = AssistantToolCallFunction("run", "{}"))
+        val assistantTurn2 = ChatCompletionMessage(role = "assistant", toolCalls = listOf(callTurn2))
+        val assistantJson2 = canonicalJson.encodeToString(assistantTurn2)
+        val resultTurn2 = ChatCompletionMessage(role = "tool", toolCallId = sharedCallId, content = JsonPrimitive("result from turn 2"))
+
+        val entryTurn1 = AgentConversationEntry(
+            id = 100, conversationId = 9, conversationMode = "agent", entryId = "tool-t1",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "done 1",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to sharedCallId,
+                "modelAssistantMessageJson" to assistantJson1,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(resultTurn1),
+                "sessionId" to "sess-iso", "turnId" to "turn-1",
+            )),
+            createdAt = 100, updatedAt = 100
+        )
+        val userBetween = buildUserEntry(
+            id = 101,
+            entryId = "user-between",
+            text = "next turn"
+        )
+        val entryTurn2 = AgentConversationEntry(
+            id = 102, conversationId = 9, conversationMode = "agent", entryId = "tool-t2",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "done 2",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to sharedCallId,
+                "modelAssistantMessageJson" to assistantJson2,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(resultTurn2),
+                "sessionId" to "sess-iso", "turnId" to "turn-2",
+            )),
+            createdAt = 102, updatedAt = 102
+        )
+
+        val replay = AgentConversationHistorySupport.buildPromptRelevantMessages(listOf(entryTurn1, userBetween, entryTurn2))
+        assertEquals(listOf("assistant", "tool", "user", "assistant", "tool"), replay.map { it.role })
+        assertEquals("result from turn 1", replay[1].content?.jsonPrimitive?.content)
+        assertEquals("result from turn 2", replay[4].content?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `mergeToolPayload preserves modelToolResultMessagesJson from incoming and existing`() {
+        val existing = mapOf<String, Any?>(
+            "modelToolCallId" to "call-1",
+            "modelToolResultMessagesJson" to """[{"role":"tool","tool_call_id":"call-1","content":"res1"}]"""
+        )
+        val incoming = mapOf<String, Any?>(
+            "modelToolCallId" to "call-1",
+            "modelToolResultMessagesJson" to """[{"role":"tool","tool_call_id":"call-1","content":"res1"},{"role":"tool","tool_call_id":"call-2","content":"res2"}]"""
+        )
+        val merged = AgentConversationHistorySupport.mergeToolPayload(
+            existing = existing,
+            incoming = incoming,
+            fallbackStatus = "success",
+            fallbackSummary = "test"
+        )
+        val resultJson = merged["modelToolResultMessagesJson"]?.toString().orEmpty()
+        val decodedList = canonicalJson.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+            resultJson
+        )
+        assertEquals(2, decodedList.size)
+        assertEquals("call-1", decodedList[0].toolCallId)
+        assertEquals("res1", decodedList[0].content?.jsonPrimitive?.content)
+        assertEquals("call-2", decodedList[1].toolCallId)
+        assertEquals("res2", decodedList[1].content?.jsonPrimitive?.content)
+
+        // 验证传入为空时正确回退已存字段
+        val sparseIncoming = mapOf<String, Any?>("status" to "success")
+        val mergedFallback = AgentConversationHistorySupport.mergeToolPayload(
+            existing = existing,
+            incoming = sparseIncoming,
+            fallbackStatus = "success",
+            fallbackSummary = "test"
+        )
+        assertEquals(existing["modelToolResultMessagesJson"], mergedFallback["modelToolResultMessagesJson"])
+    }
+
+    @Test
+    fun `two rounds with identical assistantJson in same turn output two distinct groups via sequential break`() {
+        val toolCall = AssistantToolCall(id = "tool_fetch", function = AssistantToolCallFunction("fetch", """{"k":"v"}"""))
+        val assistant = ChatCompletionMessage(role = "assistant", toolCalls = listOf(toolCall))
+        val assistantJson = canonicalJson.encodeToString(assistant)
+
+        val result1 = ChatCompletionMessage(role = "tool", toolCallId = "tool_fetch", content = JsonPrimitive("round 1 data"))
+        val result2 = ChatCompletionMessage(role = "tool", toolCallId = "tool_fetch", content = JsonPrimitive("round 2 data"))
+
+        val entry1 = AgentConversationEntry(
+            id = 201, conversationId = 12, conversationMode = "agent", entryId = "card-round-1",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "done r1",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to "tool_fetch",
+                "modelAssistantMessageJson" to assistantJson,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(result1),
+                "sessionId" to "session-dup", "turnId" to "turn-dup",
+            )),
+            createdAt = 201, updatedAt = 201
+        )
+        val entry2 = AgentConversationEntry(
+            id = 202, conversationId = 12, conversationMode = "agent", entryId = "card-round-2",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = AgentConversationHistoryRepository.STATUS_SUCCESS, summary = "done r2",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to "tool_fetch",
+                "modelAssistantMessageJson" to assistantJson,
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(result2),
+                "sessionId" to "session-dup", "turnId" to "turn-dup",
+            )),
+            createdAt = 202, updatedAt = 202
+        )
+
+        val replay = AgentConversationHistorySupport.buildPromptRelevantMessages(listOf(entry1, entry2))
+        assertEquals(listOf("assistant", "tool", "assistant", "tool"), replay.map { it.role })
+        assertEquals("round 1 data", replay[1].content?.jsonPrimitive?.content)
+        assertEquals("round 2 data", replay[3].content?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `tool output projection preserves error protocolState and offloads synthetic group notice`() {
+        val projection = AgentHistoryToolOutputProjection(offload = { "/tmp/offload-test.txt" }, budgetTokens = 10)
+        val assistant = ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(
+                AssistantToolCall("real_call", function = AssistantToolCallFunction("exec", "{}")),
+                AssistantToolCall("skip_call", function = AssistantToolCallFunction("skip", "{}"))
+            )
+        )
+        val realErrorResult = ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "real_call",
+            content = JsonPrimitive("x".repeat(500)),
+            protocolState = cn.com.omnimind.baselib.llm.ChatCompletionProtocolState(
+                anthropic = cn.com.omnimind.baselib.llm.AnthropicMessageProtocolState(toolResultIsError = true)
+            )
+        )
+        val syntheticErrorResult = ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "skip_call",
+            content = JsonPrimitive("y".repeat(500)),
+            protocolState = cn.com.omnimind.baselib.llm.ChatCompletionProtocolState(
+                anthropic = cn.com.omnimind.baselib.llm.AnthropicMessageProtocolState(toolResultIsError = true)
+            )
+        )
+        val syntheticArrayJson = canonicalJson.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+            listOf(syntheticErrorResult)
+        )
+
+        val entry = AgentConversationEntry(
+            id = 301, conversationId = 15, conversationMode = "agent", entryId = "large-tool",
+            entryType = AgentConversationHistoryRepository.ENTRY_TYPE_TOOL_EVENT,
+            status = "error", summary = "failed",
+            payloadJson = gson.toJson(mapOf(
+                "modelToolCallId" to "real_call",
+                "modelAssistantMessageJson" to canonicalJson.encodeToString(assistant),
+                "modelToolResultMessageJson" to canonicalJson.encodeToString(realErrorResult),
+                "modelToolResultMessagesJson" to syntheticArrayJson,
+                "rawResultJson" to "huge raw result " + "z".repeat(1000)
+            )),
+            createdAt = 301, updatedAt = 301
+        )
+
+        val projected = projection.project(entry)
+        val projectedPayload = AgentConversationHistorySupport.readMap(projected.payloadJson)
+
+        val projectedRealJson = projectedPayload["modelToolResultMessageJson"]?.toString().orEmpty()
+        val decodedReal = canonicalJson.decodeFromString(ChatCompletionMessage.serializer(), projectedRealJson)
+        assertTrue(decodedReal.content?.jsonPrimitive?.content?.contains("Earlier tool record saved in full") == true)
+        assertEquals(true, decodedReal.protocolState?.anthropic?.toolResultIsError)
+
+        val projectedGroupJson = projectedPayload["modelToolResultMessagesJson"]?.toString().orEmpty()
+        val decodedGroup = canonicalJson.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+            projectedGroupJson
+        )
+        assertEquals(1, decodedGroup.size)
+        assertTrue(decodedGroup[0].content?.jsonPrimitive?.content?.contains("Earlier tool record saved in full") == true)
+        assertEquals(true, decodedGroup[0].protocolState?.anthropic?.toolResultIsError)
+    }
+
+    @Test
     fun `a user followup keeps the preceding tool fact without creating a synthetic user turn`() {
         val entries = listOf(
             buildUserEntry(

@@ -48,6 +48,112 @@ export function stream(response: ServerResponse, options: { text?: string; think
   response.end("data: [DONE]\n\n");
 }
 
+export function sendGoogleChunk(
+  response: ServerResponse,
+  parts: Record<string, unknown>[],
+  options: {
+    finishReason?: string;
+    usage?: { prompt?: number; candidates?: number; total?: number };
+  } = {},
+) {
+  const chunk: Record<string, unknown> = {
+    candidates: [
+      {
+        content: {
+          parts,
+          role: "model",
+        },
+        ...(options.finishReason ? { finishReason: options.finishReason } : {}),
+      },
+    ],
+  };
+  if (options.usage) {
+    chunk.usageMetadata = {
+      promptTokenCount: options.usage.prompt ?? 32,
+      candidatesTokenCount: options.usage.candidates ?? 8,
+      totalTokenCount: options.usage.total ?? 40,
+    };
+  }
+  response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+}
+
+export function streamGoogle(
+  response: ServerResponse,
+  options: {
+    text?: string;
+    thinking?: string;
+    tool?: { id: string; name: string; arguments: unknown };
+    usage?: { prompt?: number; candidates?: number; total?: number };
+  } = {},
+) {
+  response.writeHead(200, { "Content-Type": "text/event-stream" });
+  const parts: Record<string, unknown>[] = [];
+  if (options.thinking) {
+    parts.push({ text: options.thinking, thought: true });
+  }
+  if (options.text) {
+    parts.push({ text: options.text });
+  }
+  if (options.tool) {
+    parts.push({
+      functionCall: {
+        id: options.tool.id,
+        name: options.tool.name,
+        args: options.tool.arguments,
+      },
+    });
+  }
+  sendGoogleChunk(response, parts, { finishReason: "STOP", usage: options.usage });
+  response.end();
+}
+
+export function streamAnthropic(
+  response: ServerResponse,
+  options: {
+    text?: string;
+    tool?: { id: string; name: string; arguments: unknown };
+    usage?: { input?: number; output?: number };
+  } = {},
+) {
+  response.writeHead(200, { "Content-Type": "text/event-stream" });
+  const send = (type: string, fields = {}) =>
+    response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`);
+  send("message_start", {
+    message: {
+      id: "anthropic-test",
+      type: "message",
+      role: "assistant",
+      content: [],
+      model: "fixture",
+      stop_reason: null,
+      usage: { input_tokens: options.usage?.input ?? 32, output_tokens: 0 },
+    },
+  });
+  if (options.text) {
+    send("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+    send("content_block_delta", { index: 0, delta: { type: "text_delta", text: options.text } });
+    send("content_block_stop", { index: 0 });
+  }
+  if (options.tool) {
+    const toolIndex = options.text ? 1 : 0;
+    send("content_block_start", {
+      index: toolIndex,
+      content_block: { type: "tool_use", id: options.tool.id, name: options.tool.name, input: {} },
+    });
+    send("content_block_delta", {
+      index: toolIndex,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(options.tool.arguments) },
+    });
+    send("content_block_stop", { index: toolIndex });
+  }
+  send("message_delta", {
+    delta: { stop_reason: options.tool ? "tool_use" : "end_turn" },
+    usage: { output_tokens: options.usage?.output ?? 8 },
+  });
+  send("message_stop");
+  response.end();
+}
+
 export function configFor(root: string, baseUrl: string): LaunchConfig {
   return {
     agentDir: join(root, "pi"), sessionDir: join(root, "pi", "sessions"), modelId: "fixture", apiKey: "test-key",

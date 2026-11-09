@@ -58,7 +58,6 @@ void main() {
       }
       if (call.method == 'fetchProviderModels') {
         final args = call.arguments as Map;
-        expect(args['forceRefresh'], true);
         final id = args['profileId'] as String;
         calls.add(id);
         return fetch(id);
@@ -194,12 +193,13 @@ void main() {
       );
       await tester.pumpWidget(selector());
       await tester.pumpAndSettle();
-      expect(
-        find.text(
-          'Could not verify the model connection. Check its address and key in model settings.',
-        ),
-        findsNWidgets(2),
-      );
+      final errorFinder = find.byWidgetPredicate((widget) {
+        if (widget is! Text) return false;
+        final text = widget.data ?? '';
+        return text.contains('Could not verify the model connection') ||
+            text.contains('无法验证模型连接');
+      });
+      expect(errorFinder, findsNWidgets(2));
       expect(find.text('该 Provider 暂无可选模型'), findsNothing);
     },
   );

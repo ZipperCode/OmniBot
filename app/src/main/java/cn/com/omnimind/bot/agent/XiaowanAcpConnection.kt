@@ -796,8 +796,16 @@ private class XiaowanAgentSession(
             "Xiaowan ACP prompt is empty"
         }
         val conversationId = conversationIdProvider(sessionId.value)
+        val acpTurnId = (_meta as? JsonObject)
+            ?.get("turnId")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         val streamBridge = XiaowanAcpEventBridge(
-            context
+            context = context,
+            sessionId = sessionId.value,
+            turnId = acpTurnId,
         ) { update ->
             // AgentCallback can arrive from provider/tool worker coroutines.
             // `flow { emit(...) }` is not thread-safe and drops the whole turn
@@ -812,12 +820,6 @@ private class XiaowanAgentSession(
                 "inMemoryMessages=${messages.size} historySource=" +
                 if (conversationId != null) "conversation" else "session_memory"
         )
-        val acpTurnId = (_meta as? JsonObject)
-            ?.get("turnId")
-            ?.jsonPrimitive
-            ?.contentOrNull
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
         val requestedConversationMode = (_meta as? JsonObject)
             ?.get("conversationMode")
             ?.jsonPrimitive
@@ -889,7 +891,11 @@ private class XiaowanAgentSession(
                     toolCallId: String,
                     title: String,
                     detail: String,
-                ): Boolean = requestPermission(sessionId.value, toolCallId, title, detail, null, null, null)
+                ): Boolean {
+                    streamBridge.emitToolPending(toolCallId, title, detail)
+                    val acpId = streamBridge.lookupActiveAcpToolCallId(toolCallId)
+                    return requestPermission(sessionId.value, acpId, title, detail, null, null, null)
+                }
 
                 override suspend fun requestPermission(
                     toolCallId: String,
@@ -899,7 +905,8 @@ private class XiaowanAgentSession(
                     targetResource: String?,
                 ): Boolean {
                     streamBridge.emitToolPending(toolCallId, title, detail)
-                    return requestPermission(sessionId.value, toolCallId, title, detail, action, targetResource, null)
+                    val acpId = streamBridge.lookupActiveAcpToolCallId(toolCallId)
+                    return requestPermission(sessionId.value, acpId, title, detail, action, targetResource, null)
                 }
 
                 override suspend fun requestPermission(
@@ -911,7 +918,8 @@ private class XiaowanAgentSession(
                     rawInput: JsonObject?,
                 ): Boolean {
                     streamBridge.emitToolPending(toolCallId, title, detail)
-                    return requestPermission(sessionId.value, toolCallId, title, detail, action, targetResource, rawInput)
+                    val acpId = streamBridge.lookupActiveAcpToolCallId(toolCallId)
+                    return requestPermission(sessionId.value, acpId, title, detail, action, targetResource, rawInput)
                 }
             },
             historyMessagesOverride = messages.toList().takeIf { conversationId == null },
@@ -1358,8 +1366,57 @@ internal fun xiaowanTerminalEnvironmentFromMeta(
 
 internal class XiaowanAcpEventBridge(
     private val context: Context,
+    private val sessionId: String? = null,
+    private val turnId: String? = null,
     private val emitUpdate: suspend (SessionUpdate) -> Unit,
 ) : AgentCallback {
+    constructor(
+        context: Context,
+        emitUpdate: suspend (SessionUpdate) -> Unit,
+    ) : this(context, null, null, emitUpdate)
+
+    private class CanonicalToolGroup(
+        val assistantMessage: ChatCompletionMessage,
+        val assistantJson: String,
+        val declaredToolCallIds: Set<String>,
+        val executedAcpToolCallIds: MutableList<String> = mutableListOf(),
+        val resultsByCallId: LinkedHashMap<String, ChatCompletionMessage> = linkedMapOf(),
+        val syntheticResults: MutableList<ChatCompletionMessage> = mutableListOf(),
+        var patchEmitted: Boolean = false,
+    )
+
+    private val canonicalJson = kotlinx.serialization.json.Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        encodeDefaults = true
+    }
+    private val toolGroups = mutableListOf<CanonicalToolGroup>()
+    private var roundIndex = 0
+    private val activeRoundProviderToolMap = mutableMapOf<String, String>()
+    private val allAllocatedAcpToolIds = mutableSetOf<String>()
+
+    private fun resolveAcpToolCallIdLocked(providerToolCallId: String): String {
+        if (providerToolCallId.isBlank()) return providerToolCallId
+        return activeRoundProviderToolMap.getOrPut(providerToolCallId) {
+            if (allAllocatedAcpToolIds.add(providerToolCallId)) {
+                providerToolCallId
+            } else {
+                var candidate = "${providerToolCallId}-round-$roundIndex"
+                var suffix = 2
+                while (!allAllocatedAcpToolIds.add(candidate)) {
+                    candidate = "${providerToolCallId}-round-$roundIndex-$suffix"
+                    suffix++
+                }
+                candidate
+            }
+        }
+    }
+
+    internal suspend fun lookupActiveAcpToolCallId(providerToolCallId: String): String {
+        return callbackMutex.withLock {
+            activeRoundProviderToolMap[providerToolCallId] ?: providerToolCallId
+        }
+    }
     private val callbackMutex = Mutex()
     private var assistantSnapshot = ""
     private var thoughtSnapshot = ""
@@ -1428,6 +1485,10 @@ internal class XiaowanAcpEventBridge(
 
     override suspend fun onThinkingStart() {
         callbackMutex.withLock {
+            roundIndex += 1
+            activeRoundProviderToolMap.clear()
+            startedToolCallIds.clear()
+            seenToolCallIds.clear()
             val startsAfterTool = reasoningSegmentPending
             if (thoughtSnapshot.isNotEmpty() && !startsAfterTool) {
                 thoughtMessageId = MessageId(UUID.randomUUID().toString())
@@ -1498,18 +1559,18 @@ internal class XiaowanAcpEventBridge(
         toolType: String?,
     ) {
         callbackMutex.withLock {
-            val id = toolCall.id
+            val acpId = resolveAcpToolCallIdLocked(toolCall.id)
             val name = toolCall.function.name
-            if (id.isBlank() || name.isBlank() || startedToolCallIds.contains(id)) return@withLock
-            val first = seenToolCallIds.add(id)
-            if (!first && !toolTypesById.containsKey(id)) return@withLock // terminal replay
+            if (acpId.isBlank() || name.isBlank() || startedToolCallIds.contains(acpId)) return@withLock
+            val first = seenToolCallIds.add(acpId)
+            if (!first && !toolTypesById.containsKey(acpId)) return@withLock // terminal replay
             val input = JsonPrimitive(toolCall.function.arguments)
             if (first) {
                 reasoningSegmentPending = true
-                toolIdsByName.getOrPut(name) { ArrayDeque() }.addLast(id)
-                toolTypesById[id] = toolType
+                toolIdsByName.getOrPut(name) { ArrayDeque() }.addLast(acpId)
+                toolTypesById[acpId] = toolType
                 emitUpdate(SessionUpdate.ToolCall(
-                    toolCallId = ToolCallId(id),
+                    toolCallId = ToolCallId(acpId),
                     title = xiaowanToolTitle(context, name),
                     kind = xiaowanToolKind(name, toolType),
                     status = ToolCallStatus.PENDING,
@@ -1517,7 +1578,7 @@ internal class XiaowanAcpEventBridge(
                 ))
             } else {
                 emitUpdate(SessionUpdate.ToolCallUpdate(
-                    toolCallId = ToolCallId(id),
+                    toolCallId = ToolCallId(acpId),
                     title = xiaowanToolTitle(context, name),
                     kind = xiaowanToolKind(name, toolType),
                     rawInput = input,
@@ -1543,7 +1604,8 @@ internal class XiaowanAcpEventBridge(
     ) {
         callbackMutex.withLock {
             if (toolCallId.isNotBlank()) {
-                emitToolStart(toolCallId, toolName, arguments)
+                val acpId = resolveAcpToolCallIdLocked(toolCallId)
+                emitToolStart(acpId, toolName, arguments)
             }
         }
     }
@@ -1556,7 +1618,8 @@ internal class XiaowanAcpEventBridge(
     ) {
         callbackMutex.withLock {
             if (toolCallId.isNotBlank()) {
-                emitToolStart(toolCallId, toolName, arguments, toolType)
+                val acpId = resolveAcpToolCallIdLocked(toolCallId)
+                emitToolStart(acpId, toolName, arguments, toolType)
             }
         }
     }
@@ -1640,12 +1703,10 @@ internal class XiaowanAcpEventBridge(
         extras: Map<String, Any?>,
     ) {
         callbackMutex.withLock {
-            val resolvedId = toolCallId.ifBlank {
+            val rawId = toolCallId.ifBlank {
                 toolIdsByName[toolName]?.lastOrNull()
             }
-            // A tool update without a preceding ACP tool_call has no valid
-            // identity. Do not invent one: that creates an orphan card and
-            // can make one provider retry look like a second tool execution.
+            val resolvedId = rawId?.let(::resolveAcpToolCallIdLocked)
             resolvedId?.takeIf(startedToolCallIds::contains)
                 ?.let { emitToolProgress(it, toolName, progress, extras) }
         }
@@ -1685,10 +1746,11 @@ internal class XiaowanAcpEventBridge(
         detail: String,
     ) {
         callbackMutex.withLock {
-            if (!startedToolCallIds.contains(toolCallId)) return@withLock
+            val acpToolCallId = resolveAcpToolCallIdLocked(toolCallId)
+            if (!startedToolCallIds.contains(acpToolCallId)) return@withLock
             emitUpdate(
                 SessionUpdate.ToolCallUpdate(
-                    toolCallId = ToolCallId(toolCallId),
+                    toolCallId = ToolCallId(acpToolCallId),
                     title = title,
                     kind = ToolKind.EXECUTE,
                     status = ToolCallStatus.PENDING,
@@ -1728,10 +1790,12 @@ internal class XiaowanAcpEventBridge(
         result: ToolExecutionResult,
     ) {
         callbackMutex.withLock {
+            val acpId = resolveAcpToolCallIdLocked(toolCallId)
             emitToolComplete(
-                removeToolCallId(toolName, toolCallId.ifBlank { null }),
+                removeToolCallId(toolName, acpId.ifBlank { null }),
                 toolName,
                 result,
+                originalModelCallId = toolCallId,
             )
         }
     }
@@ -1740,6 +1804,7 @@ internal class XiaowanAcpEventBridge(
         toolCallId: String?,
         toolName: String,
         result: ToolExecutionResult,
+        originalModelCallId: String = toolCallId.orEmpty(),
     ) {
         val resolvedToolCallId = toolCallId
             ?.takeIf(startedToolCallIds::contains)
@@ -1758,7 +1823,21 @@ internal class XiaowanAcpEventBridge(
                     )
                 )
             }
-        val rawOutput = permissionPayload ?: toolResultAcpPayload(result)
+        val baseRawOutput = permissionPayload ?: toolResultAcpPayload(result)
+        val matchingGroup = toolGroups.lastOrNull { it.resultsByCallId.containsKey(originalModelCallId) }
+        val finalRawOutputMap = baseRawOutput.toMutableMap()
+        finalRawOutputMap["modelToolCallId"] = JsonPrimitive(originalModelCallId)
+        sessionId?.takeIf { it.isNotBlank() }?.let { finalRawOutputMap["sessionId"] = JsonPrimitive(it) }
+        turnId?.takeIf { it.isNotBlank() }?.let { finalRawOutputMap["turnId"] = JsonPrimitive(it) }
+        if (matchingGroup != null) {
+            finalRawOutputMap["modelAssistantMessageJson"] = JsonPrimitive(matchingGroup.assistantJson)
+            matchingGroup.resultsByCallId[originalModelCallId]?.let { msg ->
+                finalRawOutputMap["modelToolResultMessageJson"] = JsonPrimitive(
+                    canonicalJson.encodeToString(ChatCompletionMessage.serializer(), msg)
+                )
+            }
+        }
+        val rawOutput = JsonObject(finalRawOutputMap)
         emitUpdate(
             SessionUpdate.ToolCallUpdate(
                 toolCallId = ToolCallId(resolvedToolCallId),
@@ -1799,6 +1878,56 @@ internal class XiaowanAcpEventBridge(
     private fun finalizeToolCallId(toolCallId: String) {
         toolTypesById.remove(toolCallId)
         startedToolCallIds.remove(toolCallId)
+    }
+
+    override suspend fun onToolReplayReady(
+        toolCallId: String,
+        assistantMessage: ChatCompletionMessage,
+        toolResultMessage: ChatCompletionMessage,
+        isSynthetic: Boolean,
+    ) {
+        callbackMutex.withLock {
+            val group = toolGroups.firstOrNull { it.assistantMessage === assistantMessage }
+                ?: CanonicalToolGroup(
+                    assistantMessage = assistantMessage,
+                    assistantJson = canonicalJson.encodeToString(ChatCompletionMessage.serializer(), assistantMessage),
+                    declaredToolCallIds = assistantMessage.toolCalls.orEmpty().map { it.id }.toSet(),
+                ).also { toolGroups.add(it) }
+
+            group.resultsByCallId[toolCallId] = toolResultMessage
+            val acpCallId = resolveAcpToolCallIdLocked(toolCallId)
+
+            if (!isSynthetic) {
+                if (!group.executedAcpToolCallIds.contains(acpCallId)) {
+                    group.executedAcpToolCallIds.add(acpCallId)
+                }
+            } else {
+                group.syntheticResults.add(toolResultMessage)
+            }
+
+            if (!group.patchEmitted && group.syntheticResults.isNotEmpty() && group.resultsByCallId.keys.containsAll(group.declaredToolCallIds)) {
+                group.patchEmitted = true
+                val targetRealCallId = group.executedAcpToolCallIds.lastOrNull()
+                if (targetRealCallId != null) {
+                    val syntheticGroupJson = canonicalJson.encodeToString(
+                        kotlinx.serialization.builtins.ListSerializer(ChatCompletionMessage.serializer()),
+                        group.syntheticResults
+                    )
+                    val patchOutput = kotlinx.serialization.json.buildJsonObject {
+                        put("modelToolResultMessagesJson", JsonPrimitive(syntheticGroupJson))
+                        put("modelAssistantMessageJson", JsonPrimitive(group.assistantJson))
+                        sessionId?.takeIf { it.isNotBlank() }?.let { put("sessionId", JsonPrimitive(it)) }
+                        turnId?.takeIf { it.isNotBlank() }?.let { put("turnId", JsonPrimitive(it)) }
+                    }
+                    emitUpdate(
+                        SessionUpdate.ToolCallUpdate(
+                            toolCallId = ToolCallId(targetRealCallId),
+                            rawOutput = patchOutput,
+                        )
+                    )
+                }
+            }
+        }
     }
 
     override suspend fun onChatMessage(message: String) {

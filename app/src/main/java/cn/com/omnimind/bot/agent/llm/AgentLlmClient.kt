@@ -325,7 +325,9 @@ class HttpAgentLlmClient(
                 routeInfo.providerCapabilities.requiresReasoningContentForToolCalls,
             captureAnthropicContentBlocks =
                 routeInfo.providerCapabilities.requiresAnthropicThinkingReplay,
-            anthropicSourceModel = routeInfo.resolvedModel
+            anthropicSourceModel = routeInfo.resolvedModel,
+            captureGeminiParts = routeInfo.protocolType.equals("gemini", ignoreCase = true),
+            geminiSourceModel = routeInfo.resolvedModel
         )
         var lastReasoning = ""
         var lastReasoningEmitLength = 0

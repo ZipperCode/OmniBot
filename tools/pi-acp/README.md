@@ -85,10 +85,11 @@ process launch; mutable model capabilities are scoped to each session.
 | `OMNIBOT_PI_PROVIDER_BASE_URL` | Expected normalized Provider endpoint |
 | `OMNIBOT_PI_SKILL_PATHS` | Additional skill directories, separated by `:` |
 
-Credentials and header values are kept in memory, outside model/session
-configuration files. OpenAI Chat Completions, Responses and Anthropic Messages
-use Pi's corresponding official API implementations. Missing or unavailable
-models fail explicitly. Model and thinking selectors use ACP config options.
+凭据和自定义请求头只保留在进程内，不写入模型或会话配置文件。
+OpenAI Chat Completions、Responses、Gemini GenerateContent 和 Anthropic Messages
+直接使用 Pi 对应的官方开源适配器。Gemini 配置为 `google-generative-ai`，
+服务地址必须包含版本或代理根路径（官方默认为 `/v1beta`），不接受 `#` 直通标记。
+模型不存在或协议不受支持时明确失败；模型与思考选择继续使用 ACP config options。
 
 An idle `session/load` or `session/resume` can refresh that session's catalog
 from the file when Provider ID, revision, API and endpoint still match its

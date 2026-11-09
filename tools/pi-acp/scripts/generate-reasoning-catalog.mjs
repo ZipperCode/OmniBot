@@ -8,9 +8,9 @@ const repo = resolve(packageRoot, "../..");
 const packageName = "@earendil-works/pi-ai";
 const version = "1.4.0";
 const enabledLevels = ["minimal", "low", "medium", "high", "xhigh", "max"];
-const supportedApis = new Set(["anthropic-messages", "openai-completions", "openai-responses", "openai-codex-responses"]);
+const supportedApis = new Set(["anthropic-messages", "google-generative-ai", "openai-completions", "openai-responses", "openai-codex-responses"]);
 const providers = [
-  "anthropic", "deepseek", "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "openai", "openai-codex",
+  "anthropic", "deepseek", "google", "minimax", "minimax-cn", "moonshotai", "moonshotai-cn", "openai", "openai-codex",
   "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual", "xai", "xiaomi", "zai", "zai-coding-cn",
 ];
 // Exact endpoint aliases reviewed in docs/third-party/pi-model-catalog-NOTICE.md.

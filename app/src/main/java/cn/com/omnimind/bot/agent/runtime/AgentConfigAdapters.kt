@@ -690,3 +690,50 @@ internal fun normalizeClaudeCodeBaseUrl(baseUrl: String): String {
         normalized
     }
 }
+
+/** Google Generative AI 客户端（如 Pi SDK 与 OpenCode）期望版本根路径或自定义代理路径，而非 OpenAI /v1，且 SDK 不支持 '#' 直通标记。 */
+internal fun normalizeGeminiBaseUrl(baseUrl: String): String {
+    require(!baseUrl.contains('#')) {
+        "Google Generative AI SDK 不支持 '#' 直通 URL 标记。"
+    }
+    var normalized = baseUrl.trim().trimEnd('/')
+    if (normalized.contains('?')) {
+        normalized = normalized.substringBefore('?')
+    }
+    val colonIdx = normalized.lastIndexOf(':')
+    if (colonIdx != -1) {
+        val slashAfter = normalized.indexOf('/', colonIdx)
+        if (slashAfter == -1 && normalized.substring(colonIdx).matches(Regex(":[a-zA-Z]+.*"))) {
+            normalized = normalized.substring(0, colonIdx).trimEnd('/')
+        }
+    }
+    val modelsIdx = normalized.lastIndexOf("/models")
+    if (modelsIdx != -1) {
+        val afterModels = normalized.substring(modelsIdx + "/models".length)
+        if (afterModels.isEmpty() || afterModels.startsWith('/')) {
+            normalized = normalized.substring(0, modelsIdx).trimEnd('/')
+        }
+    }
+    val tunedIdx = normalized.lastIndexOf("/tunedModels")
+    if (tunedIdx != -1) {
+        val afterTuned = normalized.substring(tunedIdx + "/tunedModels".length)
+        if (afterTuned.isEmpty() || afterTuned.startsWith('/')) {
+            normalized = normalized.substring(0, tunedIdx).trimEnd('/')
+        }
+    }
+    listOf(
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/responses",
+        "/responses",
+    ).firstOrNull { normalized.endsWith(it, ignoreCase = true) }?.let {
+        normalized = normalized.dropLast(it.length).trimEnd('/')
+    }
+    if (normalized.isEmpty()) return normalized
+    val uri = runCatching { java.net.URI(normalized) }.getOrNull()
+    val path = uri?.path?.trimEnd('/').orEmpty()
+    if (path.isEmpty()) {
+        return "$normalized/v1beta"
+    }
+    return normalized
+}

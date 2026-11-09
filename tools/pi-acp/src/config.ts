@@ -44,7 +44,7 @@ function catalogProvider(document: any): LaunchConfig["provider"] {
   if (!provider || !Array.isArray(provider.models) || !provider.models.length) {
     throw new Error("Pi requires the shared Provider model catalog.");
   }
-  if (!["openai-completions", "openai-responses", "anthropic-messages"].includes(provider.api)) {
+  if (!["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"].includes(provider.api)) {
     throw new Error("Unsupported Pi Provider protocol.");
   }
   const endpoint = new URL(provider.baseUrl);

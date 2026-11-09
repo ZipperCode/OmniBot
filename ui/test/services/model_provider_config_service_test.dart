@@ -259,6 +259,12 @@ void main() {
       ),
       'https://api.example.com/custom/messages',
     );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://api.example.com/custom/generateContent#',
+      ),
+      'https://api.example.com/custom/generateContent',
+    );
   });
 
   test('builds request urls without duplicating v1 suffix', () {
@@ -342,6 +348,51 @@ void main() {
     );
   });
 
+  test('builds gemini request urls from base url', () {
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com',
+      ),
+      'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com/',
+      ),
+      'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com/v1beta',
+      ),
+      'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com/v1',
+      ),
+      'https://generativelanguage.googleapis.com/v1/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://proxy.example.com/custom/path',
+      ),
+      'https://proxy.example.com/custom/path/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+      ),
+      'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent',
+      ),
+      'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+    );
+  });
+
   test('returns null for invalid base url input', () {
     expect(
       ModelProviderConfigService.buildModelsRequestUrl('api.example.com'),
@@ -350,6 +401,57 @@ void main() {
     expect(
       ModelProviderConfigService.buildChatCompletionsRequestUrl(''),
       isNull,
+    );
+    expect(
+      ModelProviderConfigService.buildGeminiRequestUrl('api.example.com'),
+      isNull,
+    );
+  });
+
+  test('infers wire api per protocol contract', () {
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://generativelanguage.googleapis.com',
+        protocolType: 'gemini',
+      ),
+      'chat_completions',
+    );
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://api.anthropic.com',
+        protocolType: 'anthropic',
+      ),
+      'chat_completions',
+    );
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://api.example.com/v1/responses',
+        protocolType: 'gemini',
+      ),
+      'chat_completions',
+    );
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://api.example.com/v1/responses',
+        protocolType: 'openai_compatible',
+      ),
+      'responses',
+    );
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://api.example.com/v1',
+        explicitWireApi: 'responses',
+        protocolType: 'openai_compatible',
+      ),
+      'responses',
+    );
+    expect(
+      ModelProviderConfigService.inferWireApi(
+        'https://api.example.com/v1',
+        explicitWireApi: 'chat_completions',
+        protocolType: 'openai_compatible',
+      ),
+      'chat_completions',
     );
   });
 

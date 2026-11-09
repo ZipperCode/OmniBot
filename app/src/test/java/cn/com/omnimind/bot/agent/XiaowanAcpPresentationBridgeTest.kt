@@ -858,4 +858,223 @@ class XiaowanAcpPresentationBridgeTest {
         val rawOutput = completion.rawOutput as JsonObject
         assertEquals("确认执行高权限 shell 命令？", rawOutput["question"]?.jsonPrimitive?.content)
     }
+
+    @Test
+    fun `onToolReplayReady binds canonical payloads to tool completion rawOutput`() = runBlocking {
+        val updates = mutableListOf<SessionUpdate>()
+        val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-1", "turn-1") { updates += it }
+        val assistant = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(
+                cn.com.omnimind.bot.agent.AssistantToolCall(
+                    id = "call-1",
+                    function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("file_read", """{"path":"/tmp/a.txt"}""")
+                )
+            )
+        )
+        val toolResult = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "call-1",
+            content = JsonPrimitive("hello world")
+        )
+
+        bridge.onToolCallStart("call-1", "file_read", JsonObject(emptyMap()))
+        bridge.onToolReplayReady("call-1", assistant, toolResult, isSynthetic = false)
+        bridge.onToolCallComplete("call-1", "file_read", ToolExecutionResult.ContextResult("file_read", summaryText = "hello world", previewJson = "{}", rawResultJson = "{}"))
+
+        val completion = updates.filterIsInstance<SessionUpdate.ToolCallUpdate>().last()
+        assertEquals(ToolCallStatus.COMPLETED, completion.status)
+        val rawOutput = completion.rawOutput as JsonObject
+        assertEquals("call-1", rawOutput["modelToolCallId"]?.jsonPrimitive?.content)
+        assertTrue(rawOutput["modelAssistantMessageJson"]?.jsonPrimitive?.content?.contains("file_read") == true)
+        assertTrue(rawOutput["modelToolResultMessageJson"]?.jsonPrimitive?.content?.contains("hello world") == true)
+        assertEquals(null, rawOutput["modelToolResultMessagesJson"])
+    }
+
+    @Test
+    fun `synthetic skipped tool results update existing real tool without creating phantom cards`() = runBlocking {
+        val updates = mutableListOf<SessionUpdate>()
+        val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-2", "turn-2") { updates += it }
+        val assistant = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(
+                cn.com.omnimind.bot.agent.AssistantToolCall(
+                    id = "call-exec",
+                    function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("file_read", """{"path":"/tmp/a.txt"}""")
+                ),
+                cn.com.omnimind.bot.agent.AssistantToolCall(
+                    id = "call-skip",
+                    function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("file_write", """{"path":"/tmp/b.txt"}""")
+                )
+            )
+        )
+        val realResult = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "call-exec",
+            content = JsonPrimitive("read ok")
+        )
+        val syntheticResult = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "call-skip",
+            content = JsonPrimitive("skipped due to error")
+        )
+
+        // 1. First tool executed
+        bridge.onToolCallStart("call-exec", "file_read", JsonObject(emptyMap()))
+        bridge.onToolReplayReady("call-exec", assistant, realResult, isSynthetic = false)
+        bridge.onToolCallComplete("call-exec", "file_read", ToolExecutionResult.ContextResult("file_read", summaryText = "read ok", previewJson = "{}", rawResultJson = "{}"))
+
+        // 2. Second tool skipped: onToolReplayReady called with isSynthetic = true
+        bridge.onToolReplayReady("call-skip", assistant, syntheticResult, isSynthetic = true)
+
+        // Verify: No tool_call started for call-skip
+        val startedCalls = updates.filterIsInstance<SessionUpdate.ToolCall>()
+        assertEquals(1, startedCalls.size)
+        assertEquals("call-exec", startedCalls.single().toolCallId.value)
+
+        // Verify: Last update is on call-exec carrying synthetic result in modelToolResultMessagesJson
+        val toolUpdates = updates.filterIsInstance<SessionUpdate.ToolCallUpdate>()
+        val finalUpdate = toolUpdates.last()
+        assertEquals("call-exec", finalUpdate.toolCallId.value)
+        val rawOutput = finalUpdate.rawOutput as JsonObject
+        val groupJson = rawOutput["modelToolResultMessagesJson"]?.jsonPrimitive?.content.orEmpty()
+        assertTrue(groupJson.contains("call-skip"))
+        assertTrue(groupJson.contains("skipped due to error"))
+        // Real tool is NOT duplicated inside synthetic-only group array
+        assertFalse(groupJson.contains("call-exec"))
+    }
+
+    @Test
+    fun `parallel multi-tool replay preserves protocol state and image content`() = runBlocking {
+        val updates = mutableListOf<SessionUpdate>()
+        val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-3", "turn-3") { updates += it }
+        val assistant = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(
+                cn.com.omnimind.bot.agent.AssistantToolCall(
+                    id = "call-img",
+                    function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("take_screenshot", "{}")
+                ),
+                cn.com.omnimind.bot.agent.AssistantToolCall(
+                    id = "call-cmd",
+                    function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("run_cmd", """{"cmd":"ls"}""")
+                )
+            )
+        )
+        val imageContent = kotlinx.serialization.json.buildJsonArray {
+            add(kotlinx.serialization.json.buildJsonObject {
+                put("type", JsonPrimitive("text"))
+                put("text", JsonPrimitive("screenshot error: display lost"))
+            })
+            add(kotlinx.serialization.json.buildJsonObject {
+                put("type", JsonPrimitive("image_url"))
+                put("image_url", kotlinx.serialization.json.buildJsonObject {
+                    put("url", JsonPrimitive("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="))
+                })
+            })
+        }
+        val imgResult = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "call-img",
+            content = imageContent,
+            protocolState = cn.com.omnimind.baselib.llm.ChatCompletionProtocolState(
+                anthropic = cn.com.omnimind.baselib.llm.AnthropicMessageProtocolState(
+                    toolResultIsError = true
+                )
+            )
+        )
+        val cmdResult = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "tool",
+            toolCallId = "call-cmd",
+            content = JsonPrimitive("file1.txt\nfile2.txt")
+        )
+
+        bridge.onToolCallStart("call-img", "take_screenshot", JsonObject(emptyMap()))
+        bridge.onToolCallStart("call-cmd", "run_cmd", JsonObject(emptyMap()))
+        bridge.onToolReplayReady("call-img", assistant, imgResult, isSynthetic = false)
+        bridge.onToolCallComplete("call-img", "take_screenshot", ToolExecutionResult.Error("take_screenshot", "display lost"))
+        bridge.onToolReplayReady("call-cmd", assistant, cmdResult, isSynthetic = false)
+        bridge.onToolCallComplete("call-cmd", "run_cmd", ToolExecutionResult.ContextResult("run_cmd", summaryText = "file1.txt\nfile2.txt", previewJson = "{}", rawResultJson = "{}"))
+
+        val completions = updates.filterIsInstance<SessionUpdate.ToolCallUpdate>().filter { it.status != null }
+        assertEquals(2, completions.size)
+
+        val imgCompletion = completions.first()
+        assertEquals("call-img", imgCompletion.toolCallId.value)
+        val imgRaw = imgCompletion.rawOutput as JsonObject
+        val imgResultJson = imgRaw["modelToolResultMessageJson"]?.jsonPrimitive?.content.orEmpty()
+
+        // Protocol state with tool_result_is_error and data:image/png must be intact in individual canonical result
+        assertTrue(imgResultJson.contains("data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="))
+        assertTrue(imgResultJson.contains("tool_result_is_error"))
+        assertTrue(imgResultJson.contains("true"))
+    }
+
+    @Test
+    fun `three round tool id collision in same turn isolates acp identities and preserves canonical provider ids`() = runBlocking {
+        val updates = mutableListOf<SessionUpdate>()
+        val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-turn", "turn-col") { updates += it }
+
+        // Round 1: provider returns raw id "call_shared"
+        bridge.onThinkingStart()
+        val assistant1 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(cn.com.omnimind.bot.agent.AssistantToolCall(id = "call_shared", function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("run", "{}")))
+        )
+        val result1 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(role = "tool", toolCallId = "call_shared", content = JsonPrimitive("round 1 done"))
+        bridge.onToolCallStart("call_shared", "run", JsonObject(emptyMap()))
+        bridge.onToolCallProgress("call_shared", "run", "progress 1", emptyMap())
+        bridge.emitToolPending("call_shared", "title 1", "pending 1")
+        bridge.onToolReplayReady("call_shared", assistant1, result1, isSynthetic = false)
+        bridge.onToolCallComplete("call_shared", "run", ToolExecutionResult.ContextResult("run", summaryText = "round 1 done", previewJson = "{}", rawResultJson = "{}"))
+
+        // Round 2: model reuses same raw id "call_shared"
+        bridge.onThinkingStart()
+        val assistant2 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(cn.com.omnimind.bot.agent.AssistantToolCall(id = "call_shared", function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("run", "{}")))
+        )
+        val result2 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(role = "tool", toolCallId = "call_shared", content = JsonPrimitive("round 2 done"))
+        bridge.onToolCallStart("call_shared", "run", JsonObject(emptyMap()))
+        bridge.onToolCallProgress("call_shared", "run", "progress 2", emptyMap())
+        bridge.emitToolPending("call_shared", "title 2", "pending 2")
+        bridge.onToolReplayReady("call_shared", assistant2, result2, isSynthetic = false)
+        bridge.onToolCallComplete("call_shared", "run", ToolExecutionResult.ContextResult("run", summaryText = "round 2 done", previewJson = "{}", rawResultJson = "{}"))
+
+        // Round 3: model returns raw id "call_shared-round-2" (attempted collision with generated id)
+        bridge.onThinkingStart()
+        val assistant3 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+            role = "assistant",
+            toolCalls = listOf(cn.com.omnimind.bot.agent.AssistantToolCall(id = "call_shared-round-2", function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("run", "{}")))
+        )
+        val result3 = cn.com.omnimind.baselib.llm.ChatCompletionMessage(role = "tool", toolCallId = "call_shared-round-2", content = JsonPrimitive("round 3 done"))
+        bridge.onToolCallStart("call_shared-round-2", "run", JsonObject(emptyMap()))
+        bridge.onToolCallProgress("call_shared-round-2", "run", "progress 3", emptyMap())
+        bridge.emitToolPending("call_shared-round-2", "title 3", "pending 3")
+        bridge.onToolReplayReady("call_shared-round-2", assistant3, result3, isSynthetic = false)
+        bridge.onToolCallComplete("call_shared-round-2", "run", ToolExecutionResult.ContextResult("run", summaryText = "round 3 done", previewJson = "{}", rawResultJson = "{}"))
+
+        // Assert 3 distinct ToolCall start events
+        val startEvents = updates.filterIsInstance<SessionUpdate.ToolCall>()
+        assertEquals(3, startEvents.size)
+        val acpId1 = startEvents[0].toolCallId.value
+        val acpId2 = startEvents[1].toolCallId.value
+        val acpId3 = startEvents[2].toolCallId.value
+
+        assertEquals("call_shared", acpId1)
+        assertEquals("call_shared-round-2", acpId2)
+        assertEquals("call_shared-round-2-round-3", acpId3)
+
+        // Assert 3 completions preserve original signed provider IDs
+        val completions = updates.filterIsInstance<SessionUpdate.ToolCallUpdate>().filter { it.status == ToolCallStatus.COMPLETED }
+        assertEquals(3, completions.size)
+
+        val rawOut1 = completions[0].rawOutput as JsonObject
+        val rawOut2 = completions[1].rawOutput as JsonObject
+        val rawOut3 = completions[2].rawOutput as JsonObject
+
+        assertEquals("call_shared", rawOut1["modelToolCallId"]?.jsonPrimitive?.content)
+        assertEquals("call_shared", rawOut2["modelToolCallId"]?.jsonPrimitive?.content)
+        assertEquals("call_shared-round-2", rawOut3["modelToolCallId"]?.jsonPrimitive?.content)
+    }
 }

@@ -268,3 +268,28 @@ test("a registry failure rolls back the catalog before another session operation
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("catalogProvider accepts google-generative-ai and verifies launch identity", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-google-catalog-"));
+  try {
+    const config = configFor(root, "http://127.0.0.1:1");
+    config.provider.api = "google-generative-ai";
+    config.provider.baseUrl = "https://generativelanguage.googleapis.com/v1beta";
+    const file = catalogFile(config);
+    const env = {
+      PI_CODING_AGENT_DIR: config.agentDir,
+      OMNIBOT_PI_MODELS_PATH: file.path,
+      OMNIBOT_PI_MODEL: config.modelId,
+      OMNIBOT_PI_API_KEY: config.apiKey,
+      OMNIBOT_PI_PROVIDER_ID: "provider-a",
+      OMNIBOT_PI_PROVIDER_REVISION: "7",
+      OMNIBOT_PI_PROVIDER_API: "google-generative-ai",
+      OMNIBOT_PI_PROVIDER_BASE_URL: "https://generativelanguage.googleapis.com/v1beta",
+    };
+    const loaded = readLaunchConfig(env);
+    assert.equal(loaded.provider.api, "google-generative-ai");
+    assert.equal(loaded.provider.baseUrl, "https://generativelanguage.googleapis.com/v1beta");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

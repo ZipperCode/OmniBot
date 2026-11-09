@@ -103,15 +103,17 @@ internal fun buildPiModelsJson(
     return GsonBuilder().serializeNulls().setPrettyPrinting().disableHtmlEscaping().create().toJson(config) + "\n"
 }
 
-private fun piApi(provider: AgentProviderCredentials): String = when {
-    provider.protocolType == "anthropic" -> "anthropic-messages"
-    OpenAiWireApi.isResponses(provider.wireApi) -> "openai-responses"
-    else -> "openai-completions"
+private fun piApi(provider: AgentProviderCredentials): String = when (provider.protocolType) {
+    "anthropic" -> "anthropic-messages"
+    "gemini" -> "google-generative-ai"
+    else -> if (OpenAiWireApi.isResponses(provider.wireApi)) "openai-responses" else "openai-completions"
 }
 
-private fun piBaseUrl(provider: AgentProviderCredentials): String =
-    if (provider.protocolType == "anthropic") normalizeAnthropicServiceRoot(provider.baseUrl)
-    else normalizeOpenCodeBaseUrl(provider.baseUrl)
+private fun piBaseUrl(provider: AgentProviderCredentials): String = when (provider.protocolType) {
+    "anthropic" -> normalizeAnthropicServiceRoot(provider.baseUrl)
+    "gemini" -> normalizeGeminiBaseUrl(provider.baseUrl)
+    else -> normalizeOpenCodeBaseUrl(provider.baseUrl)
+}
 
 private val piEnabledThinkingLevels = listOf("minimal", "low", "medium", "high", "xhigh", "max")
 

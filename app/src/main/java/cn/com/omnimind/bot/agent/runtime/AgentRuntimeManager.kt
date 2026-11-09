@@ -3873,6 +3873,7 @@ internal fun buildOpenCodeConfigJson(
     val provider = managedOpenCodeV2Provider(root)
     provider.addProperty("package", when {
         protocolType.equals("anthropic", ignoreCase = true) -> "@opencode/ai/providers/anthropic-compatible"
+        protocolType.equals("gemini", ignoreCase = true) -> openCodePackage("@ai-sdk/google")
         OpenAiWireApi.isResponses(wireApi) -> "@opencode/ai/providers/openai-compatible/responses"
         else -> "@opencode/ai/providers/openai-compatible"
     })

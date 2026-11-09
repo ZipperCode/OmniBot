@@ -116,24 +116,53 @@ const List<_ProviderTypeOption> _kProviderTypeOptions = <_ProviderTypeOption>[
     wireApi: 'chat_completions',
   ),
   _ProviderTypeOption(
-    value: 'openai_compatible',
-    label: 'OpenAI',
+    value: 'custom',
+    label: 'Custom',
     sourceType: 'custom',
     protocolType: 'openai_compatible',
     wireApi: 'chat_completions',
   ),
-  _ProviderTypeOption(
+];
+
+class _EndpointOption {
+  const _EndpointOption({
+    required this.value,
+    required this.label,
+    required this.protocolType,
+    required this.wireApi,
+  });
+
+  final String value;
+  final String label;
+  final String protocolType;
+  final String wireApi;
+}
+
+const List<_EndpointOption> _kEndpointOptions = <_EndpointOption>[
+  _EndpointOption(
+    value: 'chat_completions',
+    label: 'Chat Completions',
+    protocolType: 'openai_compatible',
+    wireApi: 'chat_completions',
+  ),
+  _EndpointOption(
+    value: 'responses',
+    label: 'Responses',
+    protocolType: 'openai_compatible',
+    wireApi: 'responses',
+  ),
+  _EndpointOption(
+    value: 'gemini',
+    label: 'Gemini',
+    protocolType: 'gemini',
+    wireApi: 'chat_completions',
+  ),
+  _EndpointOption(
     value: 'anthropic',
     label: 'Anthropic',
-    sourceType: 'custom',
     protocolType: 'anthropic',
     wireApi: 'chat_completions',
   ),
-];
-
-const List<_SelectionOption> _kOpenAiWireApiOptions = <_SelectionOption>[
-  _SelectionOption(value: 'chat_completions', label: 'Chat Completions'),
-  _SelectionOption(value: 'responses', label: 'Responses'),
 ];
 
 class _ProviderModelItem {
@@ -255,6 +284,10 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
   bool get _isChatGptProvider =>
       _selectedSourceType == ChatGptOAuthService.sourceType;
 
+  bool get _isCustomProvider =>
+      !_isChatGptProvider &&
+      BuiltinOfficialProviderCatalog.findByKey(_selectedSourceType) == null;
+
   String get _selectedProviderValue {
     if (_isChatGptProvider) return ChatGptOAuthService.sourceType;
     final officialProvider = BuiltinOfficialProviderCatalog.findByKey(
@@ -263,27 +296,48 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
     if (officialProvider != null) {
       return officialProvider.key;
     }
-    if (_selectedProtocolType == 'anthropic') {
-      return 'anthropic';
-    }
-    if (_selectedProtocolType == 'deepseek') {
-      return 'deepseek';
-    }
-    return 'openai_compatible';
+    return 'custom';
   }
 
   String get _selectedProviderLabel {
     final selectedValue = _selectedProviderValue;
     for (final option in _kProviderTypeOptions) {
       if (option.value == selectedValue) {
+        if (option.value == 'custom') {
+          return _headerText('自定义', 'Custom');
+        }
         return option.label;
       }
     }
-    return 'OpenAI';
+    return _headerText('自定义', 'Custom');
+  }
+
+  String get _currentEndpointValue {
+    if (_selectedProtocolType == 'anthropic') {
+      return 'anthropic';
+    }
+    if (_selectedProtocolType == 'gemini') {
+      return 'gemini';
+    }
+    if (_selectedProtocolType == 'openai_compatible' &&
+        _selectedWireApi == 'responses') {
+      return 'responses';
+    }
+    return 'chat_completions';
   }
 
   String get _selectedWireApiLabel {
-    return _selectedWireApi == 'responses' ? 'Responses' : 'Chat Completions';
+    switch (_currentEndpointValue) {
+      case 'anthropic':
+        return 'Anthropic';
+      case 'gemini':
+        return 'Gemini';
+      case 'responses':
+        return 'Responses';
+      case 'chat_completions':
+      default:
+        return 'Chat Completions';
+    }
   }
 
   double _measurePopupWidth(
@@ -900,6 +954,9 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
 
     if (_selectedProtocolType == 'anthropic') {
       return ModelProviderConfigService.buildAnthropicMessagesRequestUrl(input);
+    }
+    if (_selectedProtocolType == 'gemini') {
+      return ModelProviderConfigService.buildGeminiRequestUrl(input);
     }
     if (_selectedProtocolType == 'openai_compatible' &&
         _selectedWireApi == 'responses') {
@@ -1543,17 +1600,25 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
 
   Future<void> _selectProviderType(String value) async {
     if (_isSelectingProviderType) return;
+    final normalizedValue =
+        (value == 'openai_compatible' || value == 'anthropic') ? 'custom' : value;
     final selected = _kProviderTypeOptions.firstWhere(
-      (option) => option.value == value,
+      (option) => option.value == normalizedValue,
       orElse: () => _kProviderTypeOptions[0],
     );
     final isOfficialSelection = selected.baseUrl.isNotEmpty;
     final isChatGptSelection =
         selected.sourceType == ChatGptOAuthService.sourceType;
-    final isGenericOpenAiSelection = selected.value == 'openai_compatible';
-    final nextProtocolType = selected.protocolType;
-    final nextWireApi = isGenericOpenAiSelection
-        ? _normalizeWireApiForProtocol(nextProtocolType, _selectedWireApi)
+    final isCustomSelection = selected.value == 'custom';
+    final nextProtocolType = isCustomSelection
+        ? (_selectedSourceType == 'custom'
+            ? _selectedProtocolType
+            : 'openai_compatible')
+        : selected.protocolType;
+    final nextWireApi = isCustomSelection
+        ? (_selectedSourceType == 'custom'
+            ? _selectedWireApi
+            : 'chat_completions')
         : _normalizeWireApiForProtocol(selected.protocolType, selected.wireApi);
     if (_selectedProviderValue == selected.value &&
         _selectedProtocolType == nextProtocolType &&
@@ -1634,22 +1699,25 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
   }
 
   Future<void> _selectWireApi(String value) async {
-    final normalizedWireApi = _normalizeWireApiForProtocol(
-      _selectedProtocolType,
-      value,
+    final option = _kEndpointOptions.firstWhere(
+      (opt) => opt.value == value,
+      orElse: () => _kEndpointOptions[0],
     );
-    if (_selectedWireApi == normalizedWireApi ||
-        _selectedProviderValue != 'openai_compatible' ||
-        _selectedProtocolType != 'openai_compatible') {
+    if ((_selectedProtocolType == option.protocolType &&
+            _selectedWireApi == option.wireApi) ||
+        !_isCustomProvider) {
       return;
     }
     final current = _currentProfile;
     if (current == null || current.readOnly) {
       return;
     }
+    _autoSaveTimer?.cancel();
+    final previousProtocolType = _selectedProtocolType;
     final previousWireApi = _selectedWireApi;
     setState(() {
-      _selectedWireApi = normalizedWireApi;
+      _selectedProtocolType = option.protocolType;
+      _selectedWireApi = option.wireApi;
     });
     try {
       final saved = await ModelProviderConfigService.saveProfile(
@@ -1658,15 +1726,13 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
             ? current.name
             : _nameController.text.trim(),
         baseUrl: _baseUrlController.text.trim(),
-        apiKey: _apiKeyController.text.trim(),
-        customHeaders:
-            _validatedCustomHeadersDraft() ??
-            ModelProviderConfigService.normalizeCustomHeaders(
-              current.customHeaders,
-            ),
+        apiKey: _apiKeyDirty ? _apiKeyController.text.trim() : null,
+        customHeaders: _customHeadersDirty
+            ? (_validatedCustomHeadersDraft() ?? const <String, String>{})
+            : null,
         sourceType: BuiltinOfficialProviderCatalog.customKey,
-        protocolType: _selectedProtocolType,
-        wireApi: normalizedWireApi,
+        protocolType: option.protocolType,
+        wireApi: option.wireApi,
       );
       if (!mounted) return;
       setState(() {
@@ -1678,9 +1744,12 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
           saved.wireApi,
         );
       });
+      _apiKeyDirty = false;
+      _customHeadersDirty = false;
     } catch (_) {
       if (!mounted) return;
       setState(() {
+        _selectedProtocolType = previousProtocolType;
         _selectedWireApi = previousWireApi;
       });
     }
@@ -1707,16 +1776,30 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
       _kProviderTypePopupMinWidth,
       overlay.size.width - _kProviderTypePopupHorizontalMargin * 2,
     );
+    final localizedOptions = _kProviderTypeOptions.map((option) {
+      if (option.value == 'custom') {
+        return _ProviderTypeOption(
+          value: option.value,
+          label: _headerText('自定义', 'Custom'),
+          sourceType: option.sourceType,
+          protocolType: option.protocolType,
+          wireApi: option.wireApi,
+          baseUrl: option.baseUrl,
+          providerName: option.providerName,
+        );
+      }
+      return option;
+    }).toList();
     final measuredPopupWidth = _measurePopupWidth(
       context,
-      _kProviderTypeOptions.map((option) => option.label),
+      localizedOptions.map((option) => option.label),
       availablePopupWidth,
     );
     final popupWidth = math
         .max(anchorRect.width, measuredPopupWidth)
         .clamp(_kProviderTypePopupMinWidth, availablePopupWidth)
         .toDouble();
-    final estimatedHeight = (_kProviderTypeOptions.length * 48 + 24)
+    final estimatedHeight = (localizedOptions.length * 48 + 24)
         .clamp(120.0, _kProviderSwitchPopupMaxHeight)
         .toDouble();
     final selected = await showOmniMenu<String>(
@@ -1729,7 +1812,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
         _ProviderTypePopupEntry(
           width: popupWidth,
           estimatedHeight: estimatedHeight,
-          options: _kProviderTypeOptions,
+          options: localizedOptions,
           selectedValue: _selectedProviderValue,
         ),
       ],
@@ -1743,8 +1826,13 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
   Future<void> _openWireApiMenu(BuildContext anchorContext) async {
     final selected = await _showSelectionMenu(
       anchorContext: anchorContext,
-      options: _kOpenAiWireApiOptions,
-      selectedValue: _selectedWireApi,
+      options: _kEndpointOptions
+          .map(
+            (option) =>
+                _SelectionOption(value: option.value, label: option.label),
+          )
+          .toList(),
+      selectedValue: _currentEndpointValue,
       menuKey: const Key('provider-wire-api-menu'),
     );
     if (selected == null) {
@@ -3085,8 +3173,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
                                     );
                                   },
                                 ),
-                                if (_selectedProviderValue ==
-                                    'openai_compatible') ...[
+                                if (_isCustomProvider) ...[
                                   const SizedBox(height: 12),
                                   _buildWireApiField(),
                                 ],

@@ -269,8 +269,33 @@ internal class WebAgentRunBridge(
         }
 
         update.tool?.let { toolUpdate ->
-            val entryId = toolUpdate.entryId
-                ?.takeIf(String::isNotBlank)
+            val toolCallId = firstNonBlank(
+                toolUpdate.raw["toolCallId"],
+                toolUpdate.raw["tool_call_id"],
+                toolUpdate.raw["callId"]
+            )?.trim()?.takeIf { it.isNotEmpty() }
+            val existingEntry = if (toolCallId != null) {
+                state.toolEntries.values.firstOrNull {
+                    val rawCallId = firstNonBlank(
+                        it.update.raw["toolCallId"],
+                        it.update.raw["tool_call_id"],
+                        it.update.raw["callId"]
+                    )?.trim()
+                    rawCallId == toolCallId
+                }
+            } else null
+
+            val isRawOutputOnly = toolUpdate.raw["kind"] == null &&
+                toolUpdate.raw["title"] == null &&
+                toolUpdate.raw["status"] == null &&
+                toolUpdate.raw["rawOutput"] != null
+
+            if (isRawOutputOnly && existingEntry == null) {
+                return@let
+            }
+
+            val entryId = existingEntry?.entryId
+                ?: toolUpdate.entryId?.takeIf(String::isNotBlank)
                 ?: "${toolUpdate.parentTaskId ?: parentTaskId}-agent-tool"
             val toolParentTaskId = toolUpdate.parentTaskId
                 ?.takeIf(String::isNotBlank)
@@ -285,7 +310,7 @@ internal class WebAgentRunBridge(
                     update = toolUpdate
                 )
             }
-            entry.update = mergeToolUpdate(entry.update, toolUpdate)
+            entry.update = mergeToolUpdate(entry.update, toolUpdate.copy(entryId = entry.entryId, itemType = entry.update.itemType))
             persistToolEntry(state, entry)
             changed = true
         }
@@ -482,12 +507,54 @@ internal class WebAgentRunBridge(
         val arguments = normalizeMap(raw["arguments"]).ifEmpty {
             normalizeMap(raw["args"])
         }
+        val rawOutput = normalizeMap(raw["rawOutput"])
+        val toolCallId = firstNonBlank(
+            raw["toolCallId"],
+            raw["tool_call_id"],
+            raw["callId"],
+            rawOutput["toolCallId"],
+            rawOutput["modelToolCallId"]
+        )
+        val modelToolCallId = firstNonBlank(
+            raw["modelToolCallId"],
+            rawOutput["modelToolCallId"],
+            toolCallId
+        )
+        val modelAssistantMessageJson = firstNonBlank(
+            raw["modelAssistantMessageJson"],
+            rawOutput["modelAssistantMessageJson"]
+        )
+        val modelToolResultMessageJson = firstNonBlank(
+            raw["modelToolResultMessageJson"],
+            rawOutput["modelToolResultMessageJson"]
+        )
+        val modelToolResultMessagesJson = firstNonBlank(
+            raw["modelToolResultMessagesJson"],
+            rawOutput["modelToolResultMessagesJson"]
+        )
+        val sessionId = firstNonBlank(
+            raw["sessionId"],
+            rawOutput["sessionId"],
+            state.threadId
+        )
+        val turnId = firstNonBlank(
+            raw["turnId"],
+            rawOutput["turnId"],
+            state.turnId
+        )
         historyRepository.upsertToolEvent(
             conversationId = state.conversationId,
             conversationMode = state.conversationMode,
             entryId = entry.entryId,
             payload = linkedMapOf<String, Any?>(
                 "taskId" to entry.parentTaskId,
+                "toolCallId" to toolCallId,
+                "sessionId" to sessionId,
+                "turnId" to turnId,
+                "modelToolCallId" to modelToolCallId,
+                "modelAssistantMessageJson" to modelAssistantMessageJson,
+                "modelToolResultMessageJson" to modelToolResultMessageJson,
+                "modelToolResultMessagesJson" to modelToolResultMessagesJson,
                 "agentId" to state.agentId,
                 "agentName" to state.agentName,
                 "uiStyle" to "agent_tool",
@@ -908,11 +975,18 @@ private fun mergeToolUpdate(
     } else {
         existing.status
     }
+    val mergedRaw = existing.raw.toMutableMap()
+    val existingRawOutput = normalizeMap(existing.raw["rawOutput"])
+    val incomingRawOutput = normalizeMap(incoming.raw["rawOutput"])
+    mergedRaw.putAll(incoming.raw)
+    if (existingRawOutput.isNotEmpty() && incomingRawOutput.isNotEmpty()) {
+        mergedRaw["rawOutput"] = existingRawOutput + incomingRawOutput
+    }
     return incoming.copy(
         entryId = incoming.entryId ?: existing.entryId,
         parentTaskId = incoming.parentTaskId ?: existing.parentTaskId,
         status = status,
-        raw = existing.raw + incoming.raw
+        raw = mergedRaw
     )
 }
 

@@ -98,5 +98,5 @@ private fun migrateModel(model: JsonObject) {
 internal fun JsonObject.objectOrCreate(key: String): JsonObject =
     getAsJsonObject(key) ?: JsonObject().also { add(key, it) }
 
-private fun openCodePackage(npm: String): String =
+internal fun openCodePackage(npm: String): String =
     if (npm.startsWith("@opencode/ai/") || npm.startsWith("aisdk:")) npm else "aisdk:$npm"

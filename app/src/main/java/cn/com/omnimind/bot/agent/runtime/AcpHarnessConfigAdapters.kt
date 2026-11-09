@@ -109,6 +109,9 @@ internal object CodexConfigAdapter : AgentConfigAdapter {
         require(provider?.protocolType != "anthropic") {
             "Codex requires an OpenAI Responses-compatible endpoint; the current Provider is configured as Anthropic."
         }
+        require(provider?.protocolType != "gemini") {
+            "Codex 需要兼容 OpenAI Responses 的端点，不支持当前 Gemini 原生端点。"
+        }
         val headerBindings = provider?.let { buildAcpHeaderBindings(it.customHeaders) }
         val environment = if (provider == null) {
             mapOf("CODEX_HOME" to AgentRuntimeDefaults.CODEX_HOME)
@@ -180,6 +183,10 @@ internal object ClaudeCodeConfigAdapter : AgentConfigAdapter {
         providerModels: List<ProviderModelOption>,
         existingConfig: String,
     ): List<AgentConfigWrite> {
+        val provider = input.provider ?: return emptyList()
+        require(provider.protocolType != "gemini") {
+            "Claude Code 需要兼容 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+        }
         val model = input.model ?: return emptyList()
         val settings = if (existingConfig.isBlank()) com.google.gson.JsonObject()
             else JsonParser.parseString(existingConfig).asJsonObject
@@ -206,6 +213,9 @@ internal object ClaudeCodeConfigAdapter : AgentConfigAdapter {
 
     override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
         val provider = input.provider ?: return AgentProviderMapping()
+        require(provider.protocolType != "gemini") {
+            "Claude Code 需要兼容 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+        }
         val model = input.model?.trim()?.takeIf { it.isNotEmpty() }
         val anthropicBaseUrl = normalizeClaudeCodeBaseUrl(provider.baseUrl)
         val customHeaders = provider.customHeaders
@@ -274,18 +284,25 @@ internal object KimiCodeConfigAdapter : AgentConfigAdapter {
         existingConfig: String,
     ): List<AgentConfigWrite> {
         val provider = input.provider ?: return emptyList()
+        require(provider.protocolType != "gemini") {
+            "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+        }
         val model = input.model ?: return emptyList()
         return buildKimiCodeManagedFiles(provider, model, providerModels = providerModels).map { (path, content) ->
             AgentConfigWrite(path, content, "kimi-agent-config-write")
         }
     }
 
-    override fun map(input: AgentProviderMappingInput): AgentProviderMapping =
-        AgentProviderMapping(environment = kimiCodeBaseEnvironment() +
+    override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
+        val provider = input.provider
+        require(provider?.protocolType != "gemini") {
+            "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
+        }
+        return AgentProviderMapping(environment = kimiCodeBaseEnvironment() +
             if (input.provider?.isHostManaged == true) {
                 mapOf("OPENAI_API_KEY" to input.provider.apiKey)
             } else emptyMap())
-
+    }
 }
 
 internal object OpenCodeConfigAdapter : AgentConfigAdapter {
@@ -306,13 +323,18 @@ internal object OpenCodeConfigAdapter : AgentConfigAdapter {
         val provider = input.provider ?: return AgentProviderMapping()
         val model = input.model?.trim()?.takeIf { it.isNotEmpty() }
         val headerBindings = buildAcpHeaderBindings(provider.customHeaders)
+        val baseUrl = when (provider.protocolType) {
+            "gemini" -> normalizeGeminiBaseUrl(provider.baseUrl)
+            "anthropic" -> normalizeAnthropicServiceRoot(provider.baseUrl)
+            else -> normalizeOpenCodeBaseUrl(provider.baseUrl)
+        }
         return AgentProviderMapping(
             environment = mapOf(
-                "OPENAI_BASE_URL" to normalizeOpenCodeBaseUrl(provider.baseUrl),
+                "OPENAI_BASE_URL" to baseUrl,
                 "OPENAI_API_KEY" to provider.apiKey
             ) + headerBindings.environment,
             openCodeModel = model?.let { "$OPEN_CODE_PROVIDER_ID/$it" },
-            openCodeBaseUrl = normalizeOpenCodeBaseUrl(provider.baseUrl),
+            openCodeBaseUrl = baseUrl,
             launchConfigPath = OPENCODE_CONFIG_PATH,
             launchConfigExecutorKey = "opencode-agent-config-read",
         )
@@ -331,7 +353,11 @@ internal object OpenCodeConfigAdapter : AgentConfigAdapter {
                 path = OPENCODE_CONFIG_PATH,
                 content = buildOpenCodeConfigJson(
                     model = model,
-                    baseUrl = mapping.openCodeBaseUrl ?: provider.baseUrl,
+                    baseUrl = mapping.openCodeBaseUrl ?: when (provider.protocolType) {
+                        "gemini" -> normalizeGeminiBaseUrl(provider.baseUrl)
+                        "anthropic" -> normalizeAnthropicServiceRoot(provider.baseUrl)
+                        else -> normalizeOpenCodeBaseUrl(provider.baseUrl)
+                    },
                     existingConfigJson = existingConfig,
                     customHeaders = provider.customHeaders,
                     providerModels = providerModels,

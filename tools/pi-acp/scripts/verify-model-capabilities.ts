@@ -80,6 +80,11 @@ function responseStream(api: string, modelId: string, sequence: number): Respons
     send("content_block_stop", { index: 0 });
     send("message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: 8 } });
     send("message_stop");
+  } else if (api === "google-generative-ai") {
+    records.push(`data: ${JSON.stringify({ responseId: id, modelVersion: modelId,
+      candidates: [{ content: { role: "model", parts: [{ text: output }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 32, candidatesTokenCount: 8, totalTokenCount: 40 },
+    })}\n\n`);
   } else throw new Error(`Unsupported fixture API: ${api}`);
   return new Response(records.join(""), { headers: { "content-type": "text/event-stream" } });
 }
@@ -99,7 +104,10 @@ async function verify(fixture: Fixture): Promise<number> {
   const attempts: string[] = [];
   try {
     const provider = fixture.document.providers.omnibot;
-    const suffix = { "openai-completions": "chat/completions", "openai-responses": "responses", "anthropic-messages": "v1/messages" }[provider.api as string];
+    const gemini = provider.api === "google-generative-ai";
+    const suffix = gemini
+      ? `models/${encodeURIComponent(fixture.modelId.replace(/^models\//, ""))}:streamGenerateContent`
+      : { "openai-completions": "chat/completions", "openai-responses": "responses", "anthropic-messages": "v1/messages" }[provider.api as string];
     assert.ok(suffix, `${fixture.name}: fixture must use an implemented API`);
     const expectedUrl = new URL(`${provider.baseUrl.replace(/\/+$/, "")}/${suffix}`);
     // Preserve the real endpoint for SDK compatibility detection. No request is
@@ -112,7 +120,14 @@ async function verify(fixture: Fixture): Promise<number> {
       assert.equal(url.pathname, expectedUrl.pathname, "Unexpected API route");
       assert.equal(request.method, "POST");
       const body = await request.json() as Record<string, unknown>;
-      assert.equal(body.model, fixture.modelId);
+      if (gemini) {
+        assert.equal(url.searchParams.get("alt"), "sse");
+        assert.equal(request.headers.get("x-goog-api-key"), "capability-fixture-key");
+        assert.ok(Array.isArray(body.contents));
+        assert.equal(body.model, undefined);
+      } else {
+        assert.equal(body.model, fixture.modelId);
+      }
       requests.push(body);
       return responseStream(provider.api, fixture.modelId, requests.length);
     };

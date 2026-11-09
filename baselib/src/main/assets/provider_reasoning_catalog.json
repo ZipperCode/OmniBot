@@ -6,6 +6,7 @@
     "providers": [
       "anthropic",
       "deepseek",
+      "google",
       "minimax",
       "minimax-cn",
       "moonshotai",
@@ -195,6 +196,190 @@
             "xhigh",
             "max"
           ],
+          "reasoningCanDisable": false
+        }
+      }
+    },
+    {
+      "api": "google-generative-ai",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "models": {
+        "deep-research-max-preview-04-2026": {
+          "reasoning": true
+        },
+        "deep-research-preview-04-2026": {
+          "reasoning": true
+        },
+        "gemini-2.5-computer-use-preview-10-2025": {
+          "reasoning": true
+        },
+        "gemini-2.5-flash": {
+          "reasoning": true
+        },
+        "gemini-2.5-flash-lite": {
+          "reasoning": true
+        },
+        "gemini-2.5-pro": {
+          "reasoning": true
+        },
+        "gemini-3-flash-preview": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-flash-lite": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-flash-lite-image": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-flash-lite-preview": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-flash-live-preview": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-pro-preview": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.1-pro-preview-customtools": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.5-flash": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.5-flash-lite": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.6-flash": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.7-flash": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-3.8-flash": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-4-argon": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-flash-latest": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-flash-lite-latest": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemini-pro-latest": {
+          "reasoning": true,
+          "supportedReasoningLevels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "reasoningCanDisable": false
+        },
+        "gemma-4-26b-a4b-it": {
+          "reasoning": true,
+          "reasoningCanDisable": false
+        },
+        "gemma-4-31b-it": {
+          "reasoning": true,
           "reasoningCanDisable": false
         }
       }

@@ -30,8 +30,9 @@ an explicit false value. The boolean
 `compat.requiresReasoningContentOnAssistantMessages` is retained as
 `reasoningContentRequired` for tool continuation. An explicit `off` mapping
 to `none` or `off` also retains that exact wire value in the declared levels;
-an absent mapping does not invent a disable value. Only supported Anthropic Messages, OpenAI Chat
-Completions, Responses and the dedicated subscription route enter this
+an absent mapping does not invent a disable value. Only supported Anthropic
+Messages, Gemini GenerateContent, OpenAI Chat Completions, Responses and the
+dedicated subscription route enter this
 catalog. No prices, context limits,
 input modalities, credentials, endpoints selected by users, or available-model
 lists are replaced by this metadata.
@@ -90,3 +91,22 @@ existing Chat Completions selection. Unlisted models, including
 
 Copyright (c) 2025 Mario Zechner. The derived catalog remains under the MIT
 license reproduced alongside this notice.
+
+## 原生提供商协议复用
+
+新增的 Gemini endpoint 直接使用项目已锁定的 `@earendil-works/pi-ai` **1.4.0**，
+没有引入或升级依赖。Pi 的请求、工具续轮、流式输出与取消由其原生
+`google-generative-ai`、`anthropic-messages` 适配器执行；Android 原生 HTTP
+在既有转换边界复用相同版本的工具、多模态与签名回放语义。
+
+Android 场景请求所需的 Gemini 与 Anthropic 转换移植自同一版本的以下源码，适配既有
+`ChatCompletionRequest`、HTTP/SSE 和共享消息归并边界：
+
+- [google-generative-ai.ts](https://github.com/earendil-works/pi/blob/v1.4.0/packages/ai/src/api/google-generative-ai.ts)：生成参数、候选文本/思考/工具调用、usage、finishReason。
+- [google-shared.ts](https://github.com/earendil-works/pi/blob/v1.4.0/packages/ai/src/api/google-shared.ts)：systemInstruction、contents、工具定义/结果、图像、thoughtSignature 续传与思考配置。
+- [anthropic-messages.ts](https://github.com/earendil-works/pi/blob/v1.4.0/packages/ai/src/api/anthropic-messages.ts)：tool_choice、多工具结果分组、流式工具参数、thinking 与 redacted_thinking 回放。
+- [transform-messages.ts](https://github.com/earendil-works/pi/blob/v1.4.0/packages/ai/src/api/transform-messages.ts)：跨模型思考隔离、错误工具结果的图片剥离与位置。
+- [constrained-sampling.ts](https://github.com/earendil-works/pi/blob/v1.4.0/packages/ai/src/api/constrained-sampling.ts)：显式严格工具 schema 的 required、nullable 与不支持结构的拒绝规则。
+
+MIT 版权声明和完整许可复用本目录的 [pi-model-catalog-LICENSE.txt](pi-model-catalog-LICENSE.txt)。
+本地适配仅负责现有类型与服务端原生字段之间的转换，不复制 SDK 的重试或另建 Agent 生命周期。

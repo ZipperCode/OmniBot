@@ -329,11 +329,6 @@ class AgentOrchestrator(
                             JsonObject(emptyMap()),
                             descriptor.toolType,
                         )
-                        callback.onToolCallComplete(
-                            toolCall.id,
-                            toolCall.function.name,
-                            result
-                        )
                         appendToolResultMessage(
                             memory = memory,
                             env = input.executionEnv,
@@ -342,6 +337,11 @@ class AgentOrchestrator(
                             toolCall = toolCall,
                             descriptor = descriptor,
                             result = result
+                        )
+                        callback.onToolCallComplete(
+                            toolCall.id,
+                            toolCall.function.name,
+                            result
                         )
                         writtenToolCallIds += toolCall.id
                         hasUserFacingOutput =
@@ -373,11 +373,6 @@ class AgentOrchestrator(
                             parsedArgs,
                             descriptor.toolType,
                         )
-                        callback.onToolCallComplete(
-                            toolCall.id,
-                            toolCall.function.name,
-                            result
-                        )
                         appendToolResultMessage(
                             memory = memory,
                             env = input.executionEnv,
@@ -386,6 +381,11 @@ class AgentOrchestrator(
                             toolCall = toolCall,
                             descriptor = descriptor,
                             result = result
+                        )
+                        callback.onToolCallComplete(
+                            toolCall.id,
+                            toolCall.function.name,
+                            result
                         )
                         writtenToolCallIds += toolCall.id
                         hasUserFacingOutput =
@@ -422,11 +422,6 @@ class AgentOrchestrator(
                             descriptor = desc,
                             parsedArgs = args
                         )
-                        callback.onToolCallComplete(
-                            call.id,
-                            call.function.name,
-                            result
-                        )
                         appendToolResultMessage(
                             memory = memory,
                             env = input.executionEnv,
@@ -435,6 +430,11 @@ class AgentOrchestrator(
                             toolCall = call,
                             descriptor = desc,
                             result = result
+                        )
+                        callback.onToolCallComplete(
+                            call.id,
+                            call.function.name,
+                            result
                         )
                         writtenToolCallIds += call.id
 
@@ -644,6 +644,7 @@ class AgentOrchestrator(
         toolCall: AssistantToolCall,
         descriptor: AgentToolRegistry.RuntimeToolDescriptor,
         result: ToolExecutionResult,
+        isSynthetic: Boolean = false,
     ) {
         val textContent = eventAdapter.toolResultContent(
             descriptor = descriptor,
@@ -716,7 +717,8 @@ class AgentOrchestrator(
         callback.onToolReplayReady(
             toolCallId = toolCall.id,
             assistantMessage = assistantMessage,
-            toolResultMessage = toolResultMessage
+            toolResultMessage = toolResultMessage,
+            isSynthetic = isSynthetic,
         )
     }
 
@@ -756,7 +758,8 @@ class AgentOrchestrator(
                 assistantMessage = assistantMessage,
                 toolCall = toolCall,
                 descriptor = descriptor,
-                result = syntheticResult
+                result = syntheticResult,
+                isSynthetic = true,
             )
             writtenToolCallIds += toolCall.id
             syntheticIds += toolCall.id

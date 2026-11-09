@@ -7570,6 +7570,93 @@ diff --git a/lib/main.dart b/lib/main.dart
       formatAgentRuntimeErrorForUser('stream disconnected'),
     );
   });
+
+  test('sparse rawOutput canonical group update does not alter terminal status or erase output facts', () {
+    runtime
+      ..isAiResponding = true
+      ..activeRunId = 'canonical-turn';
+
+    // 1. Tool starts
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'canonical-session',
+        'turnId': 'canonical-turn',
+        'update': {
+          'sessionUpdate': 'tool_call',
+          'toolCallId': 'call_1',
+          'title': 'Read File',
+          'kind': 'execute',
+          'status': 'in_progress',
+          'rawInput': {'path': '/tmp/test.txt'},
+        },
+      },
+    );
+
+    // 2. Tool completes with canonical metadata and initial results
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'canonical-session',
+        'turnId': 'canonical-turn',
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 'call_1',
+          'title': 'Read File',
+          'kind': 'execute',
+          'status': 'completed',
+          'content': [{'type': 'content', 'content': {'type': 'text', 'text': 'file content'}}],
+          'rawOutput': {
+            'success': true,
+            'summary': 'Read 12 bytes',
+            'rawResultJson': '{"stdout":"file content"}',
+            'modelToolCallId': 'call_1',
+            'modelAssistantMessageJson': '{"role":"assistant","tool_calls":[{"id":"call_1"},{"id":"call_2"}]}',
+            'modelToolResultMessageJson': '{"role":"tool","tool_call_id":"call_1","content":"file content"}',
+            'modelToolResultMessagesJson': '[{"role":"tool","tool_call_id":"call_1","content":"file content"}]',
+          },
+        },
+      },
+    );
+
+    expect(runtime.messages.length, 1);
+    final completedCard = runtime.messages.single.cardData!;
+    expect(completedCard['status'], 'success');
+    expect(completedCard['summary'], 'Read 12 bytes');
+    expect(completedCard['modelToolCallId'], 'call_1');
+    expect(completedCard['modelToolResultMessageJson'], contains('file content'));
+
+    // 3. Synthetic skipped call (call_2) arrives as rawOutput-only update on call_1
+    reducer.reduce(
+      runtime: runtime,
+      event: {
+        'method': 'session/update',
+        'sessionId': 'canonical-session',
+        'turnId': 'canonical-turn',
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 'call_1',
+          'rawOutput': {
+            'modelAssistantMessageJson': '{"role":"assistant","tool_calls":[{"id":"call_1"},{"id":"call_2"}]}',
+            'modelToolResultMessagesJson': '[{"role":"tool","tool_call_id":"call_2","content":"skipped"}]',
+          },
+        },
+      },
+    );
+
+    // Verify: No phantom card created
+    expect(runtime.messages.length, 1);
+    final updatedCard = runtime.messages.single.cardData!;
+    // Status must remain terminal success
+    expect(updatedCard['status'], 'success');
+    // Summary and rawResultJson must NOT be erased
+    expect(updatedCard['summary'], 'Read 12 bytes');
+    // modelToolResultMessagesJson must be updated with the full group
+    expect(updatedCard['modelToolResultMessagesJson'], contains('call_2'));
+    expect(updatedCard['modelToolResultMessagesJson'], contains('skipped'));
+  });
 }
 
 // Shared with the Kotlin import regression tests. These expected items were

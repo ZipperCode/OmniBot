@@ -191,7 +191,7 @@ internal fun resolveByokEmbeddingConfig(
     val normalizedModelId = modelId?.trim()?.takeIf(String::isNotEmpty)
     val apiBase = profile.baseUrl.trim().ifEmpty { null }
     val apiKey = profile.apiKey.trim()
-    if (profile.protocolType == "anthropic") {
+    if (profile.protocolType == "anthropic" || profile.protocolType == "gemini") {
         return WorkspaceMemoryEmbeddingConfig(
             enabled = enabled,
             configured = false,

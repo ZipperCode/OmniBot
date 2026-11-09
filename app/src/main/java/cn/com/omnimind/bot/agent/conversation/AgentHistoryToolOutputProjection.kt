@@ -42,11 +42,43 @@ internal class AgentHistoryToolOutputProjection(
             (payload[key] as? com.google.gson.JsonPrimitive)?.asString?.takeIf { it.isNotBlank() }
         }.firstOrNull()
         val assistant = (payload["modelAssistantMessageJson"] as? com.google.gson.JsonPrimitive)?.asString
+        val codec = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
         if (!assistant.isNullOrBlank() && callId != null) {
             payload["modelToolCallId"] = callId
-            payload["modelToolResultMessageJson"] = gson.toJson(mapOf(
-                "role" to "tool", "tool_call_id" to callId, "content" to notice,
-            ))
+            val existingToolResultRaw = (payload["modelToolResultMessageJson"] as? com.google.gson.JsonPrimitive)?.asString
+            val existingMsg = existingToolResultRaw?.let { raw ->
+                runCatching {
+                    codec.decodeFromString(cn.com.omnimind.baselib.llm.ChatCompletionMessage.serializer(), raw)
+                }.getOrNull()
+            }
+            val offloadedMsg = existingMsg?.copy(content = kotlinx.serialization.json.JsonPrimitive(notice))
+                ?: cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+                    role = "tool",
+                    toolCallId = callId,
+                    content = kotlinx.serialization.json.JsonPrimitive(notice),
+                )
+            payload["modelToolResultMessageJson"] = codec.encodeToString(
+                cn.com.omnimind.baselib.llm.ChatCompletionMessage.serializer(),
+                offloadedMsg
+            )
+            val groupRaw = (payload["modelToolResultMessagesJson"] as? com.google.gson.JsonPrimitive)?.asString
+            if (!groupRaw.isNullOrBlank()) {
+                val groupList = runCatching {
+                    codec.decodeFromString(
+                        kotlinx.serialization.builtins.ListSerializer(cn.com.omnimind.baselib.llm.ChatCompletionMessage.serializer()),
+                        groupRaw
+                    )
+                }.getOrNull()
+                if (groupList != null) {
+                    val updatedGroup = groupList.map { msg ->
+                        msg.copy(content = kotlinx.serialization.json.JsonPrimitive(notice))
+                    }
+                    payload["modelToolResultMessagesJson"] = codec.encodeToString(
+                        kotlinx.serialization.builtins.ListSerializer(cn.com.omnimind.baselib.llm.ChatCompletionMessage.serializer()),
+                        updatedGroup
+                    )
+                }
+            }
         }
         return entry.copy(payloadJson = gson.toJson(payload))
     }
@@ -56,7 +88,7 @@ internal class AgentHistoryToolOutputProjection(
             "toolName", "displayName", "toolTitle", "toolType", "argsJson",
             "status", "success", "historyOmitted", "taskId", "sessionId", "turnId",
             "toolCallId", "modelToolCallId", "modelAssistantMessageJson",
-            "interruptedBy", "interruptionReason",
+            "modelToolResultMessageJson", "modelToolResultMessagesJson",
         )
     }
 }

@@ -249,7 +249,8 @@ interface AgentCallback {
     suspend fun onToolReplayReady(
         toolCallId: String,
         assistantMessage: cn.com.omnimind.baselib.llm.ChatCompletionMessage,
-        toolResultMessage: cn.com.omnimind.baselib.llm.ChatCompletionMessage
+        toolResultMessage: cn.com.omnimind.baselib.llm.ChatCompletionMessage,
+        isSynthetic: Boolean = false,
     ) = Unit
     
     /**

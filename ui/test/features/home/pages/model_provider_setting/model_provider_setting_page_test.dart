@@ -347,8 +347,9 @@ void main() {
       var calls = 0;
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(assistCoreChannel, (call) async {
-            if (call.method == 'listModelProviderProfiles')
+            if (call.method == 'listModelProviderProfiles') {
               return profilePayload();
+            }
             if (call.method == 'fetchProviderModels') {
               calls++;
               if (calls == 1) {
@@ -464,7 +465,7 @@ void main() {
       expect(
         find.descendant(
           of: find.byKey(const Key('provider-protocol-type-button')),
-          matching: find.text('OpenAI'),
+          matching: find.text('Custom'),
         ),
         findsOneWidget,
       );
@@ -680,13 +681,13 @@ void main() {
       <String, String>{
         'sourceType': 'custom',
         'baseUrl': 'https://api.openai.com/v1',
-        'label': 'OpenAI',
+        'label': 'Custom',
       },
       <String, String>{
         'sourceType': 'custom',
         'baseUrl': 'https://api.anthropic.com',
         'protocolType': 'anthropic',
-        'label': 'Anthropic',
+        'label': 'Custom',
       },
     ]) {
       messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
@@ -777,13 +778,9 @@ void main() {
     expect(find.text('Kimi'), findsOneWidget);
     expect(find.text('MiniMax'), findsOneWidget);
     expect(find.text('阿里百炼'), findsOneWidget);
-    expect(find.text('OpenAI'), findsAtLeastNWidgets(1));
-    await tester.drag(
-      find.byKey(const Key('provider-protocol-type-menu')),
-      const Offset(0, -180),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Anthropic'), findsOneWidget);
+    expect(find.text('Custom'), findsAtLeastNWidgets(1));
+    expect(find.text('OpenAI'), findsNothing);
+    expect(find.text('Anthropic'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -840,12 +837,18 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const Key('provider-protocol-type-button')),
+        matching: find.text('Custom'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
         matching: find.text('Anthropic'),
       ),
       findsOneWidget,
     );
     expect(find.text('https://api.anthropic.com/v1/messages'), findsOneWidget);
-    expect(find.byKey(const Key('provider-wire-api-button')), findsNothing);
   });
 
   testWidgets('openai compatible profile shows direct wire api choice', (
@@ -878,7 +881,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const Key('provider-protocol-type-button')),
-        matching: find.text('OpenAI'),
+        matching: find.text('Custom'),
       ),
       findsOneWidget,
     );
@@ -915,6 +918,328 @@ void main() {
     Navigator.of(tester.element(find.byType(FlClashPopupTransition))).pop();
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+  });
+  testWidgets('can select and save all 4 endpoints in custom provider', (
+    tester,
+  ) async {
+    final savedPayloads = <Map<dynamic, dynamic>>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+      switch (call.method) {
+        case 'listModelProviderProfiles':
+          return profilePayload(
+            baseUrl: 'https://api.example.com',
+            protocolType: 'openai_compatible',
+            wireApi: 'chat_completions',
+          );
+        case 'saveModelProviderProfile':
+          final args = Map<dynamic, dynamic>.from(call.arguments as Map);
+          savedPayloads.add(args);
+          return savedProfileResponse(args);
+      }
+      return null;
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        darkTheme: AppTheme.darkTheme,
+        home: const ModelProviderSettingPage(),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Chat Completions'),
+      ),
+      findsOneWidget,
+    );
+
+    // 1. Switch to Responses
+    await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Responses'));
+    await tester.pumpAndSettle();
+    expect(savedPayloads.last['protocolType'], 'openai_compatible');
+    expect(savedPayloads.last['wireApi'], 'responses');
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Responses'),
+      ),
+      findsOneWidget,
+    );
+
+    // 2. Switch to Gemini
+    await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gemini'));
+    await tester.pumpAndSettle();
+    expect(savedPayloads.last['protocolType'], 'gemini');
+    expect(savedPayloads.last['wireApi'], 'chat_completions');
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Gemini'),
+      ),
+      findsOneWidget,
+    );
+
+    // 3. Switch to Anthropic
+    await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anthropic'));
+    await tester.pumpAndSettle();
+    expect(savedPayloads.last['protocolType'], 'anthropic');
+    expect(savedPayloads.last['wireApi'], 'chat_completions');
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Anthropic'),
+      ),
+      findsOneWidget,
+    );
+
+    // 4. Switch back to Chat Completions
+    await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Chat Completions'));
+    await tester.pumpAndSettle();
+    expect(savedPayloads.last['protocolType'], 'openai_compatible');
+    expect(savedPayloads.last['wireApi'], 'chat_completions');
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Chat Completions'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+    'persisting and reopening profile restores endpoint and avoids normalization',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return profilePayload(
+              baseUrl: 'https://generativelanguage.googleapis.com',
+              protocolType: 'gemini',
+              wireApi: 'chat_completions',
+            );
+        }
+        return null;
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('provider-wire-api-button')),
+          matching: find.text('Gemini'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'saved anthropic profile allows switching to gemini within same custom provider',
+    (tester) async {
+      final savedPayloads = <Map<dynamic, dynamic>>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return profilePayload(
+              baseUrl: 'https://api.anthropic.com',
+              protocolType: 'anthropic',
+              wireApi: 'chat_completions',
+            );
+          case 'saveModelProviderProfile':
+            final args = Map<dynamic, dynamic>.from(call.arguments as Map);
+            savedPayloads.add(args);
+            return savedProfileResponse(args);
+        }
+        return null;
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('provider-protocol-type-button')),
+          matching: find.text('Custom'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('provider-wire-api-button')),
+          matching: find.text('Anthropic'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('https://api.anthropic.com/v1/messages'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Gemini'));
+      await tester.pumpAndSettle();
+
+      expect(savedPayloads.single['protocolType'], 'gemini');
+      expect(savedPayloads.single['wireApi'], 'chat_completions');
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('provider-wire-api-button')),
+          matching: find.text('Gemini'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets(
+    'gemini endpoint generates native request URL and supports trailing # override',
+    (tester) async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+        switch (call.method) {
+          case 'listModelProviderProfiles':
+            return profilePayload(
+              baseUrl: 'https://generativelanguage.googleapis.com',
+              protocolType: 'gemini',
+              wireApi: 'chat_completions',
+            );
+        }
+        return null;
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          home: const ModelProviderSettingPage(),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(
+        find.text(
+          'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        ),
+        findsOneWidget,
+      );
+
+      final urlInput = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.labelText == 'Base URL',
+      );
+      await tester.ensureVisible(urlInput);
+      await tester.enterText(
+        urlInput,
+        'https://generativelanguage.googleapis.com/v1beta',
+      );
+      await tester.pump();
+      expect(
+        find.text(
+          'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.ensureVisible(urlInput);
+      await tester.enterText(
+        urlInput,
+        'https://my-proxy.com/custom/generateContent#',
+      );
+      await tester.pump();
+      expect(
+        find.text('https://my-proxy.com/custom/generateContent'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('wire api switch failure rolls back UI and state', (
+    tester,
+  ) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+      switch (call.method) {
+        case 'listModelProviderProfiles':
+          return profilePayload(
+            baseUrl: 'https://api.example.com/v1',
+            protocolType: 'openai_compatible',
+            wireApi: 'chat_completions',
+          );
+        case 'saveModelProviderProfile':
+          throw PlatformException(code: 'network_error', message: 'save failed');
+      }
+      return null;
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        darkTheme: AppTheme.darkTheme,
+        home: const ModelProviderSettingPage(),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Chat Completions'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('provider-wire-api-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Gemini'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('provider-wire-api-button')),
+        matching: find.text('Chat Completions'),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('selecting official provider saves builtin profile payload', (

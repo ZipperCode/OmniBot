@@ -2654,6 +2654,8 @@ class AgentEventReducer {
     // Harness. They are intentionally copied as data, not interpreted here;
     // cards that understand truncation, clarification, or SubAgent timelines
     // can render them while unknown extensions remain harmless.
+    final rawOutputMap = _asStringMap(raw['rawOutput']) ??
+        _asStringMap(existingCardData['rawOutput']);
     for (final key in const <String>[
       'message',
       'question',
@@ -2666,11 +2668,15 @@ class AgentEventReducer {
       'headTail',
       'fullOutputArtifact',
       'subagentStatusText',
+      'rawOutput',
+      'modelToolCallId',
+      'modelAssistantMessageJson',
+      'modelToolResultMessageJson',
+      'modelToolResultMessagesJson',
     ]) {
-      if (raw[key] != null) {
-        cardData[key] = raw[key];
-      } else if (existingCardData[key] != null) {
-        cardData[key] = existingCardData[key];
+      final value = raw[key] ?? rawOutputMap?[key] ?? existingCardData[key];
+      if (value != null) {
+        cardData[key] = value;
       }
     }
     if (effectiveToolType == 'file') {
@@ -4280,6 +4286,25 @@ class AgentEventReducer {
           !preservesSpecificType &&
           (!keepsTerminalState ||
               (entry.key != 'status' && entry.key != 'state'))) {
+        if (entry.key == 'rawOutput') {
+          final existingRawMap = _asStringMap(
+            existingMap['rawOutput'] is String
+                ? _decodeAcpJsonValue(existingMap['rawOutput'] as String)
+                : existingMap['rawOutput'],
+          );
+          final incomingRawMap = _asStringMap(
+            entry.value is String
+                ? _decodeAcpJsonValue(entry.value as String)
+                : entry.value,
+          );
+          if (existingRawMap != null && incomingRawMap != null) {
+            merged['rawOutput'] = <String, dynamic>{
+              ...existingRawMap,
+              ...incomingRawMap,
+            };
+            continue;
+          }
+        }
         merged[entry.key] = entry.value;
       }
     }
@@ -6324,6 +6349,10 @@ Map<String, dynamic> _acpStructuredToolOutput(Map<String, dynamic>? output) {
       'runId',
       'run_id',
       'contextType',
+      'modelToolCallId',
+      'modelAssistantMessageJson',
+      'modelToolResultMessageJson',
+      'modelToolResultMessagesJson',
     ])
       if (output[key] != null) key: output[key],
     if (result != null) 'result': result,
@@ -6375,6 +6404,10 @@ Map<String, dynamic> _acpStructuredToolOutput(Map<String, dynamic>? output) {
       'fullOutputArtifact',
       'previewJson',
       'rawResultJson',
+      'modelToolCallId',
+      'modelAssistantMessageJson',
+      'modelToolResultMessageJson',
+      'modelToolResultMessagesJson',
     ]) {
       if (projected[key] == null && resultMap[key] != null) {
         projected[key] = resultMap[key];

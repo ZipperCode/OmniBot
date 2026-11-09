@@ -8,6 +8,7 @@ import java.net.URI
 object ProviderReasoningCatalog {
     internal const val ASSET_PATH = "provider_reasoning_catalog.json"
     @Volatile private var bundled: Snapshot? = null
+    private val googleGenerationEndpoint = Regex("/models/[^/]+:(?:streamGenerateContent|generateContent)$")
 
     fun enrich(
         context: Context,
@@ -27,6 +28,7 @@ object ProviderReasoningCatalog {
             val oauth = ChatGptOAuthProvider.isOAuth(profile.sourceType)
             val api = when {
                 profile.protocolType == "anthropic" -> "anthropic-messages"
+                profile.protocolType == "gemini" -> "google-generative-ai"
                 OpenAiWireApi.isResponses(profile.wireApi) -> "openai-responses"
                 else -> "openai-completions"
             }
@@ -108,6 +110,13 @@ object ProviderReasoningCatalog {
         if (!uri.scheme.equals("https", ignoreCase = true) || uri.host.isNullOrEmpty() ||
             uri.port !in setOf(-1, 443) || uri.rawUserInfo != null ||
             uri.rawQuery != null || uri.rawFragment != null) return null
+        if (api == "google-generative-ai") {
+            var path = uri.rawPath.orEmpty().trimEnd('/')
+            if (direct && !googleGenerationEndpoint.containsMatchIn(path)) return null
+            path = path.replace(googleGenerationEndpoint, "")
+            if (path.isEmpty()) path = "/v1beta"
+            return "${uri.host.lowercase()}$path"
+        }
         val suffix = when (api) {
             "anthropic-messages" -> "/messages"
             "openai-completions" -> "/chat/completions"
