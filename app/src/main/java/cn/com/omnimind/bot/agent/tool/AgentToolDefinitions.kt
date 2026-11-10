@@ -214,6 +214,8 @@ object AgentToolDefinitions {
             "Use this immediately whenever the user asks you to operate a phone or Android app (for example ordering coffee, shopping, contacts, settings, navigation, or opening an app). Pass the complete user goal in goal; do not use terminal/browser instead and do not claim completion in plain text. If the OmniFlow operation module is disabled, this call tells the user to enable it manually from Plugin Market.",
         "要在 Android GUI 中完成的具体目标。" to
             "The concrete goal to complete in the Android GUI.",
+        "目标屏幕：'virtual' 为后台虚拟屏（默认，安全在后台运行不干扰主屏），或传实际虚拟屏显示编号；省略时默认使用后台虚拟屏。严禁使用主屏。" to
+            "Target display: 'virtual' for background virtual display (default, runs safely in background without disturbing main screen), or pass specific virtual display ID; defaults to background virtual display when omitted. Main display is prohibited.",
         "可选关键词，可匹配应用名或包名。" to
             "Optional keyword filter. Matches app names or package names.",
         "可选，返回数量上限。省略时返回执行环境提供的完整结果。" to
@@ -594,7 +596,7 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("display") {
                         put("type", "string")
-                        put("description", "目标屏幕：'virtual' 为后台虚拟屏（默认，安全在后台运行不干扰主屏），'main' 为主屏（仅当用户明确要求在当前主屏操作时使用），或传实际显示编号；省略时默认使用后台虚拟屏。不兼容时明确报告，不暗中切屏。")
+                        put("description", "目标屏幕：'virtual' 为后台虚拟屏（默认，安全在后台运行不干扰主屏），或传实际虚拟屏显示编号；省略时默认使用后台虚拟屏。严禁使用主屏。")
                     }
                 }
                 putJsonArray("required") {

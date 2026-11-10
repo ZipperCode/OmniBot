@@ -878,19 +878,40 @@ def _run_result(
         else None
     )
     error = str(result.error or "")
-    error_code = None
-    if not result.success:
-        error_code = (
-            "FUNCTION_ARGUMENTS_MISSING"
-            if error.startswith("function_arguments_invalid:missing:")
-            else "FUNCTION_CALL_FAILED"
-        )
-    function_resolution = result.detail.get("function_resolution") or None
-    recalled_function_id = str(result.function_id or "").strip()
-    recall_hit = bool(recalled_function_id)
     done_reason = result.detail.get("done_reason") or (
         "finished" if result.success else "error"
     )
+    error_code = None
+    if not result.success:
+        if error.startswith("function_arguments_invalid:missing:"):
+            error_code = "FUNCTION_ARGUMENTS_MISSING"
+        elif done_reason == "max_steps_exceeded" or error == "max_steps_exceeded":
+            error_code = "MAX_STEPS_EXCEEDED"
+            if not error:
+                error = "max_steps_exceeded"
+        elif done_reason == "no_progress_detected" or error == "no_progress_detected":
+            error_code = "NO_PROGRESS_DETECTED"
+            if not error:
+                error = "no_progress_detected"
+        elif error.startswith("vlm_planner_failed:"):
+            error_code = "VLM_PLANNER_FAILED"
+        elif error == "fallback_budget_exhausted":
+            error_code = "FALLBACK_BUDGET_EXHAUSTED"
+        elif not function:
+            if error:
+                normalized_err = error.split(":")[0].strip()
+                error_code = (
+                    normalized_err.upper()
+                    if normalized_err.replace("_", "").isalnum()
+                    else "GUI_TASK_FAILED"
+                )
+            else:
+                error_code = "GUI_TASK_FAILED"
+        else:
+            error_code = "FUNCTION_CALL_FAILED"
+    function_resolution = result.detail.get("function_resolution") or None
+    recalled_function_id = str(result.function_id or "").strip()
+    recall_hit = bool(recalled_function_id)
     payload: dict[str, Any] = {
         "success": result.success,
         "status": "succeeded" if result.success else "failed",

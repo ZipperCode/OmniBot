@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Rect
 import android.os.PowerManager
+import android.provider.Settings
 import android.view.ViewConfiguration
 import cn.com.omnimind.bot.task.runtime.TaskExecutionInfo
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
@@ -30,10 +31,13 @@ import java.util.concurrent.TimeUnit
 class ScreenTaskOverlayGeometryTest {
 
     private lateinit var context: Context
+    private var originalAnimationScale = 1f
 
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
+        originalAnimationScale = Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 0f)
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         Shadows.shadowOf(pm).setIsInteractive(true)
         ShadowSettings.setCanDrawOverlays(true)
@@ -44,6 +48,7 @@ class ScreenTaskOverlayGeometryTest {
 
     @After
     fun tearDown() {
+        Settings.Global.putFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, originalAnimationScale)
         ScreenTaskOverlayHost.dismissAll()
         TaskRuntime.resetForTesting()
         ShadowLooper.idleMainLooper()
@@ -197,40 +202,45 @@ class ScreenTaskOverlayGeometryTest {
         ScreenTaskOverlayHost.sync(context, listOf(task))
         ShadowLooper.idleMainLooper()
 
-        val dm = context.resources.displayMetrics
-        val safeInsets = ScreenTaskOverlayHost.getSafeInsets(context)
+        val topView = ScreenTaskOverlayHost.getTopOverlayView()!!
+        val topLp = topView.layoutParams as android.view.WindowManager.LayoutParams
+        val viewContext = topView.context
+        val viewMetrics = viewContext.resources.displayMetrics
+        val viewSafeInsets = ScreenTaskOverlayHost.getSafeInsets(viewContext, topView)
 
         // 胶囊靠左侧释放：应吸附至左安全边界
         ScreenTaskOverlayHost.moveWindowBy(-3000f, 0f)
         ScreenTaskOverlayHost.snapWindow(OverlayDisplayMode.CAPSULE)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
         val posLeft = ScreenTaskOverlayHost.getWindowPosition()
-        assertEquals(safeInsets.left, posLeft.first)
+        assertEquals(viewSafeInsets.left, posLeft.first)
 
         // 胶囊靠右侧释放：应吸附至右安全边界
         ScreenTaskOverlayHost.moveWindowBy(3000f, 0f)
         ScreenTaskOverlayHost.snapWindow(OverlayDisplayMode.CAPSULE)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
         val posRight = ScreenTaskOverlayHost.getWindowPosition()
-        val expectedRight = (dm.widthPixels - dp(context, 264) - safeInsets.right).coerceAtLeast(safeInsets.left)
-        assertEquals(expectedRight, posRight.first)
+        val expectedRight = (viewMetrics.widthPixels - topLp.width - viewSafeInsets.right).coerceAtLeast(viewSafeInsets.left)
+        assertEquals("胶囊右侧吸附应达到右安全边界 (metrics: W=${viewMetrics.widthPixels}, lpW=${topLp.width}, insets=$viewSafeInsets)", expectedRight, posRight.first)
 
         // 贴边折叠态 (DOCKED, 48dp)：左半屏吸附左侧，右半屏吸附右侧
         ScreenTaskOverlayHost.setOverlayMode(OverlayDisplayMode.DOCKED)
+        val dockedLp = topView.layoutParams as android.view.WindowManager.LayoutParams
+        val dockedSafeInsets = ScreenTaskOverlayHost.getSafeInsets(viewContext, topView)
+
         ScreenTaskOverlayHost.moveWindowBy(-3000f, 0f)
         ScreenTaskOverlayHost.snapWindow(OverlayDisplayMode.DOCKED)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
         val dockedLeft = ScreenTaskOverlayHost.getWindowPosition()
-        assertEquals(safeInsets.left, dockedLeft.first)
+        assertEquals(dockedSafeInsets.left, dockedLeft.first)
 
         ScreenTaskOverlayHost.moveWindowBy(3000f, 0f)
         ScreenTaskOverlayHost.snapWindow(OverlayDisplayMode.DOCKED)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
         val dockedRight = ScreenTaskOverlayHost.getWindowPosition()
-        val expectedDockRight = dm.widthPixels - dp(context, 48) - safeInsets.right
-        assertEquals(expectedDockRight, dockedRight.first)
+        val expectedDockRight = (viewMetrics.widthPixels - dockedLp.width - dockedSafeInsets.right).coerceAtLeast(dockedSafeInsets.left)
+        assertEquals("侧边入口右侧吸附应达到右安全边界", expectedDockRight, dockedRight.first)
     }
-
     @Test
     fun `frame views activate only when visible and edge lights stop on waiting`() {
         val task = createTaskInfo("task-visibility", displayId = 2, isWaiting = false)
@@ -444,5 +454,41 @@ class ScreenTaskOverlayGeometryTest {
         ScreenTaskOverlayHost.setOverlayMode(OverlayDisplayMode.EXPANDED)
         ShadowLooper.idleMainLooper()
         assertEquals(280, ScreenTaskOverlayHost.getSavedCanvasHeightDp())
+    }
+
+    @Test
+    fun `takeover button in expanded monitor requires explicit confirmation overlay before taking over`() {
+        var takeoverCallbackCount = 0
+
+        val capsule = ScreenTaskCapsuleView(context).apply {
+            initBinding(
+                taskId = "task-takeover-confirm",
+                sessionId = "sess-tc",
+                turnId = "t1",
+                stopToken = "token-tc",
+                displayId = 5,
+                statusText = "执行中",
+                isWaiting = false,
+                onTakeover = { _, _, _, _, _ -> takeoverCallbackCount++ }
+            )
+            setOverlayMode(OverlayDisplayMode.EXPANDED)
+        }
+
+        val takeoverBtn = capsule.getTakeoverButton()
+        val confirmOverlay = capsule.getTakeoverConfirmOverlay()
+
+        assertEquals(android.view.View.GONE, confirmOverlay.visibility)
+        assertEquals(0, takeoverCallbackCount)
+
+        takeoverBtn.performClick()
+
+        // 验证：点击并未直接触发移交回调，而是展示二次确认浮层
+        assertEquals("未显式确认前严禁触发移交回调", 0, takeoverCallbackCount)
+        assertEquals("点击移交按钮必须展示二次确认浮层", android.view.View.VISIBLE, confirmOverlay.visibility)
+
+        // 显式确认后才触发移交，且仅触发1次
+        capsule.confirmTakeover()
+        assertEquals("显式确认后必须仅触发1次移交回调", 1, takeoverCallbackCount)
+        assertEquals(android.view.View.GONE, confirmOverlay.visibility)
     }
 }

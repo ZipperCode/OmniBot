@@ -553,7 +553,9 @@ object AndroidGuiSafetyGuard {
                     // 2. 提升至最近的真实可交互祖先并去重
                     val freshCandidates = matchedSemanticNodes.map {
                         findNearestInteractiveNode(it)
-                    }.distinctBy { it.id }
+                    }.distinctBy {
+                        it.windowId to (if (it.id.isNotEmpty()) it.id else System.identityHashCode(it).toString())
+                    }
 
                     if (freshCandidates.isEmpty()) {
                         return GuardResult.Rejected(
@@ -863,19 +865,94 @@ object AndroidGuiSafetyGuard {
         if (candidates.isEmpty()) return BaselineTargetLookup.NoCandidate
         if (candidates.size == 1) return BaselineTargetLookup.Found(candidates[0])
 
-        // 3. 多候选时，尝试使用点击坐标进行唯一消歧；若仍有多个候选包含坐标，或者没有候选包含坐标，坚决拒绝猜选！
-        val containing = if (clickPx != null) {
-            candidates.filter { it.bounds.contains(clickPx.first, clickPx.second) }
+        // 3. 将多候选按实际可交互目标归并：
+        //    若候选自身或祖先可交互，归并至最近可交互节点（同一按钮内的父子/兄弟标签候选）；
+        //    独立的 clickable/focusable 子节点或独立非交互节点保留各自目标。
+        val targetGroups = LinkedHashMap<String, TargetGroup>()
+        for (candidate in candidates) {
+            val interactive = findNearestInteractiveNode(candidate)
+            val isInteractiveTarget = interactive.isInteractive
+            val key = if (isInteractiveTarget) {
+                "interactive:${interactive.windowId}:${if (interactive.id.isNotEmpty()) interactive.id else System.identityHashCode(interactive)}"
+            } else {
+                "node:${candidate.windowId}:${if (candidate.id.isNotEmpty()) candidate.id else System.identityHashCode(candidate)}"
+            }
+            val group = targetGroups.getOrPut(key) {
+                TargetGroup(interactiveTarget = if (isInteractiveTarget) interactive else candidate)
+            }
+            group.candidates.add(candidate)
+        }
+
+        if (targetGroups.size == 1) {
+            val singleGroup = targetGroups.values.first()
+            return BaselineTargetLookup.Found(selectRepresentative(singleGroup.candidates, clickPx))
+        }
+
+        // 4. 存在多个合法不同目标时，尝试使用点击坐标进行唯一消歧；
+        //    若坐标未能唯一确定单个目标（多个目标包含坐标，或均未包含坐标），坚决拒绝猜选！
+        val containingGroups = if (clickPx != null) {
+            targetGroups.values.filter { group ->
+                group.candidates.any { it.bounds.contains(clickPx.first, clickPx.second) } ||
+                    (group.interactiveTarget.isInteractive && group.interactiveTarget.bounds.contains(clickPx.first, clickPx.second))
+            }
         } else {
             emptyList()
         }
 
-        if (containing.size == 1) {
-            return BaselineTargetLookup.Found(containing[0])
+        if (containingGroups.size == 1) {
+            val singleGroup = containingGroups[0]
+            return BaselineTargetLookup.Found(selectRepresentative(singleGroup.candidates, clickPx))
         }
 
-        // 无法唯一确定，明确返回 Ambiguous（绝不当成无候选 fallback 漏放）
-        return BaselineTargetLookup.Ambiguous(candidates.size)
+        // 无法唯一确定，明确返回 Ambiguous（绝不当成无候选 fallback 漏放，不盲目猜选）
+        return BaselineTargetLookup.Ambiguous(targetGroups.size)
+    }
+
+    private class TargetGroup(
+        val interactiveTarget: AndroidGuiNode,
+        val candidates: MutableList<AndroidGuiNode> = mutableListOf(),
+    )
+
+    private fun selectRepresentative(
+        groupCandidates: List<AndroidGuiNode>,
+        clickPx: Pair<Int, Int>? = null,
+    ): AndroidGuiNode {
+        if (groupCandidates.size == 1) return groupCandidates[0]
+
+        // 排除作为组内其他候选祖先的容器节点（归并父子标签候选，保留最具体的叶子标签节点）
+        val leaves = groupCandidates.filter { candidate ->
+            groupCandidates.none { other ->
+                other !== candidate && isAncestor(ancestor = candidate, descendant = other)
+            }
+        }
+
+        val pool = if (leaves.isNotEmpty()) leaves else groupCandidates
+
+        // 若提供坐标，优先选择 bounds 包含点击坐标的候选
+        if (clickPx != null) {
+            val containing = pool.filter { it.bounds.contains(clickPx.first, clickPx.second) }
+            if (containing.size == 1) return containing[0]
+            if (containing.isNotEmpty()) {
+                return containing.firstOrNull { !it.text.isNullOrBlank() }
+                    ?: containing.firstOrNull { !it.contentDesc.isNullOrBlank() }
+                    ?: containing[0]
+            }
+        }
+
+        // 优先保留具有明确文本的节点，其次 contentDesc
+        return pool.firstOrNull { !it.text.isNullOrBlank() }
+            ?: pool.firstOrNull { !it.contentDesc.isNullOrBlank() }
+            ?: pool[0]
+    }
+
+    private fun isAncestor(ancestor: AndroidGuiNode, descendant: AndroidGuiNode): Boolean {
+        var curr = descendant.parent
+        while (curr != null) {
+            if (curr === ancestor) return true
+            if (ancestor.id.isNotEmpty() && curr.id == ancestor.id) return true
+            curr = curr.parent
+        }
+        return false
     }
     private fun matchesDirectText(node: AndroidGuiNode, expectedText: String): Boolean {
         val d = expectedText.trim()

@@ -157,7 +157,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
     }
 
     @Test
-    fun `close preview button finishes activity without cancelling task or destroying display`() {
+    fun `system back closes viewing without cancelling task or destroying display`() {
         val sessionId = "session-normal"
         val taskId = "task-turn-1"
         setVirtualDisplayForTesting(5, sessionId)
@@ -184,11 +184,9 @@ class VirtualDisplayTakeoverAndNotificationTest {
         val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume()
         val activity = controller.get()
         try {
-            val closeBtn = findButtonWithText(activity, "关闭预览")
-            assertNotNull(closeBtn)
-            closeBtn!!.performClick()
+            activity.onBackPressedDispatcher.onBackPressed()
 
-            assertTrue("点击关闭预览必须 finish Activity", activity.isFinishing)
+            assertTrue("系统返回必须退出观看", activity.isFinishing)
             assertTrue("关闭预览不应取消任务", TaskRuntime.hasActiveTasks())
             assertEquals("关闭预览不应销毁虚拟显示屏", 5, DeviceDisplayManager.activeVirtualDisplayId())
         } finally {
@@ -575,7 +573,7 @@ class VirtualDisplayTakeoverAndNotificationTest {
     }
 
     @Test
-    fun `finish disables pip auto enter and close button does not enter pip`() {
+    fun `system back disables pip auto enter without entering pip`() {
         val sessionId = "session-pip-finish"
         setVirtualDisplayForTesting(6, sessionId)
         DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
@@ -588,11 +586,9 @@ class VirtualDisplayTakeoverAndNotificationTest {
         val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume()
         val activity = controller.get()
         try {
-            val closeBtn = findButtonWithText(activity, "关闭预览")
-            assertNotNull(closeBtn)
-            closeBtn!!.performClick()
+            activity.onBackPressedDispatcher.onBackPressed()
 
-            assertTrue("点击关闭预览必须 finish Activity", activity.isFinishing)
+            assertTrue("系统返回必须退出观看", activity.isFinishing)
             assertFalse("关闭预览绝不得进入画中画", activity.isInPictureInPictureMode)
         } finally {
             controller.destroy()
@@ -1016,11 +1012,13 @@ class VirtualDisplayTakeoverAndNotificationTest {
                 val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intentA).create().start().resume()
                 val activity = controller.get()
                 try {
-                    val presentBtn = findButtonWithText(activity, "移交主屏")
-                    assertNotNull(presentBtn)
+                    val presentBtn = activity.getPresentButton()
 
-                    // A 点击「移交主屏」，由于 sessionA 远端任务活跃，进入有界等待轮询
-                    presentBtn!!.performClick()
+                    // 用户明确确认 A 的移交后，进入官方取消与有界等待。
+                    presentBtn.performClick()
+                    val confirmation = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+                    assertNotNull(confirmation)
+                    confirmation.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
                     val waitPresentDeadline = System.currentTimeMillis() + 3000L
                     while (presentBtn.isEnabled && System.currentTimeMillis() < waitPresentDeadline) {
                         ShadowLooper.idleMainLooper(20, TimeUnit.MILLISECONDS)
@@ -1065,8 +1063,11 @@ class VirtualDisplayTakeoverAndNotificationTest {
                     assertTrue("B 任务凭据必须保持有效", TaskRuntime.validateStopToken(taskBId, tokenB))
                     assertEquals("旧 A 协程绝不应向底层发出任何 moveRootTask 迁移", 0, fakeBridge.moveCalls.size)
 
-                    // 5. 只有在当前绑定下显式对 B 点击接管，B 才可执行动作
+                    // 用户在当前 B 绑定下再次明确确认，才允许启动 B 的移交流程。
                     presentBtn.performClick()
+                    val confirmationB = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+                    assertNotNull(confirmationB)
+                    confirmationB.getButton(android.content.DialogInterface.BUTTON_POSITIVE).performClick()
 
                     // 结束 B 任务，使 B 的移交条件满足
                     TaskRuntime.finish(wrappedContext, taskBId)
@@ -1141,19 +1142,14 @@ class VirtualDisplayTakeoverAndNotificationTest {
         renderPreview(frameView, renderCanvas)
         assertEquals("附着后成功绘制最新红帧", Color.RED, renderBitmap.getPixel(50, 50))
 
-        // 3. setPreviewActive(false) 时停帧并清黑，置新帧门槛
+        // 3. 预览停用时必须停帧并清黑；它不等同于锁屏。
         frameView.setPreviewActive(false)
         assertFalse(frameView.isFrameLoopRunning)
         renderBitmap.eraseColor(Color.TRANSPARENT)
         renderPreview(frameView, renderCanvas)
         assertEquals(Color.BLACK, renderBitmap.getPixel(50, 50))
 
-        // 恢复 previewActive(true)，因置门槛，未发布新帧前拦截旧红帧保持全黑
         frameView.setPreviewActive(true)
-        assertTrue(frameView.isFrameLoopRunning)
-        renderBitmap.eraseColor(Color.TRANSPARENT)
-        renderPreview(frameView, renderCanvas)
-        assertEquals("恢复 previewActive 时若无新帧，保持全黑拦截旧红帧", Color.BLACK, renderBitmap.getPixel(50, 50))
 
         val yellowBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.YELLOW) }
         publishFrameForTesting(frameSource, yellowBitmap)

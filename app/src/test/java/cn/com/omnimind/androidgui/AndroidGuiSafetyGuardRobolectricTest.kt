@@ -12,6 +12,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import android.content.Context
+import android.view.Display
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertFalse
+import org.robolectric.RuntimeEnvironment
+import java.lang.reflect.Proxy
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class, manifest = Config.NONE)
@@ -677,5 +683,296 @@ class AndroidGuiSafetyGuardRobolectricTest {
         // 指定了明确 node_id 但不存在，坚决报 action_target_missing，绝不能当成视觉/OCR目标放行
         assertTrue(result is GuardResult.Rejected)
         assertEquals("action_target_missing", (result as GuardResult.Rejected).failure.message)
+    }
+
+    private val context: Context
+        get() = RuntimeEnvironment.getApplication()
+
+    private fun createPlatformState(
+        xml: String,
+        screenshotJpeg: ByteArray? = null,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        frameSequence: Long? = 10L,
+    ): Any {
+        val clazz = Class.forName("cn.com.omnimind.androidgui.AndroidGuiPlatformState")
+        val ctor = clazz.declaredConstructors.first { it.parameterCount >= 6 }
+        ctor.isAccessible = true
+        return if (ctor.parameterCount == 8) {
+            ctor.newInstance(
+                "com.test.app",
+                "MainActivity",
+                1080,
+                2400,
+                xml,
+                screenshotJpeg,
+                displayId,
+                frameSequence,
+            )
+        } else {
+            ctor.newInstance(
+                "com.test.app",
+                "MainActivity",
+                1080,
+                2400,
+                xml,
+                screenshotJpeg,
+            )
+        }
+    }
+
+    private fun createFakePlatform(
+        onObserve: (captureScreenshot: Boolean, displayId: Int) -> Any,
+        onDispatch: (action: Action, displayId: Int) -> AndroidGuiActionResult,
+    ): Any {
+        val platformClass = Class.forName("cn.com.omnimind.androidgui.AndroidGuiPlatform")
+        return Proxy.newProxyInstance(
+            platformClass.classLoader,
+            arrayOf(platformClass),
+        ) { _, method, args ->
+            when (method.name) {
+                "isAccessibilityEnabled" -> true
+                "isReady" -> true
+                "displaySize" -> 1080 to 2400
+                "screenshotExcludesOverlays" -> true
+                "observe" -> {
+                    val captureScreenshot = args?.getOrNull(0) as? Boolean ?: true
+                    val displayId = args?.getOrNull(1) as? Int ?: Display.DEFAULT_DISPLAY
+                    onObserve(captureScreenshot, displayId)
+                }
+                "dispatch" -> {
+                    val action = args[0] as Action
+                    val displayId = args.getOrNull(1) as? Int ?: Display.DEFAULT_DISPLAY
+                    onDispatch(action, displayId)
+                }
+                "installedApplications" -> emptyMap<String, String>()
+                "inputTarget" -> null
+                "inputMethodTop" -> null
+                "toString" -> "FakePlatform"
+                "hashCode" -> 1
+                "equals" -> false
+                else -> null
+            }
+        }
+    }
+
+    private fun createEnvironment(
+        appContext: Context?,
+        platform: Any,
+        ocrEngine: AndroidScreenOcrEngine? = null,
+    ): AndroidGuiEnvironment {
+        val ctor = AndroidGuiEnvironment::class.java.declaredConstructors
+            .first { it.parameterCount == 3 }
+        ctor.isAccessible = true
+        return ctor.newInstance(appContext, platform, ocrEngine) as AndroidGuiEnvironment
+    }
+
+    @Test
+    fun googlePlayStoreNestedParentChildLabelsDispatchesCorrectlyViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var dispatchedAction: Action? = null
+
+        // 真实谷歌商店嵌套结构：
+        // node16 View (clickable=true, focusable=true, bounds=[64,2191][1017,2317])
+        //   node17 View (nonclickable, nonfocusable, bounds=[469,2227][613,2280], text="开始体验")
+        //     node18 TextView (noninteractive, bounds=[469,2227][613,2280], text="开始体验")
+        val googlePlayStoreXml = """
+            <hierarchy>
+              <node id="16" class="android.view.View" bounds="[64,2191][1017,2317]" clickable="true" focusable="true" visible-to-user="true">
+                <node id="17" class="android.view.View" text="开始体验" bounds="[469,2227][613,2280]" visible-to-user="true" clickable="false" focusable="false">
+                  <node id="18" class="android.widget.TextView" text="开始体验" bounds="[469,2227][613,2280]" visible-to-user="true" clickable="false" focusable="false" />
+                </node>
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = googlePlayStoreXml, displayId = displayId)
+            },
+            onDispatch = { action, _ ->
+                dispatchCount++
+                dispatchedAction = action
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        env.observeWithDiagnostics()
+
+        // 模拟带 target_description 与坐标点击（归一化坐标对应真实点击 (541, 2253)）
+        val result = env.act(
+            action = Action(
+                "click",
+                mapOf(
+                    "target_description" to "开始体验",
+                    "x" to (541.0 / 1080.0 * 1000.0),
+                    "y" to (2253.0 / 2400.0 * 1000.0),
+                )
+            ),
+            awaitStabilization = false,
+        )
+
+        assertTrue("Expected action to succeed but was: ${result.message}", result.success)
+        assertEquals(1, dispatchCount)
+        assertEquals("ok", result.message)
+        assertNotNull(dispatchedAction)
+        assertEquals("click", dispatchedAction?.tool)
+        val clickX = (dispatchedAction!!.args["x"] as Number).toInt()
+        val clickY = (dispatchedAction!!.args["y"] as Number).toInt()
+        val node16TargetBounds = Rect(64, 2191, 1017, 2317)
+        assertTrue(
+            "Dispatched coordinate ($clickX, $clickY) must fall within unique node 16 target bounds $node16TargetBounds",
+            node16TargetBounds.contains(clickX, clickY),
+        )
+    }
+
+    @Test
+    fun siblingButtonsWithSameTextRejectedAsAmbiguousWithoutCoordinateViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+
+        // 同名兄弟不同 target 按钮：
+        // btn1 与 btn2 为两个同名独立可交互按钮，未传入坐标或坐标未落入任何一个按钮，绝不能合并
+        val siblingButtonsXml = """
+            <hierarchy>
+              <node id="btn1" class="android.view.View" bounds="[64,1000][1017,1126]" clickable="true" focusable="true" visible-to-user="true">
+                <node id="txt1" class="android.widget.TextView" text="开始体验" bounds="[469,1036][613,1089]" visible-to-user="true" />
+              </node>
+              <node id="btn2" class="android.view.View" bounds="[64,2191][1017,2317]" clickable="true" focusable="true" visible-to-user="true">
+                <node id="txt2" class="android.widget.TextView" text="开始体验" bounds="[469,2227][613,2280]" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = siblingButtonsXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        env.observeWithDiagnostics()
+
+        // 坐标落在空白处 (0, 0)，无法消歧
+        val result = env.act(
+            action = Action(
+                "click",
+                mapOf(
+                    "target_description" to "开始体验",
+                    "x" to 0.0,
+                    "y" to 0.0,
+                )
+            ),
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_target_ambiguous", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun siblingButtonsDisambiguatedByCoordinateDispatchesSingleTargetViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var dispatchedAction: Action? = null
+
+        val siblingButtonsXml = """
+            <hierarchy>
+              <node id="btn1" class="android.view.View" bounds="[64,1000][1017,1126]" clickable="true" focusable="true" visible-to-user="true">
+                <node id="txt1" class="android.widget.TextView" text="开始体验" bounds="[469,1036][613,1089]" visible-to-user="true" />
+              </node>
+              <node id="btn2" class="android.view.View" bounds="[64,2191][1017,2317]" clickable="true" focusable="true" visible-to-user="true">
+                <node id="txt2" class="android.widget.TextView" text="开始体验" bounds="[469,2227][613,2280]" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = siblingButtonsXml, displayId = displayId)
+            },
+            onDispatch = { action, _ ->
+                dispatchCount++
+                dispatchedAction = action
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        env.observeWithDiagnostics()
+
+        // 坐标落在 btn2 内部 (541, 2253)，唯一消歧到 btn2
+        val result = env.act(
+            action = Action(
+                "click",
+                mapOf(
+                    "target_description" to "开始体验",
+                    "x" to (541.0 / 1080.0 * 1000.0),
+                    "y" to (2253.0 / 2400.0 * 1000.0),
+                )
+            ),
+            awaitStabilization = false,
+        )
+
+        assertTrue(result.success)
+        assertEquals(1, dispatchCount)
+        assertNotNull(dispatchedAction)
+        assertEquals("click", dispatchedAction?.tool)
+        val clickX = (dispatchedAction!!.args["x"] as Number).toInt()
+        val clickY = (dispatchedAction!!.args["y"] as Number).toInt()
+        val btn2TargetBounds = Rect(64, 2191, 1017, 2317)
+        assertTrue(
+            "Dispatched coordinate ($clickX, $clickY) must fall within btn2 target bounds $btn2TargetBounds",
+            btn2TargetBounds.contains(clickX, clickY),
+        )
+    }
+
+    @Test
+    fun independentClickableChildInsideClickableContainerNotMergedAndRejectedViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+
+        // 独立可交互子节点：
+        // 外层 card 可交互且具备相同文本，内层 inner_btn 也是独立可交互（clickable=true）控件且具备相同文本
+        // 两者不应被错误合并；当点击点同时落在重叠区时，仍应被拒绝为 ambiguous
+        val nestedInteractiveXml = """
+            <hierarchy>
+              <node id="card" class="android.view.View" bounds="[64,1000][1017,1500]" clickable="true" focusable="true" visible-to-user="true" text="开始体验">
+                <node id="inner_btn" class="android.widget.Button" bounds="[100,1100][400,1200]" clickable="true" focusable="true" visible-to-user="true" text="开始体验" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = nestedInteractiveXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        env.observeWithDiagnostics()
+
+        // 点击坐标位于 inner_btn 内部 (200, 1150)，由于 card 与 inner_btn 均为合法候选且均包含坐标，拒绝猜选
+        val result = env.act(
+            action = Action(
+                "click",
+                mapOf(
+                    "target_description" to "开始体验",
+                    "x" to (200.0 / 1080.0 * 1000.0),
+                    "y" to (1150.0 / 2400.0 * 1000.0),
+                )
+            ),
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_target_ambiguous", result.message)
+        assertEquals(0, dispatchCount)
     }
 }

@@ -206,23 +206,24 @@ class DeviceDisplayRoutingRegressionTest {
         )
         assertEquals("VLM 工具在同会话中解析目标必须一致", 8, vlmResolved)
 
-        // 3. 执行 switch_display 切换至主屏 0
+        // 3. 模拟历史会话目标被污染为主屏 0，随后默认 null 请求必须从 sticky main 恢复至虚拟屏 8
         DeviceDisplayManager.setSessionDisplayTarget(sessionId, Display.DEFAULT_DISPLAY)
         val afterSwitch = DeviceDisplayManager.resolveOrPrepareDisplayId(
             context = context,
             target = null,
             sessionKey = sessionId,
         )
-        assertEquals("切换后两者同会话默认均为主屏", Display.DEFAULT_DISPLAY, afterSwitch)
+        assertEquals("默认请求必须从 sticky main 恢复并返回虚拟屏", 8, afterSwitch)
+        assertEquals("会话目标必须更新回虚拟屏 8", 8, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
 
-        // 4. 显式传入 virtual 时，必须准备/复用虚拟屏并覆盖此前 main 的 session target
+        // 4. 显式传入 virtual 时，必须准备/复用虚拟屏并确认会话目标为虚拟屏
         val virtualOverride = DeviceDisplayManager.resolveOrPrepareDisplayId(
             context = context,
             target = "virtual",
             sessionKey = sessionId,
         )
         assertEquals(8, virtualOverride)
-        assertEquals("target virtual 必须覆盖此前 main 的 session target", 8, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+        assertEquals(8, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
     }
 
     @Test
@@ -301,21 +302,28 @@ class DeviceDisplayRoutingRegressionTest {
     fun `explicit main and present_to_user and close lifecycle state verification`() = runBlocking {
         val sessionId = "session-lifecycle"
 
-        // 1. 显式 main / 0 解析为主屏
-        val mainResolved = DeviceDisplayManager.resolveOrPrepareDisplayId(
-            context = context,
-            target = "main",
-            sessionKey = sessionId,
-        )
-        assertEquals(Display.DEFAULT_DISPLAY, mainResolved)
+        // 1. 显式 main / 0 在 resolveOrPrepareDisplayId 中必须直接拒绝抛异常
+        try {
+            DeviceDisplayManager.resolveOrPrepareDisplayId(
+                context = context,
+                target = "main",
+                sessionKey = sessionId,
+            )
+            fail("显式 main 必须抛出 background_display_required 异常")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message?.contains("background_display_required") == true)
+        }
 
-        val zeroResolved = DeviceDisplayManager.resolveOrPrepareDisplayId(
-            context = context,
-            target = "0",
-            sessionKey = sessionId,
-        )
-        assertEquals(Display.DEFAULT_DISPLAY, zeroResolved)
-
+        try {
+            DeviceDisplayManager.resolveOrPrepareDisplayId(
+                context = context,
+                target = "0",
+                sessionKey = sessionId,
+            )
+            fail("显式 0 必须抛出 background_display_required 异常")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message?.contains("background_display_required") == true)
+        }
         // 2. 建立虚拟屏
         val fakeBridge = RecordingFakeBridge(
             createdDisplayId = 6,
@@ -339,5 +347,125 @@ class DeviceDisplayRoutingRegressionTest {
         // 4. closeSessionVirtualDisplays 彻底清理会话目标
         DisplayInputCoordinator.closeSessionVirtualDisplays(sessionId)
         assertNull("closeSessionVirtualDisplays 后会话目标应被清理", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+    }
+
+    @Test
+    fun `handler rejects explicit main and 0 with background_display_required without polluting session target`() = runBlocking {
+        val sessionId = "session-reject-main"
+        val turnId = "turn-1"
+        val taskId = "agent-turn:$sessionId:$turnId"
+        TaskRuntime.start(context = context, taskId = taskId, sessionId = sessionId, turnId = turnId, conversationId = 100L)
+
+        val env = mockEnv(sessionId, turnId)
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(DeviceDisplayToolHandler.TOOL_NAME, DeviceDisplayToolHandler.TOOL_NAME, "")
+        val toolCall = AssistantToolCall("call-main", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
+
+        val mainArgs = buildJsonObject {
+            put("action", "open_app")
+            put("package_name", "com.example.app")
+            put("display", "main")
+        }
+        val resultMain = handler.execute(toolCall, mainArgs, descriptor, env, callback, handle)
+        assertTrue("显式 main 必须被拒: $resultMain", resultMain is ToolExecutionResult.Error)
+        val errMain = resultMain as ToolExecutionResult.Error
+        assertTrue("错误应包含 background_display_required", errMain.message.contains("background_display_required"))
+        assertNull("会话目标不得被污染为主屏", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+        assertNull("TaskRuntime 不得被标记为主屏", TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
+
+        val zeroArgs = buildJsonObject {
+            put("action", "open_app")
+            put("package_name", "com.example.app")
+            put("display", "0")
+        }
+        val resultZero = handler.execute(toolCall, zeroArgs, descriptor, env, callback, handle)
+        assertTrue("显式 0 必须被拒: $resultZero", resultZero is ToolExecutionResult.Error)
+        assertNull("会话目标不得被污染为主屏", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+
+        val switchMainArgs = buildJsonObject {
+            put("action", "switch_display")
+            put("display", "main")
+        }
+        val resultSwitch = handler.execute(toolCall, switchMainArgs, descriptor, env, callback, handle)
+        assertTrue("switch_display 到 main 必须被拒: $resultSwitch", resultSwitch is ToolExecutionResult.Error)
+    }
+
+    @Test
+    fun `handler recovers sticky main in session to virtual display on default action`() = runBlocking {
+        val sessionId = "session-sticky-recover"
+        val turnId = "turn-1"
+        val taskId = "agent-turn:$sessionId:$turnId"
+        TaskRuntime.start(context = context, taskId = taskId, sessionId = sessionId, turnId = turnId, conversationId = 100L)
+
+        val fakeBridge = RecordingFakeBridge(createdDisplayId = 12)
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        // 模拟旧会话被污染为 main
+        DeviceDisplayManager.setSessionDisplayTarget(sessionId, Display.DEFAULT_DISPLAY)
+        assertEquals(Display.DEFAULT_DISPLAY, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+
+        val env = mockEnv(sessionId, turnId)
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(DeviceDisplayToolHandler.TOOL_NAME, DeviceDisplayToolHandler.TOOL_NAME, "")
+        val toolCall = AssistantToolCall("call-recover", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
+
+        // 省略 display 参数执行 open_app
+        val args = buildJsonObject {
+            put("action", "open_app")
+            put("package_name", "com.example.app")
+        }
+
+        val result = handler.execute(toolCall, args, descriptor, env, callback, handle)
+        assertTrue("执行结果应产出 ContextResult: $result", result is ToolExecutionResult.ContextResult)
+        assertEquals("会话目标必须从 sticky main 恢复并更新为虚拟屏 12", 12, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+        assertEquals("TaskRuntime 必须被标记为虚拟屏 12", 12, TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
+    }
+
+    @Test
+    fun `handler rejects present_to_user with background_display_required`() = runBlocking {
+        val sessionId = "session-present-reject"
+        val turnId = "turn-1"
+        val env = mockEnv(sessionId, turnId)
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(DeviceDisplayToolHandler.TOOL_NAME, DeviceDisplayToolHandler.TOOL_NAME, "")
+        val toolCall = AssistantToolCall("call-present", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
+
+        val args = buildJsonObject {
+            put("action", "present_to_user")
+            put("packageName", "com.example.app")
+        }
+
+        val result = handler.execute(toolCall, args, descriptor, env, callback, handle)
+        assertTrue("Agent 模型调用 present_to_user 必须被拒: $result", result is ToolExecutionResult.Error)
+        val err = result as ToolExecutionResult.Error
+        assertTrue("应包含 background_display_required", err.message.contains("background_display_required"))
+    }
+
+    @Test
+    fun `handler rejects numeric unknown or unowned display without zero dispatch and does not pollute session target`() = runBlocking {
+        val sessionId = "session-unknown-numeric"
+        val turnId = "turn-1"
+        val taskId = "agent-turn:$sessionId:$turnId"
+        TaskRuntime.start(context = context, taskId = taskId, sessionId = sessionId, turnId = turnId, conversationId = 100L)
+
+        val env = mockEnv(sessionId, turnId)
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(DeviceDisplayToolHandler.TOOL_NAME, DeviceDisplayToolHandler.TOOL_NAME, "")
+        val toolCall = AssistantToolCall("call-unknown", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
+
+        val unknownArgs = buildJsonObject {
+            put("action", "open_app")
+            put("package_name", "com.example.app")
+            put("display", "99")
+        }
+
+        val result = handler.execute(toolCall, unknownArgs, descriptor, env, callback, handle)
+        assertTrue("未知/未登记 numeric 显示屏必须被拒: $result", result is ToolExecutionResult.Error)
+        assertNull("会话目标不得记录未登记显示屏", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+        assertNull("TaskRuntime 不得标记未登记显示屏", TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
     }
 }

@@ -10,6 +10,8 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -274,46 +276,42 @@ object DeviceDisplayManager {
     ): Int {
         val normalized = target?.trim()?.lowercase().orEmpty()
         return when {
-            // 显式指定主屏
-            normalized == DISPLAY_MAIN || normalized == "0" -> Display.DEFAULT_DISPLAY
+            // 显式指定主屏：Agent 操作严禁使用主屏，直接拦截
+            normalized == DISPLAY_MAIN || normalized == "0" -> {
+                throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
+            }
 
-            // 显式指定具体编号（例如物理屏或已建虚拟屏 ID）
+            // 显式指定具体编号（例如已建虚拟屏 ID）：必须 >0，且必须属于本会话的活动托管虚拟屏
             normalized.isNotEmpty() && normalized != DISPLAY_VIRTUAL -> {
                 val parsed = normalized.toIntOrNull()
-                    ?: throw IllegalArgumentException("Invalid display target: '$target'. Expected 'main', 'virtual', or display integer ID.")
-                if (parsed == Display.DEFAULT_DISPLAY) {
-                    Display.DEFAULT_DISPLAY
-                } else {
-                    if (!hasDisplay(context, parsed)) {
-                        throw IllegalArgumentException("Display id $parsed is not connected or available.")
-                    }
-                    val owner = DisplayInputCoordinator.getVirtualDisplayOwner(parsed)
-                    if (owner != null && owner != sessionKey) {
-                        throw IllegalStateException("虚拟显示屏 $parsed 属于其他会话 ($owner)，当前会话 ($sessionKey) 无权操作。")
-                    }
-                    parsed
+                    ?: throw IllegalArgumentException("Invalid display target: '$target'. Expected 'virtual' or display integer ID.")
+                if (parsed == Display.DEFAULT_DISPLAY || parsed <= 0) {
+                    throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
                 }
+                if (!hasDisplay(context, parsed) || parsed != activeVirtualDisplayId || !isVirtualDisplayActive()) {
+                    throw IllegalArgumentException("虚拟显示屏 $parsed 处于非活动状态或未就绪。")
+                }
+                val owner = DisplayInputCoordinator.getVirtualDisplayOwner(parsed)
+                    ?: activeVirtualDisplayOwner
+                if (owner == null) {
+                    throw IllegalStateException("显示屏 $parsed 未登记为本会话虚拟屏，当前会话 ($sessionKey) 无权操作非托管显示屏。")
+                }
+                if (owner != sessionKey) {
+                    throw IllegalStateException("虚拟显示屏 $parsed 属于其他会话 ($owner)，当前会话 ($sessionKey) 无权操作。")
+                }
+                setSessionDisplayTarget(sessionKey, parsed)
+                parsed
             }
 
-            // 显式指定 virtual：必须安全准备或复用虚拟屏
-            normalized == DISPLAY_VIRTUAL -> {
-                ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
-            }
-
-            // 省略（null 或空）：按会话默认路由
+            // 显式指定 virtual 或 省略（null/空）：必须忽略旧 sticky main 0，安全准备或复用本会话虚拟屏
             else -> {
                 val currentTarget = getSessionDisplayTarget(sessionKey)
-                if (currentTarget != null) {
-                    if (currentTarget == Display.DEFAULT_DISPLAY) {
-                        Display.DEFAULT_DISPLAY
-                    } else if (activeVirtualDisplayOwner == sessionKey && isVirtualDisplayActive() && hasDisplay(context, currentTarget)) {
-                        currentTarget
-                    } else {
-                        // 记录的虚拟屏已失效，自动准备新虚拟屏
-                        ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
-                    }
+                if (currentTarget != null && currentTarget != Display.DEFAULT_DISPLAY &&
+                    activeVirtualDisplayOwner == sessionKey && isVirtualDisplayActive() && hasDisplay(context, currentTarget)
+                ) {
+                    currentTarget
                 } else {
-                    // 全新会话默认：必须走后台虚拟屏，绝不占用前台主屏
+                    // 全新或 sticky main 或记录失效会话：强制在后台准备并绑定本会话虚拟屏
                     ensureSessionVirtualDisplay(context, sessionKey, acpSessionId).getOrThrow()
                 }
             }
@@ -876,66 +874,171 @@ object DeviceDisplayManager {
         return source.drawLatestFrame(canvas, destination, afterSequence, outDrawRect)
     }
 
+    private fun launchErrorResult(
+        code: String,
+        message: String,
+        packageName: String,
+        displayId: Int,
+        extraDiagnostics: Map<String, String> = emptyMap(),
+    ): AndroidGuiActionResult {
+        val diagnostics = mutableMapOf(
+            "success" to "false",
+            "code" to code,
+            "packageName" to packageName,
+            "targetDisplayId" to displayId.toString(),
+        )
+        diagnostics.putAll(extraDiagnostics)
+        return AndroidGuiActionResult(
+            success = false,
+            message = message,
+            diagnostics = diagnostics,
+        )
+    }
+
     /**
-     * Launches an app on [displayId].
+     * 在指定显示屏 [displayId] 上启动应用。
      *
-     * If launching on a secondary/virtual display, verifies that the activity actually appears on [displayId].
-     * If the app fails to appear on [displayId], returns a factual error without secretly falling back to the main display.
+     * 行为准则：
+     * 1. 启动前严格前置读取包状态（未安装、挂起/冻结、停用、无启动入口），准确拦截且不执行任何 dispatch。
+     * 2. 不主动解冻、不擅自启用、不弹系统解冻/启用 UI。
+     * 3. 严格禁止主动把用户主屏任务迁移至后台虚拟屏（“无main迁移”）。
+     * 4. 所有启动（含主屏与虚拟屏）必须确认目标 display 上真实出现应用窗口，不凭 intent 受理报假成功。
+     * 5. 若系统擅自把目标任务调度到主屏，及时拦截并返回错误，不继续在主屏执行操作。
      */
     suspend fun launchAppOnDisplay(
         context: Context,
         packageName: String,
         displayId: Int,
         ownerId: String? = null,
+        timeoutMs: Long = APP_LAUNCH_TIMEOUT_MS,
     ): AndroidGuiActionResult {
         val pm = context.packageManager
-        val intent = pm.getLaunchIntentForPackage(packageName)
-            ?: return AndroidGuiActionResult(false, "open_app_not_found:$packageName")
+
+        // 1. 前置读取包状态：准确检查 installed / enabled / suspended / launcher，不解冻、不启用、不弹系统UI
+        val packageInfo = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(PackageManager.MATCH_DISABLED_COMPONENTS.toLong()),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(packageName, PackageManager.MATCH_DISABLED_COMPONENTS)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: PackageManager.NameNotFoundException) {
+            return launchErrorResult(
+                code = "package_not_installed",
+                message = "package_not_installed:$packageName. 应用未安装。",
+                packageName = packageName,
+                displayId = displayId,
+            )
+        } catch (e: Exception) {
+            return launchErrorResult(
+                code = "package_state_unavailable",
+                message = "package_state_unavailable:$packageName. 查询应用包状态失败: ${e.message ?: e.javaClass.simpleName}。",
+                packageName = packageName,
+                displayId = displayId,
+                extraDiagnostics = mapOf("error" to (e.message ?: e.javaClass.simpleName)),
+            )
+        }
+
+        val appInfo = packageInfo.applicationInfo
+        val isSuspended = (appInfo != null && ((appInfo.flags and ApplicationInfo.FLAG_SUSPENDED) != 0)) ||
+            try {
+                pm.isPackageSuspended(packageName)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+
+        if (isSuspended) {
+            return launchErrorResult(
+                code = "app_suspended",
+                message = "app_suspended:$packageName. 应用已被系统或安全策略挂起/冻结(suspended)，无法在后台启动，请由用户在系统设置中自行恢复。",
+                packageName = packageName,
+                displayId = displayId,
+            )
+        }
+
+        val enabledSetting = try {
+            pm.getApplicationEnabledSetting(packageName)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+        }
+        val isDisabled = when (enabledSetting) {
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED -> true
+            PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> false
+            else -> appInfo != null && !appInfo.enabled
+        }
+
+        if (isDisabled) {
+            return launchErrorResult(
+                code = "app_disabled",
+                message = "app_disabled:$packageName. 应用已被停用或冻结(disabled)，无法在后台启动，请由用户在系统设置中自行启用。",
+                packageName = packageName,
+                displayId = displayId,
+            )
+        }
+
+        val intent = try {
+            pm.getLaunchIntentForPackage(packageName)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        if (intent == null) {
+            return launchErrorResult(
+                code = "package_no_launcher",
+                message = "package_no_launcher:$packageName. 应用未声明启动入口(LAUNCHER activity)，无法直接启动。",
+                packageName = packageName,
+                displayId = displayId,
+            )
+        }
 
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
 
-        if (displayId == Display.DEFAULT_DISPLAY) {
-            context.startActivity(intent)
-            return AndroidGuiActionResult(true, "open_app_dispatched")
-        }
-
-        val options = ActivityOptions.makeBasic().apply {
-            launchDisplayId = displayId
-        }
-
+        // 2. 检查现有任务分布与歧义，防止把用户主屏任务搬走
         val activeTasks = (listDisplays(context).map { it.displayId } + displayId).distinct()
             .flatMap { getRootTasks(it) }
             .filter { it.packageName == packageName }
         if (activeTasks.size > 1) {
-            return AndroidGuiActionResult(
-                success = false,
-                message = "ambiguous_task",
-                diagnostics = mapOf(
-                    "success" to "false",
-                    "code" to "ambiguous_task",
-                    "packageName" to packageName,
-                    "targetDisplayId" to displayId.toString(),
-                    "candidateTaskIds" to activeTasks.map { it.taskId }.joinToString(","),
-                ),
+            return launchErrorResult(
+                code = "ambiguous_task",
+                message = "ambiguous_task:$packageName. 检测到多个相同包名的运行任务，无法确定操作目标。",
+                packageName = packageName,
+                displayId = displayId,
+                extraDiagnostics = mapOf("candidateTaskIds" to activeTasks.map { it.taskId }.joinToString(",")),
             )
         }
         if (displayId != Display.DEFAULT_DISPLAY) {
-            val foregroundOnMain = activeTasks.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY && (it.visible || it.isFocused) }
-            if (foregroundOnMain != null) {
-                return AndroidGuiActionResult(
-                    success = false,
-                    message = "app_in_foreground_on_main_display:$packageName. 应用当前正在主屏前台使用，无法在后台虚拟屏打开，避免干扰用户当前操作。",
-                    diagnostics = mapOf(
-                        "success" to "false",
-                        "code" to "app_in_foreground_on_main_display",
-                        "packageName" to packageName,
-                        "taskId" to foregroundOnMain.taskId.toString(),
-                        "targetDisplayId" to displayId.toString(),
-                    ),
+            val taskOnMain = activeTasks.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }
+            if (taskOnMain != null) {
+                val isForeground = taskOnMain.visible || taskOnMain.isFocused
+                val code = if (isForeground) "app_in_foreground_on_main_display" else "app_has_task_on_main_display"
+                val desc = if (isForeground) {
+                    "应用当前正在主屏前台使用，无法在后台虚拟屏打开，避免干扰用户当前操作。"
+                } else {
+                    "应用在主屏已存在任务，后台虚拟屏不主动迁移主屏任务，避免干扰用户主屏状态。"
+                }
+                return launchErrorResult(
+                    code = code,
+                    message = "$code:$packageName. $desc",
+                    packageName = packageName,
+                    displayId = displayId,
+                    extraDiagnostics = mapOf("taskId" to taskOnMain.taskId.toString()),
                 )
             }
         }
 
+        // 3. 调度启动（特权服务或普通 Context 启动）
         val bridge = displayBridge
         val privilegedLaunched = if (bridge != null) {
             bridge.launchActivity(displayId, packageName)
@@ -949,32 +1052,73 @@ object DeviceDisplayManager {
         }
 
         if (privilegedLaunched == false) {
-            return AndroidGuiActionResult(
-                success = false,
-                message = "open_app_failed_on_display:$displayId via privileged bridge/service. Application may not support multi-display. Please switch to main display.",
+            return launchErrorResult(
+                code = "open_app_failed_on_display",
+                message = "open_app_failed_on_display:$displayId. 通过特权服务在显示屏 $displayId 启动应用失败。",
+                packageName = packageName,
+                displayId = displayId,
             )
         }
 
         if (privilegedLaunched == null) {
             try {
-                context.startActivity(intent, options.toBundle())
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    context.startActivity(intent)
+                } else {
+                    val options = ActivityOptions.makeBasic().apply {
+                        launchDisplayId = displayId
+                    }
+                    context.startActivity(intent, options.toBundle())
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                return AndroidGuiActionResult(
-                    success = false,
-                    message = "open_app_failed_on_display:$displayId error=${e.message}. Application may not support multi-display. Please switch to main display.",
+                return launchErrorResult(
+                    code = "open_app_launch_failed",
+                    message = "open_app_failed_on_display:$displayId error=${e.message}. 启动 Activity 异常。",
+                    packageName = packageName,
+                    displayId = displayId,
+                    extraDiagnostics = mapOf("error" to (e.message ?: "")),
                 )
             }
         }
 
-        val appeared = awaitPackageOnDisplay(context, packageName, displayId, APP_LAUNCH_TIMEOUT_MS)
+        // 4. 所有启动必须真实确认目标 display 出现，不能只凭 intent 受理就报 success
+        val appeared = awaitPackageOnDisplay(context, packageName, displayId, timeoutMs)
         if (!appeared) {
-            return AndroidGuiActionResult(
-                success = false,
-                message = "app_not_supported_on_virtual_display:$packageName. Application was not detected on display $displayId after launch. Please switch to main display.",
+            // 防系统把目标偷偷落 main（核对真实 task 位置）
+            if (displayId != Display.DEFAULT_DISPLAY && isPackageOnDisplay(context, packageName, Display.DEFAULT_DISPLAY)) {
+                return launchErrorResult(
+                    code = "app_dropped_to_main_display",
+                    message = "app_dropped_to_main_display:$packageName. 目标应用未在目标后台屏启动，未继续操作主屏。",
+                    packageName = packageName,
+                    displayId = displayId,
+                    extraDiagnostics = mapOf("actualDisplayId" to Display.DEFAULT_DISPLAY.toString()),
+                )
+            }
+            return launchErrorResult(
+                code = "app_not_detected_on_display",
+                message = "app_not_detected_on_display:$packageName. 应用在显示屏 $displayId 启动后未检测到运行任务。",
+                packageName = packageName,
+                displayId = displayId,
             )
         }
 
-        return AndroidGuiActionResult(true, "open_app_dispatched_on_display:$displayId")
+        val successMessage = if (displayId == Display.DEFAULT_DISPLAY) {
+            "open_app_dispatched"
+        } else {
+            "open_app_dispatched_on_display:$displayId"
+        }
+        return AndroidGuiActionResult(
+            success = true,
+            message = successMessage,
+            diagnostics = mapOf(
+                "success" to "true",
+                "code" to "ok",
+                "packageName" to packageName,
+                "targetDisplayId" to displayId.toString(),
+            ),
+        )
     }
 
     suspend fun getRootTasks(displayId: Int): List<PrivilegedRootTaskInfo> {
@@ -1211,20 +1355,29 @@ object DeviceDisplayManager {
         displayId: Int,
         timeoutMs: Long,
     ): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
+        val deadline = currentElapsedTime() + timeoutMs
+        while (currentElapsedTime() < deadline) {
             if (isPackageOnDisplay(context, packageName, displayId)) return true
             delay(APP_POLL_INTERVAL_MS)
         }
         return isPackageOnDisplay(context, packageName, displayId)
     }
 
-    private fun isPackageOnDisplay(
+    private suspend fun isPackageOnDisplay(
         context: Context,
         packageName: String,
         displayId: Int,
     ): Boolean {
-        // 1. 优先通过无障碍服务获取多屏窗口（公共虚拟屏在系统无障碍树中立即可见）
+        // 1. 优先通过特权服务根任务查询真实任务分布（必须为 visible 或 focused，防止后台未展示的历史任务假成功）
+        val rootTasks = getRootTasks(displayId)
+        if (rootTasks.isNotEmpty()) {
+            val found = rootTasks.any {
+                it.packageName == packageName && it.displayId == displayId && (it.visible || it.isFocused)
+            }
+            if (found) return true
+        }
+
+        // 2. 检查系统无障碍服务树中的窗口（真实可见渲染窗口）
         val accessibilityWindows = runCatching {
             cn.com.omnimind.accessibility.service.AssistsService.readyInstance()?.windowsOnAllDisplays?.get(displayId)
         }.getOrNull()
@@ -1236,7 +1389,7 @@ object DeviceDisplayManager {
             if (found) return true
         }
 
-        // 2. 检查 ActivityManager 运行任务
+        // 3. 检查 ActivityManager 运行任务（必须能确认真实 displayId 匹配，未知 display 严禁证实任何屏幕）
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         if (am != null) {
             @Suppress("DEPRECATION")
@@ -1246,14 +1399,15 @@ object DeviceDisplayManager {
                     val pkg = task.topActivity?.packageName ?: task.baseActivity?.packageName
                     if (pkg != packageName) return@any false
                     val taskDisplay = taskDisplayId(task)
-                    taskDisplay == null || taskDisplay == displayId
+                    taskDisplay != null && taskDisplay == displayId
                 }
                 if (found) return true
             }
         }
-
         return false
     }
+
+    private fun currentElapsedTime(): Long = runCatching { SystemClock.elapsedRealtime() }.getOrElse { System.currentTimeMillis() }
 
     private fun taskDisplayId(task: ActivityManager.RunningTaskInfo): Int? {
         var cls: Class<*>? = task.javaClass

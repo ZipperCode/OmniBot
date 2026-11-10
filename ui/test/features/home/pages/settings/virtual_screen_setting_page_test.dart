@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -10,7 +9,6 @@ import 'package:ui/features/home/pages/settings/virtual_screen_setting_page.dart
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
 import 'package:ui/services/storage_service.dart';
-import 'package:ui/services/virtual_screen_service.dart';
 import 'package:ui/theme/app_theme.dart';
 import 'package:ui/widgets/omni_glass.dart';
 
@@ -399,5 +397,29 @@ void main() {
     final finalCount =
         recordedCalls.where((c) => c.method == 'getVirtualScreenState').length;
     expect(finalCount, greaterThan(afterResumeCount));
+  });
+  testWidgets('查看预览：点击预览按钮触发底层 openVirtualScreenPreview 并携带精确 display 与 session', (tester) async {
+    mockStateResult = {
+      'state': 'running',
+      'displayId': 12,
+      'sessionId': 'sess-12',
+    };
+
+    await tester.pumpWidget(buildTestApp(const VirtualScreenSettingPage()));
+    await tester.pumpAndSettle();
+
+    final previewFinder = find.byKey(const Key('virtual-screen-preview-tile'));
+    expect(previewFinder, findsOneWidget);
+
+    await tester.tap(previewFinder);
+    await tester.pumpAndSettle();
+
+    expect(
+      recordedCalls.any((c) =>
+          c.method == 'openVirtualScreenPreview' &&
+          c.arguments['displayId'] == 12 &&
+          c.arguments['sessionId'] == 'sess-12'),
+      isTrue,
+    );
   });
 }

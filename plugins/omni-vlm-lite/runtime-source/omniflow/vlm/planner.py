@@ -21,6 +21,9 @@ from omniflow.vlm_coordinates import screen_pixel_args_to_canonical
 _SCHEDULER_CONTRACT = (
     "\n\n【调度契约】宿主每轮仅准入首个工具调用进入真实执行环境。若收到 executed=false 的工具结果，"
     "表示该调用未被执行；必须依据当前最新屏幕观测重新决策，严禁假设已生效，严禁盲目复用旧坐标。"
+    "\n\n【环境与启动说明】任务运行于独立后台显示屏，该屏幕无桌面Launcher，且不与前台主屏同步。"
+    "若当前屏幕为空白、黑屏、无前台应用或非目标应用界面，必须使用 open_app 工具从已安装应用列表中选择合适的应用启动；"
+    "严禁反复调用 get_state、home 等只读或桌面操作等待界面自动出现。"
 )
 SYSTEM_PROMPT = f"{DEFAULT_PLANNER_SYSTEM_PROMPT}{_SCHEDULER_CONTRACT}"
 
@@ -283,6 +286,11 @@ def _turn_text(
             f"display={display.get('width') or '?'}x{display.get('height') or '?'}"
         ),
     ]
+    if not state.get("package_name") or str(state.get("package_name")).strip() in {"-", "None"}:
+        lines.append(
+            "Screen status: 当前后台虚拟屏暂无前台应用界面且无桌面Launcher，不与前台主屏同步。"
+            "请根据任务目标，使用 open_app 工具从候选已安装应用列表中启动相应应用，切勿连续重复调用 get_state 或 home 等待屏幕变化。"
+        )
     page_context = analyze_page_context(state, goal=goal)
     if page_context.useful:
         lines.append(page_context.evidence)
@@ -320,10 +328,15 @@ def _turn_text(
                             f"region=({args['x1']},{args['y1']},{args['x2']},{args['y2']})"
                         )
                     args_str = ", ".join(parts)
-                    lines.append(
-                        f"Previous action: get_state({args_str}) {result_status}. "
-                        "Latest screen state, visual region and OCR evidence are refreshed. Continue with the next step."
-                    )
+                    if raw_extra.get("read_stalled"):
+                        lines.append(
+                            f"Previous action: get_state({args_str}) succeeded，但当前屏幕无新变化或感知证据。请勿重复调用相同只读操作，请使用 open_app 启动应用或执行交互操作。"
+                        )
+                    else:
+                        lines.append(
+                            f"Previous action: get_state({args_str}) {result_status}. "
+                            "Latest screen state, visual region and OCR evidence are refreshed. Continue with the next step."
+                        )
                 else:
                     lines.append(f"Previous action: {tool} {result_status}.")
         function_execution = raw_extra.get("function_execution")
@@ -536,6 +549,9 @@ class VLMPlanner:
                             for r in regions
                             if isinstance(r, dict) and "bounds" in r
                         ]
+                    if extra.get("read_stalled"):
+                        first_res_dict["progress"] = False
+                        first_res_dict["screen_changed"] = False
                 if prev_err:
                     first_res_dict["error"] = prev_err
 

@@ -274,25 +274,23 @@ class _VirtualScreenSettingPageState extends State<VirtualScreenSettingPage>
           child: ListView(
             padding: edgeToEdgeScrollPadding(
               context,
-              const EdgeInsets.fromLTRB(22, 10, 22, 32),
+              const EdgeInsets.fromLTRB(20, 8, 20, 28),
             ),
             children: [
               if (_errorMessage != null) ...[
                 _buildErrorCard(context),
               ] else if (_snapshot != null) ...[
-                _buildOverviewCard(context),
+                if (_snapshot!.isAbsent) ...[
+                  _buildEmptyState(context),
+                ] else ...[
+                  _buildStatusAndAppGroup(context),
+                  const SizedBox(height: 16),
+                  _buildControlsGroup(context),
+                  const SizedBox(height: 16),
+                  _buildAdvancedGroup(context),
+                ],
               ],
-              if (_errorMessage == null &&
-                  _snapshot != null &&
-                  !_snapshot!.isAbsent) ...[
-                const SizedBox(height: 20),
-                _buildRuntimeInfoGroup(context),
-                const SizedBox(height: 20),
-                _buildControlsGroup(context),
-                const SizedBox(height: 20),
-                _buildAdvancedGroup(context),
-              ],
-              const SizedBox(height: 20),
+              const SizedBox(height: 16),
               _buildPermissionsGroup(context),
             ],
           ),
@@ -301,113 +299,267 @@ class _VirtualScreenSettingPageState extends State<VirtualScreenSettingPage>
     );
   }
 
-  Widget _buildOverviewCard(BuildContext context) {
+  Color _getStatusColor(BuildContext context, VirtualScreenLifecycleState state) {
     final palette = context.omniPalette;
-    final snapshot = _snapshot;
-    final state = snapshot?.state ?? VirtualScreenLifecycleState.absent;
-
-    final Color statusColor;
-    final Color statusBgColor;
-    final IconData stateIcon;
-    final String stateDescription;
-
     switch (state) {
       case VirtualScreenLifecycleState.running:
-        statusColor = palette.brandPrimary;
-        statusBgColor = palette.brandSurface;
-        stateIcon = LucideIcons.playCircle;
-        stateDescription = snapshot?.taskTitle?.isNotEmpty == true
-            ? snapshot!.taskTitle!
-            : '后台虚拟屏正在执行任务';
+        return palette.brandPrimary;
       case VirtualScreenLifecycleState.waiting:
-        statusColor = palette.accentPrimary;
-        statusBgColor = palette.surfaceSecondary;
-        stateIcon = LucideIcons.clock;
-        stateDescription = snapshot?.taskTitle?.isNotEmpty == true
-            ? snapshot!.taskTitle!
-            : '后台虚拟屏等待输入或下一轮次';
+        return palette.accentPrimary;
       case VirtualScreenLifecycleState.retained:
-        statusColor = palette.brandPrimary;
-        statusBgColor = palette.brandSurface;
-        stateIcon = LucideIcons.checkCircle2;
-        stateDescription = '应用现场保持在后台，未占用前台主屏';
+        return palette.textSecondary;
       case VirtualScreenLifecycleState.absent:
-        statusColor = palette.textTertiary;
-        statusBgColor = palette.borderSubtle.withValues(alpha: 0.35);
-        stateIcon = LucideIcons.monitorOff;
-        stateDescription = '当前未运行虚拟屏，仅在使用屏幕工具时创建';
+        return palette.textTertiary;
     }
+  }
 
-    return OmniGlassCard(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: statusBgColor,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(stateIcon, color: statusColor, size: 24),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      state.label,
-                      style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                        color: palette.textPrimary,
-                        height: 1.25,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      stateDescription,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: palette.textSecondary,
-                        height: 1.4,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+  IconData _getStatusIcon(VirtualScreenLifecycleState state) {
+    switch (state) {
+      case VirtualScreenLifecycleState.running:
+        return LucideIcons.playCircle;
+      case VirtualScreenLifecycleState.waiting:
+        return LucideIcons.clock;
+      case VirtualScreenLifecycleState.retained:
+        return LucideIcons.monitor;
+      case VirtualScreenLifecycleState.absent:
+        return LucideIcons.monitorOff;
+    }
+  }
+
+  String _getStateDescription(VirtualScreenSnapshot? snapshot) {
+    if (snapshot == null) return '未开启';
+    if (snapshot.taskTitle?.isNotEmpty == true) {
+      return snapshot.taskTitle!;
+    }
+    switch (snapshot.state) {
+      case VirtualScreenLifecycleState.running:
+        return '正在执行屏幕任务';
+      case VirtualScreenLifecycleState.waiting:
+        return '等待操作输入';
+      case VirtualScreenLifecycleState.retained:
+        return '应用现场保持在后台';
+      case VirtualScreenLifecycleState.absent:
+        return '后台虚拟屏未开启，仅在 Agent 执行屏幕任务时按需创建';
+    }
+  }
+
+  Widget _buildEmptyState(BuildContext context) {
+    final palette = context.omniPalette;
+    return OmniSettingsGroup(
+      title: '运行状态',
+      translateTitle: false,
+      children: [
+        OmniSettingsTile(
+          icon: LucideIcons.monitorOff,
+          iconColor: palette.textTertiary,
+          title: '未开启',
+          subtitle: '后台虚拟屏未开启，仅在 Agent 执行屏幕任务时按需创建',
+          translateText: false,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatusAndAppGroup(BuildContext context) {
+    final snapshot = _snapshot!;
+    final state = snapshot.state;
+    final statusColor = _getStatusColor(context, state);
+    final statusIcon = _getStatusIcon(state);
+    final stateDescription = _getStateDescription(snapshot);
+
+    final currentApp = snapshot.appLabel?.isNotEmpty == true
+        ? snapshot.appLabel!
+        : (snapshot.packageName?.isNotEmpty == true
+            ? snapshot.packageName!
+            : '无');
+
+    final parsedConversationId = int.tryParse(snapshot.conversationId ?? '');
+    final hasConversation = parsedConversationId != null;
+
+    final hasExtraStatusText = snapshot.statusText != null &&
+        snapshot.statusText!.isNotEmpty &&
+        snapshot.taskTitle != snapshot.statusText;
+
+    return OmniSettingsGroup(
+      title: '运行状态',
+      translateTitle: false,
+      children: [
+        OmniSettingsTile(
+          icon: statusIcon,
+          iconColor: statusColor,
+          title: '后台状态',
+          subtitle: stateDescription,
+          bottomNote: hasExtraStatusText ? snapshot.statusText : null,
+          trailing: OmniSettingsStatusBadge(
+            label: state.label,
+            color: statusColor,
           ),
-          if (snapshot != null &&
-              snapshot.statusText != null &&
-              snapshot.statusText!.isNotEmpty &&
-              snapshot.taskTitle != null &&
-              snapshot.taskTitle != snapshot.statusText) ...[
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: palette.borderSubtle.withValues(alpha: 0.25),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                snapshot.statusText!,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: palette.textTertiary,
-                  height: 1.35,
-                ),
-              ),
-            ),
-          ],
+          translateText: false,
+        ),
+        OmniSettingsTile(
+          icon: LucideIcons.smartphone,
+          title: '当前应用',
+          subtitle: currentApp,
+          trailingText: (snapshot.width != null && snapshot.height != null)
+              ? '${snapshot.width}×${snapshot.height}'
+              : null,
+          translateText: false,
+        ),
+        OmniSettingsTile(
+          tileKey: const Key('virtual-screen-preview-tile'),
+          icon: LucideIcons.eye,
+          title: '查看预览',
+          subtitle: '实时查看后台虚拟屏画面',
+          showChevron: true,
+          translateText: false,
+          onTap: _operating ? null : _openPreview,
+        ),
+        if (hasConversation)
+          OmniSettingsTile(
+            tileKey: const Key('virtual-screen-conversation-tile'),
+            icon: LucideIcons.messageSquare,
+            title: '所属对话',
+            subtitle: '会话 #${snapshot.conversationId}',
+            trailingText: '查看',
+            showChevron: true,
+            translateText: false,
+            onTap: () => _openConversation(snapshot.conversationId!),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildControlsGroup(BuildContext context) {
+    final snapshot = _snapshot!;
+    final canStopTask = snapshot.isActiveTask && snapshot.taskId != null;
+    final canCloseScreen = snapshot.isRetained;
+    final palette = context.omniPalette;
+    final errorColor = Theme.of(context).colorScheme.error;
+
+    return OmniSettingsGroup(
+      title: '控制操作',
+      translateTitle: false,
+      children: [
+        if (snapshot.isActiveTask) ...[
+          OmniSettingsTile(
+            tileKey: const Key('virtual-screen-stop-task-tile'),
+            icon: LucideIcons.square,
+            iconColor: errorColor,
+            title: '停止当前任务',
+            subtitle: '中断当前正在执行的屏幕操作',
+            isDestructive: true,
+            translateText: false,
+            onTap: (_operating || !canStopTask) ? null : _stopTask,
+          ),
+          OmniSettingsTile(
+            icon: LucideIcons.info,
+            iconColor: palette.textTertiary,
+            title: '关闭虚拟屏现场',
+            subtitle: '任务运行中不可关闭现场，请先停止任务',
+            translateText: false,
+          ),
         ],
-      ),
+        if (canCloseScreen)
+          OmniSettingsTile(
+            tileKey: const Key('virtual-screen-close-screen-tile'),
+            icon: LucideIcons.power,
+            iconColor: errorColor,
+            title: '关闭虚拟屏现场',
+            subtitle: '释放虚拟屏与后台应用，保留聊天记录',
+            isDestructive: true,
+            translateText: false,
+            onTap: _operating ? null : _confirmCloseScreen,
+          ),
+      ],
+    );
+  }
+
+  Widget _buildAdvancedGroup(BuildContext context) {
+    final snapshot = _snapshot!;
+    final palette = context.omniPalette;
+    final specsText = (snapshot.width != null && snapshot.height != null)
+        ? '${snapshot.width} × ${snapshot.height}${snapshot.dpi != null ? ' (${snapshot.dpi} DPI)' : ''}'
+        : '无';
+
+    return OmniSettingsGroup(
+      title: '详细信息',
+      translateTitle: false,
+      children: [
+        OmniSettingsTile(
+          tileKey: const Key('virtual-screen-advanced-toggle'),
+          icon: LucideIcons.code,
+          title: '底层调试参数',
+          subtitle: _expandedAdvanced ? '点击收起' : 'Display、Session 与调试标识',
+          trailing: Icon(
+            _expandedAdvanced ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+            size: 18,
+            color: palette.textTertiary,
+          ),
+          translateText: false,
+          onTap: () {
+            setState(() {
+              _expandedAdvanced = !_expandedAdvanced;
+            });
+          },
+        ),
+        if (_expandedAdvanced) ...[
+          OmniSettingsTile(
+            title: '屏幕规格',
+            subtitle: specsText,
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: 'Display ID',
+            subtitle: snapshot.displayId?.toString() ?? '无',
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: 'Session ID',
+            subtitle: snapshot.sessionId ?? '无',
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: '应用包名',
+            subtitle: snapshot.packageName ?? '无',
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: '任务 ID',
+            subtitle: snapshot.taskId ?? '无',
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: '轮次 ID',
+            subtitle: snapshot.turnId ?? '无',
+            translateText: false,
+          ),
+          OmniSettingsTile(
+            title: '悬浮窗层级',
+            subtitle: snapshot.overlayAvailable ? '可用' : '不可用',
+            translateText: false,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPermissionsGroup(BuildContext context) {
+    return OmniSettingsGroup(
+      title: '系统权限',
+      translateTitle: false,
+      children: [
+        OmniSettingsTile(
+          tileKey: const Key('virtual-screen-permissions-tile'),
+          icon: LucideIcons.shieldCheck,
+          title: '权限管理',
+          subtitle: '配置悬浮窗、无障碍服务与后台运行权限',
+          showChevron: true,
+          translateText: false,
+          onTap: () {
+            GoRouterManager.push('/home/authorize_setting');
+          },
+        ),
+      ],
     );
   }
 
@@ -466,180 +618,6 @@ class _VirtualScreenSettingPageState extends State<VirtualScreenSettingPage>
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildRuntimeInfoGroup(BuildContext context) {
-    final snapshot = _snapshot!;
-    final specsText =
-        '${snapshot.width ?? '-'} × ${snapshot.height ?? '-'} (${snapshot.dpi != null ? '${snapshot.dpi} DPI' : '-'})';
-    final currentApp = snapshot.appLabel?.isNotEmpty == true
-        ? snapshot.appLabel!
-        : (snapshot.packageName?.isNotEmpty == true
-            ? snapshot.packageName!
-            : '无');
-    final parsedConversationId = int.tryParse(snapshot.conversationId ?? '');
-    final hasConversation = parsedConversationId != null;
-
-    return OmniSettingsGroup(
-      title: '运行信息',
-      translateTitle: false,
-      children: [
-        OmniSettingsTile(
-          icon: LucideIcons.maximize2,
-          title: '屏幕规格',
-          subtitle: specsText,
-          translateText: false,
-        ),
-        OmniSettingsTile(
-          icon: LucideIcons.smartphone,
-          title: '当前应用',
-          subtitle: currentApp,
-          translateText: false,
-        ),
-        OmniSettingsTile(
-          tileKey: const Key('virtual-screen-conversation-tile'),
-          icon: LucideIcons.messageSquare,
-          title: '所属对话',
-          subtitle: hasConversation
-              ? '会话 #${snapshot.conversationId}'
-              : '无关联对话',
-          trailingText: hasConversation ? '查看' : null,
-          showChevron: hasConversation,
-          translateText: false,
-          onTap: hasConversation
-              ? () => _openConversation(snapshot.conversationId!)
-              : null,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildControlsGroup(BuildContext context) {
-    final snapshot = _snapshot!;
-    final canStopTask = snapshot.isActiveTask && snapshot.taskId != null;
-    final canCloseScreen = snapshot.isRetained;
-
-    return OmniSettingsGroup(
-      title: '控制操作',
-      translateTitle: false,
-      children: [
-        OmniSettingsTile(
-          tileKey: const Key('virtual-screen-preview-tile'),
-          icon: LucideIcons.eye,
-          title: '查看预览',
-          subtitle: '以悬浮全屏方式实时查看后台虚拟屏',
-          showChevron: true,
-          translateText: false,
-          onTap: _operating ? null : _openPreview,
-        ),
-        if (snapshot.isActiveTask)
-          OmniSettingsTile(
-            tileKey: const Key('virtual-screen-stop-task-tile'),
-            icon: LucideIcons.square,
-            title: '停止当前任务',
-            subtitle: '官方安全取消当前执行中的任务 Turn',
-            isDestructive: true,
-            translateText: false,
-            onTap: (_operating || !canStopTask) ? null : _stopTask,
-          ),
-        if (canCloseScreen)
-          OmniSettingsTile(
-            tileKey: const Key('virtual-screen-close-screen-tile'),
-            icon: LucideIcons.power,
-            title: '关闭虚拟屏现场',
-            subtitle: '释放后台虚拟屏与应用现场，保留聊天记录',
-            isDestructive: true,
-            translateText: false,
-            onTap: _operating ? null : _confirmCloseScreen,
-          ),
-        if (snapshot.isActiveTask)
-          OmniSettingsTile(
-            icon: LucideIcons.info,
-            title: '关闭虚拟屏现场',
-            subtitle: '任务正在运行中，禁止直接销毁现场，请先停止任务',
-            translateText: false,
-          ),
-      ],
-    );
-  }
-
-  Widget _buildAdvancedGroup(BuildContext context) {
-    final snapshot = _snapshot!;
-
-    return OmniSettingsGroup(
-      title: '高级详情',
-      translateTitle: false,
-      children: [
-        OmniSettingsTile(
-          tileKey: const Key('virtual-screen-advanced-toggle'),
-          icon: LucideIcons.code,
-          title: '底层调试参数',
-          subtitle: _expandedAdvanced ? '点击收起' : 'Display ID、Session ID、包名等',
-          trailing: Icon(
-            _expandedAdvanced ? LucideIcons.chevronUp : LucideIcons.chevronDown,
-            size: 18,
-          ),
-          translateText: false,
-          onTap: () {
-            setState(() {
-              _expandedAdvanced = !_expandedAdvanced;
-            });
-          },
-        ),
-        if (_expandedAdvanced) ...[
-          OmniSettingsTile(
-            title: 'Display ID',
-            subtitle: snapshot.displayId?.toString() ?? '无',
-            translateText: false,
-          ),
-          OmniSettingsTile(
-            title: 'Session ID',
-            subtitle: snapshot.sessionId ?? '无',
-            translateText: false,
-          ),
-          OmniSettingsTile(
-            title: '包名 (Package)',
-            subtitle: snapshot.packageName ?? '无',
-            translateText: false,
-          ),
-          OmniSettingsTile(
-            title: '任务 ID (Task ID)',
-            subtitle: snapshot.taskId ?? '无',
-            translateText: false,
-          ),
-          OmniSettingsTile(
-            title: '轮次 ID (Turn ID)',
-            subtitle: snapshot.turnId ?? '无',
-            translateText: false,
-          ),
-          OmniSettingsTile(
-            title: '悬浮窗层级 (Overlay)',
-            subtitle: snapshot.overlayAvailable ? '可用' : '不可用',
-            translateText: false,
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildPermissionsGroup(BuildContext context) {
-    return OmniSettingsGroup(
-      title: '系统权限',
-      translateTitle: false,
-      children: [
-        OmniSettingsTile(
-          tileKey: const Key('virtual-screen-permissions-tile'),
-          icon: LucideIcons.shieldCheck,
-          title: '权限管理',
-          subtitle: '检查并配置悬浮窗、无障碍服务与后台运行权限',
-          showChevron: true,
-          translateText: false,
-          onTap: () {
-            GoRouterManager.push('/home/authorize_setting');
-          },
-        ),
-      ],
     );
   }
 }

@@ -73,7 +73,7 @@ class DeviceDisplayToolHandlerPresentTest {
     }
 
     @Test
-    fun `present_to_user requires packageName in camelCase`() = runBlocking {
+    fun `present_to_user via agent tool handler is rejected with background_display_required`() = runBlocking {
         val env = mockEnv("session-test")
         val callback = Mockito.mock(AgentCallback::class.java)
         val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
@@ -88,7 +88,7 @@ class DeviceDisplayToolHandlerPresentTest {
             toolCall = toolCall,
             args = buildJsonObject {
                 put("action", "present_to_user")
-                // Missing packageName!
+                put("packageName", "com.example.app")
             },
             runtimeDescriptor = descriptor,
             env = env,
@@ -96,47 +96,13 @@ class DeviceDisplayToolHandlerPresentTest {
             toolHandle = handle,
         )
 
-        assertTrue("缺少 packageName 必须返回 Error", result is ToolExecutionResult.Error)
+        assertTrue("模型调用 present_to_user 必须被拒: $result", result is ToolExecutionResult.Error)
         val err = result as ToolExecutionResult.Error
-        assertTrue(err.message.contains("packageName"))
+        assertTrue("错误应包含 background_display_required", err.message.contains("background_display_required"))
     }
 
     @Test
-    fun `present_to_user rejects execution when acpSessionId or acpTurnId is missing`() = runBlocking {
-        val envNoTurn = Mockito.mock(AgentExecutionEnvironment::class.java)
-        Mockito.`when`(envNoTurn.conversationId).thenReturn(1L)
-        Mockito.`when`(envNoTurn.acpSessionId).thenReturn("session-test")
-        Mockito.`when`(envNoTurn.acpTurnId).thenReturn(null) // missing turnId
-        Mockito.`when`(envNoTurn.agentRunId).thenReturn("run-fallback")
-
-        val callback = Mockito.mock(AgentCallback::class.java)
-        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
-        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(
-            DeviceDisplayToolHandler.TOOL_NAME,
-            DeviceDisplayToolHandler.TOOL_NAME,
-            ""
-        )
-        val toolCall = AssistantToolCall("call-noturn", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
-
-        val result = handler.execute(
-            toolCall = toolCall,
-            args = buildJsonObject {
-                put("action", "present_to_user")
-                put("packageName", "com.example.app")
-            },
-            runtimeDescriptor = descriptor,
-            env = envNoTurn,
-            callback = callback,
-            toolHandle = handle,
-        )
-
-        assertTrue("缺少 acpTurnId 绝不 fallback agentRunId 必须直接返回 Error", result is ToolExecutionResult.Error)
-        val err = result as ToolExecutionResult.Error
-        assertTrue(err.message.contains("acpTurnId"))
-    }
-
-    @Test
-    fun `present_to_user failure preserves virtual display and projects typed json`() = runBlocking {
+    fun `native presentToUser failure preserves virtual display`() = runBlocking {
         val sessionId = "session-fail"
         setVirtualDisplayForTesting(3, sessionId)
 
@@ -147,46 +113,24 @@ class DeviceDisplayToolHandlerPresentTest {
         )
         DeviceDisplayManager.displayBridge = fakeBridge
 
-        val env = mockEnv(sessionId)
-        val callback = Mockito.mock(AgentCallback::class.java)
-        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
-        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(
-            DeviceDisplayToolHandler.TOOL_NAME,
-            DeviceDisplayToolHandler.TOOL_NAME,
-            ""
-        )
-        val toolCall = AssistantToolCall("call-2", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
-
-        val result = handler.execute(
-            toolCall = toolCall,
-            args = buildJsonObject {
-                put("action", "present_to_user")
-                put("packageName", "com.example.app")
-            },
-            runtimeDescriptor = descriptor,
-            env = env,
-            callback = callback,
-            toolHandle = handle,
+        val result = DeviceDisplayManager.presentToUser(
+            context = context,
+            packageName = "com.example.app",
+            taskId = 88,
+            sessionOwnerId = sessionId,
+            leaseOwnerId = "$sessionId:turn-1:call-2",
         )
 
-        assertTrue(result is ToolExecutionResult.ContextResult)
-        val ctx = result as ToolExecutionResult.ContextResult
-        assertFalse("迁移失败时 success 必须为 false", ctx.success)
-
-        // 验证失败时虚拟屏仍然保留，绝不销毁
+        assertFalse("迁移失败时 success 必须为 false", result.success)
         assertEquals("移交失败时虚拟屏必须保留", 3, DeviceDisplayManager.activeVirtualDisplayId())
-
-        // 验证 JSON 投影为严格的 int/bool 类型
-        val parsedJson = Json.parseToJsonElement(ctx.rawResultJson).jsonObject
-        assertEquals(false, parsedJson["success"]?.jsonPrimitive?.booleanOrNull)
-        assertEquals(false, parsedJson["verified"]?.jsonPrimitive?.booleanOrNull)
-        assertEquals(88, parsedJson["taskId"]?.jsonPrimitive?.intOrNull)
-        assertEquals(3, parsedJson["sourceDisplayId"]?.jsonPrimitive?.intOrNull)
-        assertEquals(0, parsedJson["targetDisplayId"]?.jsonPrimitive?.intOrNull)
+        assertEquals("88", result.diagnostics["taskId"])
+        assertEquals("3", result.diagnostics["sourceDisplayId"])
+        assertEquals("0", result.diagnostics["targetDisplayId"])
+        assertEquals("false", result.diagnostics["verified"])
     }
 
     @Test
-    fun `present_to_user success switches session display target to DEFAULT_DISPLAY and returns verified json`() = runBlocking {
+    fun `native presentToUser success switches session display target to DEFAULT_DISPLAY`() = runBlocking {
         val sessionId = "session-ok"
         setVirtualDisplayForTesting(3, sessionId)
 
@@ -196,42 +140,24 @@ class DeviceDisplayToolHandlerPresentTest {
         )
         DeviceDisplayManager.displayBridge = fakeBridge
 
-        val env = mockEnv(sessionId)
-        val callback = Mockito.mock(AgentCallback::class.java)
-        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
-        val descriptor = AgentToolRegistry.RuntimeToolDescriptor(
-            DeviceDisplayToolHandler.TOOL_NAME,
-            DeviceDisplayToolHandler.TOOL_NAME,
-            ""
-        )
-        val toolCall = AssistantToolCall("call-3", "function", AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}"))
-
-        val result = handler.execute(
-            toolCall = toolCall,
-            args = buildJsonObject {
-                put("action", "present_to_user")
-                put("packageName", "com.example.calc")
-            },
-            runtimeDescriptor = descriptor,
-            env = env,
-            callback = callback,
-            toolHandle = handle,
+        val result = DeviceDisplayManager.presentToUser(
+            context = context,
+            packageName = "com.example.calc",
+            taskId = 99,
+            sessionOwnerId = sessionId,
+            leaseOwnerId = "$sessionId:turn-1:call-3",
         )
 
-        assertTrue(result is ToolExecutionResult.ContextResult)
-        val ctx = result as ToolExecutionResult.ContextResult
-        assertTrue("迁移成功时 success 必须为 true", ctx.success)
-
-        val parsedJson = Json.parseToJsonElement(ctx.rawResultJson).jsonObject
-        assertEquals(true, parsedJson["success"]?.jsonPrimitive?.booleanOrNull)
-        assertEquals(true, parsedJson["verified"]?.jsonPrimitive?.booleanOrNull)
-        assertEquals(99, parsedJson["taskId"]?.jsonPrimitive?.intOrNull)
-        assertEquals(3, parsedJson["sourceDisplayId"]?.jsonPrimitive?.intOrNull)
-        assertEquals(0, parsedJson["targetDisplayId"]?.jsonPrimitive?.intOrNull)
-        assertEquals("ok", parsedJson["code"]?.jsonPrimitive?.content)
+        assertTrue("迁移成功时 success 必须为 true", result.success)
+        assertEquals("99", result.diagnostics["taskId"])
+        assertEquals("3", result.diagnostics["sourceDisplayId"])
+        assertEquals("0", result.diagnostics["targetDisplayId"])
+        assertEquals("ok", result.diagnostics["code"])
+        assertEquals("true", result.diagnostics["verified"])
 
         // 成功移交后也不立即销毁虚拟屏
         assertEquals("成功移交后暂不立即销毁虚拟屏", 3, DeviceDisplayManager.activeVirtualDisplayId())
+        assertEquals("成功移交后会话目标为主屏", Display.DEFAULT_DISPLAY, DeviceDisplayManager.getSessionDisplayTarget(sessionId))
     }
 
     private class FakePresentDisplayBridge(

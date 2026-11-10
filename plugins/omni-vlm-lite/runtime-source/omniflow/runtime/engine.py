@@ -339,6 +339,8 @@ class OmniFlow:
         previous_action_result: str | None = None
         pending_user_input: str | None = None
         planner_diagnostics: dict[str, Any] = {}
+        consecutive_stalled_reads: int = 0
+        current_screen_read_evidence: set[tuple[bool, tuple[float, float, float, float] | None]] = set()
         while planner_steps < self.config.runtime.max_steps:
             max_fallback_steps = self.config.runtime.max_fallback_steps
             fallback_this_turn = function_session.failed
@@ -494,10 +496,10 @@ class OmniFlow:
                             model_calls=model_calls,
                             llm_usage=llm_usage,
                             fallback_steps=fallback_steps,
-                            error=previous_action_error,
+                            error=previous_action_error or "max_steps_exceeded",
                             final_state=observation,
                             planner_diagnostics=planner_diagnostics,
-                            terminal_detail={"done_reason": "step_completed"},
+                            terminal_detail={"done_reason": "max_steps_exceeded"},
                         )
                     continue
                 if previous_bound != bound_function:
@@ -530,6 +532,8 @@ class OmniFlow:
                             "source_state_id": retry_step.source_state_id,
                         }
                         function_session.resume_events.append(resume_event)
+                consecutive_stalled_reads = 0
+                current_screen_read_evidence.clear()
                 replay = await execute_function(
                     bound_function,
                     host=self.host,
@@ -579,10 +583,10 @@ class OmniFlow:
                         model_calls=model_calls,
                         llm_usage=llm_usage,
                         fallback_steps=fallback_steps,
-                        error=None if replay.success else previous_action_error,
+                        error=None if replay.success else (previous_action_error or "max_steps_exceeded"),
                         final_state=observation,
                         planner_diagnostics=planner_diagnostics,
-                        terminal_detail={"done_reason": "step_completed"},
+                        terminal_detail={"done_reason": "step_completed" if replay.success else "max_steps_exceeded"},
                     )
                 continue
             try:
@@ -599,10 +603,10 @@ class OmniFlow:
                         model_calls=model_calls,
                         llm_usage=llm_usage,
                         fallback_steps=fallback_steps,
-                        error=previous_action_error,
+                        error=previous_action_error or "max_steps_exceeded",
                         final_state=observation,
                         planner_diagnostics=planner_diagnostics,
-                        terminal_detail={"done_reason": "step_completed"},
+                        terminal_detail={"done_reason": "max_steps_exceeded"},
                     )
                 continue
             if planned.tool == "finished":
@@ -718,14 +722,79 @@ class OmniFlow:
                         observation = await self._observe(screenshot=True)
                         continue
                     region = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                before_observation = observation
                 observation = await self._observe(
                     screenshot=True,
                     ocr=ocr_flag,
                     region=region,
                 )
+                screen_changed = _is_screen_substantively_changed(
+                    before_observation,
+                    observation,
+                )
+                read_roi = (
+                    (float(region["x1"]), float(region["y1"]), float(region["x2"]), float(region["y2"]))
+                    if region else None
+                )
+                read_sig = (bool(ocr_flag), read_roi)
+                after_pkg = str(observation.package_name or "").strip()
+                is_empty_bg = (after_pkg in {"", "-", "None", "android"}) and not str(observation.xml or "").strip()
+
+                if screen_changed:
+                    # 屏幕真实改变时清空既有读取记录
+                    current_screen_read_evidence.clear()
+                    current_screen_read_evidence.add(read_sig)
+                    has_progress = True
+                elif is_empty_bg:
+                    # 空后台无前台应用状态，只读操作均无法推进实际界面
+                    has_progress = False
+                elif read_sig in current_screen_read_evidence:
+                    # 同一未变屏幕下已读过相同 OCR/ROI 组合去重（含交替轮播）
+                    has_progress = False
+                else:
+                    current_screen_read_evidence.add(read_sig)
+                    has_progress = True
+
+                if has_progress:
+                    consecutive_stalled_reads = 0
+                else:
+                    consecutive_stalled_reads += 1
+
+                extra = dict(observation.extra) if isinstance(observation.extra, dict) else {}
+                if has_progress:
+                    extra.pop("read_stalled", None)
+                    extra.pop("consecutive_stalled_reads", None)
+                else:
+                    extra["read_stalled"] = True
+                    extra["consecutive_stalled_reads"] = consecutive_stalled_reads
+
+                observation = Observation(
+                    xml=observation.xml,
+                    package_name=observation.package_name,
+                    activity_name=observation.activity_name,
+                    image_base64=observation.image_base64,
+                    extra=extra,
+                )
                 previous_action_error = None
                 previous_action = planned
                 previous_action_result = "succeeded"
+
+                if consecutive_stalled_reads >= 2:
+                    return finish(
+                        False,
+                        profile=profile,
+                        trace=trace,
+                        function_id=function_session.selected_id or function_session.failed_id,
+                        actions_executed=actions_executed,
+                        model_calls=model_calls,
+                        llm_usage=llm_usage,
+                        fallback_steps=fallback_steps,
+                        error="no_progress_detected",
+                        final_state=observation,
+                        planner_diagnostics=planner_diagnostics,
+                        terminal_detail={"done_reason": "no_progress_detected"},
+                    )
+
                 if planner_steps >= self.config.runtime.max_steps:
                     return finish(
                         False,
@@ -736,12 +805,14 @@ class OmniFlow:
                         model_calls=model_calls,
                         llm_usage=llm_usage,
                         fallback_steps=fallback_steps,
-                        error=None,
+                        error="max_steps_exceeded",
                         final_state=observation,
                         planner_diagnostics=planner_diagnostics,
-                        terminal_detail={"done_reason": "step_completed"},
+                        terminal_detail={"done_reason": "max_steps_exceeded"},
                     )
                 continue
+            consecutive_stalled_reads = 0
+            current_screen_read_evidence.clear()
             step = await execute_robust_action(
                 planned,
                 observation=observation,
@@ -759,6 +830,17 @@ class OmniFlow:
             )
             actions_executed += step.actions_executed
             observation = step.after or observation
+            if isinstance(observation.extra, dict) and "read_stalled" in observation.extra:
+                clean_extra = dict(observation.extra)
+                clean_extra.pop("read_stalled", None)
+                clean_extra.pop("consecutive_stalled_reads", None)
+                observation = Observation(
+                    xml=observation.xml,
+                    package_name=observation.package_name,
+                    activity_name=observation.activity_name,
+                    image_base64=observation.image_base64,
+                    extra=clean_extra,
+                )
             previous_action_error = (
                 None if step.success else step.error or "fallback_action_failed"
             )
@@ -772,10 +854,10 @@ class OmniFlow:
                     model_calls=model_calls,
                     llm_usage=llm_usage,
                     fallback_steps=fallback_steps,
-                    error=previous_action_error,
+                    error=previous_action_error or "max_steps_exceeded",
                     final_state=observation,
                     planner_diagnostics=planner_diagnostics,
-                    terminal_detail={"done_reason": "step_completed"},
+                    terminal_detail={"done_reason": "max_steps_exceeded"},
                 )
             previous_action = planned
             previous_action_result = "succeeded" if step.success else "failed"
@@ -792,6 +874,7 @@ class OmniFlow:
             error=previous_action_error or "max_steps_exceeded",
             final_state=observation,
             planner_diagnostics=planner_diagnostics,
+            terminal_detail={"done_reason": "max_steps_exceeded"},
         )
 
     async def _observe(
@@ -1068,6 +1151,29 @@ def _same_observation(
         after.xml,
         after.image_base64,
     )
+
+
+def _is_screen_substantively_changed(
+    before_obs: Observation | None,
+    after_obs: Observation | None,
+) -> bool:
+    if before_obs is None or after_obs is None:
+        return False
+
+    # 1. 前台包名或 Activity 发生变化
+    if (before_obs.package_name or "") != (after_obs.package_name or ""):
+        return True
+    if (before_obs.activity_name or "") != (after_obs.activity_name or ""):
+        return True
+
+    # 2. 空后台状态（无前台包名且无 XML 树）绝不因动态截图判定为有实质进展
+    after_pkg = str(after_obs.package_name or "").strip()
+    is_empty_bg = (after_pkg in {"", "-", "None", "android"}) and not str(after_obs.xml or "").strip()
+    if is_empty_bg:
+        return False
+
+    # 3. 非空屏状态下沿用既有 _same_observation 比对（支持 Canvas/地图/视频等纯视觉更新）
+    return not _same_observation(before_obs, after_obs)
 
 
 def _optional_step_index(value: Any) -> int | None:

@@ -94,8 +94,21 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private var initialStopToken: String? = null
 
     private var takeoverJob: Job? = null
+    private var presentConfirmDialog: android.app.Dialog? = null
     private val takeoverController by lazy { VirtualDisplayTakeoverController(this) }
 
+    private data class PresentBindingIdentity(
+        val sessionId: String,
+        val displayId: Int,
+        val taskId: String?,
+        val turnId: String?,
+        val stopToken: String?
+    )
+
+    private fun dismissPresentConfirmationDialog() {
+        presentConfirmDialog?.dismiss()
+        presentConfirmDialog = null
+    }
     private var lastBarsLeft = 0
     private var lastBarsTop = 0
     private var lastBarsRight = 0
@@ -109,19 +122,15 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private var transientStatusExpiry: Long = 0L
 
     private var lastRenderedTitle: String? = null
-    private var lastRenderedBadgeText: String? = null
-    private var lastRenderedBadgeVisible: Boolean? = null
     private var lastRenderedSubtitle: String? = null
     private var lastRenderedDotColor: Int? = null
     private var lastStopButtonEnabled: Boolean? = null
     private var lastPresentButtonEnabled: Boolean? = null
-    private var lastCloseButtonEnabled: Boolean? = null
     private var lastCanEnterPipState: Boolean? = null
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var headerBar: LinearLayout
     private lateinit var mainTitleView: TextView
-    private lateinit var displayBadgeView: TextView
     private lateinit var statusDotView: View
     private lateinit var statusDotDrawable: GradientDrawable
     private lateinit var statusTextView: TextView
@@ -131,7 +140,6 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private lateinit var bottomBar: LinearLayout
     private lateinit var stopButton: Button
     private lateinit var presentButton: Button
-    private lateinit var closeButton: Button
     private val tempContentRect = RectF()
 
     private val stateRefreshHandler = Handler(Looper.getMainLooper())
@@ -219,6 +227,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         if (isBindingChanged) {
             takeoverJob?.cancel()
             takeoverJob = null
+            dismissPresentConfirmationDialog()
         }
 
         sessionId = newSessionId
@@ -370,27 +379,6 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
         titleRow.addView(mainTitleView)
 
-        displayBadgeView = TextView(this).apply {
-            text = if (displayId > 0) "ID: $displayId" else ""
-            setTextColor(secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dpToPx(6f), dpToPx(2f), dpToPx(6f), dpToPx(2f))
-            val badgeBg = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dpF(context, 4f)
-                setColor(ScreenTaskTheme.surfaceSecondary(dark))
-            }
-            background = badgeBg
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginStart = dpToPx(8f)
-            }
-            layoutParams = lp
-        }
-        titleRow.addView(displayBadgeView)
         titleColumn.addView(titleRow)
 
         val statusRow = LinearLayout(this).apply {
@@ -433,6 +421,23 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         titleColumn.addView(statusRow)
         headerRow.addView(titleColumn)
 
+        presentButton = createActionButton(
+            text = "移交主屏",
+            contentDesc = "移交主屏",
+            isPrimary = false,
+            isDanger = false,
+            onClick = { handlePresentToMainDisplay() }
+        ).apply {
+            val sz = dpToPx(48f)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, sz).apply {
+                marginEnd = dpToPx(4f)
+            }
+            minWidth = sz
+            minHeight = sz
+            setPadding(dpToPx(12f), 0, dpToPx(12f), 0)
+        }
+        headerRow.addView(presentButton)
+
         val pipButton = FrameLayout(this).apply {
             val sz = dpToPx(48f)
             layoutParams = LinearLayout.LayoutParams(sz, sz).apply {
@@ -452,16 +457,19 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         headerBar.addView(headerRow)
         rootContainer.addView(headerBar)
 
-        // 浮层底栏：操作按钮（停止任务、移交主屏、关闭预览）
+        // 浮层底栏：仅展示独立停止胶囊，去除3等宽大按钮堆
         bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(scrimBg)
+            setBackgroundColor(Color.TRANSPARENT)
             layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM
-            )
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.START
+            ).apply {
+                marginStart = dpToPx(16f)
+                bottomMargin = dpToPx(16f)
+            }
         }
 
         stopButton = createActionButton(
@@ -470,26 +478,17 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             isPrimary = false,
             isDanger = true,
             onClick = { handleStopTask() }
-        )
+        ).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dpToPx(48f)
+            )
+            minWidth = dpToPx(48f)
+            minHeight = dpToPx(48f)
+            setPadding(dpToPx(16f), 0, dpToPx(16f), 0)
+        }
         bottomBar.addView(stopButton)
 
-        presentButton = createActionButton(
-            text = "移交主屏",
-            contentDesc = "移交主屏",
-            isPrimary = true,
-            isDanger = false,
-            onClick = { handlePresentToMainDisplay() }
-        )
-        bottomBar.addView(presentButton)
-
-        closeButton = createActionButton(
-            text = "关闭预览",
-            contentDesc = "关闭预览",
-            isPrimary = false,
-            isDanger = false,
-            onClick = { finish() }
-        )
-        bottomBar.addView(closeButton)
         rootContainer.addView(bottomBar)
 
         ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { _, insets ->
@@ -715,18 +714,6 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             lastRenderedTitle = "虚拟屏"
         }
 
-        val badgeText = if (displayId > 0 && state != VirtualScreenUiState.CLOSED) "ID: $displayId" else ""
-        val badgeVisible = badgeText.isNotEmpty()
-        if (::displayBadgeView.isInitialized) {
-            if (lastRenderedBadgeVisible != badgeVisible) {
-                displayBadgeView.visibility = if (badgeVisible) View.VISIBLE else View.GONE
-                lastRenderedBadgeVisible = badgeVisible
-            }
-            if (badgeVisible && lastRenderedBadgeText != badgeText) {
-                displayBadgeView.text = badgeText
-                lastRenderedBadgeText = badgeText
-            }
-        }
 
         val displaySubtitle = when {
             state == VirtualScreenUiState.CLOSED -> {
@@ -772,19 +759,18 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             state == VirtualScreenUiState.RETAINED
         )
 
-        val canClose = !isFinishing && !isDestroyed
 
-        if (::stopButton.isInitialized && lastStopButtonEnabled != canStop) {
-            applyActionButtonStyle(stopButton, enabled = canStop, isPrimary = false, isDanger = true)
-            lastStopButtonEnabled = canStop
+        if (::stopButton.isInitialized) {
+            val shouldShowStop = (state == VirtualScreenUiState.RUNNING || state == VirtualScreenUiState.WAITING) && isBound
+            stopButton.visibility = if (shouldShowStop) View.VISIBLE else View.GONE
+            if (lastStopButtonEnabled != canStop) {
+                applyActionButtonStyle(stopButton, enabled = canStop, isPrimary = false, isDanger = true)
+                lastStopButtonEnabled = canStop
+            }
         }
         if (::presentButton.isInitialized && lastPresentButtonEnabled != canPresent) {
-            applyActionButtonStyle(presentButton, enabled = canPresent, isPrimary = true, isDanger = false)
+            applyActionButtonStyle(presentButton, enabled = canPresent, isPrimary = false, isDanger = false)
             lastPresentButtonEnabled = canPresent
-        }
-        if (::closeButton.isInitialized && lastCloseButtonEnabled != canClose) {
-            applyActionButtonStyle(closeButton, enabled = canClose, isPrimary = false, isDanger = false)
-            lastCloseButtonEnabled = canClose
         }
 
         if (state == VirtualScreenUiState.CLOSED) {
@@ -936,7 +922,6 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     fun getPreviewView(): VirtualDisplayFrameView = previewView
     fun getStopButton(): Button = stopButton
     fun getPresentButton(): Button = presentButton
-    fun getCloseButton(): Button = closeButton
 
     override fun onStart() {
         super.onStart()
@@ -984,6 +969,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        dismissPresentConfirmationDialog()
         stopStateRefreshLoop()
         hideControlsHandler.removeCallbacks(hideControlsRunnable)
         takeoverJob?.cancel()
@@ -999,6 +985,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     }
 
     override fun finish() {
+        dismissPresentConfirmationDialog()
         disableAutoEnterPip()
         stopStateRefreshLoop()
         takeoverJob?.cancel()
@@ -1165,15 +1152,61 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     }
 
     /**
-     * 移交主屏：委托 VirtualDisplayTakeoverController 执行安全取消、等待、新Turn防护与无损迁移。
+     * 移交主屏：弹出显式二次确认对话框，用户确认且捕获快照未过时才委托 VirtualDisplayTakeoverController 执行安全迁移。
      */
     private fun handlePresentToMainDisplay() {
+        if (isFinishing || isDestroyed) return
+        dismissPresentConfirmationDialog()
+
+        val captured = PresentBindingIdentity(
+            sessionId = sessionId,
+            displayId = displayId,
+            taskId = initialTaskId,
+            turnId = initialTurnId,
+            stopToken = initialStopToken
+        )
+
+        val hasActiveTask = isTaskRunningForCurrentTurn() || !captured.taskId.isNullOrBlank()
+        val message = if (hasActiveTask) {
+            "将停止当前任务，并把后台应用移到主屏由你继续操作。当前前台应用会暂时离开。"
+        } else {
+            "将后台应用移到主屏，由你继续操作。"
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("移交主屏操作")
+            .setMessage(message)
+            .setPositiveButton("确认移交") { _, _ ->
+                val current = PresentBindingIdentity(
+                    sessionId = sessionId,
+                    displayId = displayId,
+                    taskId = initialTaskId,
+                    turnId = initialTurnId,
+                    stopToken = initialStopToken
+                )
+                if (current == captured && !isFinishing && !isDestroyed) {
+                    executePresentToMainDisplay(captured)
+                } else {
+                    OmniLog.w(TAG, "已绑定新任务或状态已失效，拒绝执行旧移交确认")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .setOnDismissListener {
+                if (presentConfirmDialog === it) {
+                    presentConfirmDialog = null
+                }
+            }
+            .create()
+        presentConfirmDialog = dialog
+        dialog.show()
+    }
+
+    private fun executePresentToMainDisplay(target: PresentBindingIdentity) {
         takeoverJob?.cancel()
-        val targetSessionId = sessionId
-        val targetDisplayId = displayId
-        val targetTaskId = initialTaskId
-        val targetTurnId = initialTurnId
-        val targetStopToken = initialStopToken
+        val targetSessionId = target.sessionId
+        val targetDisplayId = target.displayId
+        val targetTaskId = target.taskId
+        val targetTurnId = target.turnId
+        val targetStopToken = target.stopToken
 
         if (targetSessionId.isEmpty() || targetDisplayId == Display.DEFAULT_DISPLAY) {
             return
@@ -1192,7 +1225,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                     initialStopToken == targetStopToken
 
             if (::presentButton.isInitialized) {
-                applyActionButtonStyle(presentButton, enabled = false, isPrimary = true, isDanger = false)
+                applyActionButtonStyle(presentButton, enabled = false, isPrimary = false, isDanger = false)
             }
             if (::stopButton.isInitialized) {
                 applyActionButtonStyle(stopButton, enabled = false, isPrimary = false, isDanger = true)

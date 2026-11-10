@@ -144,8 +144,21 @@ object OmniFlow {
                 val targetDisplayArg = request.toolCall.arguments["display"]?.toString()
                     ?: request.toolCall.arguments["display_id"]?.toString()
                 val targetDisplayId = when {
-                    targetDisplayArg == "main" || targetDisplayArg == "0" -> Display.DEFAULT_DISPLAY
-                    !targetDisplayArg.isNullOrBlank() -> DeviceDisplayManager.resolveDisplayId(context, targetDisplayArg)
+                    targetDisplayArg == "main" || targetDisplayArg == "0" ->
+                        throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
+                    !targetDisplayArg.isNullOrBlank() -> {
+                        val resolved = DeviceDisplayManager.resolveDisplayId(context, targetDisplayArg)
+                        if (resolved == Display.DEFAULT_DISPLAY) {
+                            throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
+                        }
+                        val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
+                        val owner = DisplayInputCoordinator.getVirtualDisplayOwner(resolved)
+                            ?: DeviceDisplayManager.activeVirtualDisplayOwner()
+                        if (resolved != activeVd || !DeviceDisplayManager.isVirtualDisplayActive() || owner == null) {
+                            throw IllegalStateException("虚拟显示屏 $resolved 未登记为活动托管虚拟屏，当前无权操作非托管显示屏。")
+                        }
+                        resolved
+                    }
                     else -> throw IllegalArgumentException("Missing target display for interactive execution. Target display must be resolved and passed by caller.")
                 }
                 DisplayInputCoordinator.withDisplayLease(displayId = targetDisplayId, ownerId = request.id) {
@@ -370,8 +383,21 @@ class OmniFlowDeviceDispatcher internal constructor(
         val displayArg = request?.toolCall?.arguments?.get("display")?.toString()
             ?: request?.toolCall?.arguments?.get("display_id")?.toString()
         when {
-            displayArg == "main" || displayArg == "0" -> Display.DEFAULT_DISPLAY
-            !displayArg.isNullOrBlank() -> DeviceDisplayManager.resolveDisplayId(appContext, displayArg)
+            displayArg == "main" || displayArg == "0" ->
+                throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
+            !displayArg.isNullOrBlank() -> {
+                val resolved = DeviceDisplayManager.resolveDisplayId(appContext, displayArg)
+                if (resolved == Display.DEFAULT_DISPLAY) {
+                    throw IllegalArgumentException("background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。")
+                }
+                val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
+                val owner = DisplayInputCoordinator.getVirtualDisplayOwner(resolved)
+                    ?: DeviceDisplayManager.activeVirtualDisplayOwner()
+                if (resolved != activeVd || !DeviceDisplayManager.isVirtualDisplayActive() || owner == null) {
+                    throw IllegalStateException("虚拟显示屏 $resolved 未登记为活动托管虚拟屏，当前无权操作非托管显示屏。")
+                }
+                resolved
+            }
             else -> throw IllegalArgumentException("Missing target display for interactive execution. Target display must be resolved and passed by caller.")
         }
     }

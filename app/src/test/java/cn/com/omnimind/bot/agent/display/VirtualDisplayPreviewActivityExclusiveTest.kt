@@ -45,7 +45,7 @@ import kotlin.concurrent.withLock
 class VirtualDisplayPreviewActivityExclusiveTest {
 
     private lateinit var context: Context
-
+    private var testBridge: FakeTestDisplayBridge? = null
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
@@ -80,8 +80,11 @@ class VirtualDisplayPreviewActivityExclusiveTest {
         fsField.set(DeviceDisplayManager, source)
         if (ownerId != null && displayId != Display.DEFAULT_DISPLAY) {
             DisplayInputCoordinator.registerVirtualDisplayOwnership(displayId, ownerId)
-            DeviceDisplayManager.displayBridge = FakeTestDisplayBridge()
+            val bridge = FakeTestDisplayBridge()
+            testBridge = bridge
+            DeviceDisplayManager.displayBridge = bridge
         } else {
+            testBridge = null
             DeviceDisplayManager.displayBridge = null
         }
     }
@@ -446,9 +449,9 @@ class VirtualDisplayPreviewActivityExclusiveTest {
         val activity = controller.get()
         ShadowLooper.idleMainLooper()
         try {
-            // 用户点击“关闭预览”或返回键
-            activity.getCloseButton().performClick()
-            assertTrue("关闭预览必须触发 Activity finish", activity.isFinishing)
+            // 用户触发系统返回键退出全屏观看
+            activity.onBackPressedDispatcher.onBackPressed()
+            assertTrue("返回键退出全屏观看必须触发 Activity finish", activity.isFinishing)
 
             // 核心契约：Activity 生命周期结束绝不停止/取消 TaskRuntime 执行租约，不产生终态
             val active = TaskRuntime.findActiveTaskBySession(sessionId)
@@ -461,7 +464,226 @@ class VirtualDisplayPreviewActivityExclusiveTest {
         }
     }
 
+    @Test
+    fun `present button triggers confirmation dialog and does not take over without user confirmation`() {
+        val sessionId = "session-exclusive-confirm"
+        val displayId = 20
+        val taskId = "task-confirm-1"
+        val turnId = "turn-confirm-1"
+
+        val source = VirtualScreenFrameSource(1080, 2400)
+        setVirtualDisplayForTesting(displayId, sessionId, source)
+
+        TaskRuntime.start(
+            context = context,
+            taskId = taskId,
+            conversationId = 105L,
+            sessionId = sessionId,
+            turnId = turnId,
+            title = "确认移交测试",
+        )
+        TaskRuntime.markScreenTarget(context, sessionId, turnId, displayId)
+        val stopToken = TaskRuntime.getActiveTask(taskId)!!.stopToken
+
+        val intent = VirtualDisplayPreviewActivity.createIntent(
+            context = context,
+            sessionId = sessionId,
+            displayId = displayId,
+            taskId = taskId,
+            turnId = turnId,
+            stopToken = stopToken,
+        )
+
+        val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intent).create().start().resume().visible()
+        val activity = controller.get()
+        ShadowLooper.idleMainLooper()
+
+        try {
+            assertTrue("移交按钮初始可用", activity.getPresentButton().isEnabled)
+            activity.getPresentButton().performClick()
+            ShadowLooper.idleMainLooper()
+
+            // 1. 弹出二次确认对话框，但尚未确认
+            val dialog = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+            assertNotNull("点击移交主屏必须弹出显式二次确认对话框", dialog)
+            assertTrue("对话框必须展示给用户", dialog.isShowing)
+
+            // 验证：点击但未确认前，任务依然保持活跃，绝不提前执行迁移
+            val activeBefore = TaskRuntime.getActiveTask(taskId)
+            assertNotNull("未确认前任务必须依然保持活跃", activeBefore)
+            assertEquals(taskId, activeBefore?.taskId)
+            assertEquals("未确认前绝不执行 moveRootTask", 0, testBridge?.moveCalls?.size ?: 0)
+
+            // 2. 用户取消对话框
+            dialog.dismiss()
+            ShadowLooper.idleMainLooper()
+            val activeAfterCancel = TaskRuntime.getActiveTask(taskId)
+            assertNotNull("取消确认后任务依然保持活跃", activeAfterCancel)
+            assertEquals(taskId, activeAfterCancel?.taskId)
+            assertEquals("取消后绝对不执行 moveRootTask", 0, testBridge?.moveCalls?.size ?: 0)
+        } finally {
+            controller.destroy()
+            ShadowLooper.idleMainLooper()
+            source.close()
+        }
+    }
+
+    @Test
+    fun `stale confirm dialog from task A does not stop or move task B after onNewIntent`() {
+        val sessionIdA = "session-stale-A"
+        val displayIdA = 21
+        val taskIdA = "task-stale-A"
+        val turnIdA = "turn-stale-A"
+
+        val sourceA = VirtualScreenFrameSource(1080, 2400)
+        setVirtualDisplayForTesting(displayIdA, sessionIdA, sourceA)
+
+        TaskRuntime.start(
+            context = context,
+            taskId = taskIdA,
+            conversationId = 106L,
+            sessionId = sessionIdA,
+            turnId = turnIdA,
+            title = "旧任务A",
+        )
+        TaskRuntime.markScreenTarget(context, sessionIdA, turnIdA, displayIdA)
+        val stopTokenA = TaskRuntime.getActiveTask(taskIdA)!!.stopToken
+
+        val intentA = VirtualDisplayPreviewActivity.createIntent(
+            context = context,
+            sessionId = sessionIdA,
+            displayId = displayIdA,
+            taskId = taskIdA,
+            turnId = turnIdA,
+            stopToken = stopTokenA,
+        )
+
+        val controller = Robolectric.buildActivity(VirtualDisplayPreviewActivity::class.java, intentA).create().start().resume().visible()
+        val activity = controller.get()
+        ShadowLooper.idleMainLooper()
+
+        try {
+            // 1. 任务 A 下点击移交主屏，弹出二次确认对话框
+            activity.getPresentButton().performClick()
+            ShadowLooper.idleMainLooper()
+            val dialogA = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog()
+            assertNotNull("点击移交主屏必须弹出确认对话框", dialogA)
+            assertTrue("对话框必须展示", dialogA.isShowing)
+
+            // 2. 此时有新任务 B 准入，Activity 收到 onNewIntent
+            val sessionIdB = "session-stale-B"
+            val displayIdB = 22
+            val taskIdB = "task-stale-B"
+            val turnIdB = "turn-stale-B"
+            val sourceB = VirtualScreenFrameSource(1080, 2400)
+            setVirtualDisplayForTesting(displayIdB, sessionIdB, sourceB)
+
+            TaskRuntime.start(
+                context = context,
+                taskId = taskIdB,
+                conversationId = 107L,
+                sessionId = sessionIdB,
+                turnId = turnIdB,
+                title = "新任务B",
+            )
+            TaskRuntime.markScreenTarget(context, sessionIdB, turnIdB, displayIdB)
+            val stopTokenB = TaskRuntime.getActiveTask(taskIdB)!!.stopToken
+
+            val intentB = VirtualDisplayPreviewActivity.createIntent(
+                context = context,
+                sessionId = sessionIdB,
+                displayId = displayIdB,
+                taskId = taskIdB,
+                turnId = turnIdB,
+                stopToken = stopTokenB,
+            )
+
+            controller.newIntent(intentB)
+            ShadowLooper.idleMainLooper()
+
+            // 验证：旧对话框必须已被 dismiss 关闭
+            assertFalse("收到新任务 onNewIntent 后旧确认对话框必须自动关闭", dialogA.isShowing)
+
+            // 3. 即使针对旧对话框调用确认，也绝不可停止或影响新任务 B
+            val positiveBtn = dialogA.getButton(android.content.DialogInterface.BUTTON_POSITIVE)
+            positiveBtn?.performClick()
+            ShadowLooper.idleMainLooper()
+
+            // 验证：任务 B 保持运行，且 bridge.moveCalls 为空，绝未被旧对话框误杀或抢占
+            val activeB = TaskRuntime.getActiveTask(taskIdB)
+            assertNotNull("新任务 B 必须完好保持运行，绝不可被旧对话框误杀", activeB)
+            assertEquals("活跃任务依然为 B", taskIdB, activeB?.taskId)
+            assertEquals("绝不可执行对任务 B 的 moveRootTask", 0, testBridge?.moveCalls?.size ?: 0)
+            sourceB.close()
+        } finally {
+            controller.destroy()
+            ShadowLooper.idleMainLooper()
+            sourceA.close()
+        }
+    }
+
+    @Test
+    fun `dock inactive pause preserves static frame on restore while screen lock rejects pre-lock frame`() {
+        val sessionId = "session-restore-static"
+        val displayId = 25
+        val source = VirtualScreenFrameSource(100, 100)
+        setVirtualDisplayForTesting(displayId, sessionId, source)
+
+        val frameView = VirtualDisplayFrameView(context).apply {
+            bind(displayId, sessionId)
+        }
+        val layout = android.widget.FrameLayout(context).apply {
+            addView(frameView, android.widget.FrameLayout.LayoutParams(100, 100))
+        }
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+        val lp = android.view.WindowManager.LayoutParams(100, 100, android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, 0, android.graphics.PixelFormat.TRANSLUCENT)
+        wm.addView(layout, lp)
+        ShadowLooper.idleMainLooper()
+
+        try {
+            // 1. 发布静态蓝帧
+            val blueBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+            publishFrameForTesting(source, blueBitmap)
+
+            val renderBitmap1 = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+            renderPreview(frameView, Canvas(renderBitmap1))
+            assertEquals("初始绘制必须可见蓝帧", Color.BLUE, renderBitmap1.getPixel(50, 50))
+
+            // 2. 模拟贴边折叠停帧（setPreviewActive(false)），手机保持解锁交互
+            frameView.setPreviewActive(false)
+            ShadowLooper.idleMainLooper()
+
+            // 3. 模拟还原展开（setPreviewActive(true)），未锁屏时同序列静态帧必须立即可见
+            frameView.setPreviewActive(true)
+            ShadowLooper.idleMainLooper()
+
+            val renderBitmap2 = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+            renderPreview(frameView, Canvas(renderBitmap2))
+            assertEquals("贴边恢复展开时静态蓝帧必须立即可见，严禁变黑", Color.BLUE, renderBitmap2.getPixel(50, 50))
+
+            // 4. 模拟真实息屏锁屏（ACTION_SCREEN_OFF），触发安全水位提升
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            Shadows.shadowOf(pm).setIsInteractive(false)
+            context.sendBroadcast(android.content.Intent(android.content.Intent.ACTION_SCREEN_OFF))
+            ShadowLooper.idleMainLooper()
+
+            // 用户解锁屏幕，但未产出新帧
+            Shadows.shadowOf(pm).setIsInteractive(true)
+            context.sendBroadcast(android.content.Intent(android.content.Intent.ACTION_USER_PRESENT))
+            ShadowLooper.idleMainLooper()
+
+            val renderBitmap3 = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+            renderPreview(frameView, Canvas(renderBitmap3))
+            assertEquals("锁屏恢复后无新帧到达前必须清黑，拒绝泄露锁屏前旧帧", Color.BLACK, renderBitmap3.getPixel(50, 50))
+        } finally {
+            runCatching { wm.removeView(layout) }
+            ShadowLooper.idleMainLooper()
+            source.close()
+        }
+    }
+
     private class FakeTestDisplayBridge : PrivilegedDisplayBridge {
+        val moveCalls = mutableListOf<Triple<Int, Int, Int>>()
         override suspend fun createVirtualDisplay(width: Int, height: Int, dpi: Int, surface: android.view.Surface, flags: Int): Result<Int> =
             Result.success(4)
         override suspend fun releaseVirtualDisplay(displayId: Int) {}
@@ -471,7 +693,9 @@ class VirtualDisplayPreviewActivityExclusiveTest {
         override suspend fun launchActivity(displayId: Int, packageName: String): Boolean = true
         override suspend fun getRootTasks(displayId: Int): String =
             """[{"taskId":101,"taskKind":"root_task","displayId":$displayId,"userId":0,"packageName":"com.example.calc","childTaskIds":[101]}]"""
-        override suspend fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): String =
-            """{"success":true,"code":"ok","taskId":$taskId,"taskKind":"root_task","sourceDisplayId":$sourceDisplayId,"targetDisplayId":$targetDisplayId,"verified":true}"""
+        override suspend fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): String {
+            moveCalls.add(Triple(taskId, sourceDisplayId, targetDisplayId))
+            return """{"success":true,"code":"ok","taskId":$taskId,"taskKind":"root_task","sourceDisplayId":$sourceDisplayId,"targetDisplayId":$targetDisplayId,"verified":true}"""
+        }
     }
 }

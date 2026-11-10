@@ -74,9 +74,10 @@ class VlmToolHandler(context: Context) : ToolHandler {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val msg = "指定的显示屏 '$displayTarget' 不可用或准备失败: ${e.message}"
-            persistFailure(runId, goal, "display_unavailable", msg)
-            return failedRunResult(runId, goal, "display_unavailable", msg)
+            val msg = e.message ?: "指定的显示屏 '$displayTarget' 不可用或准备失败"
+            val reason = if (msg.contains("background_display_required")) "background_display_required" else "display_unavailable"
+            persistFailure(runId, goal, reason, msg)
+            return failedRunResult(runId, goal, reason, msg)
         }
         toolHandle.bindStopAction {
             OmniVlmPlugin.stop(runId)
@@ -337,6 +338,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
         }
         }
     }
+
 
     private fun persistFailure(
         runId: String,

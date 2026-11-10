@@ -4,6 +4,14 @@ import android.app.Application
 import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import org.robolectric.Shadows
+import android.os.Build
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -308,7 +316,27 @@ class DeviceDisplayManagerTest {
     }
 
     @Test
-    fun `launchActivity never issues force-stop and migrates existing root task`() {
+    fun `launchActivity never issues force-stop and migrates existing root task between virtual displays`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = listOf(
+                PrivilegedDisplayServiceStub.TaskSnapshot(
+                    taskId = 55,
+                    taskKind = "root_task",
+                    displayId = 2,
+                    userId = 0,
+                    packageName = "com.example.calc",
+                    childTaskIds = listOf(55),
+                )
+            )
+        )
+
+        val launched = stub.launchActivity(displayId = 3, packageName = "com.example.calc")
+        assertTrue("Migrating single existing task between virtual displays returns true", launched)
+        assertTrue("Never issues force-stop", stub.executedCommands.none { cmd -> cmd.contains("force-stop") })
+    }
+
+    @Test
+    fun `launchActivity refuses to migrate task from main display to virtual display`() {
         val stub = FakePrivilegedDisplayServiceStub(
             initialTasks = listOf(
                 PrivilegedDisplayServiceStub.TaskSnapshot(
@@ -318,14 +346,17 @@ class DeviceDisplayManagerTest {
                     userId = 0,
                     packageName = "com.example.calc",
                     childTaskIds = listOf(55),
+                    visible = false,
+                    isFocused = false,
                 )
             )
         )
 
         val launched = stub.launchActivity(displayId = 3, packageName = "com.example.calc")
-        assertTrue("Migrating single existing task returns true", launched)
-        assertTrue("Never issues force-stop", stub.executedCommands.none { cmd -> cmd.contains("force-stop") })
+        assertFalse("Refuses to migrate task from main display to virtual display", launched)
+        assertEquals("Task remains on main display 0", 0, stub.tasksOnDisplays[0]?.single()?.displayId)
     }
+
     @Test
     fun `launchActivity refuses to migrate task if existing task on main display is in foreground`() {
         val stub = FakePrivilegedDisplayServiceStub(
@@ -564,13 +595,362 @@ class DeviceDisplayManagerTest {
         assertEquals("com.example.legacy", tasks[0].packageName)
         assertEquals(224, tasks[0].taskId)
     }
+
+    private fun <T> anyNonNull(default: T): T {
+        org.mockito.ArgumentMatchers.any<T>()
+        return default
+    }
+
+    private fun registerApp(
+        packageName: String,
+        enabled: Boolean = true,
+        suspended: Boolean = false,
+        hasLauncher: Boolean = true,
+    ) {
+        val shadowPm = Shadows.shadowOf(context.packageManager)
+        val appFlags = if (suspended) {
+            ApplicationInfo.FLAG_INSTALLED or ApplicationInfo.FLAG_SUSPENDED
+        } else {
+            ApplicationInfo.FLAG_INSTALLED
+        }
+        val appInfo = ApplicationInfo().apply {
+            this.packageName = packageName
+            this.enabled = enabled
+            this.flags = appFlags
+        }
+        val activities = if (hasLauncher) {
+            val actInfo = ActivityInfo().apply {
+                this.name = "$packageName.MainActivity"
+                this.packageName = packageName
+                this.applicationInfo = appInfo
+                this.enabled = enabled
+                this.exported = true
+            }
+            arrayOf(actInfo)
+        } else {
+            emptyArray()
+        }
+        val pi = PackageInfo().apply {
+            this.packageName = packageName
+            this.applicationInfo = appInfo
+            this.activities = activities
+        }
+        shadowPm.installPackage(pi)
+        if (hasLauncher) {
+            val resolveInfo = ResolveInfo().apply {
+                this.activityInfo = activities[0]
+            }
+            val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                setPackage(packageName)
+            }
+            shadowPm.addResolveInfoForIntent(launcherIntent, resolveInfo)
+        }
+    }
+
+    @Test
+    fun `launchAppOnDisplay returns package_not_installed when package does not exist without dispatching`() = runBlocking {
+        val fakeBridge = FakePrivilegedDisplayBridge()
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = "com.uninstalled.app",
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Uninstalled app must fail", result.success)
+        assertEquals("package_not_installed", result.diagnostics["code"])
+        assertEquals("com.uninstalled.app", result.diagnostics["packageName"])
+        assertEquals("3", result.diagnostics["targetDisplayId"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+    @Test
+    fun `launchAppOnDisplay returns package_state_unavailable when getPackageInfo throws unexpected error without dispatching`() = runBlocking {
+        val fakeBridge = FakePrivilegedDisplayBridge()
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val mockPm = org.mockito.Mockito.mock(PackageManager::class.java)
+        val dummyFlags = PackageManager.PackageInfoFlags.of(0)
+        org.mockito.Mockito.`when`(mockPm.getPackageInfo(anyNonNull(""), anyNonNull(0)))
+            .thenThrow(SecurityException("Mock security exception"))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            org.mockito.Mockito.`when`(mockPm.getPackageInfo(anyNonNull(""), anyNonNull(dummyFlags)))
+                .thenThrow(SecurityException("Mock security exception"))
+        }
+        val throwingContext = object : android.content.ContextWrapper(context) {
+            override fun getPackageManager(): PackageManager = mockPm
+        }
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = throwingContext,
+            packageName = "com.throwing.app",
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Unexpected failure must return false", result.success)
+        assertEquals("package_state_unavailable", result.diagnostics["code"])
+        assertEquals("com.throwing.app", result.diagnostics["packageName"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+
+    @Test
+    fun `launchAppOnDisplay returns app_suspended when package is suspended without dispatching`() = runBlocking {
+        val pkgName = "com.tencent.android.qqdownloader"
+        registerApp(pkgName, enabled = true, suspended = true, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge()
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Suspended app must fail without dispatching", result.success)
+        assertEquals("app_suspended", result.diagnostics["code"])
+        assertEquals(pkgName, result.diagnostics["packageName"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+    @Test
+    fun `launchAppOnDisplay returns app_disabled when package is disabled without dispatching`() = runBlocking {
+        val pkgName = "com.example.disabledapp"
+        registerApp(pkgName, enabled = false, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge()
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Disabled app must fail without dispatching", result.success)
+        assertEquals("app_disabled", result.diagnostics["code"])
+        assertEquals(pkgName, result.diagnostics["packageName"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+    @Test
+    fun `launchAppOnDisplay returns package_no_launcher when package has no launcher activity without dispatching`() = runBlocking {
+        val pkgName = "com.example.backgroundservice"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = false)
+
+        val fakeBridge = FakePrivilegedDisplayBridge()
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("App without launcher must fail without dispatching", result.success)
+        assertEquals("package_no_launcher", result.diagnostics["code"])
+        assertEquals(pkgName, result.diagnostics["packageName"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+
+    @Test
+    fun `launchAppOnDisplay refuses to migrate task when package already has task on main display`() = runBlocking {
+        val pkgName = "com.example.apponmain"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(
+            rootTasksByDisplay = mapOf(
+                0 to """[{"taskId":88,"taskKind":"root_task","displayId":0,"userId":0,"packageName":"$pkgName","childTaskIds":[88],"visible":false,"isFocused":false}]""",
+                3 to "[]",
+            )
+        )
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Must not migrate task from main display to virtual display", result.success)
+        assertEquals("app_has_task_on_main_display", result.diagnostics["code"])
+        assertEquals("88", result.diagnostics["taskId"])
+        assertEquals(0, fakeBridge.launchCalls.size)
+        assertEquals(0, fakeBridge.moveCalls.size)
+    }
+
+    @Test
+    fun `launchAppOnDisplay fails when package not detected on target display and does not report false success`() = runBlocking {
+        val pkgName = "com.example.failinglaunch"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(rootTasksResponse = "[]")
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Must return failure when package does not appear on target display", result.success)
+        assertEquals("app_not_detected_on_display", result.diagnostics["code"])
+        assertEquals(1, fakeBridge.launchCalls.size)
+    }
+
+    @Test
+    fun `launchAppOnDisplay fails with app_dropped_to_main_display when system drops target to main display`() = runBlocking {
+        val pkgName = "com.example.droppedtomain"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        lateinit var fakeBridge: FakePrivilegedDisplayBridge
+        fakeBridge = FakePrivilegedDisplayBridge(
+            rootTasksByDisplay = mapOf(0 to "[]", 3 to "[]"),
+            onLaunchActivity = {
+                fakeBridge.rootTasksByDisplay = mapOf(
+                    0 to """[{"taskId":77,"taskKind":"root_task","displayId":0,"userId":0,"packageName":"$pkgName","childTaskIds":[77],"visible":true,"isFocused":true}]""",
+                    3 to "[]",
+                )
+            }
+        )
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Must return failure when app drops to main display", result.success)
+        assertEquals("app_dropped_to_main_display", result.diagnostics["code"])
+        assertEquals("0", result.diagnostics["actualDisplayId"])
+        assertEquals("3", result.diagnostics["targetDisplayId"])
+    }
+
+    @Test
+    fun `launchAppOnDisplay succeeds only when package is confirmed appeared on target display`() = runBlocking {
+        val pkgName = "com.example.successapp"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(
+            rootTasksByDisplay = mapOf(
+                0 to "[]",
+                3 to """[{"taskId":99,"taskKind":"root_task","displayId":3,"userId":0,"packageName":"$pkgName","childTaskIds":[99],"visible":true,"isFocused":true}]""",
+            )
+        )
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertTrue("Must succeed when confirmed on target display", result.success)
+        assertEquals("ok", result.diagnostics["code"])
+        assertEquals("open_app_dispatched_on_display:3", result.message)
+    }
+
+    @Test
+    fun `launchAppOnDisplay on default display confirms package appeared and does not report false success on timeout`() = runBlocking {
+        val pkgName = "com.example.mainlaunch"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(rootTasksResponse = "[]")
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val resultFail = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 0,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Default display launch must not report false success on timeout", resultFail.success)
+        assertEquals("app_not_detected_on_display", resultFail.diagnostics["code"])
+
+        // Now simulate package appeared on default display 0
+        fakeBridge.rootTasksResponse = """[
+            {"taskId":101,"taskKind":"root_task","displayId":0,"userId":0,"packageName":"$pkgName","childTaskIds":[101],"visible":true,"isFocused":true}
+        ]"""
+
+        val resultSuccess = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 0,
+            timeoutMs = 0L,
+        )
+
+        assertTrue("Default display launch succeeds when package confirmed on default display", resultSuccess.success)
+        assertEquals("ok", resultSuccess.diagnostics["code"])
+        assertEquals("open_app_dispatched", resultSuccess.message)
+    }
+    @Test
+    fun `launchAppOnDisplay fails when package task on target display is neither visible nor focused`() = runBlocking {
+        val pkgName = "com.example.dormantapp"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(
+            rootTasksByDisplay = mapOf(
+                0 to "[]",
+                3 to """[{"taskId":99,"taskKind":"root_task","displayId":3,"userId":0,"packageName":"$pkgName","childTaskIds":[99],"visible":false,"isFocused":false}]""",
+            )
+        )
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 3,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Dormant non-visible task must not report success", result.success)
+        assertEquals("app_not_detected_on_display", result.diagnostics["code"])
+    }
+
+    @Test
+    fun `launchAppOnDisplay does not treat unknown taskDisplay as main display success`() = runBlocking {
+        val pkgName = "com.example.unknowndisplay"
+        registerApp(pkgName, enabled = true, suspended = false, hasLauncher = true)
+
+        val fakeBridge = FakePrivilegedDisplayBridge(rootTasksResponse = "[]")
+        DeviceDisplayManager.displayBridge = fakeBridge
+
+        val result = DeviceDisplayManager.launchAppOnDisplay(
+            context = context,
+            packageName = pkgName,
+            displayId = 0,
+            timeoutMs = 0L,
+        )
+
+        assertFalse("Unknown task display must never verify any display as success", result.success)
+        assertEquals("app_not_detected_on_display", result.diagnostics["code"])
+    }
 }
 
 private class FakePrivilegedDisplayBridge(
     var rootTasksResponse: String = "[]",
     var moveRootTaskResponse: String = """{"success":true,"code":"ok","taskId":1,"taskKind":"root_task","sourceDisplayId":3,"targetDisplayId":0,"verified":true}""",
+    var rootTasksByDisplay: Map<Int, String> = emptyMap(),
+    var launchActivityResult: Boolean = true,
+    var onLaunchActivity: (() -> Unit)? = null,
 ) : PrivilegedDisplayBridge {
     val moveCalls = mutableListOf<Triple<Int, Int, Int>>()
+    val launchCalls = mutableListOf<Pair<Int, String>>()
 
     override suspend fun createVirtualDisplay(width: Int, height: Int, dpi: Int, surface: Surface, flags: Int): Result<Int> =
         Result.success(3)
@@ -579,9 +959,14 @@ private class FakePrivilegedDisplayBridge(
     override suspend fun injectKeyEvent(displayId: Int, keyCode: Int): Boolean = true
     override suspend fun injectTap(displayId: Int, x: Int, y: Int): Boolean = true
     override suspend fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean = true
-    override suspend fun launchActivity(displayId: Int, packageName: String): Boolean = true
+    override suspend fun launchActivity(displayId: Int, packageName: String): Boolean {
+        launchCalls.add(displayId to packageName)
+        onLaunchActivity?.invoke()
+        return launchActivityResult
+    }
 
-    override suspend fun getRootTasks(displayId: Int): String = rootTasksResponse
+    override suspend fun getRootTasks(displayId: Int): String =
+        rootTasksByDisplay[displayId] ?: rootTasksResponse
 
     override suspend fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): String {
         moveCalls.add(Triple(taskId, sourceDisplayId, targetDisplayId))

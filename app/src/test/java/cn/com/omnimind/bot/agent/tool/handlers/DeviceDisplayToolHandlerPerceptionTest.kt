@@ -54,6 +54,14 @@ class DeviceDisplayToolHandlerPerceptionTest {
         mockEnvironment = Mockito.mock(AndroidGuiEnvironment::class.java)
         handler = DeviceDisplayToolHandler(context, mockEnvironment)
         DisplayInputCoordinator.resetForTesting()
+        DeviceDisplayManager.displayBridge = FakePerceptionBridge(2)
+        val vfField = DeviceDisplayManager::class.java
+            .getDeclaredField("activeVirtualDisplayId").apply { isAccessible = true }
+        val voField = DeviceDisplayManager::class.java
+            .getDeclaredField("activeVirtualDisplayOwner").apply { isAccessible = true }
+        vfField.setInt(DeviceDisplayManager, 2)
+        voField.set(DeviceDisplayManager, "session-p-test")
+        DisplayInputCoordinator.registerVirtualDisplayOwnership(2, "session-p-test")
     }
 
     @After
@@ -100,7 +108,11 @@ class DeviceDisplayToolHandlerPerceptionTest {
         function = AssistantToolCallFunction(DeviceDisplayToolHandler.TOOL_NAME, "{}")
     )
 
-    private fun createTestState(displayId: Int = Display.DEFAULT_DISPLAY, stateId: String = "state_1"): State {
+    private fun createTestState(
+        displayId: Int = Display.DEFAULT_DISPLAY,
+        stateId: String = "state_1",
+        packageName: String = "com.test.app",
+    ): State {
         return State(
             stateId = stateId,
             packageName = "com.test.app",
@@ -155,7 +167,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
                 mockEnvironment.observeWithDiagnostics(
                     captureScreenshot = Mockito.eq(true),
                     waitToStabilize = Mockito.eq(false),
-                    displayId = Mockito.eq(Display.DEFAULT_DISPLAY),
+                    displayId = Mockito.eq(2),
                     leaseOwnerId = Mockito.anyString(),
                     ocr = Mockito.eq(true),
                     region = Mockito.eq(AndroidGuiObservationRegion(100.0, 200.0, 500.0, 600.0)),
@@ -164,7 +176,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
 
             val args = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
                 put("ocr", true)
                 put("region", buildJsonObject {
                     put("x1", 100.0)
@@ -237,7 +249,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
                 mockEnvironment.observeWithDiagnostics(
                     captureScreenshot = Mockito.eq(false),
                     waitToStabilize = Mockito.eq(false),
-                    displayId = Mockito.eq(Display.DEFAULT_DISPLAY),
+                    displayId = Mockito.eq(2),
                     leaseOwnerId = Mockito.anyString(),
                     ocr = Mockito.eq(false),
                     region = Mockito.isNull(),
@@ -246,7 +258,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
 
             val args = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
             }
 
             val env = mockEnv()
@@ -276,7 +288,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
             // Invalid: x2 <= x1 (zero/negative area)
             val argsZeroArea = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
                 put("region", buildJsonObject {
                     put("x1", 500.0)
                     put("y1", 200.0)
@@ -291,7 +303,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
             // Invalid: coordinate > 1000 out of bounds
             val argsOutOfBounds = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
                 put("region", buildJsonObject {
                     put("x1", 0.0)
                     put("y1", 0.0)
@@ -306,7 +318,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
             // Non-object region (e.g. array or primitive) must be strictly rejected
             val argsNonObject = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
                 put("region", "0,0,100,100")
             }
 
@@ -334,7 +346,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
 
             val args = buildJsonObject {
                 put("action", "get_state")
-                put("display", "main")
+                put("display", "virtual")
                 put("ocr", "yes") // not a boolean
             }
 
@@ -359,7 +371,7 @@ class DeviceDisplayToolHandlerPerceptionTest {
         runBlocking {
             val clickArgs = buildJsonObject {
                 put("action", "click")
-                put("display", "main")
+                put("display", "virtual")
                 put("x", 200.0)
                 put("y", 200.0)
                 put("observation_id", "obs_expired_nonexistent")
@@ -390,76 +402,219 @@ class DeviceDisplayToolHandlerPerceptionTest {
     @Test
     fun `click with cross-display observation_id rejects and does not call environment act`() {
         runBlocking {
-            // Register an observation on display 0
-            val state0 = createTestState(displayId = 0, stateId = "state_d0")
-            val obsId0 = "obs_display_0_abc"
-            val observation0 = AndroidGuiObservation(
-                state = state0,
+            val env = mockEnv()
+            val callback = Mockito.mock(AgentCallback::class.java)
+            val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+
+            // 1. 在当前活跃虚拟屏 2 上进行观测，记录 observation_id 为 obs_display_2_abc
+            val state2 = createTestState(displayId = 2, stateId = "state_d2")
+            val obsId2 = "obs_display_2_abc"
+            val observation2 = AndroidGuiObservation(
+                state = state2,
                 stabilization = emptyMap(),
-                extra = mapOf("observation_id" to obsId0, "display_id" to 0)
+                extra = mapOf("observation_id" to obsId2, "display_id" to 2)
             )
             Mockito.`when`(
                 mockEnvironment.observeWithDiagnostics(
                     captureScreenshot = Mockito.eq(false),
                     waitToStabilize = Mockito.eq(false),
-                    displayId = Mockito.eq(0),
+                    displayId = Mockito.eq(2),
                     leaseOwnerId = Mockito.anyString(),
                     ocr = Mockito.eq(false),
                     region = Mockito.isNull(),
                 )
-            ).thenReturn(observation0)
-
-            val env = mockEnv()
-            val callback = Mockito.mock(AgentCallback::class.java)
-            val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+            ).thenReturn(observation2)
 
             val getStateArgs = buildJsonObject {
                 put("action", "get_state")
-                put("display", "0")
+                put("display", "virtual")
             }
-            handler.execute(mockToolCall("call-get-0"), getStateArgs, mockDescriptor(), env, callback, handle)
+            handler.execute(mockToolCall("call-get-2"), getStateArgs, mockDescriptor(), env, callback, handle)
 
-            // Set up virtual display 2 with active bridge for testing so display 2 resolves successfully
-            val fakeBridge = Mockito.mock(PrivilegedDisplayBridge::class.java)
-            DeviceDisplayManager.displayBridge = fakeBridge
+            // 2. 模拟系统将活跃虚拟屏切换到 3，并为当前会话登记
             val vfField = DeviceDisplayManager::class.java
                 .getDeclaredField("activeVirtualDisplayId").apply { isAccessible = true }
-            val voField = DeviceDisplayManager::class.java
-                .getDeclaredField("activeVirtualDisplayOwner").apply { isAccessible = true }
-            vfField.setInt(DeviceDisplayManager, 2)
-            voField.set(DeviceDisplayManager, "session-p-test")
-            DisplayInputCoordinator.registerVirtualDisplayOwnership(2, "session-p-test")
+            vfField.setInt(DeviceDisplayManager, 3)
+            DisplayInputCoordinator.registerVirtualDisplayOwnership(3, "session-p-test")
 
             try {
-                // Attempt to click on display 2 using observation_id from display 0
+                // 尝试在显示屏 3 上使用来自显示屏 2 的旧 observation_id
                 val clickArgs = buildJsonObject {
                     put("action", "click")
-                    put("display", "2")
+                    put("display", "3")
                     put("x", 100.0)
                     put("y", 100.0)
-                    put("observation_id", obsId0) // from display 0!
+                    put("observation_id", obsId2) // 来自显示屏 2!
                 }
 
                 val result = handler.execute(mockToolCall("call-click-mismatch"), clickArgs, mockDescriptor(), env, callback, handle)
                 assertTrue(result is ToolExecutionResult.ContextResult)
                 val contextResult = result as ToolExecutionResult.ContextResult
-                assertFalse("Cross-display observation_id must be rejected", contextResult.success)
-                assertTrue(contextResult.summaryText.contains("action_display_mismatch"))
+                assertFalse("跨屏幕 observation_id 必须被拒绝", contextResult.success)
+                assertTrue("错误应包含 action_display_mismatch", contextResult.summaryText.contains("action_display_mismatch"))
 
-                // Must NOT call act on display 2
+                // 严禁向显示屏 3 下发 act
                 Mockito.verify(mockEnvironment, Mockito.never()).act(
                     action = anyAction(),
                     awaitStabilization = Mockito.anyBoolean(),
-                    displayId = Mockito.eq(2),
+                    displayId = Mockito.eq(3),
                     leaseOwnerId = anyNullable(),
                     expectedState = anyNullable(),
                     expectedObservationId = anyNullable(),
                 )
             } finally {
-                DeviceDisplayManager.displayBridge = null
-                vfField.setInt(DeviceDisplayManager, Display.DEFAULT_DISPLAY)
-                voField.set(DeviceDisplayManager, null)
+                vfField.setInt(DeviceDisplayManager, 2)
             }
         }
+    }
+
+    @Test
+    fun `click with display main is rejected with background_display_required and does not observe`() {
+        runBlocking {
+            val env = mockEnv()
+            val callback = Mockito.mock(AgentCallback::class.java)
+            val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+
+            val clickArgs = buildJsonObject {
+                put("action", "click")
+                put("display", "main")
+                put("x", 200.0)
+                put("y", 200.0)
+            }
+
+            val result = handler.execute(mockToolCall(), clickArgs, mockDescriptor(), env, callback, handle)
+            assertTrue(result is ToolExecutionResult.Error)
+            val err = result as ToolExecutionResult.Error
+            assertTrue(err.message.contains("background_display_required"))
+
+            Mockito.verify(mockEnvironment, Mockito.never()).act(
+                action = anyAction(),
+                awaitStabilization = Mockito.anyBoolean(),
+                displayId = Mockito.anyInt(),
+                leaseOwnerId = anyNullable(),
+                expectedState = anyNullable(),
+                expectedObservationId = anyNullable(),
+            )
+        }
+    }
+
+    @Test
+    fun `click without observation_id when unobserved rejects with action_observation_required`() {
+        runBlocking {
+            val env = mockEnv()
+            val callback = Mockito.mock(AgentCallback::class.java)
+            val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+
+            val clickArgs = buildJsonObject {
+                put("action", "click")
+                put("display", "virtual")
+                put("x", 200.0)
+                put("y", 200.0)
+            }
+
+            val result = handler.execute(mockToolCall(), clickArgs, mockDescriptor(), env, callback, handle)
+            assertTrue(result is ToolExecutionResult.ContextResult)
+            val contextResult = result as ToolExecutionResult.ContextResult
+            assertFalse("未看屏点击必须失败", contextResult.success)
+            assertTrue(contextResult.summaryText.contains("action_observation_required"))
+
+            Mockito.verify(mockEnvironment, Mockito.never()).act(
+                action = anyAction(),
+                awaitStabilization = Mockito.anyBoolean(),
+                displayId = Mockito.anyInt(),
+                leaseOwnerId = anyNullable(),
+                expectedState = anyNullable(),
+                expectedObservationId = anyNullable(),
+            )
+        }
+    }
+
+    @Test
+    fun `screenshot observe failure returns error and does not report success`() = runBlocking {
+        val env = mockEnv()
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+
+        Mockito.`when`(
+            mockEnvironment.observeWithDiagnostics(
+                captureScreenshot = Mockito.eq(true),
+                waitToStabilize = Mockito.eq(false),
+                displayId = Mockito.eq(2),
+                leaseOwnerId = Mockito.anyString(),
+                ocr = Mockito.eq(false),
+                region = Mockito.isNull(),
+            )
+        ).thenThrow(RuntimeException("observe_failed"))
+
+        val args = buildJsonObject {
+            put("action", "screenshot")
+            put("display", "virtual")
+        }
+
+        val result = handler.execute(mockToolCall("call-ss-fail"), args, mockDescriptor(), env, callback, handle)
+        assertTrue(result is ToolExecutionResult.ContextResult)
+        val contextResult = result as ToolExecutionResult.ContextResult
+        assertFalse("截图观测失败不得报成功", contextResult.success)
+        assertTrue(contextResult.summaryText.contains("截取显示屏 2 画面失败"))
+    }
+
+    @Test
+    fun `non-coordinate action open_app is not blocked by previous baseline state`() = runBlocking {
+        val env = mockEnv()
+        val callback = Mockito.mock(AgentCallback::class.java)
+        val handle = Mockito.mock(AgentToolExecutionHandle::class.java)
+
+        // First register state A
+        val stateA = createTestState(displayId = 2, stateId = "state_pkg_A", packageName = "com.pkg.a")
+        val obsA = AndroidGuiObservation(state = stateA, stabilization = emptyMap(), extra = mapOf("observation_id" to "obs_a"))
+        Mockito.`when`(
+            mockEnvironment.observeWithDiagnostics(
+                captureScreenshot = Mockito.anyBoolean(),
+                waitToStabilize = Mockito.anyBoolean(),
+                displayId = Mockito.eq(2),
+                leaseOwnerId = Mockito.anyString(),
+                ocr = Mockito.anyBoolean(),
+                region = anyNullable(),
+            )
+        ).thenReturn(obsA)
+
+        val getStateArgs = buildJsonObject {
+            put("action", "get_state")
+            put("display", "virtual")
+        }
+        handler.execute(mockToolCall("call-get-a"), getStateArgs, mockDescriptor(), env, callback, handle)
+
+        // Now execute open_app without observation_id targeting pkg B: must NOT bind state A and must not fail on A's package
+        Mockito.`when`(
+            mockEnvironment.act(
+                action = anyAction(),
+                awaitStabilization = Mockito.anyBoolean(),
+                displayId = Mockito.eq(2),
+                leaseOwnerId = anyNullable(),
+                expectedState = Mockito.isNull(),
+                expectedObservationId = Mockito.isNull(),
+            )
+        ).thenReturn(cn.com.omnimind.androidgui.AndroidGuiActionResult(success = true, message = "ok"))
+
+        val openArgs = buildJsonObject {
+            put("action", "open_app")
+            put("package_name", "com.pkg.b")
+            put("display", "virtual")
+        }
+
+        val result = handler.execute(mockToolCall("call-open-b"), openArgs, mockDescriptor(), env, callback, handle)
+        assertTrue("open_app 不得被旧观测状态阻断: $result", result is ToolExecutionResult.ContextResult)
+        assertTrue((result as ToolExecutionResult.ContextResult).success)
+    }
+
+    private class FakePerceptionBridge(val displayId: Int = 2) : PrivilegedDisplayBridge {
+        override suspend fun createVirtualDisplay(width: Int, height: Int, dpi: Int, surface: android.view.Surface, flags: Int): Result<Int> = Result.success(displayId)
+        override suspend fun releaseVirtualDisplay(displayId: Int) {}
+        override suspend fun injectKeyEvent(displayId: Int, keyCode: Int): Boolean = true
+        override suspend fun injectTap(displayId: Int, x: Int, y: Int): Boolean = true
+        override suspend fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean = true
+        override suspend fun launchActivity(displayId: Int, packageName: String): Boolean = true
+        override suspend fun getRootTasks(displayId: Int): String = "[]"
+        override suspend fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): String = "{}"
     }
 }

@@ -193,7 +193,7 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
         this.previewActive = active
         if (!active) {
             lastDrawnContentRect.setEmpty()
-            if (hasWindowBeenVisible) {
+            if (hasWindowBeenVisible && (!KeyguardStateMonitor.isInteractive(context) || KeyguardStateMonitor.isKeyguardLocked(context))) {
                 requireNewFrameAfterUnlock = true
             }
         }

@@ -1255,5 +1255,507 @@ class ScreenPerceptionBehaviorTest(unittest.TestCase):
             asyncio.run(planner.one_step_tool_call("test goal", obs_2, functions=(func,)))
         self.assertIn("action_execution_unconfirmed", str(cm.exception))
         self.assertEqual(len(transport_requests), 1)
+    def test_empty_background_decision_launches_installed_target(self) -> None:
+        """空后台新决策启动已装目标：后台虚拟屏无前台应用与桌面，模型根据上下文与已安装候选主动调用 open_app 启动目标应用"""
+        import asyncio
+        import json
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            if turn_idx == 1:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_open_1",
+                            "type": "function",
+                            "function": {
+                                "name": "open_app",
+                                "arguments": json.dumps({"package_name": "com.android.vending"}),
+                            },
+                        }
+                    ],
+                }
+            else:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_fin_2",
+                            "type": "function",
+                            "function": {
+                                "name": "finished",
+                                "arguments": json.dumps({"content": "store_opened"}),
+                            },
+                        }
+                    ],
+                }
+
+        class EmptyBackgroundHost:
+            def __init__(self):
+                self.act_calls = []
+                self.obs_count = 0
+
+            async def observe(self, **kwargs):
+                self.obs_count += 1
+                if self.obs_count == 1:
+                    return {
+                        "state_id": "state_empty_1",
+                        "xml": "",
+                        "package_name": "-",
+                        "activity_name": "-",
+                        "display": {"width": 1080, "height": 2400},
+                        "extra": {"display": {"width": 1080, "height": 2400}},
+                    }
+                return {
+                    "state_id": "state_store_2",
+                    "xml": '<hierarchy><node class="android.widget.TextView" text="Google Play" bounds="[100,100][500,200]"/></hierarchy>',
+                    "package_name": "com.android.vending",
+                    "activity_name": "MainActivity",
+                    "display": {"width": 1080, "height": 2400},
+                    "extra": {"display": {"width": 1080, "height": 2400}},
+                }
+
+            async def installed_apps(self):
+                return {"Google Play": "com.android.vending", "设置": "com.android.settings"}
+
+            async def act(self, action):
+                self.act_calls.append(action)
+                return {"success": True}
+
+        host = EmptyBackgroundHost()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_empty_bg.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"Google Play": "com.android.vending", "设置": "com.android.settings"},
+        )
+        result = asyncio.run(engine.arun("下载淘宝应用"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(host.act_calls), 1)
+        self.assertEqual(host.act_calls[0].tool, "open_app")
+        self.assertEqual(host.act_calls[0].args.get("package_name"), "com.android.vending")
+        self.assertEqual(result.actions_executed, 1)
+
+
+    def test_identical_empty_read_gives_no_progress_feedback_and_bounded_termination(self) -> None:
+        """相同空读无进展反馈和有界结束：连续重复空读获得 progress=False 与文字提示反馈，并在达到有界阈值时明确以 no_progress_detected 终止"""
+        import asyncio
+        import json
+        from omniflow.bridge import _run_result
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            return {
+                "requested_model": envelope["model"],
+                "resolved_model": "deepseek-v4-pro",
+                "tool_calls": [
+                    {
+                        "id": f"call_get_state_{turn_idx}",
+                        "type": "function",
+                        "function": {
+                            "name": "get_state",
+                            "arguments": json.dumps({"reason": f"wait_screen_{turn_idx}"}),
+                        },
+                    }
+                ],
+            }
+
+        class StaticEmptyHost:
+            async def observe(self, **kwargs):
+                return {
+                    "state_id": "state_empty_const",
+                    "xml": "",
+                    "package_name": "-",
+                    "activity_name": "-",
+                    "display": {"width": 1080, "height": 2400},
+                    "extra": {"display": {"width": 1080, "height": 2400}},
+                }
+
+            async def installed_apps(self):
+                return {"应用商店": "com.android.vending"}
+
+            async def act(self, action):
+                return {"success": True}
+
+        host = StaticEmptyHost()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_stalled_read.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"应用商店": "com.android.vending"},
+        )
+        result = asyncio.run(engine.arun("下载应用"))
+
+        # 1. 验证有界终止：在第 2 次相同空读后终止，不无限消耗至 20 轮
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "no_progress_detected")
+        self.assertEqual(result.detail.get("done_reason"), "no_progress_detected")
+        self.assertEqual(len(transport_envelopes), 2)
+
+        # 2. 验证第 2 轮中的无进展反馈：tool message 中 progress=False，以及 user 文本提示
+        turn_2_msgs = transport_envelopes[1]["request"]["messages"]
+        tool_res = json.loads(turn_2_msgs[2]["content"])
+        self.assertTrue(tool_res["success"])
+        self.assertFalse(tool_res["progress"])
+        self.assertFalse(tool_res["screen_changed"])
+
+        # 3. 验证经过 bridge 处理后的错误码透传具体原因而非 FUNCTION_CALL_FAILED
+        bridge_res = _run_result(result, body={"run_id": "stalled_run_1"}, function=None)
+        self.assertEqual(bridge_res["error_code"], "NO_PROGRESS_DETECTED")
+        self.assertEqual(bridge_res["error_message"], "no_progress_detected")
+        self.assertEqual(bridge_res["done_reason"], "no_progress_detected")
+
+    def test_distinct_roi_and_ocr_reads_are_valid_and_not_stalled(self) -> None:
+        """不同ROI/OCR合法读取：多轮请求不同 OCR 或 ROI 区域属于合法感知，不误判为无进展中断，可正常推进并完成"""
+        import asyncio
+        import json
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            if turn_idx == 1:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_read_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_state",
+                                "arguments": json.dumps({"reason": "initial inspect"}),
+                            },
+                        }
+                    ],
+                }
+            elif turn_idx == 2:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_read_2",
+                            "type": "function",
+                            "function": {
+                                "name": "get_state",
+                                "arguments": json.dumps({"reason": "request ocr", "ocr": True}),
+                            },
+                        }
+                    ],
+                }
+            elif turn_idx == 3:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_read_3",
+                            "type": "function",
+                            "function": {
+                                "name": "get_state",
+                                "arguments": json.dumps({
+                                    "reason": "request roi",
+                                    "ocr": True,
+                                    "x1": 0.0,
+                                    "y1": 0.0,
+                                    "x2": 500.0,
+                                    "y2": 500.0,
+                                }),
+                            },
+                        }
+                    ],
+                }
+            else:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_read_4",
+                            "type": "function",
+                            "function": {
+                                "name": "finished",
+                                "arguments": json.dumps({"content": "verified"}),
+                            },
+                        }
+                    ],
+                }
+
+        class StaticScreenWithPerceptionHost:
+            async def observe(self, **kwargs):
+                extra = {"display": {"width": 1080, "height": 2400}}
+                if kwargs.get("ocr"):
+                    extra["ocr"] = {"status": "ready", "items": [{"text": "Hello", "bounds": [10, 10, 100, 50]}]}
+                if kwargs.get("region"):
+                    extra["visual_regions"] = [{"bounds": [0.0, 0.0, 500.0, 500.0], "image_base64": "Y3JvcA=="}]
+                return {
+                    "state_id": "state_static_1",
+                    "xml": '<hierarchy><node class="android.widget.TextView" text="Hello" bounds="[10,10][100,50]"/></hierarchy>',
+                    "package_name": "com.test.app",
+                    "activity_name": "MainActivity",
+                    "display": {"width": 1080, "height": 2400},
+                    "extra": extra,
+                }
+
+            async def installed_apps(self):
+                return {"App": "com.test.app"}
+
+            async def act(self, action):
+                return {"success": True}
+
+        host = StaticScreenWithPerceptionHost()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_distinct_reads.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"App": "com.test.app"},
+        )
+        result = asyncio.run(engine.arun("感知验证"))
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(transport_envelopes), 4)
+
+    def test_max_steps_exceeded_reports_explicit_budget_error(self) -> None:
+        """max budget 明确错误：步数耗尽时明确报告 max_steps_exceeded 与正确终止 reason，绝不冒充 step_completed 或 Function 报错"""
+        import asyncio
+        import json
+        from omniflow.bridge import _run_result
+        from omniflow.core.config import OmniFlowConfig, RuntimeSettings
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            return {
+                "requested_model": envelope["model"],
+                "resolved_model": "deepseek-v4-pro",
+                "tool_calls": [
+                    {
+                        "id": f"call_click_{turn_idx}",
+                        "type": "function",
+                        "function": {
+                            "name": "click",
+                            "arguments": json.dumps({"target_description": f"btn_{turn_idx}", "x": 100.0 * turn_idx, "y": 100.0 * turn_idx}),
+                        },
+                    }
+                ],
+            }
+
+        host = self._create_mock_host()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_budget_exceeded.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"App": "com.test.app"},
+            config=OmniFlowConfig(runtime=RuntimeSettings(max_steps=2)),
+        )
+        result = asyncio.run(engine.arun("连续点击"))
+
+        # 1. 引擎执行结果确认为 max_steps_exceeded
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "max_steps_exceeded")
+        self.assertEqual(result.detail.get("done_reason"), "max_steps_exceeded")
+        self.assertEqual(len(transport_envelopes), 2)
+
+        # 2. bridge 处理结果明确为 MAX_STEPS_EXCEEDED，而不是 FUNCTION_CALL_FAILED 或 step_completed
+        bridge_res = _run_result(result, body={"run_id": "budget_run_1"}, function=None)
+        self.assertEqual(bridge_res["error_code"], "MAX_STEPS_EXCEEDED")
+        self.assertEqual(bridge_res["error_message"], "max_steps_exceeded")
+        self.assertEqual(bridge_res["done_reason"], "max_steps_exceeded")
+        self.assertEqual(bridge_res["status"], "failed")
+    def test_alternating_roi_or_ocr_deduplicated_and_bounded(self) -> None:
+        """同一未变屏幕下已读OCR与ROI组合去重：在相同未变屏幕下交替轮播 OCR/ROI 不得被永久判定为新进展，重复读取后有界终止"""
+        import asyncio
+        import json
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            # 交替轮播：Turn 1 OCR=True -> Turn 2 OCR=False -> Turn 3 OCR=True (已读过) -> Turn 4 OCR=False (已读过)
+            ocr_val = (turn_idx % 2 == 1)
+            return {
+                "requested_model": envelope["model"],
+                "resolved_model": "deepseek-v4-pro",
+                "tool_calls": [
+                    {
+                        "id": f"call_alt_{turn_idx}",
+                        "type": "function",
+                        "function": {
+                            "name": "get_state",
+                            "arguments": json.dumps({"reason": f"inspect_{turn_idx}", "ocr": ocr_val}),
+                        },
+                    }
+                ],
+            }
+
+        class StaticScreenHost:
+            async def observe(self, **kwargs):
+                extra = {"display": {"width": 1080, "height": 2400}}
+                if kwargs.get("ocr"):
+                    extra["ocr"] = {"status": "ready", "items": []}
+                return {
+                    "state_id": "state_static_screen",
+                    "xml": '<hierarchy><node class="android.widget.TextView" text="Page" bounds="[0,0][100,100]"/></hierarchy>',
+                    "package_name": "com.test.app",
+                    "activity_name": "MainActivity",
+                    "display": {"width": 1080, "height": 2400},
+                    "extra": extra,
+                }
+
+            async def installed_apps(self):
+                return {"App": "com.test.app"}
+
+            async def act(self, action):
+                return {"success": True}
+
+        host = StaticScreenHost()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_alt_read.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"App": "com.test.app"},
+        )
+        result = asyncio.run(engine.arun("交替轮播感知"))
+
+        # Turn 1 (OCR=True): 新证据，progress=True
+        # Turn 2 (OCR=False): 新证据，progress=True
+        # Turn 3 (OCR=True): 已存在于本屏幕 evidence set 中，progress=False (stall=1)
+        # Turn 4 (OCR=False): 已存在于本屏幕 evidence set 中，progress=False (stall=2 -> 有界终止)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "no_progress_detected")
+        self.assertEqual(result.detail.get("done_reason"), "no_progress_detected")
+        self.assertEqual(len(transport_envelopes), 4)
+    def test_canvas_identical_xml_with_visual_update_not_stalled(self) -> None:
+        """Canvas场景：结构化XML保持不变但画面内容发生真实更新时，不误判为stalled中断，可正常推进"""
+        import asyncio
+        import json
+        from omniflow.runtime.engine import OmniFlow
+        from omniflow.vlm.planner import VLMPlanner
+
+        transport_envelopes = []
+
+        def test_transport(envelope):
+            transport_envelopes.append(envelope)
+            turn_idx = len(transport_envelopes)
+            if turn_idx == 1:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_canvas_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_state",
+                                "arguments": json.dumps({"reason": "check canvas initial"}),
+                            },
+                        }
+                    ],
+                }
+            elif turn_idx == 2:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_canvas_2",
+                            "type": "function",
+                            "function": {
+                                "name": "get_state",
+                                "arguments": json.dumps({"reason": "check canvas updated"}),
+                            },
+                        }
+                    ],
+                }
+            else:
+                return {
+                    "requested_model": envelope["model"],
+                    "resolved_model": "deepseek-v4-pro",
+                    "tool_calls": [
+                        {
+                            "id": "call_canvas_3",
+                            "type": "function",
+                            "function": {
+                                "name": "finished",
+                                "arguments": json.dumps({"content": "canvas_verified"}),
+                            },
+                        }
+                    ],
+                }
+
+        class DynamicCanvasHost:
+            def __init__(self):
+                self.count = 0
+
+            async def observe(self, **kwargs):
+                self.count += 1
+                # 相同 XML 容器树（如 SurfaceView/Canvas），但画面字节持续更新
+                return {
+                    "state_id": f"state_canvas_{self.count}",
+                    "xml": '<hierarchy><node class="android.view.SurfaceView" bounds="[0,0][1080,2400]"/></hierarchy>',
+                    "package_name": "com.test.game",
+                    "activity_name": "GameActivity",
+                    "image_base64": f"Y2FudmFzX2ZyYW1l_{self.count}",
+                    "display": {"width": 1080, "height": 2400},
+                    "extra": {"display": {"width": 1080, "height": 2400}},
+                }
+
+            async def installed_apps(self):
+                return {"Game": "com.test.game"}
+
+            async def act(self, action):
+                return {"success": True}
+
+        host = DynamicCanvasHost()
+        planner = VLMPlanner(model="scene.vlm.operation.primary", transport=test_transport)
+        store_file = self.temp_dir / "store_canvas_read.json"
+        engine = OmniFlow(
+            store_file,
+            host=host,
+            planner=planner,
+            installed_apps={"Game": "com.test.game"},
+        )
+        result = asyncio.run(engine.arun("Canvas画面感知"))
+
+        # 画面产生变化时均被判定为实质进展，顺利推进完成，绝不被误判为 stalled_read
+        self.assertTrue(result.success)
+        self.assertIsNone(result.error)
+        self.assertEqual(len(transport_envelopes), 3)
 if __name__ == "__main__":
     unittest.main()

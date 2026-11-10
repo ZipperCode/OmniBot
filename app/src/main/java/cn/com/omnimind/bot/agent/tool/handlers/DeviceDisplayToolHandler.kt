@@ -81,51 +81,20 @@ class DeviceDisplayToolHandler(
 
         val sessionKey = env.acpSessionId ?: env.agentRunId
         val displayArg = args["display"]?.jsonPrimitive?.contentOrNull?.trim()
-        val targetDisplayId = when (actionName) {
-            "list_displays" -> Display.DEFAULT_DISPLAY
-            "create_virtual_display" -> {
-                // 创建虚拟屏时无需提前校验虚拟屏已存在，使用默认主屏申请操作租约
-                Display.DEFAULT_DISPLAY
-            }
-            "present_to_user" -> {
-                // 移交主屏目标为主屏，双屏租约在外部单独分流处理
-                Display.DEFAULT_DISPLAY
-            }
-            "destroy_virtual_display" -> {
-                // 已持有的虚拟屏即使对应用不可见，也必须能送达所属 Helper 清理。
-                val currentActiveId = DeviceDisplayManager.activeVirtualDisplayId()
-                val parsed = displayArg?.toIntOrNull()
-                when {
-                    displayArg.isNullOrEmpty() || displayArg.lowercase() == DeviceDisplayManager.DISPLAY_VIRTUAL -> {
-                        currentActiveId
-                    }
-                    parsed != null && parsed == currentActiveId -> {
-                        currentActiveId
-                    }
-                    else -> try {
-                        DeviceDisplayManager.resolveDisplayId(context, displayArg)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "无效的显示屏目标：$displayArg")
-                    }
-                }
-            }
-            "switch_display" -> {
-                try {
-                    DeviceDisplayManager.resolveOrPrepareDisplayId(
-                        context = context,
-                        target = displayArg,
-                        sessionKey = sessionKey,
-                        acpSessionId = env.acpSessionId,
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid display target: $displayArg")
-                }
-            }
-            else -> try {
+        if (actionName == "present_to_user") {
+            return ToolExecutionResult.Error(
+                toolName = TOOL_NAME,
+                message = "background_display_required: present_to_user 为用户原生UI移交保留，Agent工具无法调用。",
+            )
+        }
+        if (actionName == "list_displays") {
+            return handleListDisplays()
+        }
+        if (actionName == "create_virtual_display") {
+            return handleCreateVirtualDisplay(args, sessionKey, env.acpSessionId, env.acpTurnId)
+        }
+        if (actionName == "switch_display") {
+            val targetVdId = try {
                 DeviceDisplayManager.resolveOrPrepareDisplayId(
                     context = context,
                     target = displayArg,
@@ -137,6 +106,56 @@ class DeviceDisplayToolHandler(
             } catch (e: Exception) {
                 return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid display target: $displayArg")
             }
+            return handleSwitchDisplay(targetVdId, sessionKey)
+        }
+        if (actionName == "destroy_virtual_display") {
+            if (displayArg?.lowercase() in setOf("main", "0") || displayArg?.toIntOrNull() == 0) {
+                return ToolExecutionResult.Error(TOOL_NAME, "background_display_required: 禁止销毁主屏 (0)。")
+            }
+            val currentActiveId = DeviceDisplayManager.activeVirtualDisplayId()
+            val parsed = displayArg?.toIntOrNull()
+            val targetVdId = when {
+                displayArg.isNullOrEmpty() || displayArg.lowercase() == DeviceDisplayManager.DISPLAY_VIRTUAL -> {
+                    if (currentActiveId == Display.DEFAULT_DISPLAY) {
+                        return ToolExecutionResult.Error(TOOL_NAME, "No active virtual display to destroy.")
+                    }
+                    currentActiveId
+                }
+                parsed != null && parsed == currentActiveId -> {
+                    if (currentActiveId == Display.DEFAULT_DISPLAY) {
+                        return ToolExecutionResult.Error(TOOL_NAME, "background_display_required: 禁止销毁主屏 (0)。")
+                    }
+                    currentActiveId
+                }
+                else -> try {
+                    val res = DeviceDisplayManager.resolveDisplayId(context, displayArg)
+                    if (res == Display.DEFAULT_DISPLAY) {
+                        return ToolExecutionResult.Error(TOOL_NAME, "background_display_required: 禁止销毁主屏 (0)。")
+                    }
+                    res
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "无效的显示屏目标：$displayArg")
+                }
+            }
+            val validationError = validateNumericVirtualDisplay(targetVdId, sessionKey)
+            if (validationError != null) {
+                return ToolExecutionResult.Error(TOOL_NAME, validationError)
+            }
+            return handleDestroyVirtualDisplay(targetVdId, sessionKey)
+        }
+        val targetDisplayId = try {
+            DeviceDisplayManager.resolveOrPrepareDisplayId(
+                context = context,
+                target = displayArg,
+                sessionKey = sessionKey,
+                acpSessionId = env.acpSessionId,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid display target: $displayArg")
         }
 
         // Fine-grained lease owner ID: session + turnId/agentRunId + toolCallId
@@ -144,15 +163,9 @@ class DeviceDisplayToolHandler(
         // Bind stop action
         toolHandle.bindStopAction {
             DisplayInputCoordinator.cancelActiveOperation(targetDisplayId, leaseOwnerId)
-            if (actionName == "present_to_user") {
-                val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
-                if (activeVd != Display.DEFAULT_DISPLAY) {
-                    DisplayInputCoordinator.cancelActiveOperation(activeVd, leaseOwnerId)
-                }
-            }
         }
 
-        val displayName = if (targetDisplayId == Display.DEFAULT_DISPLAY) "主屏(0)" else "虚拟屏($targetDisplayId)"
+        val displayName = "虚拟屏($targetDisplayId)"
         helper.reportToolProgress(
             callback = callback,
             toolName = TOOL_NAME,
@@ -200,32 +213,6 @@ class DeviceDisplayToolHandler(
                 )
             }
         }
-        // 移交主屏在单屏 withDisplayLease 外独立分流，避免先持虚拟屏锁再持主屏锁引发死锁
-        if (actionName == "present_to_user") {
-            val sessionId = env.acpSessionId?.trim()?.ifEmpty { null }
-            val turnId = env.acpTurnId?.trim()?.ifEmpty { null }
-            if (sessionId == null || turnId == null) {
-                return ToolExecutionResult.Error(
-                    toolName = TOOL_NAME,
-                    message = "缺少有效 ACP 会话或 Turn 标识 (acpSessionId=$sessionId, acpTurnId=$turnId)，无法执行主屏移交。",
-                )
-            }
-            val presentLeaseOwnerId = "$sessionId:$turnId:${toolCall.id}"
-            TaskRuntime.suppressResultPresentationForSession(sessionId)
-            return handlePresentToUser(args, sessionId, presentLeaseOwnerId, env, callback, toolHandle)
-        }
-
-
-        // 虚拟屏动作校验所有权，防止跨会话操作他人屏幕
-        if (targetDisplayId != Display.DEFAULT_DISPLAY) {
-            val vdOwner = DisplayInputCoordinator.getVirtualDisplayOwner(targetDisplayId)
-            if (vdOwner != null && vdOwner != sessionKey) {
-                return ToolExecutionResult.Error(
-                    toolName = TOOL_NAME,
-                    message = "虚拟显示屏 $targetDisplayId 属于其他会话 ($vdOwner)，当前会话 ($sessionKey) 无权操作。",
-                )
-            }
-        }
 
         return DisplayInputCoordinator.withDisplayLease(targetDisplayId, leaseOwnerId) {
             val convId = env.conversationId
@@ -256,19 +243,16 @@ class DeviceDisplayToolHandler(
             DeviceDisplayManager.connectShizukuUserService(context)
 
             try {
-            if (actionName in setOf("click", "long_press", "swipe", "input_text", "press_key", "open_app", "wait", "screenshot", "get_state")) {
-                val acpSession = env.acpSessionId ?: sessionKey
-                TaskRuntime.markScreenTarget(
-                    context = context,
-                    sessionId = acpSession,
-                    turnId = env.acpTurnId,
-                    displayId = targetDisplayId,
-                )
-            }
+                if (actionName in setOf("click", "long_press", "swipe", "input_text", "press_key", "open_app", "wait", "screenshot", "get_state")) {
+                    val acpSession = env.acpSessionId ?: sessionKey
+                    TaskRuntime.markScreenTarget(
+                        context = context,
+                        sessionId = acpSession,
+                        turnId = env.acpTurnId,
+                        displayId = targetDisplayId,
+                    )
+                }
                 when (actionName) {
-                    "list_displays" -> handleListDisplays()
-                    "create_virtual_display" -> handleCreateVirtualDisplay(args, sessionKey, env.acpSessionId, env.acpTurnId)
-                    "destroy_virtual_display" -> handleDestroyVirtualDisplay(targetDisplayId, sessionKey)
                     "get_state" -> handleGetState(args, targetDisplayId, leaseOwnerId)
                     "screenshot" -> handleScreenshot(targetDisplayId, leaseOwnerId)
                     "click" -> handleClick(args, targetDisplayId, leaseOwnerId)
@@ -278,7 +262,6 @@ class DeviceDisplayToolHandler(
                     "press_key" -> handlePressKey(args, targetDisplayId, leaseOwnerId)
                     "open_app" -> handleOpenApp(args, targetDisplayId, leaseOwnerId)
                     "wait" -> handleWait(args, targetDisplayId, leaseOwnerId)
-                    "switch_display" -> handleSwitchDisplay(targetDisplayId, sessionKey)
                     else -> ToolExecutionResult.Error(TOOL_NAME, "Unsupported action: $actionName")
                 }
             } catch (e: CancellationException) {
@@ -294,94 +277,6 @@ class DeviceDisplayToolHandler(
                 DisplayInputCoordinator.clearLeaseUnlockAwaiter(targetDisplayId, leaseOwnerId)
                 DisplayInputCoordinator.clearLeaseExecutor(targetDisplayId, leaseOwnerId)
             }
-        }
-    }
-    private suspend fun handlePresentToUser(
-        args: JsonObject,
-        sessionId: String,
-        leaseOwnerId: String,
-        env: AgentExecutionEnvironment,
-        callback: AgentCallback,
-        toolHandle: AgentToolExecutionHandle,
-    ): ToolExecutionResult {
-        toolHandle.throwIfStopRequested()
-
-        val packageName = args["packageName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-        if (packageName.isEmpty()) {
-            return ToolExecutionResult.Error(
-                toolName = TOOL_NAME,
-                message = "Missing required argument 'packageName' for present_to_user.",
-            )
-        }
-        val taskId = args["taskId"]?.jsonPrimitive?.intOrNull
-
-        DeviceDisplayManager.connectShizukuUserService(context)
-
-        return try {
-            val result = DeviceDisplayManager.presentToUser(
-                context = context,
-                packageName = packageName,
-                taskId = taskId,
-                sessionOwnerId = sessionId,
-                leaseOwnerId = leaseOwnerId,
-            )
-
-            val resSuccess = result.success
-            val resCode = result.diagnostics["code"] ?: if (resSuccess) "ok" else "error"
-            val resTaskId = result.diagnostics["taskId"]?.toIntOrNull() ?: taskId ?: 0
-            val resTaskKind = result.diagnostics["taskKind"] ?: "unknown"
-            val resSourceDisplayId = result.diagnostics["sourceDisplayId"]?.toIntOrNull() ?: 0
-            val resTargetDisplayId = result.diagnostics["targetDisplayId"]?.toIntOrNull() ?: Display.DEFAULT_DISPLAY
-            val resVerified = result.diagnostics["verified"]?.toBooleanStrictOrNull() ?: resSuccess
-
-            val payload = buildJsonObject {
-                put("success", resSuccess)
-                put("code", resCode)
-                put("taskId", resTaskId)
-                put("taskKind", resTaskKind)
-                put("sourceDisplayId", resSourceDisplayId)
-                put("targetDisplayId", resTargetDisplayId)
-                put("verified", resVerified)
-                put("packageName", packageName)
-                if (!resSuccess) {
-                    put("error", result.message)
-                }
-            }
-            val jsonStr = payload.toString()
-
-            if (resSuccess) {
-                TaskRuntime.markScreenTarget(
-                    context = context,
-                    sessionId = sessionId,
-                    turnId = env.acpTurnId,
-                    displayId = Display.DEFAULT_DISPLAY,
-                )
-                DeviceDisplayManager.setSessionDisplayTarget(sessionId, Display.DEFAULT_DISPLAY)
-                ToolExecutionResult.ContextResult(
-                    toolName = TOOL_NAME,
-                    summaryText = "已将应用 $packageName (taskId=$resTaskId) 移交至主屏显示",
-                    previewJson = jsonStr,
-                    rawResultJson = jsonStr,
-                    success = true,
-                )
-            } else {
-                ToolExecutionResult.ContextResult(
-                    toolName = TOOL_NAME,
-                    summaryText = "移交主屏失败: ${result.message}",
-                    previewJson = jsonStr,
-                    rawResultJson = jsonStr,
-                    success = false,
-                )
-            }
-        } catch (e: CancellationException) {
-            ToolExecutionResult.Interrupted(
-                toolName = TOOL_NAME,
-                summaryText = "手机操作已被用户手动停止并接管",
-                interruptedBy = "user",
-                interruptionReason = "manual_stop",
-            )
-        } catch (e: Exception) {
-            ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Action execution failed")
         }
     }
 
@@ -486,46 +381,90 @@ class DeviceDisplayToolHandler(
         data class Failure(val message: String, val diagnostics: Map<String, String>) : GuardCheckResult()
     }
 
+    private fun validateNumericVirtualDisplay(displayId: Int, sessionKey: String): String? {
+        if (displayId <= 0 || displayId == Display.DEFAULT_DISPLAY) {
+            return "background_display_required: 主屏 (0) 不允许用于 Agent 操作，手机操作必须在后台虚拟屏执行。"
+        }
+        val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
+        if (!DeviceDisplayManager.isVirtualDisplayActive() || displayId != activeVd) {
+            return "虚拟显示屏 $displayId 处于非活动状态或未就绪。"
+        }
+        val owner = DisplayInputCoordinator.getVirtualDisplayOwner(displayId)
+            ?: DeviceDisplayManager.activeVirtualDisplayOwner()
+        if (owner == null) {
+            return "显示屏 $displayId 未登记为本会话虚拟屏，当前会话 ($sessionKey) 无权操作非托管显示屏。"
+        }
+        if (owner != sessionKey) {
+            return "虚拟显示屏 $displayId 属于其他会话 ($owner)，当前会话 ($sessionKey) 无权操作。"
+        }
+        return null
+    }
+
     private fun checkObservationGuard(
         args: JsonObject,
         targetDisplayId: Int,
+        hasCoords: Boolean = false,
     ): GuardCheckResult {
         val observationId = args["observation_id"]
             ?.jsonPrimitive?.contentOrNull?.trim()?.ifEmpty { null }
-            ?: return GuardCheckResult.Success(expectedState = null, expectedObservationId = null)
 
-        // 1. 跨屏不符校验：该 observation_id 是否属于其他屏
-        val otherDisplayEntry = latestObservations.entries.firstOrNull {
-            it.key != targetDisplayId && it.value.observationId == observationId
-        }
-        if (otherDisplayEntry != null) {
-            val otherDisplayId = otherDisplayEntry.key
-            return GuardCheckResult.Failure(
-                message = "action_display_mismatch",
-                diagnostics = mapOf(
-                    "expected_display" to otherDisplayId.toString(),
-                    "current_display" to targetDisplayId.toString(),
-                    "observation_id" to observationId,
-                ),
+        val currentObservation = latestObservations[targetDisplayId]
+
+        if (observationId != null) {
+            // 1. 跨屏不符校验：该 observation_id 是否属于其他屏
+            val otherDisplayEntry = latestObservations.entries.firstOrNull {
+                it.key != targetDisplayId && it.value.observationId == observationId
+            }
+            if (otherDisplayEntry != null) {
+                val otherDisplayId = otherDisplayEntry.key
+                return GuardCheckResult.Failure(
+                    message = "action_display_mismatch",
+                    diagnostics = mapOf(
+                        "expected_display" to otherDisplayId.toString(),
+                        "current_display" to targetDisplayId.toString(),
+                        "observation_id" to observationId,
+                    ),
+                )
+            }
+
+            // 2. 当前屏最新观测校验
+            if (currentObservation == null || currentObservation.observationId != observationId) {
+                return GuardCheckResult.Failure(
+                    message = "action_observation_expired",
+                    diagnostics = mapOf(
+                        "expected_observation_id" to observationId,
+                        "actual_observation_id" to (currentObservation?.observationId ?: "none"),
+                        "display_id" to targetDisplayId.toString(),
+                    ),
+                )
+            }
+
+            return GuardCheckResult.Success(
+                expectedState = currentObservation.state,
+                expectedObservationId = observationId,
             )
         }
 
-        // 2. 当前屏最新观测校验
-        val currentObservation = latestObservations[targetDisplayId]
-        if (currentObservation == null || currentObservation.observationId != observationId) {
-            return GuardCheckResult.Failure(
-                message = "action_observation_expired",
-                diagnostics = mapOf(
-                    "expected_observation_id" to observationId,
-                    "actual_observation_id" to (currentObservation?.observationId ?: "none"),
-                    "display_id" to targetDisplayId.toString(),
-                ),
+        // observationId 为空：坐标动作必须依赖观测，防止模型删字段盲打绕过基线安全核验
+        if (hasCoords) {
+            if (currentObservation == null) {
+                return GuardCheckResult.Failure(
+                    message = "action_observation_required",
+                    diagnostics = mapOf(
+                        "display_id" to targetDisplayId.toString(),
+                        "reason" to "Screen has not been observed yet. Call get_state or screenshot before performing coordinate actions.",
+                    ),
+                )
+            }
+            return GuardCheckResult.Success(
+                expectedState = currentObservation.state,
+                expectedObservationId = currentObservation.observationId,
             )
         }
 
         return GuardCheckResult.Success(
-            expectedState = currentObservation.state,
-            expectedObservationId = observationId,
+            expectedState = null,
+            expectedObservationId = null,
         )
     }
 
@@ -626,20 +565,39 @@ class DeviceDisplayToolHandler(
         displayId: Int,
         leaseOwnerId: String,
     ): ToolExecutionResult = DisplayInputCoordinator.withDisplayLock(displayId, leaseOwnerId) {
-        val snapshot = environment.captureScreenSnapshot(displayId = displayId, leaseOwnerId = leaseOwnerId)
-        val imageBytes = snapshot.screenshotJpeg
+        val observation = try {
+            environment.observeWithDiagnostics(
+                captureScreenshot = true,
+                waitToStabilize = false,
+                displayId = displayId,
+                leaseOwnerId = leaseOwnerId,
+                ocr = false,
+                region = null,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return@withDisplayLock errorResult("截取显示屏 $displayId 画面失败：${e.message}")
+        }
+        val currentBaseline = environment.currentObservationBaseline()
+        val imageBytes = currentBaseline?.takeIf { it.displayId == displayId && it.observationId == observation.extra["observation_id"] }?.screenshotJpeg
         if (imageBytes != null && imageBytes.isNotEmpty()) {
+            val state = observation.state
+            val obsId = observation.extra["observation_id"] as? String ?: state.stateId
+            latestObservations[displayId] = DisplayObservation(state = state, observationId = obsId)
             val base64 = Base64.getEncoder().encodeToString(imageBytes)
             val dataUrl = "data:image/jpeg;base64,$base64"
+            val dataMap = mutableMapOf<String, Any?>(
+                "display_id" to displayId,
+                "package_name" to state.packageName,
+                "activity_name" to state.activityName,
+                "width" to state.displayWidth,
+                "height" to state.displayHeight,
+                "observation_id" to obsId,
+            )
             successResult(
-                summary = "成功截取显示屏 $displayId 画面 (${snapshot.displayWidth}x${snapshot.displayHeight}，坐标使用 0..1000 规范相对尺度: x/width*1000, y/height*1000)",
-                data = mapOf(
-                    "display_id" to displayId,
-                    "package_name" to snapshot.packageName,
-                    "activity_name" to snapshot.activityName,
-                    "width" to snapshot.displayWidth,
-                    "height" to snapshot.displayHeight,
-                ),
+                summary = "成功截取显示屏 $displayId 画面 (${state.displayWidth}x${state.displayHeight}，坐标使用 0..1000 规范相对尺度: x/width*1000, y/height*1000)",
+                data = dataMap,
                 imageDataUrl = dataUrl,
             )
         } else {
@@ -657,7 +615,7 @@ class DeviceDisplayToolHandler(
         if (x == null || y == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x' and 'y' for click.")
         }
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = true)) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -689,7 +647,7 @@ class DeviceDisplayToolHandler(
         if (x == null || y == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x' and 'y' for long_press.")
         }
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = true)) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -727,7 +685,7 @@ class DeviceDisplayToolHandler(
         if (x1 == null || y1 == null || x2 == null || y2 == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x', 'y', 'x2', 'y2' for swipe.")
         }
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = true)) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -765,7 +723,7 @@ class DeviceDisplayToolHandler(
         }
         val x = args["x"]?.jsonPrimitive?.doubleOrNull
         val y = args["y"]?.jsonPrimitive?.doubleOrNull
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = (x != null && y != null))) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -799,7 +757,7 @@ class DeviceDisplayToolHandler(
         if (key.isEmpty()) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required argument 'key' for press_key.")
         }
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = false)) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -829,7 +787,7 @@ class DeviceDisplayToolHandler(
         if (packageName.isEmpty()) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required argument 'package_name' for open_app.")
         }
-        val guard = when (val res = checkObservationGuard(args, displayId)) {
+        val guard = when (val res = checkObservationGuard(args, displayId, hasCoords = false)) {
             is GuardCheckResult.Success -> res
             is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
         }
@@ -923,7 +881,7 @@ class DeviceDisplayToolHandler(
             AgentCapabilityToolDefinition(
                 name = TOOL_NAME,
                 displayName = "设备显示与屏幕操作",
-                description = "直接对 Android 手机后台虚拟屏（默认）或主屏执行读屏、截图、点击、长按、滑动、输入文本、按键、启动应用和多屏管理。默认在后台虚拟屏执行，不占用或干扰用户当前主屏；仅当用户明确要求在前台/主屏操作，或执行 present_to_user 移交时才使用主屏。同一屏幕输入自动排队。当操作主屏遇到安全锁屏时会等待解锁。屏幕操作统一使用 0..1000 规范相对坐标（0为屏幕最左/顶，1000为最右/底；若由 XML bounds [left,top][right,bottom] 计算目标中心：x = (left+right)/2 / width * 1000，y = (top+bottom)/2 / height * 1000）。",
+                description = "直接对 Android 手机后台虚拟屏执行读屏、截图、点击、长按、滑动、输入文本、按键、启动应用和多屏管理。Agent 必须且仅在后台虚拟屏执行，不占用或干扰用户当前主屏；严禁接管主屏。同一屏幕输入自动排队。屏幕操作统一使用 0..1000 规范相对坐标（0为屏幕最左/顶，1000为最右/底；若由 XML bounds [left,top][right,bottom] 计算目标中心：x = (left+right)/2 / width * 1000，y = (top+bottom)/2 / height * 1000）。",
                 parameters = buildJsonObject {
                     put("type", "object")
                     putJsonObject("properties") {
@@ -944,12 +902,11 @@ class DeviceDisplayToolHandler(
                                 add(JsonPrimitive("destroy_virtual_display"))
                                 add(JsonPrimitive("switch_display"))
                                 add(JsonPrimitive("wait"))
-                                add(JsonPrimitive("present_to_user"))
                             })
                         }
                         putJsonObject("display") {
                             put("type", "string")
-                            put("description", "目标屏幕：'virtual'（默认，后台虚拟屏）、'main'（主屏，0，仅在用户明确要求操作主屏时使用），或具体屏幕数字 ID。省略时默认后台虚拟屏。")
+                            put("description", "目标后台屏幕：'virtual'（默认，后台虚拟屏），或本会话具体的虚拟屏数字 ID。省略时默认使用后台虚拟屏。禁止传入 'main' 或 '0'。")
                         }
                         putJsonObject("x") {
                             put("type", "number")
@@ -997,14 +954,6 @@ class DeviceDisplayToolHandler(
                         putJsonObject("package_name") {
                             put("type", "string")
                             put("description", "应用包名（仅 action=open_app）")
-                        }
-                        putJsonObject("packageName") {
-                            put("type", "string")
-                            put("description", "应用包名（仅 action=present_to_user 必填）")
-                        }
-                        putJsonObject("taskId") {
-                            put("type", "integer")
-                            put("description", "要移交的任务根 ID（仅 action=present_to_user 可选）")
                         }
                         putJsonObject("width") {
                             put("type", "integer")

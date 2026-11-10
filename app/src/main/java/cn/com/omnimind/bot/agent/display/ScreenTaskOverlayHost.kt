@@ -1,4 +1,6 @@
 package cn.com.omnimind.bot.agent.display
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -44,7 +46,7 @@ internal data class TaskGeometry(
     var stageX: Int = -1,
     var stageY: Int = -1,
     var stageWidthDp: Int = 296,
-    var stageCanvasHeightDp: Int = 336,
+    var stageCanvasHeightDp: Int = -1,
     var dockedX: Int = -1,
     var dockedY: Int = -1
 )
@@ -799,7 +801,7 @@ object ScreenTaskOverlayHost {
         }
 
         val estimatedHeight = when (mode) {
-            OverlayDisplayMode.EXPANDED -> dp(ctx, 136 + overlayGeometry.stageCanvasHeightDp)
+            OverlayDisplayMode.EXPANDED -> if (overlayGeometry.stageCanvasHeightDp > 0) dp(ctx, overlayGeometry.stageCanvasHeightDp) else dp(ctx, 400)
             OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
             OverlayDisplayMode.DOCKED -> dp(ctx, 48)
         }
@@ -884,7 +886,7 @@ object ScreenTaskOverlayHost {
         }
 
         val estimatedHeight = when (mode) {
-            OverlayDisplayMode.EXPANDED -> dp(ctx, 136 + overlayGeometry.stageCanvasHeightDp)
+            OverlayDisplayMode.EXPANDED -> if (overlayGeometry.stageCanvasHeightDp > 0) dp(ctx, overlayGeometry.stageCanvasHeightDp) else dp(ctx, 400)
             OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
             OverlayDisplayMode.DOCKED -> dp(ctx, 48)
         }
@@ -907,12 +909,13 @@ object ScreenTaskOverlayHost {
         // 单次 post 测量实际高度进行 clamp，避免底部展开越界
         view.post {
             val measuredH = view.height
-            if (measuredH > 0 && topOverlayView === view) {
+            val currentSafeInsets = getSafeInsets(view.context, view)
+            val availableScreenH = dm.heightPixels - currentSafeInsets.top - currentSafeInsets.bottom
+            if (measuredH in 1 until availableScreenH && topOverlayView === view) {
                 val currentParams = view.layoutParams as? WindowManager.LayoutParams ?: return@post
-                val currentSafeInsets = getSafeInsets(view.context, view)
                 val currentMinY = currentSafeInsets.top
                 val currentMaxY = (dm.heightPixels - measuredH - currentSafeInsets.bottom).coerceAtLeast(currentMinY)
-                if (currentParams.y > currentMaxY) {
+                if (currentParams.y > currentMaxY && currentMaxY > currentMinY) {
                     currentParams.y = currentMaxY
                     if (overlayGeometry.mode == OverlayDisplayMode.EXPANDED) {
                         overlayGeometry.stageY = currentMaxY
@@ -1037,6 +1040,7 @@ object ScreenTaskOverlayHost {
             runCatching { wm.updateViewLayout(view, params) }
         } else {
             snapAnimator?.cancel()
+            var wasCancelled = false
             val animator = ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = 180L
                 interpolator = DecelerateInterpolator(1.5f)
@@ -1046,6 +1050,24 @@ object ScreenTaskOverlayHost {
                     params.y = (startY + (targetY - startY) * fraction).toInt()
                     runCatching { wm.updateViewLayout(view, params) }
                 }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationCancel(animation: Animator) {
+                        wasCancelled = true
+                        if (snapAnimator === animation) {
+                            snapAnimator = null
+                        }
+                    }
+                    override fun onAnimationEnd(animation: Animator) {
+                        if (!wasCancelled) {
+                            params.x = targetX
+                            params.y = targetY
+                            runCatching { wm.updateViewLayout(view, params) }
+                        }
+                        if (snapAnimator === animation) {
+                            snapAnimator = null
+                        }
+                    }
+                })
             }
             snapAnimator = animator
             animator.start()

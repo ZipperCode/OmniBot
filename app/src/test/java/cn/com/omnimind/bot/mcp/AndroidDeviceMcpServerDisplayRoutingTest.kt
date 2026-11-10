@@ -142,4 +142,52 @@ class AndroidDeviceMcpServerDisplayRoutingTest {
         assertTrue(result.isError == true)
         assertEquals(0, TaskRuntime.getActiveTasks().size)
     }
+
+    @Test
+    fun `acp caller with display main fails closed and does not mark task`() = runBlocking {
+        val lease = AcpSessionMcpLeaseStore.prepare("test-agent", 1L, this)
+        val activeJob = Job()
+
+        AcpSessionMcpLeaseStore.bind(lease.leaseId, "sess-mcp-main") { toolCallId ->
+            StructuredDeviceActionContext(
+                conversationId = 1L,
+                sessionId = "sess-mcp-main",
+                turnId = "turn-mcp-main",
+                ownerId = "owner-mcp",
+                toolCallId = toolCallId,
+                permissionRequester = { _, _, _ -> true },
+                isValid = { true },
+                turnJob = activeJob,
+            )
+        }
+
+        // 1. 验证 MCP 底层依赖的 shared resolver 显式拒绝 main 并抛出 background_display_required
+        try {
+            DeviceDisplayManager.resolveOrPrepareDisplayId(
+                context = context,
+                target = "main",
+                sessionKey = "sess-mcp-main",
+                acpSessionId = "sess-mcp-main",
+            )
+            fail("shared resolver 遇到 main 必须抛出 background_display_required")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message?.contains("background_display_required") == true)
+        }
+
+        // 2. 验证 MCP modernCallTool 调用真实 fail closed，绝不标记主屏任务
+        val caller = McpDeviceCaller.Acp(lease.leaseId, lease.token)
+        val result = AndroidDeviceMcpServer.modernCallTool(
+            context = context,
+            scope = scope,
+            name = "run_gui",
+            arguments = mapOf(
+                "goal" to JsonPrimitive("test goal"),
+                "display" to JsonPrimitive("main"),
+            ),
+            caller = caller,
+        )
+
+        assertTrue(result.isError == true)
+        assertEquals("TaskRuntime 严禁被标记任务", 0, TaskRuntime.getActiveTasks().size)
+    }
 }

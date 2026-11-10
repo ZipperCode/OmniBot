@@ -493,11 +493,11 @@ open class PrivilegedDisplayServiceStub(
                 }
                 return true
             } else {
-                // 如果已有任务位于主屏且正在前台使用（可见或聚焦），严禁迁移到后台虚拟屏，防止干扰用户当前主屏操作
-                if (existing.displayId == Display.DEFAULT_DISPLAY && displayId != Display.DEFAULT_DISPLAY && (existing.visible || existing.isFocused)) {
+                // 严禁将主屏任务迁移到后台虚拟屏，防止主动把用户主屏任务搬走或干扰用户主屏状态
+                if (existing.displayId == Display.DEFAULT_DISPLAY && displayId != Display.DEFAULT_DISPLAY) {
                     return false
                 }
-                // 存在非主屏前台的现有根任务，无损迁移保留 taskId
+                // 存在其他非主屏现有根任务，无损迁移保留 taskId
                 val moveResultStr = moveRootTask(existing.taskId, existing.displayId, displayId)
                 return runCatching {
                     val json = JSONObject(moveResultStr)
