@@ -316,10 +316,12 @@ class RuntimeSkillBundleManager(
     private fun packagedCandidate(candidates: List<SkillIndexEntry>): SkillIndexEntry? =
         candidates.firstOrNull { candidate -> isPackaged(candidate.rootPath) }
 
-    private fun isCompleteMarketCandidate(candidate: SkillIndexEntry): Boolean {
+    internal fun isCompleteMarketCandidate(candidate: SkillIndexEntry): Boolean {
+        if (isPackaged(candidate.rootPath)) return false
+        val expectedSha256 = spec.componentArchiveSha256?.takeIf(String::isNotBlank) ?: return false
         val root = File(candidate.rootPath)
-        return File(root, MARKET_MARKER).takeIf(File::isFile)?.readText()?.trim() ==
-            spec.componentArchiveSha256 && runCatching {
+        val marker = File(root, MARKET_MARKER).takeIf(File::isFile)?.readText()?.trim()
+        return marker == expectedSha256 && runCatching {
             val install = readRuntimeComponentInstall(
                 root,
                 spec.componentId,

@@ -744,10 +744,27 @@ open class PrivilegedDisplayServiceStub(
 
     private fun extractPackageName(item: Any): String {
         val cls = item.javaClass
-        val topActivity = runCatching {
-            val f = cls.getDeclaredField("topActivity").apply { isAccessible = true }
-            f.get(item)
-        }.getOrNull()
+
+        // 读取字段值：优先通过 getField 获取公开字段（支持从 TaskInfo 等基类继承的 public 字段），
+        // 遇到非 public 定制 ROM 字段时回退通过 getDeclaredField 逐级向上查找，不引入新猜测
+        fun readFieldValue(name: String): Any? {
+            return runCatching {
+                cls.getField(name).get(item)
+            }.getOrNull() ?: runCatching {
+                var current: Class<*>? = cls
+                var result: Any? = null
+                while (current != null && result == null) {
+                    result = runCatching {
+                        val f = current?.getDeclaredField(name)?.apply { isAccessible = true }
+                        f?.get(item)
+                    }.getOrNull()
+                    current = current?.superclass
+                }
+                result
+            }.getOrNull()
+        }
+
+        val topActivity = readFieldValue("topActivity")
         if (topActivity != null) {
             val pkg = runCatching {
                 topActivity.javaClass.getMethod("getPackageName").invoke(topActivity) as String
@@ -755,10 +772,7 @@ open class PrivilegedDisplayServiceStub(
             if (!pkg.isNullOrBlank()) return pkg
         }
 
-        val baseActivity = runCatching {
-            val f = cls.getDeclaredField("baseActivity").apply { isAccessible = true }
-            f.get(item)
-        }.getOrNull()
+        val baseActivity = readFieldValue("baseActivity")
         if (baseActivity != null) {
             val pkg = runCatching {
                 baseActivity.javaClass.getMethod("getPackageName").invoke(baseActivity) as String
@@ -766,10 +780,7 @@ open class PrivilegedDisplayServiceStub(
             if (!pkg.isNullOrBlank()) return pkg
         }
 
-        val baseIntent = runCatching {
-            val f = cls.getDeclaredField("baseIntent").apply { isAccessible = true }
-            f.get(item)
-        }.getOrNull()
+        val baseIntent = readFieldValue("baseIntent")
         if (baseIntent != null) {
             val comp = runCatching {
                 baseIntent.javaClass.getMethod("getComponent").invoke(baseIntent)
@@ -782,15 +793,26 @@ open class PrivilegedDisplayServiceStub(
             }
         }
 
-        val taskNames = runCatching {
-            val f = cls.getDeclaredField("taskNames").apply { isAccessible = true }
-            f.get(item) as? Array<*>
-        }.getOrNull()
-        if (!taskNames.isNullOrEmpty()) {
-            val first = taskNames[0]?.toString().orEmpty()
-            val pkg = first.substringBefore("/")
-            if (pkg.isNotBlank()) return pkg
+        fun extractFirstPackage(namesObj: Any?): String? {
+            val list = when (namesObj) {
+                is Array<*> -> namesObj.toList()
+                is List<*> -> namesObj
+                else -> null
+            }
+            if (!list.isNullOrEmpty()) {
+                val first = list[0]?.toString().orEmpty()
+                val pkg = first.substringBefore("/")
+                if (pkg.isNotBlank()) return pkg
+            }
+            return null
         }
+
+        // Android 11+ RootTaskInfo 声明 childTaskNames；旧版本 StackInfo 声明 taskNames
+        val childTaskPkg = extractFirstPackage(readFieldValue("childTaskNames"))
+        if (!childTaskPkg.isNullOrBlank()) return childTaskPkg
+
+        val taskNamesPkg = extractFirstPackage(readFieldValue("taskNames"))
+        if (!taskNamesPkg.isNullOrBlank()) return taskNamesPkg
 
         return ""
     }

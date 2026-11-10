@@ -16,6 +16,7 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.SweepGradient
 import android.graphics.Typeface
@@ -35,6 +36,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.RoundedCorner
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
@@ -52,6 +54,7 @@ import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.activity.StartupThemeResolver
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
+import kotlin.math.hypot
 import kotlin.math.min
 
 /**
@@ -535,7 +538,29 @@ class ScreenTaskEdgeLightView(context: Context) : View(context) {
 }
 
 /**
- * 屏幕任务专用顶部控制胶囊与展开面板。
+ * 悬浮窗展示形态。
+ */
+enum class OverlayDisplayMode {
+    CAPSULE,   // 顶部状态指示胶囊
+    EXPANDED,  // 展开小窗面板
+    DOCKED     // 48dp 侧边折叠入口
+}
+
+/**
+ * 悬浮窗视图与宿主 WindowManager 交互契约。
+ */
+interface ScreenTaskOverlayHostCallbacks {
+    fun getSafeInsets(): Rect
+    fun getWindowPosition(): Pair<Int, Int>
+    fun moveWindowBy(dx: Float, dy: Float)
+    fun snapWindow(mode: OverlayDisplayMode)
+    fun resizeStage(newWidthPx: Int, newCanvasHeightPx: Int)
+    fun requestModeChange(mode: OverlayDisplayMode)
+    fun getSavedCanvasHeightDp(): Int = 336
+}
+
+/**
+ * 屏幕任务专用顶部控制胶囊、展开面板与侧边折叠入口。
  * 遵循 48dp 触控标准、24dp 卡片与 14dp 按钮圆角。
  */
 class ScreenTaskCapsuleView @JvmOverloads constructor(
@@ -549,14 +574,17 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private var boundTurnId: String? = null
     private var boundStopToken: String? = null
     private var boundDisplayId: Int = 0
+    private var isWaitingState: Boolean = false
 
-    private var isExpandedState: Boolean = false
+    private var currentMode: OverlayDisplayMode = OverlayDisplayMode.CAPSULE
 
     private var onToggleExpandListener: ((Boolean) -> Unit)? = null
     private var onStopCallback: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?) -> Unit)? = null
     private var onTakeoverCallback: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit)? = null
     private var onOpenPipCallback: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit)? = null
+    private var hostCallbacks: ScreenTaskOverlayHostCallbacks? = null
 
+    // 1. 胶囊收起态容器
     private val pillContainer: LinearLayout
     private val statusIndicatorDot: View
     private val statusTextView: TextView
@@ -567,9 +595,13 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val tempLensRect = RectF()
     private val tempCanvasRect = RectF()
 
+    // 2. 展开面板态容器
     private val stageContainer: LinearLayout
+    private val stageTitleLayout: LinearLayout
     private val stageTitleView: TextView
     private val stageHeaderBadge: TextView
+    private val stageDockButton: FrameLayout
+    private val stageDockIconView: ImageView
     private val stageCollapseButton: FrameLayout
     private val stageCollapseIconView: ImageView
     private val canvasWrapper: FrameLayout
@@ -583,9 +615,19 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val takeoverTextView: TextView
     private val pipButton: FrameLayout
     private val pipIconView: ImageView
+    private val resizeHandle: FrameLayout
+    private val resizeGripIconView: ImageView
 
+    // 3. 贴边折叠态容器（48dp 侧边入口）
+    private val dockedContainer: FrameLayout
+    private val dockedIconView: ImageView
+    private val dockedStatusDot: View
+    private val statusDotDrawable = GradientDrawable().apply { shape = GradientDrawable.OVAL }
+    private val dockedDotDrawable = GradientDrawable().apply { shape = GradientDrawable.OVAL }
+    private var lastDotColor: Int = 0
+    private var lastThemeNight: Boolean? = null
     init {
-        // 顶部胶囊收起态（48dp 触控标准高，柔和阴影，低饱和品牌 dot）
+        // --- 胶囊收起态 (CAPSULE) ---
         pillContainer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -594,7 +636,6 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             setPadding(dp(context, 14), 0, dp(context, 10), 0)
             isClickable = true
             isFocusable = true
-            setOnClickListener { toggleExpand(true) }
         }
         markAsAccessibilityButton(pillContainer, "展开虚拟屏小窗")
 
@@ -603,6 +644,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
                 marginEnd = dp(context, 8)
             }
+            background = statusDotDrawable
         }
 
         statusTextView = TextView(context).apply {
@@ -635,6 +677,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 updateLensEdgeLightBounds()
             }
         }
+
         expandHintView = ImageView(context).apply {
             val size = dp(context, 14)
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
@@ -648,7 +691,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         pillContainer.addView(microLensFrame)
         pillContainer.addView(expandHintView)
 
-        // 展开面板外壳（24dp 卡片圆角、16dp 水平边距、柔和阴影）
+        // --- 展开面板态 (EXPANDED) ---
         stageContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -657,7 +700,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             visibility = View.GONE
         }
 
-        // 顶栏高 48dp，标题 17sp medium + 48dp 触控收起按钮
+        // 顶栏高 48dp：标题区域（可拖拽）+ 贴边折叠按钮 + 收起按钮
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -667,12 +710,14 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             )
         }
 
-        val stageTitleLayout = LinearLayout(context).apply {
+        stageTitleLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(context, 2)
             }
+            isClickable = true
+            isFocusable = true
         }
 
         stageTitleView = TextView(context).apply {
@@ -691,13 +736,29 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         stageTitleLayout.addView(stageTitleView)
         stageTitleLayout.addView(stageHeaderBadge)
 
+        // 贴边折叠按钮（48dp 触控标准）
+        stageDockButton = FrameLayout(context).apply {
+            val btnSize = dp(context, 48)
+            layoutParams = LinearLayout.LayoutParams(btnSize, btnSize).apply {
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            markAsAccessibilityButton(this, "贴边折叠")
+            setOnClickListener { requestModeTransition(OverlayDisplayMode.DOCKED) }
+        }
+        stageDockIconView = ImageView(context).apply {
+            val iconSize = dp(context, 20)
+            layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
+        }
+        stageDockButton.addView(stageDockIconView)
+
+        // 收起按钮（48dp 触控标准，收起至顶部胶囊）
         stageCollapseButton = FrameLayout(context).apply {
             val btnSize = dp(context, 48)
             layoutParams = LinearLayout.LayoutParams(btnSize, btnSize).apply {
                 gravity = Gravity.CENTER_VERTICAL
             }
-            markAsAccessibilityButton(this, "收起")
-            setOnClickListener { toggleExpand(false) }
+            markAsAccessibilityButton(this, "收起至顶部胶囊")
+            setOnClickListener { requestModeTransition(OverlayDisplayMode.CAPSULE) }
         }
         stageCollapseIconView = ImageView(context).apply {
             val iconSize = dp(context, 20)
@@ -706,8 +767,10 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         stageCollapseButton.addView(stageCollapseIconView)
 
         headerRow.addView(stageTitleLayout)
+        headerRow.addView(stageDockButton)
         headerRow.addView(stageCollapseButton)
 
+        // 虚拟屏画布外框：点按全屏独立预览
         canvasWrapper = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -718,7 +781,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             }
             isClickable = true
             isFocusable = true
-            markAsAccessibilityButton(this, "进入全屏独立观看")
+            markAsAccessibilityButton(this, "虚拟屏小窗画面，点按进入全屏独立观看")
             setOnClickListener {
                 onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
             }
@@ -739,7 +802,8 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 updateCanvasEdgeLightBounds()
             }
         }
-        // 控制栏：48dp 按钮，停止为中性底+error文字，移交主屏为 accent 黑白反差
+
+        // 控制栏：48dp 停止按钮 + 48dp 移交主屏按钮 + 48dp 全屏预览 + 48dp 缩放手柄
         val controlBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -762,7 +826,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
 
         val (takeoverFrame, takeoverIv, takeoverTv) = createLabeledButton(
             text = "移交主屏",
-            weight = 1.6f,
+            weight = 1.5f,
             accessibilityLabel = "移交主屏"
         ) {
             onTakeoverCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
@@ -785,18 +849,64 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         }
         pipButton.addView(pipIconView)
 
+        resizeHandle = FrameLayout(context).apply {
+            val size = dp(context, 48)
+            layoutParams = LinearLayout.LayoutParams(size, size)
+            markAsAccessibilityButton(this, "调整小窗尺寸")
+            setOnClickListener { toggleAccessibleResize() }
+        }
+        resizeGripIconView = ImageView(context).apply {
+            val iconSize = dp(context, 18)
+            layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
+        }
+        resizeHandle.addView(resizeGripIconView)
+
         controlBar.addView(stopButton)
-        addHorizontalSpacer(controlBar, 8)
+        addHorizontalSpacer(controlBar, 6)
         controlBar.addView(takeoverButton)
-        addHorizontalSpacer(controlBar, 8)
+        addHorizontalSpacer(controlBar, 6)
         controlBar.addView(pipButton)
+        addHorizontalSpacer(controlBar, 4)
+        controlBar.addView(resizeHandle)
 
         stageContainer.addView(headerRow)
         stageContainer.addView(canvasWrapper)
         stageContainer.addView(controlBar)
 
+        // --- 贴边折叠态 (DOCKED, 48dp 侧边入口) ---
+        dockedContainer = FrameLayout(context).apply {
+            val size = dp(context, 48)
+            layoutParams = LayoutParams(size, size)
+            elevation = dpF(context, 4f)
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+        }
+        markAsAccessibilityButton(dockedContainer, "恢复虚拟屏小窗")
+
+        dockedIconView = ImageView(context).apply {
+            val iconSize = dp(context, 22)
+            layoutParams = LayoutParams(iconSize, iconSize, Gravity.CENTER)
+        }
+        dockedStatusDot = View(context).apply {
+            val dotSize = dp(context, 8)
+            layoutParams = LayoutParams(dotSize, dotSize, Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(context, 5)
+                marginEnd = dp(context, 5)
+            }
+            background = dockedDotDrawable
+        }
+        dockedContainer.addView(dockedIconView)
+        dockedContainer.addView(dockedStatusDot)
+
         addView(pillContainer)
         addView(stageContainer)
+        addView(dockedContainer)
+
+        setupCapsuleDragAndClick()
+        setupHeaderDrag()
+        setupDockedDragAndClick()
+        setupResizeHandle()
 
         applyTheme()
     }
@@ -855,6 +965,270 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         return LabeledButtonParts(frame, iconView, textView)
     }
 
+    private fun setupCapsuleDragAndClick() {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var startRawX = 0f
+        var startRawY = 0f
+        var lastRawX = 0f
+        var lastRawY = 0f
+        var isDragging = false
+        var isMultiTouchCancelled = false
+
+        pillContainer.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = event.rawX
+                    startRawY = event.rawY
+                    lastRawX = event.rawX
+                    lastRawY = event.rawY
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    parent.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    // 多指触控立即取消当前手势，避免抬指时指针重排跳动
+                    isMultiTouchCancelled = true
+                    isDragging = false
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isMultiTouchCancelled) return@setOnTouchListener true
+                    val dx = event.rawX - lastRawX
+                    val dy = event.rawY - lastRawY
+                    if (!isDragging && (hypot((event.rawX - startRawX).toDouble(), (event.rawY - startRawY).toDouble()) > touchSlop)) {
+                        isDragging = true
+                    }
+                    if (isDragging) {
+                        hostCallbacks?.moveWindowBy(dx, dy)
+                        lastRawX = event.rawX
+                        lastRawY = event.rawY
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (!isMultiTouchCancelled) {
+                        if (isDragging) {
+                            hostCallbacks?.snapWindow(OverlayDisplayMode.CAPSULE)
+                        } else {
+                            requestModeTransition(OverlayDisplayMode.EXPANDED)
+                        }
+                    }
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (isDragging && !isMultiTouchCancelled) {
+                        hostCallbacks?.snapWindow(OverlayDisplayMode.CAPSULE)
+                    }
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun setupHeaderDrag() {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var startRawX = 0f
+        var startRawY = 0f
+        var lastRawX = 0f
+        var lastRawY = 0f
+        var isDragging = false
+        var isMultiTouchCancelled = false
+
+        stageTitleLayout.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = event.rawX
+                    startRawY = event.rawY
+                    lastRawX = event.rawX
+                    lastRawY = event.rawY
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    parent.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    isMultiTouchCancelled = true
+                    isDragging = false
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isMultiTouchCancelled) return@setOnTouchListener true
+                    val dx = event.rawX - lastRawX
+                    val dy = event.rawY - lastRawY
+                    if (!isDragging && (hypot((event.rawX - startRawX).toDouble(), (event.rawY - startRawY).toDouble()) > touchSlop)) {
+                        isDragging = true
+                    }
+                    if (isDragging) {
+                        hostCallbacks?.moveWindowBy(dx, dy)
+                        lastRawX = event.rawX
+                        lastRawY = event.rawY
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (isDragging && !isMultiTouchCancelled) {
+                        hostCallbacks?.snapWindow(OverlayDisplayMode.EXPANDED)
+                    }
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun setupDockedDragAndClick() {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var startRawX = 0f
+        var startRawY = 0f
+        var lastRawX = 0f
+        var lastRawY = 0f
+        var isDragging = false
+        var isMultiTouchCancelled = false
+
+        dockedContainer.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = event.rawX
+                    startRawY = event.rawY
+                    lastRawX = event.rawX
+                    lastRawY = event.rawY
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    parent.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    isMultiTouchCancelled = true
+                    isDragging = false
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isMultiTouchCancelled) return@setOnTouchListener true
+                    val dx = event.rawX - lastRawX
+                    val dy = event.rawY - lastRawY
+                    if (!isDragging && (hypot((event.rawX - startRawX).toDouble(), (event.rawY - startRawY).toDouble()) > touchSlop)) {
+                        isDragging = true
+                    }
+                    if (isDragging) {
+                        hostCallbacks?.moveWindowBy(dx, dy)
+                        lastRawX = event.rawX
+                        lastRawY = event.rawY
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (!isMultiTouchCancelled) {
+                        if (isDragging) {
+                            hostCallbacks?.snapWindow(OverlayDisplayMode.DOCKED)
+                        } else {
+                            requestModeTransition(OverlayDisplayMode.EXPANDED)
+                        }
+                    }
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (isDragging && !isMultiTouchCancelled) {
+                        hostCallbacks?.snapWindow(OverlayDisplayMode.DOCKED)
+                    }
+                    isDragging = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun setupResizeHandle() {
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+        var startRawX = 0f
+        var startRawY = 0f
+        var startStageWidthPx = 0
+        var isResizing = false
+        var isMultiTouchCancelled = false
+        var aspectRatio = 1.27f
+
+        resizeHandle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawX = event.rawX
+                    startRawY = event.rawY
+                    startStageWidthPx = stageContainer.width.takeIf { it > 0 } ?: dp(context, 296)
+                    aspectRatio = getFrameAspectRatio()
+                    isResizing = false
+                    isMultiTouchCancelled = false
+                    parent.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    isMultiTouchCancelled = true
+                    isResizing = false
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isMultiTouchCancelled) return@setOnTouchListener true
+                    val deltaX = event.rawX - startRawX
+                    val deltaY = event.rawY - startRawY
+                    if (!isResizing && (hypot(deltaX.toDouble(), deltaY.toDouble()) > touchSlop)) {
+                        isResizing = true
+                    }
+                    if (isResizing) {
+                        val dm = resources.displayMetrics
+                        val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
+                        val maxWidth = (dm.widthPixels - safeInsets.left - safeInsets.right).coerceAtLeast(1)
+                        val minWidth = minOf(dp(context, 296), maxWidth)
+                        val targetWidth = (startStageWidthPx + deltaX).toInt().coerceIn(minWidth, maxWidth)
+
+                        val targetCanvasWidth = (targetWidth - dp(context, 32)).coerceAtLeast(dp(context, 100))
+                        var targetCanvasHeight = (targetCanvasWidth * aspectRatio).toInt()
+
+                        val maxStageHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
+                        val nonCanvasHeight = dp(context, 48 + 16 + 48 + 24)
+                        val maxCanvasHeight = (maxStageHeight - nonCanvasHeight).coerceAtLeast(dp(context, 48))
+
+                        if (targetCanvasHeight > maxCanvasHeight) {
+                            targetCanvasHeight = maxCanvasHeight
+                        }
+
+                        val lp = canvasWrapper.layoutParams
+                        lp.height = targetCanvasHeight
+                        canvasWrapper.layoutParams = lp
+
+                        hostCallbacks?.resizeStage(targetWidth, targetCanvasHeight)
+                        updateCanvasEdgeLightBounds()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    isResizing = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
     fun initBinding(
         taskId: String,
         sessionId: String,
@@ -863,10 +1237,11 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         displayId: Int,
         statusText: String?,
         isWaiting: Boolean,
-        onToggleExpand: (Boolean) -> Unit,
-        onStop: (taskId: String, sessionId: String, turnId: String?, stopToken: String?) -> Unit,
-        onTakeover: (taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit,
-        onOpenPip: (taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit
+        onToggleExpand: ((Boolean) -> Unit)? = null,
+        onStop: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?) -> Unit)? = null,
+        onTakeover: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit)? = null,
+        onOpenPip: ((taskId: String, sessionId: String, turnId: String?, stopToken: String?, displayId: Int) -> Unit)? = null,
+        hostCallbacks: ScreenTaskOverlayHostCallbacks? = null
     ) {
         this.boundTaskId = taskId
         this.boundSessionId = sessionId
@@ -877,8 +1252,13 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         this.onStopCallback = onStop
         this.onTakeoverCallback = onTakeover
         this.onOpenPipCallback = onOpenPip
+        this.hostCallbacks = hostCallbacks
 
         updateState(statusText, isWaiting, displayId, sessionId)
+    }
+
+    fun setHostCallbacks(callbacks: ScreenTaskOverlayHostCallbacks) {
+        this.hostCallbacks = callbacks
     }
 
     fun setTakeoverInProgress(inProgress: Boolean) {
@@ -891,46 +1271,31 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     fun updateState(statusText: String?, isWaiting: Boolean, displayId: Int, sessionId: String) {
         this.boundDisplayId = displayId
         this.boundSessionId = sessionId
+        this.isWaitingState = isWaiting
 
         statusTextView.text = mapFriendlyStatus(statusText, isWaiting, displayId)
 
         val isNight = ScreenTaskTheme.isNight(context)
         val dotColor = if (isWaiting) ScreenTaskTheme.warningColor() else ScreenTaskTheme.brandPrimary(isNight)
-        val dotDrawable = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(dotColor)
+        if (lastDotColor != dotColor) {
+            lastDotColor = dotColor
+            statusDotDrawable.setColor(dotColor)
+            dockedDotDrawable.setColor(dotColor)
         }
-        statusIndicatorDot.background = dotDrawable
 
         val hasVirtualDisplay = displayId > 0
         microLensFrame.visibility = if (hasVirtualDisplay) View.VISIBLE else View.GONE
         if (hasVirtualDisplay) {
             lensFrameView.bind(displayId, sessionId)
-            lensFrameView.setPreviewActive(true)
-
             canvasFrameView.bind(displayId, sessionId)
-            canvasFrameView.setPreviewActive(true)
             canvasWrapper.visibility = View.VISIBLE
             takeoverButton.visibility = View.VISIBLE
             pipButton.visibility = View.VISIBLE
             stageTitleView.text = "虚拟屏"
             stageHeaderBadge.text = if (isWaiting) "等待人工确认" else "协同运行中"
-
             updateLensEdgeLightBounds()
             updateCanvasEdgeLightBounds()
-
-            if (!isWaiting) {
-                lensEdgeLightView.start()
-                canvasEdgeLightView.start()
-            } else {
-                lensEdgeLightView.stop()
-                canvasEdgeLightView.stop()
-            }
         } else {
-            lensFrameView.setPreviewActive(false)
-            canvasFrameView.setPreviewActive(false)
-            lensEdgeLightView.stop()
-            canvasEdgeLightView.stop()
             canvasWrapper.visibility = View.GONE
             takeoverButton.visibility = View.GONE
             pipButton.visibility = View.GONE
@@ -938,38 +1303,132 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             stageHeaderBadge.text = if (isWaiting) "等待人工确认" else "AI 正在接管"
         }
 
-        applyTheme()
+        applyModeFrameActivation()
+        if (lastThemeNight != isNight) {
+            applyTheme()
+        }
     }
 
-    private fun toggleExpand(expanded: Boolean) {
-        if (isExpandedState == expanded) return
-        isExpandedState = expanded
+    private fun toggleAccessibleResize() {
+        val dm = resources.displayMetrics
+        val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
+        val maxWidth = (dm.widthPixels - safeInsets.left - safeInsets.right).coerceAtLeast(1)
+        val minWidth = minOf(dp(context, 296), maxWidth)
+        val defaultWidth = minOf(dp(context, 296), maxWidth)
+        val expandedWidth = minOf(dp(context, 360), maxWidth)
+        val currentWidth = stageContainer.width.takeIf { it > 0 } ?: defaultWidth
+        val targetWidth = if (currentWidth >= expandedWidth - dp(context, 8)) defaultWidth else expandedWidth
 
-        if (expanded) {
-            pillContainer.visibility = View.GONE
-            stageContainer.visibility = View.VISIBLE
-            adaptCanvasHeight()
-        } else {
-            stageContainer.visibility = View.GONE
-            pillContainer.visibility = View.VISIBLE
+        val targetCanvasWidth = (targetWidth - dp(context, 32)).coerceAtLeast(dp(context, 100))
+        val aspectRatio = getFrameAspectRatio()
+        var targetCanvasHeight = (targetCanvasWidth * aspectRatio).toInt()
+        val maxStageHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
+        val nonCanvasHeight = dp(context, 48 + 16 + 48 + 24)
+        val maxCanvasHeight = (maxStageHeight - nonCanvasHeight).coerceAtLeast(dp(context, 48))
+        if (targetCanvasHeight > maxCanvasHeight) {
+            targetCanvasHeight = maxCanvasHeight
         }
 
-        onToggleExpandListener?.invoke(expanded)
+        val lp = canvasWrapper.layoutParams
+        lp.height = targetCanvasHeight
+        canvasWrapper.layoutParams = lp
+
+        hostCallbacks?.resizeStage(targetWidth, targetCanvasHeight)
+        updateCanvasEdgeLightBounds()
     }
+
+    private fun applyModeFrameActivation() {
+        val hasVirtualDisplay = boundDisplayId > 0
+        when (currentMode) {
+            OverlayDisplayMode.CAPSULE -> {
+                lensFrameView.setPreviewActive(hasVirtualDisplay)
+                canvasFrameView.setPreviewActive(false)
+                if (hasVirtualDisplay && !isWaitingState) {
+                    lensEdgeLightView.start()
+                } else {
+                    lensEdgeLightView.stop()
+                }
+                canvasEdgeLightView.stop()
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                lensFrameView.setPreviewActive(false)
+                lensEdgeLightView.stop()
+                canvasFrameView.setPreviewActive(hasVirtualDisplay)
+                if (hasVirtualDisplay && !isWaitingState) {
+                    canvasEdgeLightView.start()
+                } else {
+                    canvasEdgeLightView.stop()
+                }
+            }
+            OverlayDisplayMode.DOCKED -> {
+                lensFrameView.setPreviewActive(false)
+                canvasFrameView.setPreviewActive(false)
+                lensEdgeLightView.stop()
+                canvasEdgeLightView.stop()
+            }
+        }
+    }
+
+    fun requestModeTransition(mode: OverlayDisplayMode) {
+        setOverlayMode(mode)
+        hostCallbacks?.requestModeChange(mode)
+        if (mode == OverlayDisplayMode.EXPANDED) {
+            onToggleExpandListener?.invoke(true)
+        } else if (mode == OverlayDisplayMode.CAPSULE) {
+            onToggleExpandListener?.invoke(false)
+        }
+    }
+
+    fun setOverlayMode(mode: OverlayDisplayMode) {
+        this.currentMode = mode
+        when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                pillContainer.visibility = View.VISIBLE
+                stageContainer.visibility = View.GONE
+                dockedContainer.visibility = View.GONE
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                pillContainer.visibility = View.GONE
+                stageContainer.visibility = View.VISIBLE
+                dockedContainer.visibility = View.GONE
+                adaptCanvasHeight()
+            }
+            OverlayDisplayMode.DOCKED -> {
+                pillContainer.visibility = View.GONE
+                stageContainer.visibility = View.GONE
+                dockedContainer.visibility = View.VISIBLE
+            }
+        }
+        applyModeFrameActivation()
+    }
+
+    fun getOverlayMode(): OverlayDisplayMode = currentMode
+
+    fun isExpanded(): Boolean = currentMode == OverlayDisplayMode.EXPANDED
 
     fun setExpanded(expanded: Boolean) {
-        if (isExpandedState != expanded) {
-            toggleExpand(expanded)
-        }
+        requestModeTransition(if (expanded) OverlayDisplayMode.EXPANDED else OverlayDisplayMode.CAPSULE)
     }
 
-    private fun adaptCanvasHeight() {
+    fun adaptCanvasHeight() {
         val dm = resources.displayMetrics
-        val screenHeightDp = dm.heightPixels / dm.density
-        val maxH = (screenHeightDp - 150f).coerceIn(120f, 336f)
+        val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
+        val maxAvailableHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
+        val nonCanvasHeight = dp(context, 48 + 16 + 48 + 24)
+        val maxCanvasHeight = (maxAvailableHeight - nonCanvasHeight).coerceAtLeast(dp(context, 48))
+        val savedHeightDp = hostCallbacks?.getSavedCanvasHeightDp() ?: 336
+        val targetCanvasHeight = minOf(dp(context, savedHeightDp), maxCanvasHeight)
         val lp = canvasWrapper.layoutParams
-        lp.height = dp(context, maxH)
+        lp.height = targetCanvasHeight
         canvasWrapper.layoutParams = lp
+    }
+
+    private fun getFrameAspectRatio(): Float {
+        canvasFrameView.getContentRect(tempCanvasRect)
+        if (tempCanvasRect.width() > 0f && tempCanvasRect.height() > 0f) {
+            return tempCanvasRect.height() / tempCanvasRect.width()
+        }
+        return 1.27f
     }
     private fun updateLensEdgeLightBounds() {
         lensFrameView.getContentRect(tempLensRect)
@@ -984,10 +1443,12 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     fun getLensEdgeLight(): ScreenTaskEdgeLightView = lensEdgeLightView
     fun getCanvasEdgeLight(): ScreenTaskEdgeLightView = canvasEdgeLightView
     fun getCanvasWrapper(): FrameLayout = canvasWrapper
-
+    fun getDockedContainer(): FrameLayout = dockedContainer
+    fun getResizeHandle(): FrameLayout = resizeHandle
 
     fun applyTheme() {
         val isNight = ScreenTaskTheme.isNight(context)
+        lastThemeNight = isNight
         val surfaceBg = ScreenTaskTheme.cardSurfaceColor(context, isNight)
         val borderSubtle = ScreenTaskTheme.borderSubtle(isNight)
         val textPrimary = ScreenTaskTheme.textPrimary(isNight)
@@ -1027,6 +1488,14 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         stageContainer.background = stageBg
         stageTitleView.setTextColor(textPrimary)
         stageHeaderBadge.setTextColor(textSecondary)
+
+        // 贴边折叠按钮
+        stageDockButton.background = createRippleBackground(
+            Color.TRANSPARENT,
+            ScreenTaskTheme.rippleColor(surfaceBg),
+            dpF(context, 24f)
+        )
+        stageDockIconView.setImageDrawable(IconDrawables.createDock(textSecondary))
 
         // 收起按钮
         stageCollapseButton.background = createRippleBackground(
@@ -1070,6 +1539,23 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             dpF(context, 14f)
         )
         pipIconView.setImageDrawable(IconDrawables.createPip(textPrimary))
+
+        // 缩放手柄抓手
+        resizeHandle.background = createRippleBackground(
+            Color.TRANSPARENT,
+            ScreenTaskTheme.rippleColor(surfaceBg),
+            dpF(context, 14f)
+        )
+        resizeGripIconView.setImageDrawable(IconDrawables.createResizeGrip(textSecondary))
+
+        // 48dp 贴边折叠悬浮入口
+        val dockedBg = createRippleBackground(
+            surfaceBg,
+            ScreenTaskTheme.rippleColor(surfaceBg),
+            dpF(context, 24f)
+        )
+        dockedContainer.background = dockedBg
+        dockedIconView.setImageDrawable(IconDrawables.createPip(textPrimary))
     }
 
     fun onConfigChanged() {
@@ -1079,6 +1565,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         canvasEdgeLightView.onConfigChanged()
         updateLensEdgeLightBounds()
         updateCanvasEdgeLightBounds()
+        applyModeFrameActivation()
     }
 
     fun onScreenOff() {
@@ -1784,6 +2271,41 @@ internal object IconDrawables {
             path.lineTo(b.left + w * 0.58f, b.top + h * 0.50f)
             path.lineTo(b.left + w * 0.42f, b.top + h * 0.60f)
             canvas.drawPath(path, paint)
+        }
+    }
+
+    fun createDock(color: Int): Drawable = object : BasePathDrawable(color) {
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            paint.strokeWidth = w * strokeRatio
+            val r = w * 0.08f
+            sharedRect.set(b.left + w * 0.18f, b.top + h * 0.18f, b.right - w * 0.18f, b.bottom - h * 0.18f)
+            canvas.drawRoundRect(sharedRect, r, r, paint)
+            val splitX = b.right - w * 0.38f
+            canvas.drawLine(splitX, b.top + h * 0.18f, splitX, b.bottom - h * 0.18f, paint)
+            path.reset()
+            path.moveTo(b.left + w * 0.36f, b.top + h * 0.50f)
+            path.lineTo(b.left + w * 0.50f, b.top + h * 0.50f)
+            path.moveTo(b.left + w * 0.44f, b.top + h * 0.42f)
+            path.lineTo(b.left + w * 0.50f, b.top + h * 0.50f)
+            path.lineTo(b.left + w * 0.44f, b.top + h * 0.58f)
+            canvas.drawPath(path, paint)
+        }
+    }
+
+    fun createResizeGrip(color: Int): Drawable = object : BasePathDrawable(color) {
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            paint.strokeWidth = w * 0.09f
+            val r = b.right - w * 0.20f
+            val bot = b.bottom - h * 0.20f
+            canvas.drawLine(r - w * 0.14f, bot, r, bot - h * 0.14f, paint)
+            canvas.drawLine(r - w * 0.28f, bot, r, bot - h * 0.28f, paint)
+            canvas.drawLine(r - w * 0.42f, bot, r, bot - h * 0.42f, paint)
         }
     }
 }

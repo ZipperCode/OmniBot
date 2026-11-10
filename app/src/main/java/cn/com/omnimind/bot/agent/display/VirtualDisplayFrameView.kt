@@ -8,8 +8,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.RectF
-import android.hardware.display.DisplayManager
-import android.util.DisplayMetrics
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -71,15 +69,29 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
 
     var onKeyguardChanged: (() -> Unit)? = null
     var onFrameDrawn: (() -> Unit)? = null
+    var onDisplayInvalidated: (() -> Unit)? = null
     val lastDrawnContentRect = Rect()
+
+    /**
+     * 校验当前绑定的虚拟显示屏是否依然有效且所有者与会话一致。
+     * 屏幕销毁、ID 改变或所有者被重置时判定为失效。
+     */
+    fun isDisplayOwnerValid(): Boolean {
+        val sid = targetSessionId.trim()
+        if (targetDisplayId == Display.DEFAULT_DISPLAY || sid.isEmpty()) return false
+        if (!DeviceDisplayManager.isVirtualDisplayActive()) return false
+        if (targetDisplayId != DeviceDisplayManager.activeVirtualDisplayId()) return false
+        if (DisplayInputCoordinator.getVirtualDisplayOwner(targetDisplayId) != sid) return false
+        return true
+    }
 
     /**
      * 计算当前虚拟屏画面在组件内的实际绘制矩形。
      * 直接使用底层 VirtualScreenFrameSource 真实帧绘制的物理矩形（完全同源）；
-     * 首帧前、清黑或停帧后为空边界（outRect.setEmpty()），不显示光晕比猜测更安全。
+     * 首帧前、清黑、停帧或所有者失效后为空边界（outRect.setEmpty()），防止残留旧帧与光晕泄漏。
      */
     fun getContentRect(outRect: RectF) {
-        if (lastDrawnContentRect.width() > 0 && lastDrawnContentRect.height() > 0) {
+        if (isDisplayOwnerValid() && shouldDrawFrames() && lastDrawnContentRect.width() > 0 && lastDrawnContentRect.height() > 0) {
             outRect.set(
                 lastDrawnContentRect.left.toFloat(),
                 lastDrawnContentRect.top.toFloat(),
@@ -91,35 +103,25 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
         }
     }
 
-    private fun resolveDisplayAspectRatio(): Float {
-        if (targetDisplayId > 0) {
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-            val display = dm?.getDisplay(targetDisplayId)
-            if (display != null) {
-                val metrics = DisplayMetrics()
-                @Suppress("DEPRECATION")
-                display.getRealMetrics(metrics)
-                if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
-                    return metrics.widthPixels.toFloat() / metrics.heightPixels.toFloat()
-                }
-            }
-        }
-        // 默认虚拟屏规格：1080 x 2400 (纵向全面屏)
-        return 1080f / 2400f
-    }
-
-
     private val destRect = Rect()
     private val frameHandler = Handler(Looper.getMainLooper())
 
     private val frameRunnable = object : Runnable {
         override fun run() {
             if (!isFrameLoopRunning) return
+            if (!isDisplayOwnerValid()) {
+                isFrameLoopRunning = false
+                lastDrawnContentRect.setEmpty()
+                invalidate()
+                onDisplayInvalidated?.invoke()
+                return
+            }
             if (shouldDrawFrames()) {
                 invalidate()
                 frameHandler.postDelayed(this, FRAME_INTERVAL_MS)
             } else {
                 isFrameLoopRunning = false
+                lastDrawnContentRect.setEmpty()
                 invalidate()
             }
         }
@@ -170,9 +172,10 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
      * 绑定目标虚拟显示屏及所属会话。
      */
     fun bind(displayId: Int, sessionId: String) {
-        val changed = this.targetDisplayId != displayId || this.targetSessionId != sessionId
+        val normSession = sessionId.trim()
+        val changed = this.targetDisplayId != displayId || this.targetSessionId != normSession
         this.targetDisplayId = displayId
-        this.targetSessionId = sessionId
+        this.targetSessionId = normSession
         if (changed) {
             minRequiredFrameSequence = -1L
             requireNewFrameAfterUnlock = false
@@ -202,7 +205,7 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
      */
     fun shouldDrawFrames(): Boolean {
         if (!previewActive) return false
-        if (targetDisplayId == Display.DEFAULT_DISPLAY || targetSessionId.isEmpty()) return false
+        if (!isDisplayOwnerValid()) return false
         if (!isAttachedToWindow) return false
         if (visibility != VISIBLE) return false
         if (!isShown) return false
@@ -217,10 +220,6 @@ class VirtualDisplayFrameView @JvmOverloads constructor(
 
         // 从息屏/不可交互/锁屏状态恢复到允许状态：同步建立当前帧水位门槛，拒绝锁屏期间残留旧帧
         ensureWatermarkOnInteractiveUnlocked()
-
-        if (!DeviceDisplayManager.isVirtualDisplayActive()) return false
-        if (targetDisplayId != DeviceDisplayManager.activeVirtualDisplayId()) return false
-        if (DisplayInputCoordinator.getVirtualDisplayOwner(targetDisplayId) != targetSessionId) return false
         return true
     }
 

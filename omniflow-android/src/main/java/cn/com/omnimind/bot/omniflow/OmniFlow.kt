@@ -7,6 +7,7 @@ import android.os.SystemClock
 import android.view.Display
 import cn.com.omnimind.androidgui.AndroidGuiDisplayOffException
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
+import cn.com.omnimind.androidgui.AndroidGuiObservationRegion
 import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.androidgui.DisplayInputCoordinator
 import cn.com.omnimind.baselib.runlog.Action
@@ -365,7 +366,7 @@ class OmniFlowDeviceDispatcher internal constructor(
     }
 
     private val appContext = context.applicationContext
-    private val targetDisplayId: Int = run {
+    private val targetDisplayId: Int by lazy {
         val displayArg = request?.toolCall?.arguments?.get("display")?.toString()
             ?: request?.toolCall?.arguments?.get("display_id")?.toString()
         when {
@@ -398,6 +399,8 @@ class OmniFlowDeviceDispatcher internal constructor(
         private set
 
     private var currentState: State? = null
+
+    private var currentObservationExtra: Map<String, Any?> = emptyMap()
 
     private var previousActionTool: String? = null
 
@@ -445,6 +448,9 @@ class OmniFlowDeviceDispatcher internal constructor(
             throw error
         } catch (error: Exception) {
             failure(activeRun, error).also(::finishRun)
+        } finally {
+            currentObservationExtra = emptyMap()
+            environment.close()
         }
     }
 
@@ -484,6 +490,8 @@ class OmniFlowDeviceDispatcher internal constructor(
         beforeOperation()
         val captureScreenshot = payload["screenshot"] != false
         val waitToStabilize = payload["wait_to_stabilize"] == true
+        val region = mapValue(payload["region"]).takeIf { it.isNotEmpty() }
+            ?.let(AndroidGuiObservationRegion::fromMap)
         val suppressOverlay = shouldSuppressOverlayForScreenshot(
             captureScreenshot = captureScreenshot,
             screenshotExcludesOverlays = environment.screenshotExcludesOverlays(),
@@ -494,10 +502,14 @@ class OmniFlowDeviceDispatcher internal constructor(
                 captureScreenshot = captureScreenshot,
                 waitToStabilize = waitToStabilize,
                 displayId = targetDisplayId,
+                leaseOwnerId = request?.id,
+                ocr = payload["ocr"] == true,
+                region = region,
             ).also {
                 currentStateId = it.state.stateId
                 currentState = it.state
-            }.state.asHostMap(includeImage = captureScreenshot)
+                currentObservationExtra = it.extra
+            }.state.asHostMap(includeImage = captureScreenshot, observationExtra = currentObservationExtra)
         } finally {
             if (suppressOverlay) afterScreenshot()
         }
@@ -507,13 +519,20 @@ class OmniFlowDeviceDispatcher internal constructor(
         beforeOperation()
         onPhase(ExecutionPhase.AUTOMATIC)
         val action = Action.fromMap(mapValue(payload["action"]))
+        val metadata = mapValue(payload["metadata"])
         val suppliedState = mapValue(payload["state"])
         val sourceState = if (suppliedState.isNotEmpty()) {
             State.fromMap(suppliedState)
         } else {
             currentState ?: error("host_action_state_required")
         }
-        require(sourceState.stateId == currentStateId) { "host_action_state_stale" }
+        if (sourceState.stateId != currentStateId) {
+            return mapOf("success" to false, "error" to "action_observation_expired")
+        }
+        val expectedObservationId = firstText(metadata["observation_id"])
+        if (expectedObservationId.isBlank() || expectedObservationId != currentObservationExtra["observation_id"]) {
+            return mapOf("success" to false, "error" to "action_observation_expired")
+        }
         if (blocksPaymentConfirmation(sourceState, action)) {
             return mapOf(
                 "success" to false,
@@ -523,7 +542,6 @@ class OmniFlowDeviceDispatcher internal constructor(
         }
         beforeAction(action)
         return try {
-            val metadata = mapValue(payload["metadata"])
             onProgress(
                 firstText(metadata["summary"], action.tool).ifBlank { "GUI action" },
                 progressPayload(metadata + mapOf("action" to action.asMap())),
@@ -550,6 +568,8 @@ class OmniFlowDeviceDispatcher internal constructor(
                 awaitStabilization = payload["await_stabilization"] != false,
                 displayId = targetDisplayId,
                 leaseOwnerId = request?.id,
+                expectedState = sourceState,
+                expectedObservationId = expectedObservationId,
             )
             if (result.success) previousActionTool = action.tool
             linkedMapOf<String, Any?>(
@@ -834,17 +854,21 @@ internal fun manualCompletionResult(
     "done_reason" to "manual_finished",
 )
 
-internal fun State.asHostMap(includeImage: Boolean): Map<String, Any?> {
-    if (!includeImage) return asMap()
+internal fun State.asHostMap(
+    includeImage: Boolean,
+    observationExtra: Map<String, Any?> = emptyMap(),
+): Map<String, Any?> {
+    val observation = asMap() + if (observationExtra.isEmpty()) emptyMap() else mapOf("extra" to observationExtra)
+    if (!includeImage) return observation
     val screenshot = screenshotPath
         ?.takeIf(String::isNotBlank)
         ?.let(::File)
         ?.takeIf(File::isFile)
-        ?: return asMap()
+        ?: return observation
     val visualRgb = screenshot.visualRgbPayload()
-    return asMap() + buildMap {
+    return observation + buildMap {
         put("image_base64", Base64.getEncoder().encodeToString(screenshot.readBytes()))
-        visualRgb?.let { put("extra", mapOf("visual_rgb" to it)) }
+        if (visualRgb != null) put("extra", observationExtra + ("visual_rgb" to visualRgb))
     }
 }
 

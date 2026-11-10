@@ -35,6 +35,8 @@ internal data class AndroidGuiPlatformState(
     val displayHeight: Int,
     val xml: String,
     val screenshotJpeg: ByteArray? = null,
+    val displayId: Int = Display.DEFAULT_DISPLAY,
+    val frameSequence: Long? = null,
 )
 
 data class AndroidGuiInputTarget(
@@ -140,7 +142,7 @@ internal class AccessibilityAndroidGuiPlatform(
     ): AndroidGuiPlatformState = coroutineScope {
         val service = awaitService()
         val display = displaySize(displayId)
-        val (roots, observedPackage) = withContext(Dispatchers.Main.immediate) {
+        val (roots, windowMetadata, observedPackage) = withContext(Dispatchers.Main.immediate) {
             val seenWindowIds = mutableSetOf<Int>()
             val displayWindows = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 val allDisplays = runCatching { service.windowsOnAllDisplays }.getOrNull()
@@ -148,6 +150,20 @@ internal class AccessibilityAndroidGuiPlatform(
                     ?: if (displayId == Display.DEFAULT_DISPLAY) service.windows else emptyList()
             } else {
                 if (displayId == Display.DEFAULT_DISPLAY) service.windows else emptyList()
+            }
+
+            val windowMetaMap = mutableMapOf<Int, AndroidGuiWindowMetadata>()
+            displayWindows.forEach { window ->
+                val bounds = Rect().also { runCatching { window.getBoundsInScreen(it) } }
+                windowMetaMap[window.id] = AndroidGuiWindowMetadata(
+                    windowId = window.id,
+                    layer = runCatching { window.layer }.getOrNull(),
+                    type = runCatching { window.type }.getOrNull(),
+                    bounds = bounds,
+                    title = runCatching { window.title?.toString() }.getOrNull(),
+                    isActive = runCatching { window.isActive }.getOrNull(),
+                    isFocused = runCatching { window.isFocused }.getOrNull(),
+                )
             }
 
             val collectedRoots = buildList {
@@ -162,9 +178,9 @@ internal class AccessibilityAndroidGuiPlatform(
             }
 
             val resolvedPackage = resolveDisplayPackage(service, displayId, displayWindows)
-            collectedRoots to resolvedPackage
+            Triple(collectedRoots, windowMetaMap, resolvedPackage)
         }
-        val xmlDeferred = async(Dispatchers.Default) { AndroidGuiXml.serialize(roots) }
+        val xmlDeferred = async(Dispatchers.Default) { AndroidGuiXml.serialize(roots, windowMetadata) }
         val screenshotDeferred = if (captureScreenshot) {
             async { captureScreenshot(service, displayId) }
         } else {
@@ -176,6 +192,11 @@ internal class AccessibilityAndroidGuiPlatform(
         } else {
             ""
         }
+        val frameSequence = if (displayId != Display.DEFAULT_DISPLAY) {
+            DeviceDisplayManager.virtualFrameSequence(displayId, "")
+        } else {
+            null
+        }
         AndroidGuiPlatformState(
             packageName = observedPackage,
             activityName = activityName,
@@ -183,6 +204,8 @@ internal class AccessibilityAndroidGuiPlatform(
             displayHeight = display.second,
             xml = xml,
             screenshotJpeg = screenshotDeferred?.await(),
+            displayId = displayId,
+            frameSequence = frameSequence,
         )
     }
 

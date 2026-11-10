@@ -2,6 +2,8 @@ package cn.com.omnimind.androidgui
 
 import android.app.Application
 import android.content.Context
+import android.content.ComponentName
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -424,6 +426,144 @@ class DeviceDisplayManagerTest {
         assertTrue("Move must succeed and be verified when childTaskIds match", resultStr.contains(""""verified":true"""))
         assertTrue(resultStr.contains(""""code":"ok""""))
     }
+
+    @Test
+    fun `getRootTasks extracts packageName from inherited and direct fields across root task hierarchy`() = runBlocking {
+        var currentTasks: List<Any> = emptyList()
+
+        val fakeAtmServer = object {
+            @Suppress("UNUSED_PARAMETER")
+            fun getAllRootTaskInfosOnDisplay(displayId: Int): List<Any> = currentTasks
+            @Suppress("UNUSED_PARAMETER")
+            fun moveRootTaskToDisplay(taskId: Int, displayId: Int) {}
+            @Suppress("UNUSED_PARAMETER")
+            fun setFocusedTask(taskId: Int) {}
+        }
+
+        val getAllMethod = fakeAtmServer.javaClass.getMethod("getAllRootTaskInfosOnDisplay", Int::class.javaPrimitiveType)
+        val moveMethod = fakeAtmServer.javaClass.getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        val focusMethod = fakeAtmServer.javaClass.getMethod("setFocusedTask", Int::class.javaPrimitiveType)
+
+        val stub = object : PrivilegedDisplayServiceStub(allowedClientUid = 0) {
+            override fun isDisplayAllowed(displayId: Int): Boolean = true
+            override fun probeAtmOps(): AtmOps =
+                AtmOps.Modern(fakeAtmServer, getAllMethod, moveMethod, focusMethod)
+        }
+
+        DeviceDisplayManager.privilegedService = stub
+
+        // 1. 继承公开字段回归：topActivity 声明在 FakeTaskInfo 基类中，RootTaskInfo 作为子类继承
+        currentTasks = listOf(
+            FakeRootTaskInfo(
+                taskId = 221,
+                displayId = 21,
+                topActivity = ComponentName("com.google.android.calculator", "com.android.calculator2.Calculator"),
+            )
+        )
+        val rootTasksInheritedTop = DeviceDisplayManager.getRootTasks(21)
+        assertEquals(1, rootTasksInheritedTop.size)
+        assertEquals("com.google.android.calculator", rootTasksInheritedTop[0].packageName)
+        assertEquals(221, rootTasksInheritedTop[0].taskId)
+
+        // 验证 service.getRootTasks 返回的真实 JSON 包含正确的 packageName
+        val jsonStr = stub.getRootTasks(21)
+        assertTrue(jsonStr.contains(""""packageName":"com.google.android.calculator""""))
+
+        // 2. 继承公开字段：baseActivity 回退（topActivity 为空）
+        currentTasks = listOf(
+            FakeRootTaskInfo(
+                taskId = 221,
+                displayId = 21,
+                topActivity = null,
+                baseActivity = ComponentName("com.google.android.calculator", "com.android.calculator2.Calculator"),
+            )
+        )
+        val rootTasksInheritedBase = DeviceDisplayManager.getRootTasks(21)
+        assertEquals("com.google.android.calculator", rootTasksInheritedBase[0].packageName)
+
+        // 3. 继承公开字段：baseIntent 回退（topActivity 与 baseActivity 为空）
+        currentTasks = listOf(
+            FakeRootTaskInfo(
+                taskId = 221,
+                displayId = 21,
+                topActivity = null,
+                baseActivity = null,
+                baseIntent = Intent().apply {
+                    component = ComponentName("com.google.android.calculator", "com.android.calculator2.Calculator")
+                },
+            )
+        )
+        val rootTasksInheritedIntent = DeviceDisplayManager.getRootTasks(21)
+        assertEquals("com.google.android.calculator", rootTasksInheritedIntent[0].packageName)
+
+        // 4. Modern RootTaskInfo 专属字段：childTaskNames 读取
+        currentTasks = listOf(
+            FakeRootTaskInfo(
+                taskId = 221,
+                displayId = 21,
+                topActivity = null,
+                baseActivity = null,
+                baseIntent = null,
+                childTaskNames = arrayOf("com.google.android.calculator/com.android.calculator2.Calculator"),
+            )
+        )
+        val rootTasksChildNames = DeviceDisplayManager.getRootTasks(21)
+        assertEquals("com.google.android.calculator", rootTasksChildNames[0].packageName)
+
+        // 5. 直接声明字段（无继承关系），确保直接字段不回归
+        currentTasks = listOf(
+            FakeDirectTaskInfo(
+                taskId = 223,
+                displayId = 21,
+                topActivity = ComponentName("com.example.direct", "com.example.direct.MainActivity"),
+            )
+        )
+        val rootTasksDirect = DeviceDisplayManager.getRootTasks(21)
+        assertEquals("com.example.direct", rootTasksDirect[0].packageName)
+
+        // 6. 非公开字段回退：protected topActivity 在基类中，通过受保护字段逐级回退查找
+        currentTasks = listOf(
+            FakeNonPublicRootTaskInfo(
+                topActivity = ComponentName("com.example.nonpublic", "com.example.nonpublic.MainActivity"),
+            )
+        )
+        val rootTasksNonPublic = DeviceDisplayManager.getRootTasks(21)
+        assertEquals("com.example.nonpublic", rootTasksNonPublic[0].packageName)
+    }
+
+    @Test
+    fun `getRootTasks extracts packageName for legacy StackInfo with taskNames without regression`() = runBlocking {
+        val legacyStack = FakeLegacyStackInfo(
+            stackId = 224,
+            displayId = 21,
+            taskNames = arrayOf("com.example.legacy/com.example.legacy.MainActivity"),
+        )
+
+        val fakeAtmServer = object {
+            fun getAllStackInfos(): List<Any> = listOf(legacyStack)
+            @Suppress("UNUSED_PARAMETER")
+            fun moveStackToDisplay(taskId: Int, displayId: Int) {}
+            @Suppress("UNUSED_PARAMETER")
+            fun setFocusedStack(taskId: Int) {}
+        }
+
+        val getAllMethod = fakeAtmServer.javaClass.getMethod("getAllStackInfos")
+        val moveMethod = fakeAtmServer.javaClass.getMethod("moveStackToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        val focusMethod = fakeAtmServer.javaClass.getMethod("setFocusedStack", Int::class.javaPrimitiveType)
+
+        val stub = object : PrivilegedDisplayServiceStub(allowedClientUid = 0) {
+            override fun isDisplayAllowed(displayId: Int): Boolean = true
+            override fun probeAtmOps(): AtmOps =
+                AtmOps.Stack(fakeAtmServer, getAllMethod, moveMethod, focusMethod)
+        }
+
+        DeviceDisplayManager.privilegedService = stub
+
+        val tasks = DeviceDisplayManager.getRootTasks(21)
+        assertEquals(1, tasks.size)
+        assertEquals("com.example.legacy", tasks[0].packageName)
+        assertEquals(224, tasks[0].taskId)
+    }
 }
 
 private class FakePrivilegedDisplayBridge(
@@ -483,3 +623,65 @@ private class FakePrivilegedDisplayServiceStub(
         return true
     }
 }
+
+// 模拟 AOSP TaskInfo 基类，topActivity/baseActivity/baseIntent 作为公开成员声明在基类中
+open class FakeTaskInfo(
+    @JvmField var taskId: Int = 221,
+    @JvmField var displayId: Int = 21,
+    @JvmField var userId: Int = 0,
+    @JvmField var topActivity: ComponentName? = null,
+    @JvmField var baseActivity: ComponentName? = null,
+    @JvmField var baseIntent: Intent? = null,
+)
+
+// 模拟 AOSP 11+ RootTaskInfo，继承 TaskInfo，自身仅包含 childTaskIds/childTaskNames/visible/isFocused
+class FakeRootTaskInfo(
+    taskId: Int = 221,
+    displayId: Int = 21,
+    userId: Int = 0,
+    topActivity: ComponentName? = null,
+    baseActivity: ComponentName? = null,
+    baseIntent: Intent? = null,
+    @JvmField var childTaskIds: IntArray = intArrayOf(221),
+    @JvmField var childTaskNames: Array<String> = emptyArray(),
+    @JvmField var visible: Boolean = true,
+    @JvmField var isFocused: Boolean = true,
+) : FakeTaskInfo(taskId, displayId, userId, topActivity, baseActivity, baseIntent)
+
+// 模拟非公开字段 ROM：topActivity 在基类中受保护声明
+open class FakeNonPublicTaskInfo(
+    @JvmField protected var topActivity: ComponentName? = null,
+) {
+    @JvmField var taskId: Int = 222
+    @JvmField var displayId: Int = 21
+    @JvmField var userId: Int = 0
+}
+
+class FakeNonPublicRootTaskInfo(
+    topActivity: ComponentName? = null,
+    @JvmField var childTaskIds: IntArray = intArrayOf(222),
+    @JvmField var visible: Boolean = true,
+    @JvmField var isFocused: Boolean = true,
+) : FakeNonPublicTaskInfo(topActivity)
+
+// 模拟直接声明字段（未通过继承），确保直接字段不回归
+class FakeDirectTaskInfo(
+    @JvmField var taskId: Int = 223,
+    @JvmField var displayId: Int = 21,
+    @JvmField var userId: Int = 0,
+    @JvmField var topActivity: ComponentName? = null,
+    @JvmField var childTaskIds: IntArray = intArrayOf(223),
+    @JvmField var visible: Boolean = true,
+    @JvmField var isFocused: Boolean = true,
+)
+
+// 模拟 Android 10 旧版 StackInfo（使用 taskNames 与 taskIds）
+class FakeLegacyStackInfo(
+    @JvmField var stackId: Int = 224,
+    @JvmField var displayId: Int = 21,
+    @JvmField var userId: Int = 0,
+    @JvmField var taskIds: IntArray = intArrayOf(224),
+    @JvmField var taskNames: Array<String> = arrayOf("com.example.legacy/MainActivity"),
+    @JvmField var visible: Boolean = true,
+    @JvmField var isFocused: Boolean = true,
+)

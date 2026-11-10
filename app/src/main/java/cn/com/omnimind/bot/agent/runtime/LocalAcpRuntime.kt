@@ -21,6 +21,9 @@ import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
+import cn.com.omnimind.androidgui.DeviceDisplayManager
+import cn.com.omnimind.androidgui.DisplayInputCoordinator
+import cn.com.omnimind.bot.agent.tool.handlers.DeviceDisplayToolHandler
 import com.ai.assistance.operit.terminal.TerminalManager
 import com.rk.terminal.runtime.TerminalDistribution
 import com.agentclientprotocol.agent.AgentInfo
@@ -1115,6 +1118,7 @@ internal class LocalAcpRuntime(
         // (including in-process Xiaowan, which has no external preparation
         // callback) must start from the default enabled capability.
         sessionMcpEnabled = true
+        val sessionsToClean = (sessions.keys + turnOwnership.activeRecords().map { it.sessionId }).distinct()
         // Release local ownership, leases and authorizations before transport teardown.
         // Transport disconnect is not an official terminal confirmation, so do not
         // persist a fake official cancellation journal entry.
@@ -1145,6 +1149,10 @@ internal class LocalAcpRuntime(
             Log.w(TAG, "Timed out cancelling ACP prompts before switch")
         }
         promptExecutions.clear()
+        // 待所有执行中的 prompt 取消并稳定 (settle) 后，再释放会话持有的设备虚拟屏资源，避免操作仍在执行时强制销毁
+        sessionsToClean.forEach { sid ->
+            cleanupSessionDisplayResources(sid)
+        }
         pendingPermissions.keys.forEach {
             serverRequestOwners.remove(it, activeAgentId())
         }
@@ -1475,12 +1483,13 @@ internal class LocalAcpRuntime(
 
     private suspend fun closeLoadedSession(sessionId: String) {
         val session = sessions[sessionId] ?: return
-        AcpSessionMcpLeaseStore.revokeSession(sessionId)
         // Match the SDK: a rejected/failed close does not detach the session.
         session.close()
         if (sessions.remove(sessionId, session)) {
             sessionCwds.remove(sessionId)
             sessionPermissionBehaviors.remove(sessionId)
+            AcpSessionMcpLeaseStore.revokeSession(sessionId)
+            cleanupSessionDisplayResources(sessionId)
         }
     }
 
@@ -1513,7 +1522,6 @@ internal class LocalAcpRuntime(
         check(turnOwnership.activeTurnId(sessionId) == null) {
             "ACP session $sessionId is running; cancel the turn before deleting it."
         }
-        AcpSessionMcpLeaseStore.revokeSession(sessionId)
         check(requireAgentInfo().capabilities.sessionCapabilities.delete != null) {
             "The Agent does not advertise session/delete."
         }
@@ -1523,6 +1531,8 @@ internal class LocalAcpRuntime(
         val response = jsonToAny(Json.encodeToJsonElement(
             com.agentclientprotocol.model.DeleteSessionResponse.serializer(), deleted
         )) as? Map<String, Any?> ?: emptyMap()
+        AcpSessionMcpLeaseStore.revokeSession(sessionId)
+        cleanupSessionDisplayResources(sessionId)
         // Delete is the acknowledged operation. A follow-up close can fail
         // because the Agent has already removed that session.
         sessions.remove(sessionId)
@@ -1535,6 +1545,20 @@ internal class LocalAcpRuntime(
             put("sessionId", sessionId)
             put("conversationId", conversationId)
             put("historyPreserved", true)
+        }
+    }
+
+    private suspend fun cleanupSessionDisplayResources(sessionId: String) {
+        runCatching {
+            DisplayInputCoordinator.closeSessionVirtualDisplays(sessionId)
+            DeviceDisplayManager.closePrivilegedService(
+                context = appContext,
+                ownerId = sessionId,
+                acpSessionId = sessionId,
+            )
+            DeviceDisplayToolHandler.clearSession(sessionId)
+        }.onFailure { e ->
+            Log.w(TAG, "清理会话 $sessionId 虚拟屏资源失败: ${e.message}")
         }
     }
 

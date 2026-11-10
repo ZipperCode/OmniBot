@@ -7,7 +7,6 @@ import cn.com.omnimind.baselib.llm.ChatCompletionStreamOptions
 import cn.com.omnimind.baselib.llm.ChatCompletionTool
 import cn.com.omnimind.baselib.llm.ChatCompletionTurn
 import cn.com.omnimind.baselib.llm.contentText
-import cn.com.omnimind.baselib.util.ImageCompressor
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -29,7 +28,7 @@ interface OmniFlowModelClient {
 
 class OmniFlowModelHost(
     private val modelClient: OmniFlowModelClient,
-    private val imageCompressor: (String) -> String = ::compressVlmImage,
+    private val imageCompressor: (String) -> String = OmniFlowImageHelper::compressVlmImage,
     private val onReasoningUpdate: suspend (String) -> Unit = {},
     private val maxRejectedActionRetries: Int? = null,
 ) {
@@ -257,16 +256,7 @@ class OmniFlowModelHost(
             "repeated_action_without_progress",
         )
 
-        private fun compressVlmImage(value: String): String {
-            val compressed = ImageCompressor.compressBase64Image(
-                base64String = value,
-                scale = 0.3f,
-                quality = 70,
-                bypassThreshold = 0L,
-            ).base64
-            val payload = compressed.substringAfter(",", "")
-            return if (payload.isBlank()) value else "data:image/jpeg;base64,$payload"
-        }
+        fun compressVlmImage(value: String): String = OmniFlowImageHelper.compressVlmImage(value)
 
         suspend fun completeJson(
             payload: Map<String, Any?>,

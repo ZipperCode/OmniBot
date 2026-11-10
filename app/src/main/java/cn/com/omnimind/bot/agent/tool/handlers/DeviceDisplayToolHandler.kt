@@ -3,12 +3,14 @@ package cn.com.omnimind.bot.agent.tool.handlers
 import android.content.Context
 import android.view.Display
 import cn.com.omnimind.androidgui.AndroidGuiEnvironment
+import cn.com.omnimind.androidgui.AndroidGuiObservationRegion
 import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.androidgui.DisplayInputCoordinator
 import cn.com.omnimind.androidgui.KeyguardStateMonitor
 import cn.com.omnimind.baselib.llm.AssistantToolCall
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.OobActionSchema
+import cn.com.omnimind.baselib.runlog.State
 import cn.com.omnimind.bot.agent.AgentCallback
 import cn.com.omnimind.bot.agent.AgentExecutionEnvironment
 import cn.com.omnimind.bot.agent.AgentToolExecutionHandle
@@ -20,8 +22,10 @@ import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -35,7 +39,7 @@ import java.util.Base64
 
 class DeviceDisplayToolHandler(
     val context: Context,
-    private val environment: AndroidGuiEnvironment = AndroidGuiEnvironment(context),
+    val environment: AndroidGuiEnvironment = AndroidGuiEnvironment(context),
 ) : ToolHandler {
     private val helper = SharedHelper(
         context = context.applicationContext ?: context,
@@ -45,8 +49,17 @@ class DeviceDisplayToolHandler(
         },
     )
 
+    private data class DisplayObservation(
+        val state: State,
+        val observationId: String,
+    )
+
+    private val latestObservations = java.util.concurrent.ConcurrentHashMap<Int, DisplayObservation>()
+
     override suspend fun dispose() {
         // 跨轮必须保留会话目标与虚拟屏状态，仅在会话 close/delete 时清理
+        latestObservations.clear()
+        runCatching { environment.close() }
     }
 
     override val toolNames: Set<String> = setOf(TOOL_NAME)
@@ -256,7 +269,7 @@ class DeviceDisplayToolHandler(
                     "list_displays" -> handleListDisplays()
                     "create_virtual_display" -> handleCreateVirtualDisplay(args, sessionKey, env.acpSessionId, env.acpTurnId)
                     "destroy_virtual_display" -> handleDestroyVirtualDisplay(targetDisplayId, sessionKey)
-                    "get_state" -> handleGetState(targetDisplayId, leaseOwnerId)
+                    "get_state" -> handleGetState(args, targetDisplayId, leaseOwnerId)
                     "screenshot" -> handleScreenshot(targetDisplayId, leaseOwnerId)
                     "click" -> handleClick(args, targetDisplayId, leaseOwnerId)
                     "long_press" -> handleLongPress(args, targetDisplayId, leaseOwnerId)
@@ -452,21 +465,160 @@ class DeviceDisplayToolHandler(
         return successResult("已将当前会话默认显示屏切换至: $targetDisplayId", mapOf("display_id" to targetDisplayId))
     }
 
+    private fun parseObservationRegion(args: JsonObject): AndroidGuiObservationRegion? {
+        val regionElement = args["region"] ?: return null
+        if (regionElement is kotlinx.serialization.json.JsonNull) return null
+        val regionObj = regionElement as? JsonObject
+            ?: throw IllegalArgumentException("Argument 'region' must be a JSON object with coordinates {x1, y1, x2, y2}.")
+        val x1 = regionObj["x1"]?.jsonPrimitive?.doubleOrNull
+            ?: throw IllegalArgumentException("region coordinate 'x1' must be a numeric value.")
+        val y1 = regionObj["y1"]?.jsonPrimitive?.doubleOrNull
+            ?: throw IllegalArgumentException("region coordinate 'y1' must be a numeric value.")
+        val x2 = regionObj["x2"]?.jsonPrimitive?.doubleOrNull
+            ?: throw IllegalArgumentException("region coordinate 'x2' must be a numeric value.")
+        val y2 = regionObj["y2"]?.jsonPrimitive?.doubleOrNull
+            ?: throw IllegalArgumentException("region coordinate 'y2' must be a numeric value.")
+        return AndroidGuiObservationRegion(x1, y1, x2, y2)
+    }
+
+    private sealed class GuardCheckResult {
+        data class Success(val expectedState: State?, val expectedObservationId: String?) : GuardCheckResult()
+        data class Failure(val message: String, val diagnostics: Map<String, String>) : GuardCheckResult()
+    }
+
+    private fun checkObservationGuard(
+        args: JsonObject,
+        targetDisplayId: Int,
+    ): GuardCheckResult {
+        val observationId = args["observation_id"]
+            ?.jsonPrimitive?.contentOrNull?.trim()?.ifEmpty { null }
+            ?: return GuardCheckResult.Success(expectedState = null, expectedObservationId = null)
+
+        // 1. 跨屏不符校验：该 observation_id 是否属于其他屏
+        val otherDisplayEntry = latestObservations.entries.firstOrNull {
+            it.key != targetDisplayId && it.value.observationId == observationId
+        }
+        if (otherDisplayEntry != null) {
+            val otherDisplayId = otherDisplayEntry.key
+            return GuardCheckResult.Failure(
+                message = "action_display_mismatch",
+                diagnostics = mapOf(
+                    "expected_display" to otherDisplayId.toString(),
+                    "current_display" to targetDisplayId.toString(),
+                    "observation_id" to observationId,
+                ),
+            )
+        }
+
+        // 2. 当前屏最新观测校验
+        val currentObservation = latestObservations[targetDisplayId]
+        if (currentObservation == null || currentObservation.observationId != observationId) {
+            return GuardCheckResult.Failure(
+                message = "action_observation_expired",
+                diagnostics = mapOf(
+                    "expected_observation_id" to observationId,
+                    "actual_observation_id" to (currentObservation?.observationId ?: "none"),
+                    "display_id" to targetDisplayId.toString(),
+                ),
+            )
+        }
+
+        return GuardCheckResult.Success(
+            expectedState = currentObservation.state,
+            expectedObservationId = observationId,
+        )
+    }
+
+    private fun populateSemanticTargetArgs(args: JsonObject, actArgs: MutableMap<String, Any?>) {
+        args["target_description"]?.jsonPrimitive?.contentOrNull?.trim()?.ifEmpty { null }?.let {
+            actArgs["target_description"] = it
+        }
+        args["node_resource_id"]?.jsonPrimitive?.contentOrNull?.trim()?.ifEmpty { null }?.let {
+            actArgs["node_resource_id"] = it
+        }
+        args["node_id"]?.jsonPrimitive?.contentOrNull?.trim()?.ifEmpty { null }?.let {
+            actArgs["node_id"] = it
+        }
+    }
+
     private suspend fun handleGetState(
+        args: JsonObject,
         displayId: Int,
         leaseOwnerId: String,
     ): ToolExecutionResult = DisplayInputCoordinator.withDisplayLock(displayId, leaseOwnerId) {
-        val state = environment.observe(captureScreenshot = false, waitToStabilize = false, displayId = displayId, leaseOwnerId = leaseOwnerId)
-        successResult(
-            summary = "获取显示屏 $displayId 界面状态成功: ${state.packageName}/${state.activityName} (${state.displayWidth}x${state.displayHeight}，坐标使用 0..1000 规范相对尺度: x/width*1000, y/height*1000)",
-            data = mapOf(
-                "display_id" to displayId,
-                "package_name" to state.packageName,
-                "activity_name" to state.activityName,
-                "width" to state.displayWidth,
-                "height" to state.displayHeight,
-                "xml" to state.xml,
-            ),
+        val region = try {
+            parseObservationRegion(args)
+        } catch (e: Exception) {
+            return@withDisplayLock ToolExecutionResult.Error(TOOL_NAME, e.message ?: "Invalid region coordinates.")
+        }
+        val ocrElement = args["ocr"]
+        val ocrRequested = if (ocrElement != null && ocrElement !is kotlinx.serialization.json.JsonNull) {
+            (ocrElement as? JsonPrimitive)?.takeUnless { it.isString }?.booleanOrNull
+                ?: return@withDisplayLock ToolExecutionResult.Error(TOOL_NAME, "Argument 'ocr' must be a boolean.")
+        } else {
+            false
+        }
+        val captureScreenshot = ocrRequested || (region != null)
+
+        val observation = environment.observeWithDiagnostics(
+            captureScreenshot = captureScreenshot,
+            waitToStabilize = false,
+            displayId = displayId,
+            leaseOwnerId = leaseOwnerId,
+            ocr = ocrRequested,
+            region = region,
+        )
+        val state = observation.state
+        val obsId = observation.extra["observation_id"] as? String ?: state.stateId
+        latestObservations[displayId] = DisplayObservation(state = state, observationId = obsId)
+
+        val data = mutableMapOf<String, Any?>(
+            "display_id" to displayId,
+            "package_name" to state.packageName,
+            "activity_name" to state.activityName,
+            "width" to state.displayWidth,
+            "height" to state.displayHeight,
+            "xml" to state.xml,
+            "observation_id" to obsId,
+        )
+        // 仅在显式请求 OCR 时返回 OCR 识别结果
+        if (ocrRequested) {
+            observation.extra["ocr"]?.let { data["ocr"] = it }
+        }
+
+        // 先从真实 observation.extra.visual_regions 提取局部图像作为 imageDataUrl
+        val visualRegions = observation.extra["visual_regions"] as? List<*>
+        val firstRegion = visualRegions?.firstOrNull() as? Map<*, *>
+        val firstRegionBase64 = firstRegion?.get("image_base64") as? String
+        val imageDataUrl = firstRegionBase64?.let { "data:image/jpeg;base64,$it" }
+
+        // visual_regions 投影至 data 时保留 bounds/width/height 等元数据，但剔除 image_base64，避免在文本 JSON 中重复传输庞大 base64 载荷
+        if (visualRegions != null) {
+            val projectedRegions = visualRegions.mapNotNull { item ->
+                (item as? Map<*, *>)?.filterKeys { it != "image_base64" }
+            }
+            if (projectedRegions.isNotEmpty()) {
+                data["visual_regions"] = projectedRegions
+            }
+        }
+        observation.extra["frame_sequence"]?.let { data["frame_sequence"] = it }
+        val summary = buildString {
+            append("获取显示屏 $displayId 界面状态成功: ${state.packageName}/${state.activityName} (${state.displayWidth}x${state.displayHeight}")
+            if (ocrRequested) {
+                val ocrMap = observation.extra["ocr"] as? Map<*, *>
+                val items = (ocrMap?.get("items") as? List<*>)?.size ?: 0
+                append("，OCR文字条目: $items")
+            }
+            if (region != null) {
+                append("，ROI区域[${region.x1},${region.y1},${region.x2},${region.y2}]")
+            }
+            append("，坐标使用 0..1000 规范相对尺度: x/width*1000, y/height*1000)")
+        }
+
+        getStateSuccessResult(
+            summary = summary,
+            data = data,
+            imageDataUrl = imageDataUrl,
         )
     }
 
@@ -505,11 +657,19 @@ class DeviceDisplayToolHandler(
         if (x == null || y == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x' and 'y' for click.")
         }
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
+        val actArgs = mutableMapOf<String, Any?>(OobActionSchema.ARG_X to x, OobActionSchema.ARG_Y to y)
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
-            action = Action(OobActionSchema.TOOL_CLICK, mapOf(OobActionSchema.ARG_X to x, OobActionSchema.ARG_Y to y)),
+            action = Action(OobActionSchema.TOOL_CLICK, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("点击完成 ($x, $y) [显示屏 $displayId]", mapOf("x" to x, "y" to y, "display_id" to displayId))
@@ -529,14 +689,23 @@ class DeviceDisplayToolHandler(
         if (x == null || y == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x' and 'y' for long_press.")
         }
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
+        val actArgs = mutableMapOf<String, Any?>(
+            OobActionSchema.ARG_X to x,
+            OobActionSchema.ARG_Y to y,
+            OobActionSchema.ARG_DURATION_MS to duration,
+        )
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
-            action = Action(
-                OobActionSchema.TOOL_LONG_PRESS,
-                mapOf(OobActionSchema.ARG_X to x, OobActionSchema.ARG_Y to y, OobActionSchema.ARG_DURATION_MS to duration),
-            ),
+            action = Action(OobActionSchema.TOOL_LONG_PRESS, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("长按完成 ($x, $y, ${duration}ms) [显示屏 $displayId]", mapOf("x" to x, "y" to y, "duration_ms" to duration, "display_id" to displayId))
@@ -558,20 +727,25 @@ class DeviceDisplayToolHandler(
         if (x1 == null || y1 == null || x2 == null || y2 == null) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required arguments 'x', 'y', 'x2', 'y2' for swipe.")
         }
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
+        val actArgs = mutableMapOf<String, Any?>(
+            OobActionSchema.ARG_X1 to x1,
+            OobActionSchema.ARG_Y1 to y1,
+            OobActionSchema.ARG_X2 to x2,
+            OobActionSchema.ARG_Y2 to y2,
+            OobActionSchema.ARG_DURATION_MS to duration,
+        )
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
-            action = Action(
-                OobActionSchema.TOOL_SWIPE,
-                mapOf(
-                    OobActionSchema.ARG_X1 to x1,
-                    OobActionSchema.ARG_Y1 to y1,
-                    OobActionSchema.ARG_X2 to x2,
-                    OobActionSchema.ARG_Y2 to y2,
-                    OobActionSchema.ARG_DURATION_MS to duration,
-                ),
-            ),
+            action = Action(OobActionSchema.TOOL_SWIPE, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("滑动完成 ($x1, $y1 -> $x2, $y2) [显示屏 $displayId]", mapOf("x1" to x1, "y1" to y1, "x2" to x2, "y2" to y2, "display_id" to displayId))
@@ -591,16 +765,23 @@ class DeviceDisplayToolHandler(
         }
         val x = args["x"]?.jsonPrimitive?.doubleOrNull
         val y = args["y"]?.jsonPrimitive?.doubleOrNull
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
         val actArgs = mutableMapOf<String, Any?>(OobActionSchema.ARG_TEXT to text)
         if (x != null && y != null) {
             actArgs[OobActionSchema.ARG_X] = x
             actArgs[OobActionSchema.ARG_Y] = y
         }
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
             action = Action(OobActionSchema.TOOL_INPUT_TEXT, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("文本输入成功: '$text' [显示屏 $displayId]", mapOf("text" to text, "display_id" to displayId))
@@ -618,11 +799,19 @@ class DeviceDisplayToolHandler(
         if (key.isEmpty()) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required argument 'key' for press_key.")
         }
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
+        val actArgs = mutableMapOf<String, Any?>(OobActionSchema.ARG_KEY to key)
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
-            action = Action(OobActionSchema.TOOL_PRESS_KEY, mapOf(OobActionSchema.ARG_KEY to key)),
+            action = Action(OobActionSchema.TOOL_PRESS_KEY, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("按键触发成功: $key [显示屏 $displayId]", mapOf("key" to key, "display_id" to displayId))
@@ -640,17 +829,42 @@ class DeviceDisplayToolHandler(
         if (packageName.isEmpty()) {
             return ToolExecutionResult.Error(TOOL_NAME, "Missing required argument 'package_name' for open_app.")
         }
+        val guard = when (val res = checkObservationGuard(args, displayId)) {
+            is GuardCheckResult.Success -> res
+            is GuardCheckResult.Failure -> return errorResult(res.message, res.diagnostics)
+        }
+        val actArgs = mutableMapOf<String, Any?>(OobActionSchema.ARG_PACKAGE_NAME to packageName)
+        populateSemanticTargetArgs(args, actArgs)
         val result = environment.act(
-            action = Action(OobActionSchema.TOOL_OPEN_APP, mapOf(OobActionSchema.ARG_PACKAGE_NAME to packageName)),
+            action = Action(OobActionSchema.TOOL_OPEN_APP, actArgs),
             awaitStabilization = true,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
+            expectedState = guard.expectedState,
+            expectedObservationId = guard.expectedObservationId,
         )
         return if (result.success) {
             successResult("已在显示屏 $displayId 启动应用: $packageName", mapOf("package_name" to packageName, "display_id" to displayId))
         } else {
             errorResult(result.message, result.diagnostics)
         }
+    }
+
+    private fun getStateSuccessResult(
+        summary: String,
+        data: Map<String, Any?>,
+        imageDataUrl: String? = null,
+    ): ToolExecutionResult {
+        val jsonElement = helper.mapToJsonElement(data)
+        val jsonStr = helper.json.encodeToString(jsonElement)
+        return ToolExecutionResult.ContextResult(
+            toolName = TOOL_NAME,
+            summaryText = summary,
+            previewJson = jsonStr,
+            rawResultJson = jsonStr,
+            success = true,
+            imageDataUrl = imageDataUrl,
+        )
     }
 
     private suspend fun handleWait(
@@ -803,6 +1017,58 @@ class DeviceDisplayToolHandler(
                         putJsonObject("dpi") {
                             put("type", "integer")
                             put("description", "虚拟屏像素密度（仅 action=create_virtual_display）")
+                        }
+                        putJsonObject("ocr") {
+                            put("type", "boolean")
+                            put("description", "是否在获取界面状态时执行端侧本地 OCR 识别文字（仅在缺少可点击无障碍文本或纯图形/自绘界面时开启）。开启时自动截取屏幕图像进行识别。")
+                        }
+                        putJsonObject("region") {
+                            put("type", "object")
+                            put("description", "可选的高清局部观测与识别区域（全屏归一化 0..1000 坐标：x1, y1 为左上角，x2, y2 为右下角）。提供时自动截取对应区域画面。")
+                            putJsonObject("properties") {
+                                putJsonObject("x1") {
+                                    put("type", "number")
+                                    put("minimum", 0)
+                                    put("maximum", 1000)
+                                    put("description", "区域左边缘坐标 (0..1000)")
+                                }
+                                putJsonObject("y1") {
+                                    put("type", "number")
+                                    put("minimum", 0)
+                                    put("maximum", 1000)
+                                    put("description", "区域顶边缘坐标 (0..1000)")
+                                }
+                                putJsonObject("x2") {
+                                    put("type", "number")
+                                    put("minimum", 0)
+                                    put("maximum", 1000)
+                                    put("description", "区域右边缘坐标 (0..1000)")
+                                }
+                                putJsonObject("y2") {
+                                    put("type", "number")
+                                    put("minimum", 0)
+                                    put("maximum", 1000)
+                                    put("description", "区域底边缘坐标 (0..1000)")
+                                }
+                            }
+                            put("required", buildJsonArray {
+                                add(JsonPrimitive("x1"))
+                                add(JsonPrimitive("y1"))
+                                add(JsonPrimitive("x2"))
+                                add(JsonPrimitive("y2"))
+                            })
+                        }
+                        putJsonObject("observation_id") {
+                            put("type", "string")
+                            put("description", "可选的前置观测身份标识（由 get_state 返回）。动作执行前将严格校验该观测身份是否匹配当前屏幕最新状态，防止界面变化后执行过期操作。")
+                        }
+                        putJsonObject("target_description") {
+                            put("type", "string")
+                            put("description", "可选的目标语义描述（例如按钮文字或无障碍描述），用于动作前语义锁定与状态一致性校验。")
+                        }
+                        putJsonObject("node_resource_id") {
+                            put("type", "string")
+                            put("description", "可选的目标控件资源 ID（如 com.example:id/btn_login），用于动作前语义锁定与状态一致性校验。")
                         }
                     }
                     put("required", buildJsonArray { add(JsonPrimitive("action")) })

@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.ui.channel
 import cn.com.omnimind.bot.manager.SpecialPermissionManager
 import cn.com.omnimind.bot.agent.personal.PersonalContextPermissionActions
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalInitCoordinator
+import cn.com.omnimind.bot.agent.display.VirtualScreenManagement
 import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
@@ -21,12 +22,15 @@ class SpecialPermissionChannel {
     private var eventSink: EventChannel.EventSink? = null
     private var embeddedTerminalInitListener: ((Map<String, Any?>) -> Unit)? = null
     private var personalContextActions: PersonalContextPermissionActions? = null
+    private var virtualScreenManagement: VirtualScreenManagement? = null
 
     fun onCreate(context: Context) {
         specialPermissionManager?.closeRootSettings()
         specialPermissionManager = SpecialPermissionManager(context)
         personalContextActions?.close()
         personalContextActions = PersonalContextPermissionActions(context)
+        virtualScreenManagement?.close()
+        virtualScreenManagement = VirtualScreenManagement(context)
     }
 
     fun setChannel(flutterEngine: FlutterEngine) {
@@ -57,6 +61,7 @@ class SpecialPermissionChannel {
         }
         methodChannel?.setMethodCallHandler { call, result ->
                 if (personalContextActions?.handle(call, result) == true) return@setMethodCallHandler
+                if (virtualScreenManagement?.handle(call, result) == true) return@setMethodCallHandler
                 when (call.method) {
                     "isIgnoringBatteryOptimizations" -> specialPermissionManager!!.isIgnoringBatteryOptimizations(
                         result
@@ -213,6 +218,8 @@ class SpecialPermissionChannel {
         specialPermissionManager?.closeRootSettings()
         personalContextActions?.close()
         personalContextActions = null
+        virtualScreenManagement?.close()
+        virtualScreenManagement = null
         embeddedTerminalInitListener?.let {
             EmbeddedTerminalInitCoordinator.removeListener(it)
         }

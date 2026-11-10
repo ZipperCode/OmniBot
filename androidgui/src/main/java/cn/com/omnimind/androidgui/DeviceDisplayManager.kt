@@ -189,6 +189,9 @@ object DeviceDisplayManager {
     private var activeVirtualDisplayOwner: String? = null
 
     @Volatile
+    private var activeVirtualDisplayInfo: VirtualDisplayInfo? = null
+
+    @Volatile
     var displayBridge: PrivilegedDisplayBridge? = null
 
     @Volatile
@@ -322,6 +325,7 @@ object DeviceDisplayManager {
         activeVirtualDisplayId = Display.DEFAULT_DISPLAY
         activeVirtualDisplayOwner = null
         virtualDisplay = null
+        activeVirtualDisplayInfo = null
         frameSource = null
         lastError = null
         privilegedService = null
@@ -407,10 +411,15 @@ object DeviceDisplayManager {
 
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                privilegedService = IPrivilegedDisplayService.asInterface(service)
+                synchronized(this@DeviceDisplayManager) {
+                    privilegedService = IPrivilegedDisplayService.asInterface(service)
+                }
             }
             override fun onServiceDisconnected(name: ComponentName?) {
-                privilegedService = null
+                synchronized(this@DeviceDisplayManager) {
+                    privilegedService = null
+                    privilegedServiceOwner = null
+                }
             }
         }
         shizukuClass.getMethod("bindUserService", argsClass, ServiceConnection::class.java).invoke(null, args, conn)
@@ -553,27 +562,41 @@ object DeviceDisplayManager {
         ownerId: String? = null,
         acpSessionId: String? = null,
     ) {
-        val helperOwner = privilegedServiceOwner
-        if (ownerId != null && helperOwner != null && ownerId != helperOwner) {
-            return
-        }
-        destroyVirtualDisplay(activeVirtualDisplayId, ownerId)
-        privilegedServiceOwner = null
-        privilegedService?.let {
-            runCatching { it.destroy() }
-        }
-        privilegedService = null
-        val sid = privilegedSessionId
-        privilegedSessionId = null
-        if (sid != null && context != null && ownerId != null) {
-            runCatching {
-                val privilegedManager = cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager.get(context)
-                val access = privilegedManager.reserve(ownerId = ownerId, acpSessionId = acpSessionId)
-                access.stopPrivilegedSession(sid)
+        virtualDisplayPrepMutex.withLock {
+            var sidToStop: String? = null
+
+            synchronized(this) {
+                val helperOwner = privilegedServiceOwner
+                if (ownerId != null && helperOwner != null && ownerId != helperOwner) {
+                    return@withLock
+                }
+                val currentVdOwner = activeVirtualDisplayOwner
+                if (ownerId != null && currentVdOwner != null && ownerId != currentVdOwner) {
+                    return@withLock
+                }
+                destroyVirtualDisplay(activeVirtualDisplayId, ownerId)
+
+                val serviceToDestroy = privilegedService
+                privilegedService = null
+                privilegedServiceOwner = null
+                serviceToDestroy?.let {
+                    runCatching { it.destroy() }
+                }
+
+                sidToStop = privilegedSessionId
+                privilegedSessionId = null
             }
+
+            if (sidToStop != null && context != null && ownerId != null) {
+                runCatching {
+                    val privilegedManager = cn.com.omnimind.baselib.privileged.PrivilegedCapabilityManager.get(context)
+                    val access = privilegedManager.reserve(ownerId = ownerId, acpSessionId = acpSessionId)
+                    access.stopPrivilegedSession(sidToStop)
+                }
+            }
+            ownerId?.let { clearSessionDisplayTarget(it) }
+            acpSessionId?.let { clearSessionDisplayTarget(it) }
         }
-        ownerId?.let { clearSessionDisplayTarget(it) }
-        acpSessionId?.let { clearSessionDisplayTarget(it) }
     }
 
     /**
@@ -634,6 +657,51 @@ object DeviceDisplayManager {
         activeVirtualDisplayId != Display.DEFAULT_DISPLAY && (virtualDisplay != null || privilegedService != null || displayBridge != null)
 
     fun activeVirtualDisplayId(): Int = activeVirtualDisplayId
+    fun activeVirtualDisplayOwner(): String? = activeVirtualDisplayOwner
+
+    /**
+     * 在锁与租约内原子校验屏幕与所有者身份并释放，拒绝运行中任务与跨会话操作。
+     */
+    suspend fun closeVirtualDisplaySafely(
+        expectedDisplayId: Int,
+        expectedOwnerId: String? = null,
+        activeTaskGuard: (() -> Boolean)? = null,
+    ): Result<Unit> = virtualDisplayPrepMutex.withLock {
+        try {
+            DisplayInputCoordinator.withDisplayLeases(listOf(expectedDisplayId), "management-close-$expectedDisplayId") {
+                synchronized(this@DeviceDisplayManager) {
+                    if (activeVirtualDisplayId == Display.DEFAULT_DISPLAY || activeVirtualDisplayId != expectedDisplayId) {
+                        return@withDisplayLeases Result.failure(IllegalStateException("虚拟显示屏不存在或已被更新，拒绝关闭旧屏幕"))
+                    }
+                    val currentOwner = activeVirtualDisplayOwner
+                    if (expectedOwnerId != null && currentOwner != null && expectedOwnerId != currentOwner) {
+                        return@withDisplayLeases Result.failure(IllegalStateException("虚拟显示屏所有者不匹配，拒绝跨会话关闭"))
+                    }
+                    if (activeTaskGuard != null && activeTaskGuard()) {
+                        return@withDisplayLeases Result.failure(IllegalStateException("虚拟屏上有正在执行的任务，拒绝关闭"))
+                    }
+                    destroyVirtualDisplay(expectedDisplayId, currentOwner)
+                    Result.success(Unit)
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun getActiveVirtualDisplayInfo(): VirtualDisplayInfo? = activeVirtualDisplayInfo
+
+    fun getVirtualDisplayDimensions(displayId: Int): Triple<Int, Int, Int>? {
+        val info = activeVirtualDisplayInfo
+        if (info != null && info.displayId == displayId) {
+            return Triple(info.width, info.height, info.dpi)
+        }
+        val fs = frameSource
+        if (displayId == activeVirtualDisplayId && fs != null) {
+            return Triple(fs.width, fs.height, info?.dpi ?: DEFAULT_VIRTUAL_DPI)
+        }
+        return null
+    }
 
     @SuppressLint("WrongConstant")
     @Synchronized
@@ -648,6 +716,14 @@ object DeviceDisplayManager {
         val currentOwner = activeVirtualDisplayOwner
         if (currentOwner != null && ownerId != null && currentOwner != ownerId && isVirtualDisplayActive()) {
             return fail("A virtual display (id=$activeVirtualDisplayId) is already held by another active task ($currentOwner).")
+        }
+
+        val bridge = displayBridge
+        val service = privilegedService
+        if (bridge == null && service == null) {
+            return fail(
+                "Creating a privileged virtual display with touch & display-group flags requires a privileged Root or Shizuku service. Please start Shizuku or authorize Root User Service."
+            )
         }
 
         destroyVirtualDisplay(activeVirtualDisplayId, currentOwner)
@@ -672,7 +748,9 @@ object DeviceDisplayManager {
                     activeVirtualDisplayOwner = ownerId
                     ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(createdId, it) }
                     ownerId?.let { setSessionDisplayTarget(it, createdId) }
-                    return Result.success(VirtualDisplayInfo(createdId, width, height, dpi))
+                    val info = VirtualDisplayInfo(createdId, width, height, dpi)
+                    activeVirtualDisplayInfo = info
+                    return Result.success(info)
                 } else {
                     return failWithCleanup(
                         source,
@@ -691,30 +769,12 @@ object DeviceDisplayManager {
                     activeVirtualDisplayOwner = ownerId
                     ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(createdId, it) }
                     ownerId?.let { setSessionDisplayTarget(it, createdId) }
-                    return Result.success(VirtualDisplayInfo(createdId, width, height, dpi))
+                    val info = VirtualDisplayInfo(createdId, width, height, dpi)
+                    activeVirtualDisplayInfo = info
+                    return Result.success(info)
                 } else {
                     return failWithCleanup(source, "Privileged service failed to create virtual display")
                 }
-            }
-
-            // 2. 非特权回退路径（仅限无特权 flag 时的演示模式）
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
-                ?: return failWithCleanup(source, "DisplayManager unavailable")
-
-            val standardPresentationFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION or DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-            val standardAttempt = runCatching {
-                dm.createVirtualDisplay(VD_NAME, width, height, dpi, source.surface, standardPresentationFlags)
-            }
-            val vd = standardAttempt.getOrNull()
-            if (vd != null) {
-                virtualDisplay = vd
-                val displayId = vd.display.displayId
-                activeVirtualDisplayId = displayId
-                activeVirtualDisplayOwner = ownerId
-                applyDisplayTweaks(displayId)
-                ownerId?.let { DisplayInputCoordinator.registerVirtualDisplayOwnership(displayId, it) }
-                ownerId?.let { setSessionDisplayTarget(it, displayId) }
-                return Result.success(VirtualDisplayInfo(displayId, width, height, dpi))
             }
 
             return failWithCleanup(
@@ -758,6 +818,7 @@ object DeviceDisplayManager {
             frameSource = null
             activeVirtualDisplayId = Display.DEFAULT_DISPLAY
             activeVirtualDisplayOwner = null
+            activeVirtualDisplayInfo = null
             DisplayInputCoordinator.releaseVirtualDisplayOwnership(targetId, ownerId)
             if (ownerId != null) {
                 sessionDisplayTargets.remove(ownerId)

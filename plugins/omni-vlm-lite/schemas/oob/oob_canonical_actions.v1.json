@@ -136,13 +136,18 @@
       "name": "get_state",
       "kind": "observe",
       "ui_label": {"zh_cn": "刷新状态", "en_us": "Get state"},
-      "description": {"zh_cn": "不执行 UI 操作，只重新获取当前页面状态、包名和 Accessibility tree。", "en_us": "Do not perform a UI action; refresh the current page state, package name, and Accessibility tree."},
-      "prompt_guide": {"zh_cn": "- 内部状态刷新：运行时每轮自动读取当前页面状态；该动作不暴露给模型或前端，不点击、不滑动、不输入。", "en_us": "- Internal state refresh: the runtime reads the current page state automatically each turn; this action is not exposed to the model or frontend and does not tap, swipe, or type."},
-      "model_visible": false,
+      "description": {"zh_cn": "只读检查当前屏幕，可请求局部高清图与端侧 OCR；不执行点击、滑动或输入。", "en_us": "Inspect the current screen without UI interaction; optionally request a high-resolution region and on-device OCR."},
+      "prompt_guide": {"zh_cn": "- get_state(reason?, ocr?, x1?, y1?, x2?, y2?): 看不清小字或树中缺少目标时只读检查。区域四个坐标须一起提供，使用全屏 0..1000；ocr=true 请求端侧识字。局部图上的动作仍使用全屏坐标。", "en_us": "- get_state(reason?, ocr?, x1?, y1?, x2?, y2?): Inspect unclear text or targets missing from the tree. Supply all four region coordinates together in full-screen 0..1000 coordinates; ocr=true requests on-device OCR. Actions always use full-screen coordinates."},
+      "model_visible": true,
       "replayable": false,
       "editor_visible": false,
       "args": [
-        {"name": "reason", "type": "string", "description": {"zh_cn": "为什么需要重新获取状态，例如上一步操作失败、页面无变化或当前页面不确定。", "en_us": "Why state refresh is needed, such as previous action failed, page did not change, or current page is uncertain."}}
+        {"name": "reason", "type": "string", "description": {"zh_cn": "为什么需要重新获取状态，例如上一步操作失败、页面无变化或当前页面不确定。", "en_us": "Why state refresh is needed, such as previous action failed, page did not change, or current page is uncertain."}},
+        {"name": "ocr", "type": "boolean", "persisted": false, "description": {"zh_cn": "是否请求端侧文字识别；识别框不是可点击控件。", "en_us": "Request on-device text recognition; OCR boxes are not clickable controls."}},
+        {"name": "x1", "type": "number", "persisted": false, "description": {"zh_cn": "检查区域左边缘的全屏 0..1000 坐标。", "en_us": "Region left edge in full-screen 0..1000 coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "y1", "type": "number", "persisted": false, "description": {"zh_cn": "检查区域上边缘的全屏 0..1000 坐标。", "en_us": "Region top edge in full-screen 0..1000 coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "x2", "type": "number", "persisted": false, "description": {"zh_cn": "检查区域右边缘的全屏 0..1000 坐标。", "en_us": "Region right edge in full-screen 0..1000 coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "y2", "type": "number", "persisted": false, "description": {"zh_cn": "检查区域下边缘的全屏 0..1000 坐标。", "en_us": "Region bottom edge in full-screen 0..1000 coordinates."}, "minimum": 0, "maximum": 1000}
       ]
     },
     {

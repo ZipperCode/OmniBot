@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
@@ -14,13 +16,19 @@ import cn.com.omnimind.baselib.runlog.ActionCoordinateCodec
 import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.baselib.runlog.OobActionSchema
 import cn.com.omnimind.baselib.runlog.State
+import java.io.ByteArrayOutputStream
+import java.io.Closeable
+import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.min
-
 data class AndroidGuiActionResult(
     val success: Boolean,
     val message: String,
@@ -38,6 +46,7 @@ data class AndroidGuiScreenSnapshot(
 data class AndroidGuiObservation(
     val state: State,
     val stabilization: Map<String, Any?>,
+    val extra: Map<String, Any?> = emptyMap(),
 )
 
 /** Raised when a physical-display GUI task can no longer safely continue. */
@@ -52,12 +61,39 @@ enum class AndroidGuiAccessibilityStatus {
 class AndroidGuiEnvironment internal constructor(
     private val appContext: Context?,
     private val platform: AndroidGuiPlatform,
-) {
+    private val ocrEngine: AndroidScreenOcrEngine? = null,
+) : Closeable {
     constructor(context: Context) : this(
         appContext = context.applicationContext ?: context,
         platform = AccessibilityAndroidGuiPlatform(context.applicationContext ?: context),
+        ocrEngine = createDefaultOcrEngine(context.applicationContext ?: context),
     )
 
+    constructor(context: Context, ocrEngine: AndroidScreenOcrEngine?) : this(
+        appContext = context.applicationContext ?: context,
+        platform = AccessibilityAndroidGuiPlatform(context.applicationContext ?: context),
+        ocrEngine = ocrEngine,
+    )
+
+    private var currentBaseline: AndroidGuiObservationBaseline? = null
+    private val observationCounter = AtomicLong(0L)
+    private val ocrCache = ConcurrentHashMap<OcrCacheKey, List<Map<String, Any?>>>()
+
+    fun clearObservation() {
+        currentBaseline = null
+        ocrCache.clear()
+    }
+
+    override fun close() {
+        clearObservation()
+        (ocrEngine as? AutoCloseable)?.runCatching { close() }
+    }
+
+    fun registerObservationBaseline(baseline: AndroidGuiObservationBaseline) {
+        currentBaseline = baseline
+    }
+
+    fun currentObservationBaseline(): AndroidGuiObservationBaseline? = currentBaseline
     fun accessibilityStatus(): AndroidGuiAccessibilityStatus = when {
         !platform.isAccessibilityEnabled() -> AndroidGuiAccessibilityStatus.DISABLED
         platform.isReady() -> AndroidGuiAccessibilityStatus.READY
@@ -113,11 +149,15 @@ class AndroidGuiEnvironment internal constructor(
         waitToStabilize: Boolean = false,
         displayId: Int = Display.DEFAULT_DISPLAY,
         leaseOwnerId: String? = null,
+        ocr: Boolean = false,
+        region: AndroidGuiObservationRegion? = null,
     ): State = observeWithDiagnostics(
         captureScreenshot = captureScreenshot,
         waitToStabilize = waitToStabilize,
         displayId = displayId,
         leaseOwnerId = leaseOwnerId,
+        ocr = ocr,
+        region = region,
     ).state
 
     suspend fun observeWithDiagnostics(
@@ -125,14 +165,19 @@ class AndroidGuiEnvironment internal constructor(
         waitToStabilize: Boolean = false,
         displayId: Int = Display.DEFAULT_DISPLAY,
         leaseOwnerId: String? = null,
+        ocr: Boolean = false,
+        region: AndroidGuiObservationRegion? = null,
     ): AndroidGuiObservation {
         check(awaitReady(displayId = displayId)) { "android_gui_accessibility_not_ready" }
         val context = checkNotNull(appContext) { "android_gui_context_required" }
         KeyguardStateMonitor.ensureInteractiveAndUnlocked(context, displayId, leaseOwnerId)
+
+        val forceScreenshot = ocr || region != null
+        val needScreenshot = captureScreenshot || forceScreenshot
         val observedAndStability = if (waitToStabilize) {
-            observeStable(captureScreenshot, displayId)
+            observeStable(needScreenshot, displayId)
         } else {
-            platform.observe(captureScreenshot, displayId) to false
+            platform.observe(needScreenshot, displayId) to false
         }
         val observed = observedAndStability.first
         val stabilized = observedAndStability.second
@@ -144,18 +189,228 @@ class AndroidGuiEnvironment internal constructor(
             xml = observed.xml,
         )
         val persisted = InternalRunLogStore.persistState(context, state, observed.screenshotJpeg)
-        return AndroidGuiObservation(
-            state = persisted,
-            stabilization = linkedMapOf<String, Any?>(
-                "wait_requested" to waitToStabilize,
-                "stabilized" to if (waitToStabilize) stabilized else null,
-                "result" to when {
-                    !waitToStabilize -> "not_requested"
-                    stabilized -> "stable"
-                    else -> "timeout"
-                },
-            ).filterValues { it != null },
+
+        val obsId = "obs_${SystemClock.elapsedRealtime()}_${observationCounter.incrementAndGet()}"
+        val frameSeq = observed.frameSequence
+
+        // Visual regions (最多一个高清区域，包含全屏 0..1000 归一化 bounds 与 image_base64)
+        val visualRegions = mutableListOf<Map<String, Any?>>()
+        var decodedBitmap: Bitmap? = null
+        try {
+            if (region != null && observed.screenshotJpeg != null) {
+                decodedBitmap = BitmapFactory.decodeByteArray(observed.screenshotJpeg, 0, observed.screenshotJpeg.size)
+                if (decodedBitmap != null) {
+                    val rect = region.toRect(observed.displayWidth, observed.displayHeight)
+                    val cropLeft = rect.left.coerceIn(0, decodedBitmap.width - 1)
+                    val cropTop = rect.top.coerceIn(0, decodedBitmap.height - 1)
+                    val cropWidth = rect.width().coerceAtMost(decodedBitmap.width - cropLeft)
+                    val cropHeight = rect.height().coerceAtMost(decodedBitmap.height - cropTop)
+                    if (cropWidth > 0 && cropHeight > 0) {
+                        val cropped = Bitmap.createBitmap(decodedBitmap, cropLeft, cropTop, cropWidth, cropHeight)
+                        try {
+                            val base64 = ByteArrayOutputStream().use { out ->
+                                cropped.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                                Base64.getEncoder().encodeToString(out.toByteArray())
+                            }
+                            visualRegions.add(
+                                mapOf(
+                                    "bounds" to region.toNormalizedList(),
+                                    "image_base64" to base64,
+                                    "width" to cropWidth,
+                                    "height" to cropHeight,
+                                )
+                            )
+                        } finally {
+                            if (cropped !== decodedBitmap) {
+                                cropped.recycle()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // OCR 逻辑：显式请求 或 区域请求，或在已有截图前提下树缺少可用文字时自动触发（普通无图观测不触发，避免无图噪声）
+            val shouldRunOcr = ocr || (region != null) || (needScreenshot && AndroidGuiSafetyGuard.treeLacksUsableText(observed.xml))
+            val ocrResult = if (shouldRunOcr) {
+                executeOcr(
+                    observed = observed,
+                    decodedBitmap = decodedBitmap,
+                    region = region,
+                    displayId = displayId,
+                    frameSequence = frameSeq,
+                )
+            } else {
+                null
+            }
+
+            // 记录内存基线（最多仅当前一份，生命周期清理）
+            val baseline = AndroidGuiObservationBaseline(
+                observationId = obsId,
+                displayId = displayId,
+                frameSequence = frameSeq,
+                stateId = persisted.stateId,
+                packageName = observed.packageName,
+                activityName = observed.activityName,
+                displayWidth = observed.displayWidth,
+                displayHeight = observed.displayHeight,
+                xml = observed.xml,
+                screenshotJpeg = observed.screenshotJpeg,
+            )
+            registerObservationBaseline(baseline)
+
+            val extra = buildMap<String, Any?> {
+                put("observation_id", obsId)
+                put("display_id", displayId)
+                put("frame_sequence", frameSeq)
+                if (ocrResult != null) {
+                    put("ocr", ocrResult)
+                }
+                if (visualRegions.isNotEmpty()) {
+                    put("visual_regions", visualRegions)
+                }
+            }
+
+            return AndroidGuiObservation(
+                state = persisted,
+                stabilization = linkedMapOf<String, Any?>(
+                    "wait_requested" to waitToStabilize,
+                    "stabilized" to if (waitToStabilize) stabilized else null,
+                    "result" to when {
+                        !waitToStabilize -> "not_requested"
+                        stabilized -> "stable"
+                        else -> "timeout"
+                    },
+                ).filterValues { it != null },
+                extra = extra,
+            )
+        } finally {
+            decodedBitmap?.recycle()
+        }
+    }
+
+    private suspend fun executeOcr(
+        observed: AndroidGuiPlatformState,
+        decodedBitmap: Bitmap?,
+        region: AndroidGuiObservationRegion?,
+        displayId: Int,
+        frameSequence: Long?,
+    ): Map<String, Any?> {
+        val jpeg = observed.screenshotJpeg
+        if (jpeg == null || jpeg.isEmpty()) {
+            return mapOf(
+                "status" to "failed",
+                "engine" to "paddle_ocr_v6",
+                "cached" to false,
+                "items" to emptyList<Map<String, Any?>>(),
+                "message" to "screenshot_unavailable_for_ocr",
+            )
+        }
+
+        val cacheKey = OcrCacheKey(
+            displayId = displayId,
+            region = region,
+            imageSha256 = sha256Hex(jpeg),
         )
+
+        val cached = ocrCache[cacheKey]
+        if (cached != null) {
+            return mapOf(
+                "status" to "ready",
+                "engine" to "paddle_ocr_v6",
+                "cached" to true,
+                "items" to cached,
+            )
+        }
+
+        val engine = ocrEngine
+        if (engine == null) {
+            return mapOf(
+                "status" to "unavailable",
+                "engine" to "paddle_ocr_v6",
+                "cached" to false,
+                "items" to emptyList<Map<String, Any?>>(),
+                "message" to "ocr_engine_not_configured",
+            )
+        }
+
+        return withContext(Dispatchers.Default) {
+            var tempBitmap: Bitmap? = null
+            var croppedOcrBitmap: Bitmap? = null
+            try {
+                val sourceBitmap = if (decodedBitmap != null && !decodedBitmap.isRecycled) {
+                    decodedBitmap
+                } else {
+                    tempBitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+                    tempBitmap
+                }
+
+                if (sourceBitmap == null) {
+                    return@withContext mapOf(
+                        "status" to "failed",
+                        "engine" to "paddle_ocr_v6",
+                        "cached" to false,
+                        "items" to emptyList<Map<String, Any?>>(),
+                        "message" to "bitmap_decode_failed",
+                    )
+                }
+
+                val (inputBitmap, offsetX, offsetY) = if (region != null) {
+                    val rect = region.toRect(observed.displayWidth, observed.displayHeight)
+                    val cropLeft = rect.left.coerceIn(0, sourceBitmap.width - 1)
+                    val cropTop = rect.top.coerceIn(0, sourceBitmap.height - 1)
+                    val cropW = rect.width().coerceAtMost(sourceBitmap.width - cropLeft)
+                    val cropH = rect.height().coerceAtMost(sourceBitmap.height - cropTop)
+                    if (cropW > 0 && cropH > 0) {
+                        croppedOcrBitmap = Bitmap.createBitmap(sourceBitmap, cropLeft, cropTop, cropW, cropH)
+                        Triple(croppedOcrBitmap, cropLeft, cropTop)
+                    } else {
+                        Triple(sourceBitmap, 0, 0)
+                    }
+                } else {
+                    Triple(sourceBitmap, 0, 0)
+                }
+
+                val recognizedItems = engine.recognize(inputBitmap)
+                val mappedItems = recognizedItems.map { item ->
+                    mapOf(
+                        "text" to item.text,
+                        "bounds" to listOf(
+                            item.bounds.left + offsetX,
+                            item.bounds.top + offsetY,
+                            item.bounds.right + offsetX,
+                            item.bounds.bottom + offsetY,
+                        ),
+                        "confidence" to item.confidence,
+                        "source" to "ocr",
+                    )
+                }
+
+                if (ocrCache.size > 32) {
+                    ocrCache.clear()
+                }
+                ocrCache[cacheKey] = mappedItems
+
+                mapOf(
+                    "status" to "ready",
+                    "engine" to "paddle_ocr_v6",
+                    "cached" to false,
+                    "items" to mappedItems,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mapOf(
+                    "status" to "failed",
+                    "engine" to "paddle_ocr_v6",
+                    "cached" to false,
+                    "items" to emptyList<Map<String, Any?>>(),
+                    "message" to (e.message ?: "ocr_recognition_failed"),
+                )
+            } finally {
+                croppedOcrBitmap?.recycle()
+                tempBitmap?.recycle()
+            }
+        }
     }
 
     private suspend fun observeStable(
@@ -223,6 +478,8 @@ class AndroidGuiEnvironment internal constructor(
         awaitStabilization: Boolean = true,
         displayId: Int = Display.DEFAULT_DISPLAY,
         leaseOwnerId: String? = null,
+        expectedState: State? = null,
+        expectedObservationId: String? = null,
     ): AndroidGuiActionResult = DisplayInputCoordinator.withDisplayLock(displayId, leaseOwnerId) {
         val currentJob = currentCoroutineContext().job
         leaseOwnerId?.let { owner ->
@@ -247,15 +504,64 @@ class AndroidGuiEnvironment internal constructor(
                 }
             }
 
-            val stateBeforeAction = if (
-                awaitStabilization && action.tool != OobActionSchema.TOOL_WAIT
-            ) {
-                platform.observe(captureScreenshot = false, displayId = displayId).uiFingerprint()
+            // 在现有 input lock 内核验当前 observed id、display、fresh tree/target 或目标 ROI 像素变化
+            val targetDesc = action.args["target_description"] as? String
+            val nodeId = action.args["node_id"]?.toString()
+            val resId = action.args["node_resource_id"] as? String
+            val hasTargetClues = !targetDesc.isNullOrBlank() || !nodeId.isNullOrBlank() || !resId.isNullOrBlank()
+            val isCoordinateAction = action.tool in OobActionSchema.coordinateToolNames ||
+                action.args["x"] != null || action.args["y"] != null
+
+            val needsGuardCheck = expectedObservationId != null || expectedState != null || hasTargetClues
+            val shouldObserveBeforeAction = (awaitStabilization || needsGuardCheck) && action.tool != OobActionSchema.TOOL_WAIT
+
+            val freshObserved = if (shouldObserveBeforeAction) {
+                val needsScreenshotForGuard = needsGuardCheck && currentBaseline?.screenshotJpeg != null && isCoordinateAction
+
+                platform.observe(
+                    captureScreenshot = needsScreenshotForGuard,
+                    displayId = displayId,
+                )
             } else {
                 null
             }
 
-            val result = platform.dispatch(canonicalForDisplay(action, displayId), displayId = displayId)
+            var actionToDispatch = canonicalForDisplay(action, displayId)
+
+            if (freshObserved != null && needsGuardCheck) {
+                val displaySize = platform.displaySize(displayId)
+                val guardResult = AndroidGuiSafetyGuard.prepareGuardedAction(
+                    action = action,
+                    expectedState = expectedState,
+                    expectedObservationId = expectedObservationId,
+                    baseline = currentBaseline,
+                    currentDisplayId = displayId,
+                    currentDisplaySize = displaySize,
+                    freshXml = freshObserved.xml,
+                    freshPackageName = freshObserved.packageName,
+                    freshScreenshotJpeg = freshObserved.screenshotJpeg,
+                )
+
+                when (guardResult) {
+                    is GuardResult.Rejected -> {
+                        return@withDisplayLock guardResult.failure
+                    }
+                    is GuardResult.Allowed -> {
+                        actionToDispatch = canonicalForDisplay(guardResult.action, displayId)
+                    }
+                }
+            }
+
+            val stateBeforeAction = if (
+                awaitStabilization && action.tool != OobActionSchema.TOOL_WAIT
+            ) {
+                freshObserved?.uiFingerprint()
+            } else {
+                null
+            }
+
+            val result = platform.dispatch(actionToDispatch, displayId = displayId)
+
             if (!result.success) return@withDisplayLock result
             if (!awaitStabilization) {
                 return@withDisplayLock result.withStabilization("runtime_delegated")
@@ -359,6 +665,21 @@ class AndroidGuiEnvironment internal constructor(
         }
     }
 }
+
+private data class OcrCacheKey(
+    val displayId: Int,
+    val region: AndroidGuiObservationRegion?,
+    val imageSha256: String,
+)
+
+private fun sha256Hex(bytes: ByteArray): String =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
+private fun createDefaultOcrEngine(context: Context): AndroidScreenOcrEngine? = runCatching {
+    AndroidScreenOcr(context)
+}.getOrNull()
 
 private const val ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
     "android.settings.ACCESSIBILITY_DETAILS_SETTINGS"

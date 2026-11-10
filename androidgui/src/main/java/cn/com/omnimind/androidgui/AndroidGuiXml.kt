@@ -5,12 +5,26 @@ import android.os.Build
 import android.util.Xml
 import android.view.accessibility.AccessibilityNodeInfo
 import java.io.StringWriter
+data class AndroidGuiWindowMetadata(
+    val windowId: Int,
+    val layer: Int? = null,
+    val type: Int? = null,
+    val bounds: Rect? = null,
+    val title: String? = null,
+    val isActive: Boolean? = null,
+    val isFocused: Boolean? = null,
+)
 
 internal object AndroidGuiXml {
-    fun serialize(root: AccessibilityNodeInfo?): String =
-        serialize(listOfNotNull(root))
+    fun serialize(
+        root: AccessibilityNodeInfo?,
+        windowMetadata: Map<Int, AndroidGuiWindowMetadata> = emptyMap(),
+    ): String = serialize(listOfNotNull(root), windowMetadata)
 
-    fun serialize(roots: List<AccessibilityNodeInfo>): String {
+    fun serialize(
+        roots: List<AccessibilityNodeInfo>,
+        windowMetadata: Map<Int, AndroidGuiWindowMetadata> = emptyMap(),
+    ): String {
         if (roots.isEmpty()) return ""
         val output = StringWriter()
         val serializer = Xml.newSerializer().apply {
@@ -28,8 +42,27 @@ internal object AndroidGuiXml {
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
             if (depth > MAX_DEPTH || (depth > 0 && !node.isVisibleToUser)) return
             val bounds = Rect().also(node::getBoundsInScreen)
+            val windowId = runCatching { node.windowId }.getOrDefault(0)
+            val windowMeta = windowMetadata[windowId]
             serializer.startTag(null, "node")
             serializer.attribute(null, "id", (nodeId++).toString())
+            serializer.attribute(null, "window-id", windowId.toString())
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val drawingOrder = runCatching { node.drawingOrder }.getOrNull()
+                if (drawingOrder != null) {
+                    serializer.attribute(null, "drawing-order", drawingOrder.toString())
+                }
+            }
+            if (windowMeta?.layer != null) {
+                serializer.attribute(null, "window-layer", windowMeta.layer.toString())
+            }
+            if (windowMeta?.type != null) {
+                serializer.attribute(null, "window-type", windowMeta.type.toString())
+            }
+            if (depth == 0 && windowMeta?.bounds != null) {
+                val wb = windowMeta.bounds
+                serializer.attribute(null, "window-bounds", "[${wb.left},${wb.top}][${wb.right},${wb.bottom}]")
+            }
             attribute("text", node.text)
             attribute("content-desc", node.contentDescription)
             attribute("hint-text", node.hintText)

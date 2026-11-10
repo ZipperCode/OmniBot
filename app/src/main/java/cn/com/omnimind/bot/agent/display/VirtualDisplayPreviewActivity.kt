@@ -15,17 +15,20 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Rational
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.graphics.drawable.GradientDrawable
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import cn.com.omnimind.bot.task.runtime.TaskWaitingStatus
 import androidx.activity.ComponentActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -99,10 +102,28 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private var lastBarsBottom = 0
 
 
+    private var isDarkTheme: Boolean = false
+    private var currentUiState: VirtualScreenUiState = VirtualScreenUiState.CLOSED
+
+    private var transientStatusText: String? = null
+    private var transientStatusExpiry: Long = 0L
+
+    private var lastRenderedTitle: String? = null
+    private var lastRenderedBadgeText: String? = null
+    private var lastRenderedBadgeVisible: Boolean? = null
+    private var lastRenderedSubtitle: String? = null
+    private var lastRenderedDotColor: Int? = null
+    private var lastStopButtonEnabled: Boolean? = null
+    private var lastPresentButtonEnabled: Boolean? = null
+    private var lastCloseButtonEnabled: Boolean? = null
+    private var lastCanEnterPipState: Boolean? = null
+
     private lateinit var rootContainer: FrameLayout
     private lateinit var headerBar: LinearLayout
-    private lateinit var sessionTagView: TextView
-    private lateinit var displayTagView: TextView
+    private lateinit var mainTitleView: TextView
+    private lateinit var displayBadgeView: TextView
+    private lateinit var statusDotView: View
+    private lateinit var statusDotDrawable: GradientDrawable
     private lateinit var statusTextView: TextView
     private lateinit var previewContainer: FrameLayout
     private lateinit var previewView: VirtualDisplayFrameView
@@ -112,8 +133,20 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private lateinit var presentButton: Button
     private lateinit var closeButton: Button
     private val tempContentRect = RectF()
+
+    private val stateRefreshHandler = Handler(Looper.getMainLooper())
+    private val stateRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                refreshUiState()
+                stateRefreshHandler.postDelayed(this, 500L)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val dark = ScreenTaskTheme.isNight(this)
+        isDarkTheme = dark
         setTheme(
             if (dark) android.R.style.Theme_Material_NoActionBar
             else android.R.style.Theme_Material_Light_NoActionBar
@@ -141,6 +174,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
 
         setupViews(dark)
+        refreshUiState()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -193,27 +227,10 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         initialTurnId = newTurnId
         initialStopToken = newStopToken
 
-        if (::sessionTagView.isInitialized) {
-            sessionTagView.text = "会话: $sessionId"
-        }
-        if (::displayTagView.isInitialized) {
-            displayTagView.text = "虚拟屏 ($displayId)"
-        }
-        if (::statusTextView.isInitialized) {
-            statusTextView.text = "任务执行中"
-        }
-        if (::stopButton.isInitialized) {
-            stopButton.isEnabled = true
-        }
-        if (::presentButton.isInitialized) {
-            presentButton.isEnabled = true
-        }
         if (::previewView.isInitialized) {
             previewView.bind(displayId, sessionId)
-            updateEdgeLightBounds()
-            updateEdgeLightState()
+            refreshUiState()
         }
-        updatePipParams()
     }
 
     private fun setupViews(dark: Boolean) {
@@ -261,7 +278,11 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                 updateEdgeLightState()
             }
             onFrameDrawn = {
+                updateEdgeLightBounds()
                 updateEdgeLightState()
+            }
+            onDisplayInvalidated = {
+                refreshUiState()
             }
             addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                 if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom) {
@@ -298,14 +319,17 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dpToPx(48f)
+                dpToPx(56f)
             )
         }
 
         val backButton = FrameLayout(this).apply {
             val sz = dpToPx(48f)
-            layoutParams = LinearLayout.LayoutParams(sz, sz)
+            layoutParams = LinearLayout.LayoutParams(sz, sz).apply {
+                marginStart = dpToPx(4f)
+            }
             markAsAccessibilityButton(this, "返回")
+            background = createRippleBackground(Color.TRANSPARENT, ScreenTaskTheme.rippleColor(scrimBg), dpF(context, 24f))
             setOnClickListener { finish() }
             val icon = ImageView(this@VirtualDisplayPreviewActivity).apply {
                 val iconSz = dpToPx(20f)
@@ -317,40 +341,105 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
         headerRow.addView(backButton)
 
-        sessionTagView = TextView(this).apply {
-            text = "会话: $sessionId"
-            setTextColor(primaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.DEFAULT_BOLD
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
+        val titleColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
             val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dpToPx(4f)
-            }
-            layoutParams = lp
-        }
-        headerRow.addView(sessionTagView)
-
-        displayTagView = TextView(this).apply {
-            text = "虚拟屏 ($displayId)"
-            setTextColor(accentColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.END
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+                marginStart = dpToPx(8f)
                 marginEnd = dpToPx(8f)
             }
             layoutParams = lp
         }
-        headerRow.addView(displayTagView)
+
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        mainTitleView = TextView(this).apply {
+            text = "虚拟屏"
+            setTextColor(primaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            typeface = Typeface.DEFAULT_BOLD
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        titleRow.addView(mainTitleView)
+
+        displayBadgeView = TextView(this).apply {
+            text = if (displayId > 0) "ID: $displayId" else ""
+            setTextColor(secondaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dpToPx(6f), dpToPx(2f), dpToPx(6f), dpToPx(2f))
+            val badgeBg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpF(context, 4f)
+                setColor(ScreenTaskTheme.surfaceSecondary(dark))
+            }
+            background = badgeBg
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = dpToPx(8f)
+            }
+            layoutParams = lp
+        }
+        titleRow.addView(displayBadgeView)
+        titleColumn.addView(titleRow)
+
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dpToPx(2f)
+            }
+            layoutParams = lp
+        }
+
+        statusDotDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(ScreenTaskTheme.brandPrimary(dark))
+        }
+        statusDotView = View(this).apply {
+            val dotSz = dpToPx(6f)
+            layoutParams = LinearLayout.LayoutParams(dotSz, dotSz).apply {
+                marginEnd = dpToPx(6f)
+            }
+            background = statusDotDrawable
+        }
+        statusRow.addView(statusDotView)
+
+        statusTextView = TextView(this).apply {
+            text = "任务运行中"
+            setTextColor(secondaryText)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        statusRow.addView(statusTextView)
+        titleColumn.addView(statusRow)
+        headerRow.addView(titleColumn)
 
         val pipButton = FrameLayout(this).apply {
             val sz = dpToPx(48f)
-            layoutParams = LinearLayout.LayoutParams(sz, sz)
+            layoutParams = LinearLayout.LayoutParams(sz, sz).apply {
+                marginEnd = dpToPx(4f)
+            }
             markAsAccessibilityButton(this, "画中画")
+            background = createRippleBackground(Color.TRANSPARENT, ScreenTaskTheme.rippleColor(scrimBg), dpF(context, 24f))
             setOnClickListener { handleEnterPip() }
             val icon = ImageView(this@VirtualDisplayPreviewActivity).apply {
                 val iconSz = dpToPx(18f)
@@ -361,23 +450,12 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
         headerRow.addView(pipButton)
         headerBar.addView(headerRow)
-
-        statusTextView = TextView(this).apply {
-            text = "任务执行中"
-            setTextColor(secondaryText)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(dpToPx(16f), 0, dpToPx(16f), dpToPx(6f))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        }
-        headerBar.addView(statusTextView)
         rootContainer.addView(headerBar)
 
         // 浮层底栏：操作按钮（停止任务、移交主屏、关闭预览）
         bottomBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(scrimBg)
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -386,48 +464,31 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             )
         }
 
-        val btnMinHeight = dpToPx(48f)
-
-        stopButton = Button(this).apply {
-            text = "停止任务"
-            contentDescription = "停止任务"
-            setTextColor(dangerColor)
-            minHeight = btnMinHeight
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
-            }
-            layoutParams = params
-            setOnClickListener { handleStopTask() }
-        }
+        stopButton = createActionButton(
+            text = "停止任务",
+            contentDesc = "停止任务",
+            isPrimary = false,
+            isDanger = true,
+            onClick = { handleStopTask() }
+        )
         bottomBar.addView(stopButton)
 
-        presentButton = Button(this).apply {
-            text = "移交主屏"
-            contentDescription = "移交主屏"
-            setTextColor(accentColor)
-            minHeight = btnMinHeight
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
-            }
-            layoutParams = params
-            setOnClickListener { handlePresentToMainDisplay() }
-        }
+        presentButton = createActionButton(
+            text = "移交主屏",
+            contentDesc = "移交主屏",
+            isPrimary = true,
+            isDanger = false,
+            onClick = { handlePresentToMainDisplay() }
+        )
         bottomBar.addView(presentButton)
 
-        closeButton = Button(this).apply {
-            text = "关闭预览"
-            contentDescription = "关闭预览"
-            setTextColor(primaryText)
-            minHeight = btnMinHeight
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(dpToPx(4f), 0, dpToPx(4f), 0)
-            }
-            layoutParams = params
-            setOnClickListener { finish() }
-        }
+        closeButton = createActionButton(
+            text = "关闭预览",
+            contentDesc = "关闭预览",
+            isPrimary = false,
+            isDanger = false,
+            onClick = { finish() }
+        )
         bottomBar.addView(closeButton)
         rootContainer.addView(bottomBar)
 
@@ -441,15 +502,18 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             lastBarsBottom = bars.bottom
             if (isInPipModeCompat()) {
                 headerBar.visibility = View.GONE
-                statusTextView.visibility = View.GONE
+                if (::statusTextView.isInitialized) {
+                    statusTextView.visibility = View.GONE
+                }
                 bottomBar.visibility = View.GONE
                 rootContainer.setPadding(0, 0, 0, 0)
                 previewEdgeLightView.stop()
             } else {
                 headerBar.visibility = if (areControlsVisible) View.VISIBLE else View.GONE
-                statusTextView.visibility = View.VISIBLE
+                if (::statusTextView.isInitialized) {
+                    statusTextView.visibility = if (areControlsVisible) View.VISIBLE else View.GONE
+                }
                 bottomBar.visibility = if (areControlsVisible) View.VISIBLE else View.GONE
-                rootContainer.setPadding(0, 0, 0, 0)
                 headerBar.setPadding(
                     bars.left + dpToPx(8f),
                     bars.top + dpToPx(4f),
@@ -473,6 +537,10 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     }
 
     private fun handleEnterPip() {
+        if (!canEnterPip()) {
+            OmniLog.w(TAG, "拒绝进入画中画：当前状态不允许进入画中画模式")
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val params = buildPipParams(autoEnter = false)
             if (params != null) {
@@ -490,9 +558,16 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
     private val hideControlsRunnable = Runnable { setControlsVisible(false, animate = true) }
 
     private fun setControlsVisible(visible: Boolean, animate: Boolean = true) {
+        if (!::headerBar.isInitialized || !::bottomBar.isInitialized) return
         if (isInPipModeCompat()) {
             headerBar.visibility = View.GONE
+            if (::statusTextView.isInitialized) {
+                statusTextView.visibility = View.GONE
+            }
             bottomBar.visibility = View.GONE
+            return
+        }
+        if (!visible && currentUiState == VirtualScreenUiState.CLOSED) {
             return
         }
         areControlsVisible = visible
@@ -504,6 +579,9 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         }
         if (visible) {
             headerBar.visibility = View.VISIBLE
+            if (::statusTextView.isInitialized) {
+                statusTextView.visibility = View.VISIBLE
+            }
             bottomBar.visibility = View.VISIBLE
             if (animate) {
                 headerBar.animate().alpha(1f).setDuration(200).start()
@@ -518,6 +596,9 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                 headerBar.animate().alpha(0f).setDuration(200).withEndAction {
                     if (!areControlsVisible) {
                         headerBar.visibility = View.GONE
+                        if (::statusTextView.isInitialized) {
+                            statusTextView.visibility = View.GONE
+                        }
                     }
                 }.start()
                 bottomBar.animate().alpha(0f).setDuration(200).withEndAction {
@@ -529,51 +610,319 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                 headerBar.alpha = 0f
                 bottomBar.alpha = 0f
                 headerBar.visibility = View.GONE
+                if (::statusTextView.isInitialized) {
+                    statusTextView.visibility = View.GONE
+                }
                 bottomBar.visibility = View.GONE
             }
         }
     }
 
     private fun toggleControls() {
+        if (!::headerBar.isInitialized || !::bottomBar.isInitialized) return
+        if (currentUiState == VirtualScreenUiState.CLOSED) {
+            setControlsVisible(true, animate = false)
+            return
+        }
         setControlsVisible(!areControlsVisible, animate = true)
     }
 
     override fun onUserInteraction() {
         super.onUserInteraction()
-        if (areControlsVisible && !isInPipModeCompat()) {
-            hideControlsHandler.removeCallbacks(hideControlsRunnable)
+        if (!::headerBar.isInitialized || !::bottomBar.isInitialized) return
+        if (areControlsVisible && !isInPipModeCompat() && currentUiState != VirtualScreenUiState.CLOSED) {
             hideControlsHandler.postDelayed(hideControlsRunnable, 4000L)
         }
     }
 
-    private fun isTaskRunningForCurrentTurn(): Boolean {
+    private enum class VirtualScreenUiState {
+        RUNNING,     // 运行中: 匹配当前初始 turn，无等待阻塞
+        WAITING,     // 等待中: 匹配当前初始 turn，存在人工介入/等待状态
+        RETAINED,    // 官方终态留存: 无活跃任务，画面已保留可供观看/显式移交
+        NEW_TURN,    // 新轮次已开始: 属于同会话但已进入新 Turn，旧按钮禁作用
+        CLOSED       // 虚拟屏已关闭或所有者失效
+    }
+
+    private fun isExactBoundTurn(currentTask: cn.com.omnimind.bot.task.runtime.TaskExecutionInfo): Boolean {
+        if (initialTaskId.isNullOrBlank() || initialTurnId.isNullOrBlank() || initialStopToken.isNullOrBlank()) {
+            return false
+        }
+        if (currentTask.taskId != initialTaskId) return false
+        if (currentTask.turnId != initialTurnId) return false
+        if (currentTask.stopToken != initialStopToken) return false
+        return TaskRuntime.validateStopToken(initialTaskId!!, initialStopToken!!)
+    }
+    private fun resolveCurrentUiState(): Pair<VirtualScreenUiState, String> {
         val sid = sessionId.trim()
-        if (sid.isEmpty()) return false
-        val task = TaskRuntime.findActiveTaskBySession(sid) ?: return false
-        if (!initialTurnId.isNullOrBlank() && task.turnId != initialTurnId) {
-            return false
+        if (sid.isEmpty() || displayId == Display.DEFAULT_DISPLAY) {
+            return VirtualScreenUiState.CLOSED to "虚拟屏已关闭"
         }
-        if (task.waitingStatus != null) {
-            return false
+        val activeVd = DeviceDisplayManager.activeVirtualDisplayId()
+        val vdOwner = DisplayInputCoordinator.getVirtualDisplayOwner(displayId)
+        if (!DeviceDisplayManager.isVirtualDisplayActive() || displayId != activeVd || vdOwner != sid) {
+            return VirtualScreenUiState.CLOSED to "虚拟屏已关闭"
         }
-        if (task.screenDisplayId != null && task.screenDisplayId != displayId) {
-            return false
+
+        val currentTask = TaskRuntime.findActiveTaskBySession(sid)
+        if (currentTask == null) {
+            return VirtualScreenUiState.RETAINED to "画面已保留"
         }
-        return true
+
+        val hasInitialBinding = !initialTaskId.isNullOrBlank() && !initialTurnId.isNullOrBlank() && !initialStopToken.isNullOrBlank()
+        if (!hasInitialBinding) {
+            return VirtualScreenUiState.NEW_TURN to "新轮次运行中"
+        }
+
+        if (!isExactBoundTurn(currentTask)) {
+            return VirtualScreenUiState.NEW_TURN to "新轮次运行中"
+        }
+
+        val waiting = currentTask.waitingStatus
+        if (waiting != null) {
+            val prompt = if (waiting is TaskWaitingStatus.WaitingForManualAuth) {
+                waiting.promptMessage.ifBlank { "等待用户处理" }
+            } else {
+                "等待用户处理"
+            }
+            return VirtualScreenUiState.WAITING to prompt
+        }
+
+        val status = currentTask.statusText?.trim().takeUnless { it.isNullOrBlank() } ?: "任务运行中"
+        return VirtualScreenUiState.RUNNING to status
+    }
+
+    private fun setTransientStatus(text: String, durationMs: Long = 4000L) {
+        transientStatusText = text
+        transientStatusExpiry = SystemClock.elapsedRealtime() + durationMs
+        if (::statusTextView.isInitialized && statusTextView.text != text) {
+            statusTextView.text = text
+            lastRenderedSubtitle = text
+        }
+    }
+
+    private fun clearTransientStatus() {
+        transientStatusText = null
+        transientStatusExpiry = 0L
+    }
+
+    fun refreshUiState() {
+        if (!::rootContainer.isInitialized) return
+        val (state, subtitleText) = resolveCurrentUiState()
+        currentUiState = state
+
+        if (::mainTitleView.isInitialized && lastRenderedTitle != "虚拟屏") {
+            mainTitleView.text = "虚拟屏"
+            lastRenderedTitle = "虚拟屏"
+        }
+
+        val badgeText = if (displayId > 0 && state != VirtualScreenUiState.CLOSED) "ID: $displayId" else ""
+        val badgeVisible = badgeText.isNotEmpty()
+        if (::displayBadgeView.isInitialized) {
+            if (lastRenderedBadgeVisible != badgeVisible) {
+                displayBadgeView.visibility = if (badgeVisible) View.VISIBLE else View.GONE
+                lastRenderedBadgeVisible = badgeVisible
+            }
+            if (badgeVisible && lastRenderedBadgeText != badgeText) {
+                displayBadgeView.text = badgeText
+                lastRenderedBadgeText = badgeText
+            }
+        }
+
+        val displaySubtitle = when {
+            state == VirtualScreenUiState.CLOSED -> {
+                clearTransientStatus()
+                subtitleText
+            }
+            SystemClock.elapsedRealtime() < transientStatusExpiry && transientStatusText != null -> {
+                transientStatusText!!
+            }
+            else -> {
+                clearTransientStatus()
+                subtitleText
+            }
+        }
+        if (::statusTextView.isInitialized && lastRenderedSubtitle != displaySubtitle) {
+            statusTextView.text = displaySubtitle
+            lastRenderedSubtitle = displaySubtitle
+        }
+
+        val dotColor = when (state) {
+            VirtualScreenUiState.RUNNING -> ScreenTaskTheme.brandPrimary(isDarkTheme)
+            VirtualScreenUiState.WAITING -> ScreenTaskTheme.warningColor()
+            VirtualScreenUiState.RETAINED -> ScreenTaskTheme.textSecondary(isDarkTheme)
+            VirtualScreenUiState.NEW_TURN -> ScreenTaskTheme.textSecondary(isDarkTheme)
+            VirtualScreenUiState.CLOSED -> ScreenTaskTheme.errorColor()
+        }
+        if (::statusDotView.isInitialized && lastRenderedDotColor != dotColor) {
+            statusDotDrawable.setColor(dotColor)
+            statusDotView.invalidate()
+            lastRenderedDotColor = dotColor
+        }
+
+        val isTakeoverActive = takeoverJob != null && takeoverJob?.isActive == true
+        val hasInitialBinding = !initialTaskId.isNullOrBlank() && !initialTurnId.isNullOrBlank() && !initialStopToken.isNullOrBlank()
+        val sid = sessionId.trim()
+        val currentTask = if (sid.isNotEmpty()) TaskRuntime.findActiveTaskBySession(sid) else null
+        val isBound = currentTask != null && hasInitialBinding && isExactBoundTurn(currentTask)
+
+        val canStop = !isTakeoverActive && (state == VirtualScreenUiState.RUNNING || state == VirtualScreenUiState.WAITING) && isBound
+
+        val canPresent = !isTakeoverActive && (
+            ((state == VirtualScreenUiState.RUNNING || state == VirtualScreenUiState.WAITING) && isBound) ||
+            state == VirtualScreenUiState.RETAINED
+        )
+
+        val canClose = !isFinishing && !isDestroyed
+
+        if (::stopButton.isInitialized && lastStopButtonEnabled != canStop) {
+            applyActionButtonStyle(stopButton, enabled = canStop, isPrimary = false, isDanger = true)
+            lastStopButtonEnabled = canStop
+        }
+        if (::presentButton.isInitialized && lastPresentButtonEnabled != canPresent) {
+            applyActionButtonStyle(presentButton, enabled = canPresent, isPrimary = true, isDanger = false)
+            lastPresentButtonEnabled = canPresent
+        }
+        if (::closeButton.isInitialized && lastCloseButtonEnabled != canClose) {
+            applyActionButtonStyle(closeButton, enabled = canClose, isPrimary = false, isDanger = false)
+            lastCloseButtonEnabled = canClose
+        }
+
+        if (state == VirtualScreenUiState.CLOSED) {
+            hideControlsHandler.removeCallbacks(hideControlsRunnable)
+            if (::headerBar.isInitialized && ::bottomBar.isInitialized) {
+                setControlsVisible(true, animate = false)
+            }
+            if (::previewView.isInitialized) {
+                previewView.setPreviewActive(false)
+            }
+            if (::previewEdgeLightView.isInitialized) {
+                previewEdgeLightView.stop()
+                previewEdgeLightView.clearTargetRect()
+            }
+            disableAutoEnterPip()
+            lastCanEnterPipState = false
+        } else {
+            updateEdgeLightState()
+            val pipEligible = canEnterPip()
+            if (lastCanEnterPipState != pipEligible) {
+                lastCanEnterPipState = pipEligible
+                updatePipParams()
+            }
+        }
+    }
+
+    private fun applyActionButtonStyle(
+        button: Button,
+        enabled: Boolean,
+        isPrimary: Boolean,
+        isDanger: Boolean,
+    ) {
+        val dp = resources.displayMetrics.density
+        fun dpToPx(value: Float): Int = (value * dp + 0.5f).toInt()
+
+        button.isEnabled = enabled
+        button.isClickable = enabled
+        button.isFocusable = enabled
+
+        val cornerRadius = dpToPx(12f).toFloat()
+        if (enabled) {
+            button.alpha = 1.0f
+            when {
+                isPrimary -> {
+                    val bg = ScreenTaskTheme.accentPrimary(isDarkTheme)
+                    val fg = ScreenTaskTheme.onAccent(isDarkTheme)
+                    button.background = createRippleBackground(bg, ScreenTaskTheme.rippleColor(bg), cornerRadius)
+                    button.setTextColor(fg)
+                }
+                isDanger -> {
+                    val bg = ScreenTaskTheme.surfaceSecondary(isDarkTheme)
+                    val fg = ScreenTaskTheme.errorColor()
+                    button.background = createRippleBackground(bg, ScreenTaskTheme.rippleColor(bg), cornerRadius)
+                    button.setTextColor(fg)
+                }
+                else -> {
+                    val bg = ScreenTaskTheme.surfaceSecondary(isDarkTheme)
+                    val fg = ScreenTaskTheme.textPrimary(isDarkTheme)
+                    button.background = createRippleBackground(bg, ScreenTaskTheme.rippleColor(bg), cornerRadius)
+                    button.setTextColor(fg)
+                }
+            }
+        } else {
+            button.alpha = 0.38f
+            val bg = ScreenTaskTheme.surfaceSecondary(isDarkTheme)
+            val fg = ScreenTaskTheme.textSecondary(isDarkTheme)
+            button.background = createRippleBackground(bg, 0, cornerRadius)
+            button.setTextColor(fg)
+        }
+    }
+
+    private fun createActionButton(
+        text: String,
+        contentDesc: String,
+        isPrimary: Boolean,
+        isDanger: Boolean,
+        onClick: () -> Unit,
+    ): Button {
+        val dp = resources.displayMetrics.density
+        fun dpToPx(value: Float): Int = (value * dp + 0.5f).toInt()
+
+        return Button(this).apply {
+            this.isAllCaps = false
+            this.text = text
+            contentDescription = contentDesc
+            gravity = Gravity.CENTER
+            minHeight = dpToPx(48f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dpToPx(8f), dpToPx(12f), dpToPx(8f), dpToPx(12f))
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dpToPx(4f)
+                marginEnd = dpToPx(4f)
+            }
+            layoutParams = lp
+            markAsAccessibilityButton(this, contentDesc)
+            setOnClickListener { onClick() }
+            applyActionButtonStyle(this, enabled = true, isPrimary = isPrimary, isDanger = isDanger)
+        }
+    }
+
+    private fun startStateRefreshLoop() {
+        stateRefreshHandler.removeCallbacks(stateRefreshRunnable)
+        stateRefreshHandler.post(stateRefreshRunnable)
+    }
+
+    private fun stopStateRefreshLoop() {
+        stateRefreshHandler.removeCallbacks(stateRefreshRunnable)
+    }
+
+    private fun isTaskRunningForCurrentTurn(): Boolean {
+        return currentUiState == VirtualScreenUiState.RUNNING
     }
 
     private fun updateEdgeLightState() {
         if (!::previewEdgeLightView.isInitialized || !::previewView.isInitialized) return
         if (isInPipModeCompat()) {
-            previewEdgeLightView.stop()
+            if (previewEdgeLightView.isRunning()) {
+                previewEdgeLightView.stop()
+            }
             return
         }
-        val isRunning = isTaskRunningForCurrentTurn()
-        if (isRunning && previewView.shouldDrawFrames()) {
+        val isOwnerValid = previewView.isDisplayOwnerValid()
+        val shouldGlow = currentUiState == VirtualScreenUiState.RUNNING &&
+            isOwnerValid &&
+            previewView.shouldDrawFrames()
+        if (shouldGlow) {
             updateEdgeLightBounds()
-            previewEdgeLightView.start()
+            if (!previewEdgeLightView.isRunning()) {
+                previewEdgeLightView.start()
+            }
         } else {
-            previewEdgeLightView.stop()
+            if (previewEdgeLightView.isRunning()) {
+                previewEdgeLightView.stop()
+            }
+            if (currentUiState == VirtualScreenUiState.CLOSED || !isOwnerValid) {
+                previewEdgeLightView.clearTargetRect()
+            }
         }
     }
 
@@ -585,31 +934,33 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
 
     fun getPreviewEdgeLight(): ScreenTaskEdgeLightView = previewEdgeLightView
     fun getPreviewView(): VirtualDisplayFrameView = previewView
-
+    fun getStopButton(): Button = stopButton
+    fun getPresentButton(): Button = presentButton
+    fun getCloseButton(): Button = closeButton
 
     override fun onStart() {
         super.onStart()
+        if (isFinishing || isDestroyed) return
         if (::previewView.isInitialized) {
             previewView.setPreviewActive(true)
         }
-        updatePipParams()
-        updateEdgeLightBounds()
-        updateEdgeLightState()
+        startStateRefreshLoop()
+        refreshUiState()
     }
 
     override fun onResume() {
         super.onResume()
+        if (isFinishing || isDestroyed) return
         if (::previewView.isInitialized) {
             previewView.setPreviewActive(true)
         }
-        updatePipParams()
+        startStateRefreshLoop()
+        refreshUiState()
         ScreenTaskOverlayHost.setPreviewActivityForeground(!isInPipModeCompat())
-        updateEdgeLightBounds()
-        updateEdgeLightState()
     }
-
     override fun onPause() {
         super.onPause()
+        stopStateRefreshLoop()
         if (!isInPipModeCompat() && ::previewView.isInitialized) {
             previewView.setPreviewActive(false)
         }
@@ -621,6 +972,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        stopStateRefreshLoop()
         if (!isInPipModeCompat() && ::previewView.isInitialized) {
             previewView.setPreviewActive(false)
         }
@@ -632,6 +984,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopStateRefreshLoop()
         hideControlsHandler.removeCallbacks(hideControlsRunnable)
         takeoverJob?.cancel()
         takeoverJob = null
@@ -641,11 +994,13 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         ScreenTaskOverlayHost.setPreviewActivityForeground(false)
         if (::previewEdgeLightView.isInitialized) {
             previewEdgeLightView.stop()
+            previewEdgeLightView.clearTargetRect()
         }
     }
 
     override fun finish() {
         disableAutoEnterPip()
+        stopStateRefreshLoop()
         takeoverJob?.cancel()
         takeoverJob = null
         super.finish()
@@ -671,7 +1026,9 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         if (isInPictureInPictureMode) {
             headerBar.visibility = View.GONE
-            statusTextView.visibility = View.GONE
+            if (::statusTextView.isInitialized) {
+                statusTextView.visibility = View.GONE
+            }
             bottomBar.visibility = View.GONE
             rootContainer.setPadding(0, 0, 0, 0)
             ScreenTaskOverlayHost.setPreviewActivityForeground(false)
@@ -683,17 +1040,14 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             }
         } else {
             headerBar.visibility = View.VISIBLE
-            statusTextView.visibility = View.VISIBLE
+            if (::statusTextView.isInitialized) {
+                statusTextView.visibility = View.VISIBLE
+            }
             bottomBar.visibility = View.VISIBLE
             rootContainer.setPadding(0, 0, 0, 0)
             ScreenTaskOverlayHost.setPreviewActivityForeground(true)
             ViewCompat.requestApplyInsets(rootContainer)
-            updatePipParams()
-            if (::previewView.isInitialized) {
-                previewView.setPreviewActive(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
-            }
-            updateEdgeLightBounds()
-            updateEdgeLightState()
+            refreshUiState()
         }
     }
 
@@ -776,13 +1130,20 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
         val targetStopToken = initialStopToken
 
         lifecycleScope.launch {
-            statusTextView.text = "正在停止任务..."
-            stopButton.isEnabled = false
+            setTransientStatus("正在停止任务...")
+            if (::stopButton.isInitialized) {
+                applyActionButtonStyle(stopButton, enabled = false, isPrimary = false, isDanger = true)
+                lastStopButtonEnabled = false
+            }
+            if (::presentButton.isInitialized) {
+                applyActionButtonStyle(presentButton, enabled = false, isPrimary = true, isDanger = false)
+                lastPresentButtonEnabled = false
+            }
 
             val currentTask = TaskRuntime.findActiveTaskBySession(targetSessionId)
-            if (currentTask != null && !targetTurnId.isNullOrBlank() && currentTask.turnId != targetTurnId) {
-                statusTextView.text = "新任务轮次已开始，无法停止"
-                stopButton.isEnabled = true
+            if (currentTask == null || !isExactBoundTurn(currentTask)) {
+                setTransientStatus("新任务轮次已开始，无法停止")
+                refreshUiState()
                 return@launch
             }
 
@@ -794,11 +1155,12 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                     turnId = targetTurnId,
                     stopToken = targetStopToken,
                 )
-                statusTextView.text = if (stopped) "已请求停止任务" else "任务已结束或凭据无效"
+                val msg = if (stopped) "已请求停止任务" else "任务已结束或凭据无效"
+                setTransientStatus(msg)
             } else {
-                statusTextView.text = "任务凭据无效，无法停止"
+                setTransientStatus("任务凭据无效，无法停止")
             }
-            stopButton.isEnabled = true
+            refreshUiState()
         }
     }
 
@@ -829,8 +1191,12 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                     initialTurnId == targetTurnId &&
                     initialStopToken == targetStopToken
 
-            presentButton.isEnabled = false
-            stopButton.isEnabled = false
+            if (::presentButton.isInitialized) {
+                applyActionButtonStyle(presentButton, enabled = false, isPrimary = true, isDanger = false)
+            }
+            if (::stopButton.isInitialized) {
+                applyActionButtonStyle(stopButton, enabled = false, isPrimary = false, isDanger = true)
+            }
 
             try {
                 val success = takeoverController.present(
@@ -842,7 +1208,7 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
                     isBindingCurrent = ::isBindingCurrent,
                     onStatus = { msg ->
                         if (isBindingCurrent()) {
-                            statusTextView.text = msg
+                            setTransientStatus(msg, durationMs = 6000L)
                         }
                     },
                 )
@@ -855,25 +1221,14 @@ class VirtualDisplayPreviewActivity : ComponentActivity() {
             } catch (e: Throwable) {
                 if (isBindingCurrent()) {
                     OmniLog.w(TAG, "移交主屏失败", e)
-                    statusTextView.text = "移交主屏失败: ${e.message}"
+                    setTransientStatus("移交主屏失败: ${e.message}", durationMs = 6000L)
                 }
             } finally {
-                val canResetUi = currentJob != null &&
-                    !currentJob.isCancelled &&
-                    takeoverJob === currentJob &&
-                    !isFinishing &&
-                    !isDestroyed &&
-                    sessionId == targetSessionId &&
-                    displayId == targetDisplayId &&
-                    initialTaskId == targetTaskId &&
-                    initialTurnId == targetTurnId &&
-                    initialStopToken == targetStopToken
-                if (canResetUi) {
-                    presentButton.isEnabled = true
-                    stopButton.isEnabled = true
-                }
                 if (takeoverJob === currentJob) {
                     takeoverJob = null
+                }
+                if (!isFinishing && !isDestroyed) {
+                    refreshUiState()
                 }
             }
         }

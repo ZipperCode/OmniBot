@@ -49,6 +49,8 @@
 - 交互参考：[Mangi-11/Eta](https://github.com/Mangi-11/Eta)，观察版本 `c866a747ba89787d15beed5030aa8513960aea45` 的 `AgentOverlayCapsule.kt`、`VirtualDisplayStageCard.kt` 与 `AgentOverlayContent.kt`：顶部胶囊 / 微缩取景器、展开装裱式预览、主屏边缘流光及底部结果选择。
 - 上游采用 [PolyForm Noncommercial 1.0.0](https://github.com/Mangi-11/Eta/blob/c866a747ba89787d15beed5030aa8513960aea45/LICENSE)，并要求保留 `Required Notice: Copyright © 2026 蛮吉 (Mangi-11).`；本次未复制或移植其源码、资源、图标、状态模型或依赖，仅据可见交互独立实现。
 - OmniBot 的 `ScreenTaskOverlayHost` / `ScreenTaskOverlayViews` 使用自身品牌配色与原生 View，复用原有 ACP / TaskRuntime、显示帧源及取消移交流程；该参考不改变既有 IzukiJS 移植代码的许可证归属。
+- 管理与收纳交互参考：[kilolonion/agent-vscreen](https://github.com/kilolonion/agent-vscreen)（MIT）：后台屏幕的独立管理、可拖动 / 缩放预览、贴边恢复，以及观看、停止与释放现场的动作区分。管理 UI 复用 OmniBot 既有原生 View、Flutter 设置组件、ACP / TaskRuntime 与帧源独立实现；未移植独立 HTTP / CLI 服务或按安静时间推断任务结束的生命周期。
+- 端侧文字识别使用上述项目固定提交 `7e2e01491797848a82bb8bfe611842fb87fb9d10` 所分发的 PaddleOCR PP-OCRv6 small 检测 / 识别 ONNX 模型及字典，许可证为 Apache-2.0；推理由 ONNX Runtime Android `1.31.1`（MIT）执行。预处理、检测框提取、CTC 解码与宿主观测接入在本仓库实现。原始来源、固定文件大小及 SHA-256 见 `androidgui/src/main/assets/screen-ocr/manifest.json`，对应许可证与上游 MIT 声明一并保留在该目录。
 
 ---
 

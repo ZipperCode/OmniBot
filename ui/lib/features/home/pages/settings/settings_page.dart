@@ -415,6 +415,14 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
             subtitle: context.trLegacy('配置 Tavily / Exa / Firecrawl 的 API Key'),
             route: '/home/web_search_key_setting',
           ),
+          _SettingItem(
+            icon: LucideIcons.screenShare,
+            title: isEnglish ? 'Virtual Screen' : '虚拟屏',
+            subtitle: isEnglish
+                ? 'Manage background virtual screen and tasks'
+                : '管理后台虚拟屏运行与留存状态',
+            route: '/home/virtual_screen_setting',
+          ),
         ],
       ),
       _SettingSection(

@@ -1,10 +1,8 @@
 package cn.com.omnimind.baselib.runlog
 
 /**
- * Generated from schemas/oob/oob_canonical_actions.v1.json.
- *
- * Do not edit action/tool names or argument fields here. Update the schema and
- * run `python3 scripts/generate-oob-action-schema.py`.
+ * 与 plugins/omni-vlm-lite/schemas/oob/oob_canonical_actions.v1.json 保持同一动作契约。
+ * 修改动作或参数时同步该规范与内置运行时，不改变持久化动作的身份。
  */
 object OobActionSchema {
     const val SCHEMA_VERSION = "oob.canonical_actions.v1"
@@ -46,6 +44,7 @@ object OobActionSchema {
     const val ARG_VALUE = "value"
     const val ARG_OPTIONS = "options"
     const val ARG_PROMPT = "prompt"
+    const val ARG_OCR = "ocr"
 
     enum class Type {
         STRING,
@@ -459,8 +458,8 @@ ArgSpec(
             name = "get_state",
             kind = Kind.OBSERVE,
             uiLabel = LocalizedText(zhCn = "刷新状态", enUs = "Get state"),
-            description = LocalizedText(zhCn = "不执行 UI 操作，只重新获取当前页面状态、包名和 Accessibility tree。", enUs = "Do not perform a UI action; refresh the current page state, package name, and Accessibility tree."),
-            promptGuide = LocalizedText(zhCn = "- 内部状态刷新：运行时每轮自动读取当前页面状态；该动作不暴露给模型或前端，不点击、不滑动、不输入。", enUs = "- Internal state refresh: the runtime reads the current page state automatically each turn; this action is not exposed to the model or frontend and does not tap, swipe, or type."),
+            description = LocalizedText(zhCn = "只读检查当前屏幕，可请求局部高清图与端侧 OCR；不执行点击、滑动或输入。", enUs = "Inspect the current screen without UI interaction; optionally request a high-resolution region and on-device OCR."),
+            promptGuide = LocalizedText(zhCn = "- get_state(reason?, ocr?, x1?, y1?, x2?, y2?): 看不清小字或树中缺少目标时只读检查。区域四个坐标须一起提供，使用全屏 0..1000；ocr=true 请求端侧识字。局部图上的动作仍使用全屏坐标。", enUs = "- get_state(reason?, ocr?, x1?, y1?, x2?, y2?): Inspect unclear text or targets missing from the tree. Supply all four region coordinates together in full-screen 0..1000 coordinates; ocr=true requests on-device OCR. Actions always use full-screen coordinates."),
             argsTemplate = emptyMap(),
             args = listOf(
 ArgSpec(
@@ -468,8 +467,34 @@ ArgSpec(
                     type = Type.STRING,
                     description = LocalizedText(zhCn = "为什么需要重新获取状态，例如上一步操作失败、页面无变化或当前页面不确定。", enUs = "Why state refresh is needed, such as previous action failed, page did not change, or current page is uncertain."),
                 ),
+                ArgSpec(
+                    name = "ocr",
+                    type = Type.BOOLEAN,
+                    persisted = false,
+                    description = LocalizedText(zhCn = "是否请求端侧文字识别；识别框不是可点击控件。", enUs = "Request on-device text recognition; OCR boxes are not clickable controls."),
+                ),
+                ArgSpec(
+                    name = "x1", type = Type.NUMBER, persisted = false,
+                    description = LocalizedText(zhCn = "检查区域左边缘的全屏 0..1000 坐标。", enUs = "Region left edge in full-screen 0..1000 coordinates."),
+                    minimum = 0, maximum = 1000,
+                ),
+                ArgSpec(
+                    name = "y1", type = Type.NUMBER, persisted = false,
+                    description = LocalizedText(zhCn = "检查区域上边缘的全屏 0..1000 坐标。", enUs = "Region top edge in full-screen 0..1000 coordinates."),
+                    minimum = 0, maximum = 1000,
+                ),
+                ArgSpec(
+                    name = "x2", type = Type.NUMBER, persisted = false,
+                    description = LocalizedText(zhCn = "检查区域右边缘的全屏 0..1000 坐标。", enUs = "Region right edge in full-screen 0..1000 coordinates."),
+                    minimum = 0, maximum = 1000,
+                ),
+                ArgSpec(
+                    name = "y2", type = Type.NUMBER, persisted = false,
+                    description = LocalizedText(zhCn = "检查区域下边缘的全屏 0..1000 坐标。", enUs = "Region bottom edge in full-screen 0..1000 coordinates."),
+                    minimum = 0, maximum = 1000,
+                ),
             ),
-            modelVisible = false,
+            modelVisible = true,
             replayable = false,
             editorVisible = false,
             recordable = false,

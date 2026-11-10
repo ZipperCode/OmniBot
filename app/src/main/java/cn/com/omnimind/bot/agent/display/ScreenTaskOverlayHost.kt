@@ -1,18 +1,21 @@
 package cn.com.omnimind.bot.agent.display
-
+import android.animation.ValueAnimator
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import cn.com.omnimind.androidgui.AndroidGuiOverlayHost
 import cn.com.omnimind.androidgui.KeyguardStateMonitor
 import cn.com.omnimind.baselib.util.OmniLog
@@ -29,6 +32,22 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+
+/**
+ * 屏幕任务浮层几何状态。
+ * 单一任务生命周期内保持，新任务时重置。
+ */
+internal data class TaskGeometry(
+    var mode: OverlayDisplayMode = OverlayDisplayMode.CAPSULE,
+    var capsuleX: Int = -1,
+    var capsuleY: Int = -1,
+    var stageX: Int = -1,
+    var stageY: Int = -1,
+    var stageWidthDp: Int = 296,
+    var stageCanvasHeightDp: Int = 336,
+    var dockedX: Int = -1,
+    var dockedY: Int = -1
+)
 /**
  * 屏幕任务专用悬浮窗宿主。
  * 遵循单一窗口拥有者、主线程切回、同身份原地更新与主屏移交保护契约。
@@ -53,6 +72,9 @@ object ScreenTaskOverlayHost {
     private var activeDisplayId: Int? = null
     @Volatile
     private var isExpanded: Boolean = false
+    @Volatile
+    private var overlayGeometry = TaskGeometry()
+    private var snapAnimator: ValueAnimator? = null
 
     // 独立全屏预览 Activity 前台展示标记（前台时不遮挡全屏画面）
     @Volatile
@@ -163,7 +185,7 @@ object ScreenTaskOverlayHost {
         val targetDisplayId = targetTask.screenDisplayId ?: 0
         val isWaiting = targetTask.waitingStatus != null
         val statusText = targetTask.statusText
-        // 同身份原地更新，不重建窗口
+        // 同身份原地更新，不重建窗口；同身份持续 sync 绝不每tick覆盖用户拖动/缩放/贴边位置
         if (activeTaskId == targetTaskId && topOverlayView != null) {
             activeSessionId = targetSessionId
             activeTurnId = targetTurnId
@@ -182,11 +204,15 @@ object ScreenTaskOverlayHost {
             } else {
                 removeEdgeLight()
             }
-
-            updateTopWindowDimensions(hasMicroLens = targetDisplayId > 0)
+            // 注意：同身份持续 sync 绝不覆盖用户的当前位置/形态/尺寸！
             return
         }
 
+        // 新任务到达，重置几何状态
+        overlayGeometry = TaskGeometry()
+        snapAnimator?.cancel()
+        snapAnimator = null
+        isExpanded = false
         dismissActiveOverlay(animate = false)
 
         val wm = ensureWindowManager(appContext) ?: return
@@ -224,11 +250,20 @@ object ScreenTaskOverlayHost {
                 },
                 onOpenPip = { tId, sId, turn, token, dId ->
                     handleOpenPip(appContext, tId, sId, turn, token, dId)
+                },
+                hostCallbacks = object : ScreenTaskOverlayHostCallbacks {
+                    override fun getSafeInsets(): Rect = this@ScreenTaskOverlayHost.getSafeInsets(appContext, topOverlayView)
+                    override fun getWindowPosition(): Pair<Int, Int> = this@ScreenTaskOverlayHost.getWindowPosition()
+                    override fun moveWindowBy(dx: Float, dy: Float) = this@ScreenTaskOverlayHost.moveWindowBy(dx, dy)
+                    override fun snapWindow(mode: OverlayDisplayMode) = this@ScreenTaskOverlayHost.snapWindow(mode)
+                    override fun resizeStage(newWidthPx: Int, newCanvasHeightPx: Int) = this@ScreenTaskOverlayHost.resizeStage(newWidthPx, newCanvasHeightPx)
+                    override fun requestModeChange(mode: OverlayDisplayMode) = this@ScreenTaskOverlayHost.setOverlayMode(mode)
+                    override fun getSavedCanvasHeightDp(): Int = this@ScreenTaskOverlayHost.getSavedCanvasHeightDp()
                 }
             )
         }
 
-        val topParams = createTopLayoutParams(hasMicroLens = targetDisplayId > 0, expanded = false)
+        val topParams = createTopLayoutParams(hasMicroLens = targetDisplayId > 0, mode = overlayGeometry.mode)
         var addSuccess = false
         runCatching {
             wm.addView(capsuleView, topParams)
@@ -425,6 +460,9 @@ object ScreenTaskOverlayHost {
         takeoverJob = null
         activeTakeoverTaskId = null
         pendingResultInfo = null
+        overlayGeometry = TaskGeometry()
+        snapAnimator?.cancel()
+        snapAnimator = null
         dismissActiveOverlay(animate = false)
         dismissResultCard()
         dismissedResultTaskIds.clear()
@@ -540,28 +578,13 @@ object ScreenTaskOverlayHost {
     }
 
     private fun handleCapsuleExpandToggle(expanded: Boolean) {
-        isExpanded = expanded
-        topOverlayView?.setExpanded(expanded)
-        updateTopWindowDimensions(hasMicroLens = (activeDisplayId ?: 0) > 0)
+        setOverlayMode(if (expanded) OverlayDisplayMode.EXPANDED else OverlayDisplayMode.CAPSULE)
     }
 
     private fun updateTopWindowDimensions(hasMicroLens: Boolean) {
         val view = topOverlayView ?: return
-        val wm = windowManager ?: return
-        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
-
-        val screenWidthDp = view.resources.displayMetrics.widthPixels / view.resources.displayMetrics.density
-        val maxAllowedWidth = (screenWidthDp - 16f).toInt()
-        val defaultWidthDp = if (isExpanded) 296 else if (hasMicroLens) 264 else 248
-        val targetWidthDp = minOf(defaultWidthDp, maxAllowedWidth)
-        params.width = dp(view.context, targetWidthDp)
-        params.height = WindowManager.LayoutParams.WRAP_CONTENT
-        runCatching {
-            wm.updateViewLayout(view, params)
-        }.onFailure {
-            windowManager = null
-            windowContext = null
-        }
+        val ctx = windowContext ?: view.context
+        recheckAndClampGeometry(ctx)
     }
 
     private fun ensureEdgeLightAttached(context: Context) {
@@ -610,6 +633,9 @@ object ScreenTaskOverlayHost {
         activeStopToken = null
         activeDisplayId = null
         isExpanded = false
+        overlayGeometry = TaskGeometry()
+        snapAnimator?.cancel()
+        snapAnimator = null
 
         topView?.cleanup()
         if (topView != null) {
@@ -649,10 +675,13 @@ object ScreenTaskOverlayHost {
         isPreviewActivityForeground = foreground
         if (foreground) {
             topOverlayView?.visibility = View.GONE
+            topOverlayView?.onScreenOff()
         } else {
             val ctx = windowContext
             if (activeTaskId != null && ctx != null && !KeyguardStateMonitor.isKeyguardLocked(ctx)) {
                 topOverlayView?.visibility = View.VISIBLE
+                recheckAndClampGeometry(ctx)
+                topOverlayView?.setOverlayMode(overlayGeometry.mode)
             }
         }
     }
@@ -696,12 +725,92 @@ object ScreenTaskOverlayHost {
         OmniLog.w(TAG, "既无系统悬浮窗权限亦无可信无障碍宿主，跳过浮层挂载并保持通知入口")
         return null
     }
-    private fun createTopLayoutParams(hasMicroLens: Boolean, expanded: Boolean): WindowManager.LayoutParams {
+    fun getSafeInsets(context: Context, anchorView: View? = topOverlayView): Rect {
+        val margin = dp(context, 8)
+        var left = margin
+        var top = getStatusBarHeight(context) + margin
+        var right = margin
+        var bottom = getNavigationBarHeight(context) + margin
+
+        val insets = anchorView?.rootWindowInsets
+        if (insets != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val systemBars = insets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                left = maxOf(left, systemBars.left + margin)
+                top = maxOf(top, systemBars.top + margin)
+                right = maxOf(right, systemBars.right + margin)
+                bottom = maxOf(bottom, systemBars.bottom + margin)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val cutout = insets.displayCutout
+                if (cutout != null) {
+                    left = maxOf(left, cutout.safeInsetLeft + margin)
+                    top = maxOf(top, cutout.safeInsetTop + margin)
+                    right = maxOf(right, cutout.safeInsetRight + margin)
+                    bottom = maxOf(bottom, cutout.safeInsetBottom + margin)
+                }
+            }
+        }
+        return Rect(left, top, right, bottom)
+    }
+
+    private fun createTopLayoutParams(hasMicroLens: Boolean, mode: OverlayDisplayMode): WindowManager.LayoutParams {
         val ctx = windowContext ?: return WindowManager.LayoutParams()
-        val screenWidthDp = ctx.resources.displayMetrics.widthPixels / ctx.resources.displayMetrics.density
-        val maxAllowedWidth = (screenWidthDp - 16f).toInt()
-        val defaultWidthDp = if (expanded) 296 else if (hasMicroLens) 264 else 248
-        val widthDp = minOf(defaultWidthDp, maxAllowedWidth)
+        val dm = ctx.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val screenHeight = dm.heightPixels
+        val screenWidthDp = screenWidth / dm.density
+        val safeInsets = getSafeInsets(ctx)
+        val maxWidthAvailableDp = ((screenWidth - safeInsets.left - safeInsets.right) / dm.density).toInt().coerceAtLeast(1)
+        val maxAllowedWidthDp = (screenWidthDp - 16f).toInt().coerceAtLeast(1)
+
+        val targetWidth: Int
+        val targetHeight: Int
+        val initialX: Int
+        val initialY: Int
+
+        when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                val defaultWidthDp = if (hasMicroLens) 264 else 248
+                targetWidth = dp(ctx, minOf(defaultWidthDp, maxAllowedWidthDp))
+                targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
+                initialX = if (overlayGeometry.capsuleX >= 0) overlayGeometry.capsuleX else (screenWidth - targetWidth) / 2
+                initialY = if (overlayGeometry.capsuleY >= 0) overlayGeometry.capsuleY else safeInsets.top
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                val minWidthDp = minOf(296, maxWidthAvailableDp)
+                val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
+                    maxWidthAvailableDp
+                } else {
+                    overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
+                }
+                targetWidth = dp(ctx, stageWidthDp)
+                targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
+                initialX = if (overlayGeometry.stageX >= 0) overlayGeometry.stageX else (screenWidth - targetWidth) / 2
+                initialY = if (overlayGeometry.stageY >= 0) overlayGeometry.stageY else safeInsets.top
+            }
+            OverlayDisplayMode.DOCKED -> {
+                targetWidth = dp(ctx, 48)
+                targetHeight = dp(ctx, 48)
+                initialX = if (overlayGeometry.dockedX >= 0) overlayGeometry.dockedX else (screenWidth - targetWidth - safeInsets.right)
+                initialY = if (overlayGeometry.dockedY >= 0) overlayGeometry.dockedY else safeInsets.top + dp(ctx, 60)
+            }
+        }
+
+        val estimatedHeight = when (mode) {
+            OverlayDisplayMode.EXPANDED -> dp(ctx, 136 + overlayGeometry.stageCanvasHeightDp)
+            OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
+            OverlayDisplayMode.DOCKED -> dp(ctx, 48)
+        }
+        val minX = safeInsets.left
+        val maxX = (screenWidth - targetWidth - safeInsets.right).coerceAtLeast(minX)
+        val minY = safeInsets.top
+        val maxY = (screenHeight - estimatedHeight - safeInsets.bottom).coerceAtLeast(minY)
+
+        val clampedX = initialX.coerceIn(minX, maxX)
+        val clampedY = initialY.coerceIn(minY, maxY)
+
         return WindowManager.LayoutParams().apply {
             type = windowType
             format = PixelFormat.TRANSLUCENT
@@ -709,13 +818,335 @@ object ScreenTaskOverlayHost {
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = 0
-            y = getStatusBarHeight(ctx) + dp(ctx, 8)
-            width = dp(ctx, widthDp)
-            height = WindowManager.LayoutParams.WRAP_CONTENT
+            gravity = Gravity.TOP or Gravity.START
+            x = clampedX
+            y = clampedY
+            width = targetWidth
+            height = targetHeight
         }
     }
+
+    private fun createTopLayoutParams(hasMicroLens: Boolean, expanded: Boolean): WindowManager.LayoutParams {
+        return createTopLayoutParams(hasMicroLens, if (expanded) OverlayDisplayMode.EXPANDED else OverlayDisplayMode.CAPSULE)
+    }
+
+    fun setOverlayMode(mode: OverlayDisplayMode) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { setOverlayMode(mode) }
+            return
+        }
+        overlayGeometry.mode = mode
+        isExpanded = (mode == OverlayDisplayMode.EXPANDED)
+
+        val view = topOverlayView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val ctx = windowContext ?: view.context
+        val dm = ctx.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val screenHeight = dm.heightPixels
+        val safeInsets = getSafeInsets(ctx, view)
+        val maxWidthAvailableDp = ((screenWidth - safeInsets.left - safeInsets.right) / dm.density).toInt().coerceAtLeast(1)
+        val maxAllowedWidthDp = ((screenWidth / dm.density) - 16f).toInt().coerceAtLeast(1)
+
+        val targetWidth: Int
+        val targetHeight: Int
+        var targetX: Int
+        var targetY: Int
+
+        when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                val hasMicroLens = (activeDisplayId ?: 0) > 0
+                val defaultWidthDp = if (hasMicroLens) 264 else 248
+                targetWidth = dp(ctx, minOf(defaultWidthDp, maxAllowedWidthDp))
+                targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
+                targetX = if (overlayGeometry.capsuleX >= 0) overlayGeometry.capsuleX else (screenWidth - targetWidth) / 2
+                targetY = if (overlayGeometry.capsuleY >= 0) overlayGeometry.capsuleY else safeInsets.top
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                val minWidthDp = minOf(296, maxWidthAvailableDp)
+                val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
+                    maxWidthAvailableDp
+                } else {
+                    overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
+                }
+                targetWidth = dp(ctx, stageWidthDp)
+                targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
+                targetX = if (overlayGeometry.stageX >= 0) overlayGeometry.stageX else (screenWidth - targetWidth) / 2
+                targetY = if (overlayGeometry.stageY >= 0) overlayGeometry.stageY else safeInsets.top
+            }
+            OverlayDisplayMode.DOCKED -> {
+                targetWidth = dp(ctx, 48)
+                targetHeight = dp(ctx, 48)
+                targetX = if (overlayGeometry.dockedX >= 0) overlayGeometry.dockedX else (screenWidth - targetWidth - safeInsets.right)
+                targetY = if (overlayGeometry.dockedY >= 0) overlayGeometry.dockedY else safeInsets.top + dp(ctx, 60)
+            }
+        }
+
+        val estimatedHeight = when (mode) {
+            OverlayDisplayMode.EXPANDED -> dp(ctx, 136 + overlayGeometry.stageCanvasHeightDp)
+            OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
+            OverlayDisplayMode.DOCKED -> dp(ctx, 48)
+        }
+        val minX = safeInsets.left
+        val maxX = (screenWidth - targetWidth - safeInsets.right).coerceAtLeast(minX)
+        val minY = safeInsets.top
+        val maxY = (screenHeight - estimatedHeight - safeInsets.bottom).coerceAtLeast(minY)
+
+        targetX = targetX.coerceIn(minX, maxX)
+        targetY = targetY.coerceIn(minY, maxY)
+
+        params.width = targetWidth
+        params.height = targetHeight
+        params.x = targetX
+        params.y = targetY
+
+        view.setOverlayMode(mode)
+        runCatching { wm.updateViewLayout(view, params) }
+
+        // 单次 post 测量实际高度进行 clamp，避免底部展开越界
+        view.post {
+            val measuredH = view.height
+            if (measuredH > 0 && topOverlayView === view) {
+                val currentParams = view.layoutParams as? WindowManager.LayoutParams ?: return@post
+                val currentSafeInsets = getSafeInsets(view.context, view)
+                val currentMinY = currentSafeInsets.top
+                val currentMaxY = (dm.heightPixels - measuredH - currentSafeInsets.bottom).coerceAtLeast(currentMinY)
+                if (currentParams.y > currentMaxY) {
+                    currentParams.y = currentMaxY
+                    if (overlayGeometry.mode == OverlayDisplayMode.EXPANDED) {
+                        overlayGeometry.stageY = currentMaxY
+                    } else if (overlayGeometry.mode == OverlayDisplayMode.CAPSULE) {
+                        overlayGeometry.capsuleY = currentMaxY
+                    }
+                    runCatching { wm.updateViewLayout(view, currentParams) }
+                }
+            }
+        }
+    }
+
+    fun getWindowPosition(): Pair<Int, Int> {
+        val params = topOverlayView?.layoutParams as? WindowManager.LayoutParams
+        return Pair(params?.x ?: 0, params?.y ?: 0)
+    }
+
+    fun getSavedCanvasHeightDp(): Int = overlayGeometry.stageCanvasHeightDp
+
+    fun moveWindowBy(dx: Float, dy: Float) {
+        snapAnimator?.cancel()
+        val view = topOverlayView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val ctx = windowContext ?: view.context
+        val dm = ctx.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val screenHeight = dm.heightPixels
+        val safeInsets = getSafeInsets(ctx)
+
+        val viewWidth = params.width
+        val viewHeight = view.measuredHeight.takeIf { it > 0 } ?: params.height
+        val minX = safeInsets.left
+        val maxX = (screenWidth - viewWidth - safeInsets.right).coerceAtLeast(minX)
+        val minY = safeInsets.top
+        val maxY = (screenHeight - viewHeight - safeInsets.bottom).coerceAtLeast(minY)
+
+        params.x = (params.x + dx).toInt().coerceIn(minX, maxX)
+        params.y = (params.y + dy).toInt().coerceIn(minY, maxY)
+
+        when (overlayGeometry.mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                overlayGeometry.capsuleX = params.x
+                overlayGeometry.capsuleY = params.y
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                overlayGeometry.stageX = params.x
+                overlayGeometry.stageY = params.y
+            }
+            OverlayDisplayMode.DOCKED -> {
+                overlayGeometry.dockedX = params.x
+                overlayGeometry.dockedY = params.y
+            }
+        }
+
+        runCatching { wm.updateViewLayout(view, params) }
+    }
+
+    fun snapWindow(mode: OverlayDisplayMode) {
+        val view = topOverlayView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val ctx = windowContext ?: view.context
+        val dm = ctx.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val screenHeight = dm.heightPixels
+        val safeInsets = getSafeInsets(ctx)
+
+        val currentX = params.x
+        val currentY = params.y
+        val viewWidth = params.width
+        val viewHeight = view.measuredHeight.takeIf { it > 0 } ?: params.height
+
+        val minX = safeInsets.left
+        val maxX = (screenWidth - viewWidth - safeInsets.right).coerceAtLeast(minX)
+        val minY = safeInsets.top
+        val maxY = (screenHeight - viewHeight - safeInsets.bottom).coerceAtLeast(minY)
+
+        val targetX: Int
+        val targetY: Int = currentY.coerceIn(minY, maxY)
+
+        when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                val travelRange = maxX - minX
+                val centerX = currentX + viewWidth / 2
+                targetX = if (travelRange > 0) {
+                    val ratio = (currentX - minX).toFloat() / travelRange
+                    when {
+                        ratio < 0.35f || centerX < screenWidth * 0.35f -> minX
+                        ratio > 0.65f || centerX > screenWidth * 0.65f -> maxX
+                        else -> ((screenWidth - viewWidth) / 2).coerceIn(minX, maxX)
+                    }
+                } else {
+                    minX
+                }
+                overlayGeometry.capsuleX = targetX
+                overlayGeometry.capsuleY = targetY
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                val snapMargin = dp(ctx, 16)
+                targetX = when {
+                    currentX - minX < snapMargin -> minX
+                    maxX - currentX < snapMargin -> maxX
+                    else -> currentX.coerceIn(minX, maxX)
+                }
+                overlayGeometry.stageX = targetX
+                overlayGeometry.stageY = targetY
+            }
+            OverlayDisplayMode.DOCKED -> {
+                val centerX = currentX + viewWidth / 2
+                targetX = if (centerX < screenWidth / 2) minX else maxX
+                overlayGeometry.dockedX = targetX
+                overlayGeometry.dockedY = targetY
+            }
+        }
+
+        val startX = currentX
+        val startY = currentY
+        if (isReducedMotion(ctx) || (startX == targetX && startY == targetY)) {
+            params.x = targetX
+            params.y = targetY
+            runCatching { wm.updateViewLayout(view, params) }
+        } else {
+            snapAnimator?.cancel()
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 180L
+                interpolator = DecelerateInterpolator(1.5f)
+                addUpdateListener { va ->
+                    val fraction = va.animatedFraction
+                    params.x = (startX + (targetX - startX) * fraction).toInt()
+                    params.y = (startY + (targetY - startY) * fraction).toInt()
+                    runCatching { wm.updateViewLayout(view, params) }
+                }
+            }
+            snapAnimator = animator
+            animator.start()
+        }
+    }
+
+    fun resizeStage(newWidthPx: Int, newCanvasHeightPx: Int) {
+        snapAnimator?.cancel()
+        val view = topOverlayView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val ctx = windowContext ?: view.context
+        val dm = ctx.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val safeInsets = getSafeInsets(ctx, view)
+
+        val maxWidthPx = (screenWidth - safeInsets.left - safeInsets.right).coerceAtLeast(1)
+        val minWidthPx = minOf(dp(ctx, 296), maxWidthPx)
+        val clampedWidth = newWidthPx.coerceIn(minWidthPx, maxWidthPx)
+
+        params.width = clampedWidth
+        val maxX = (screenWidth - clampedWidth - safeInsets.right).coerceAtLeast(safeInsets.left)
+        if (params.x > maxX) {
+            params.x = maxX
+        }
+
+        val density = dm.density
+        overlayGeometry.stageWidthDp = (clampedWidth / density).toInt()
+        overlayGeometry.stageCanvasHeightDp = (newCanvasHeightPx / density).toInt()
+        overlayGeometry.stageX = params.x
+
+        runCatching { wm.updateViewLayout(view, params) }
+    }
+
+    fun recheckAndClampGeometry(context: Context) {
+        val view = topOverlayView ?: return
+        val wm = windowManager ?: return
+        val params = view.layoutParams as? WindowManager.LayoutParams ?: return
+        val dm = context.resources.displayMetrics
+        val screenWidth = dm.widthPixels
+        val screenHeight = dm.heightPixels
+        val safeInsets = getSafeInsets(context, view)
+
+        val screenWidthDp = screenWidth / dm.density
+        val maxWidthAvailableDp = ((screenWidth - safeInsets.left - safeInsets.right) / dm.density).toInt().coerceAtLeast(1)
+        val maxAllowedWidthDp = (screenWidthDp - 16f).toInt().coerceAtLeast(1)
+        val minWidthDp = minOf(296, maxWidthAvailableDp)
+        val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
+            maxWidthAvailableDp
+        } else {
+            overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
+        }
+        overlayGeometry.stageWidthDp = stageWidthDp
+
+        val mode = overlayGeometry.mode
+        val targetWidth = when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                val hasMicroLens = (activeDisplayId ?: 0) > 0
+                val defaultWidthDp = if (hasMicroLens) 264 else 248
+                dp(context, minOf(defaultWidthDp, maxAllowedWidthDp))
+            }
+            OverlayDisplayMode.EXPANDED -> dp(context, stageWidthDp)
+            OverlayDisplayMode.DOCKED -> dp(context, 48)
+        }
+        val targetHeight = if (mode == OverlayDisplayMode.DOCKED) dp(context, 48) else WindowManager.LayoutParams.WRAP_CONTENT
+
+        if (mode == OverlayDisplayMode.EXPANDED) {
+            view.adaptCanvasHeight()
+        }
+
+        params.width = targetWidth
+        params.height = targetHeight
+
+        val minX = safeInsets.left
+        val maxX = (screenWidth - targetWidth - safeInsets.right).coerceAtLeast(minX)
+        val minY = safeInsets.top
+        val measuredHeight = view.measuredHeight.takeIf { it > 0 } ?: dp(context, 60)
+        val maxY = (screenHeight - (if (targetHeight > 0) targetHeight else measuredHeight) - safeInsets.bottom).coerceAtLeast(minY)
+
+        params.x = params.x.coerceIn(minX, maxX)
+        params.y = params.y.coerceIn(minY, maxY)
+        when (mode) {
+            OverlayDisplayMode.CAPSULE -> {
+                overlayGeometry.capsuleX = params.x
+                overlayGeometry.capsuleY = params.y
+            }
+            OverlayDisplayMode.EXPANDED -> {
+                overlayGeometry.stageX = params.x
+                overlayGeometry.stageY = params.y
+            }
+            OverlayDisplayMode.DOCKED -> {
+                overlayGeometry.dockedX = params.x
+                overlayGeometry.dockedY = params.y
+            }
+        }
+
+        runCatching { wm.updateViewLayout(view, params) }
+    }
+
+    internal fun getOverlayMode(): OverlayDisplayMode = overlayGeometry.mode
+    internal fun getTaskGeometry(): TaskGeometry = overlayGeometry
 
     private fun createEdgeLightLayoutParams(): WindowManager.LayoutParams {
         return WindowManager.LayoutParams().apply {
@@ -795,13 +1226,15 @@ object ScreenTaskOverlayHost {
                         } else {
                             sync(appContext, lastSyncedTasks)
                         }
+                        recheckAndClampGeometry(appContext)
+                        topOverlayView?.setOverlayMode(overlayGeometry.mode)
                     }
                     Intent.ACTION_CONFIGURATION_CHANGED -> {
                         OmniLog.i(TAG, "屏幕配置变更，自适应更新浮层布局与主题")
                         topOverlayView?.onConfigChanged()
                         edgeLightOverlayView?.onConfigChanged()
                         resultCardOverlayView?.onConfigChanged()
-                        updateTopWindowDimensions(hasMicroLens = (activeDisplayId ?: 0) > 0)
+                        recheckAndClampGeometry(appContext)
                     }
                 }
             }

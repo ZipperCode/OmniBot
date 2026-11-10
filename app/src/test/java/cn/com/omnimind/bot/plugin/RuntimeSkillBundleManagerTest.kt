@@ -1,5 +1,7 @@
 package cn.com.omnimind.bot.plugin.runtime
 
+import android.content.Context
+import cn.com.omnimind.bot.agent.SkillIndexEntry
 import java.io.File
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
@@ -10,7 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
-
+import org.mockito.Mockito
 class RuntimeSkillBundleManagerTest {
     @Test
     fun `component archive requires a pinned sha256`() {
@@ -176,6 +178,116 @@ class RuntimeSkillBundleManagerTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun `isCompleteMarketCandidate returns false when componentArchiveSha256 is null even if marker file is absent and component json matches`() {
+        val root = createTempDirectory("omniflow-packaged-").toFile()
+        try {
+            validComponentEntries().forEach { (path, contents) ->
+                File(root, path).apply {
+                    parentFile?.mkdirs()
+                    writeText(contents)
+                }
+            }
+            File(root, "PACKAGED_RUNTIME_SKILL").writeText("old".repeat(16))
+            val context = Mockito.mock(Context::class.java)
+            Mockito.`when`(context.applicationContext).thenReturn(context)
+            val spec = RuntimeSkillSpec(
+                componentId = COMPONENT_ID,
+                componentVersion = COMPONENT_VERSION,
+                id = SKILL_ID,
+                packagedArchivePath = "runtime-components/omniflow-gui-runtime.zip",
+                packagedArchiveSha256 = "b".repeat(64),
+            ).validated()
+            val manager = RuntimeSkillBundleManager(context, spec)
+            val candidate = skillEntry(root.absolutePath)
+
+            assertFalse(
+                "When componentArchiveSha256 is null, candidate must never be treated as market candidate",
+                manager.isCompleteMarketCandidate(candidate),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `isCompleteMarketCandidate returns false for packaged candidate even when componentArchiveSha256 is configured`() {
+        val root = createTempDirectory("omniflow-packaged-").toFile()
+        try {
+            validComponentEntries().forEach { (path, contents) ->
+                File(root, path).apply {
+                    parentFile?.mkdirs()
+                    writeText(contents)
+                }
+            }
+            File(root, "PACKAGED_RUNTIME_SKILL").writeText("b".repeat(64))
+            val context = Mockito.mock(Context::class.java)
+            Mockito.`when`(context.applicationContext).thenReturn(context)
+            val spec = RuntimeSkillSpec(
+                componentId = COMPONENT_ID,
+                componentVersion = COMPONENT_VERSION,
+                id = SKILL_ID,
+                componentArchiveUrl = "https://example.com/component.zip",
+                componentArchiveSha256 = "b".repeat(64),
+                packagedArchivePath = "runtime-components/component.zip",
+                packagedArchiveSha256 = "b".repeat(64),
+            ).validated()
+            val manager = RuntimeSkillBundleManager(context, spec)
+            val candidate = skillEntry(root.absolutePath)
+
+            assertFalse(manager.isCompleteMarketCandidate(candidate))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `isCompleteMarketCandidate returns true when MARKET_RUNTIME_SKILL matches non-blank spec checksum`() {
+        val root = createTempDirectory("omniflow-market-").toFile()
+        try {
+            validComponentEntries().forEach { (path, contents) ->
+                File(root, path).apply {
+                    parentFile?.mkdirs()
+                    writeText(contents)
+                }
+            }
+            val expectedSha = "c".repeat(64)
+            File(root, "MARKET_RUNTIME_SKILL").writeText(expectedSha)
+            val context = Mockito.mock(Context::class.java)
+            Mockito.`when`(context.applicationContext).thenReturn(context)
+            val spec = RuntimeSkillSpec(
+                componentId = COMPONENT_ID,
+                componentVersion = COMPONENT_VERSION,
+                id = SKILL_ID,
+                componentArchiveUrl = "https://example.com/component.zip",
+                componentArchiveSha256 = expectedSha,
+                packagedArchivePath = "runtime-components/component.zip",
+                packagedArchiveSha256 = expectedSha,
+            ).validated()
+            val manager = RuntimeSkillBundleManager(context, spec)
+            val candidate = skillEntry(root.absolutePath)
+
+            assertTrue(manager.isCompleteMarketCandidate(candidate))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+
+    private fun skillEntry(rootPath: String, id: String = SKILL_ID) = SkillIndexEntry(
+        id = id,
+        name = id,
+        description = "Test skill",
+        rootPath = rootPath,
+        shellRootPath = rootPath,
+        skillFilePath = "$rootPath/SKILL.md",
+        shellSkillFilePath = "$rootPath/SKILL.md",
+        hasScripts = false,
+        hasReferences = false,
+        hasAssets = false,
+        hasEvals = false,
+    )
 
     private fun runtimeSpec(
         componentVersion: String = COMPONENT_VERSION,
