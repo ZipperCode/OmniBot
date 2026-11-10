@@ -23,7 +23,7 @@ class HostManagedProviderAdaptersTest {
     @Test
     fun `host Responses support follows registered adapter capability rather than agent name`() {
         val supported = listOf(AcpHarnessAdapters.codex, AcpHarnessAdapters.openCode,
-            AcpHarnessAdapters.kimiCode, AcpHarnessAdapters.pi)
+            AcpHarnessAdapters.pi)
         supported.forEach { adapter ->
             assertTrue(AgentConfigAdapterRegistry.supportsHostManagedResponses(adapter))
             AgentConfigAdapterRegistry.map(input(adapter).copy(agentId = "renamed-user-profile"))
@@ -115,18 +115,6 @@ class HostManagedProviderAdaptersTest {
         assertFalse(writes.any { it.path == CODEX_AUTH_JSON_PATH })
     }
 
-    @Test
-    fun `Kimi references process grant through its official api key env setting`() {
-        val input = input(AcpHarnessAdapters.kimiCode)
-        val mapping = AgentConfigAdapterRegistry.map(input)
-        val config = AgentConfigAdapterRegistry.launchConfigWrites(input, mapping, models, "").single().content
-        assertEquals(provider.apiKey, mapping.environment["OPENAI_API_KEY"])
-        assertTrue(config.contains("type = \"openai_responses\""))
-        assertTrue(config.contains("api_key_env = \"OPENAI_API_KEY\""))
-        assertFalse(config.contains("api_key ="))
-        assertFalse(config.contains(provider.apiKey))
-        assertTrue(config.contains(provider.baseUrl))
-    }
 
     @Test
     fun `OpenCode removes stored continuation options only from the managed route`() {

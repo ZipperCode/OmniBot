@@ -444,11 +444,7 @@ internal class AndroidAgentWebRuntimeGateway(context: Context) : AgentWebRuntime
     }
 
     override suspend fun prepareBrowserUrl(service: AgentWebService, snapshot: AgentWebRuntimeSnapshot): String? =
-        if (service.urlKind == AgentWebUrlKind.OPENCODE) {
-            AgentWebTranscriptParser.findOpenCodeEndpoint(snapshot.transcript)?.let { openCodePairing.createLink(it) }
-        } else {
-            AgentWebTranscriptParser.findUrl(service.urlKind, snapshot.transcript)
-        }
+        AgentWebTranscriptParser.findOpenCodeEndpoint(snapshot.transcript)?.let { openCodePairing.createLink(it) }
 
     override suspend fun snapshot(sessionId: String): AgentWebRuntimeSnapshot? {
         val session = ReTerminalSessionBridge.getSession(appContext, sessionId) ?: return null
@@ -507,7 +503,6 @@ internal object AgentWebTranscriptParser {
         "http://(?:127\\.0\\.0\\.1|localhost|\\[::1])(?::[0-9]{1,5})(?:/[^\\s\\u001B<>\"']*)?",
         RegexOption.IGNORE_CASE,
     )
-    private val tokenFragmentRegex = Regex("token=[A-Za-z0-9_-]{16,}")
 
     fun findConfigurationFingerprint(transcript: String): String? {
         val clean = ansiEscapeRegex.replace(transcript, "")
@@ -540,7 +535,6 @@ internal object AgentWebTranscriptParser {
     }
 
     private fun isReadyLine(kind: AgentWebUrlKind, line: String): Boolean = when (kind) {
-        AgentWebUrlKind.KIMI -> line.startsWith("Local:") || line.startsWith("Kimi server:")
         AgentWebUrlKind.OPENCODE -> line.startsWith("server listening on ")
     }
 
@@ -552,10 +546,6 @@ internal object AgentWebTranscriptParser {
         if (host !in LOOPBACK_HOSTS) return false
         if (uri.rawPath !in setOf("", "/")) return false
         return when (kind) {
-            AgentWebUrlKind.KIMI -> {
-                val fragment = uri.rawFragment
-                uri.rawQuery == null && fragment?.matches(tokenFragmentRegex) == true
-            }
             AgentWebUrlKind.OPENCODE -> isOpenCodeLoopbackServerUrl(candidate)
         }
     }

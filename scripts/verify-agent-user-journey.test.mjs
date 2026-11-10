@@ -38,9 +38,9 @@ const escapeXml = value => String(value).replaceAll('&','&amp;').replaceAll('"',
   .replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','&#10;');
 
 for (const [name, target, expectedFailure] of [
-  ['explicit unsent owner', {agentId:'kimi-code-acp',mode:'agent',isNewConversation:true}, null],
+  ['explicit unsent owner', {agentId:'claude-code-acp',mode:'agent',isNewConversation:true}, null],
   ['another draft owner', {agentId:'xiaowan-acp',mode:'agent',isNewConversation:true}, /Wrong draft conversation owner/],
-  ['persisted conversation', {agentId:'kimi-code-acp',mode:'agent',isNewConversation:true,conversationId:42}, /created durable history/],
+  ['persisted conversation', {agentId:'claude-code-acp',mode:'agent',isNewConversation:true,conversationId:42}, /created durable history/],
   ['legacy selection without draft ownership', null, /Wrong draft conversation owner/],
 ]) {
   test(`draft acceptance checks conversation ownership: ${name}`, () => {
@@ -49,9 +49,9 @@ for (const [name, target, expectedFailure] of [
       const marker='OOB_LIVE_SWITCH_DRAFT_12345';
       const scenario=JSON.parse(readFileSync('scripts/fixtures/user-scenarios/xiaowan-switch-reply.json','utf8'));
       const expected=`${scenario.prompt.replaceAll('{{MARKER}}',marker)} End your final reply with ${marker}_DONE.`;
-      const xml=`<hierarchy><node package="cn.com.omnimind.bot" class="android.widget.EditText" text="${escapeXml(expected)}"/><node package="cn.com.omnimind.bot" text="Kimi Code"/></hierarchy>`;
+      const xml=`<hierarchy><node package="cn.com.omnimind.bot" class="android.widget.EditText" text="${escapeXml(expected)}"/><node package="cn.com.omnimind.bot" text="Claude Code"/></hierarchy>`;
       const preferences=`<map><string name="flutter.last_visible_conversation_target">${escapeXml(JSON.stringify(target))}</string></map>`;
-      const legacyPreferences='<map><string name="selected_profile_id">kimi-code-acp</string></map>';
+      const legacyPreferences='<map><string name="selected_profile_id">claude-code-acp</string></map>';
       const adb=join(directory,'adb');
       const calls=join(directory,'calls.jsonl');
       writeFileSync(adb,`#!/usr/bin/env node
@@ -68,7 +68,7 @@ else process.exit(7);
 `,{mode:0o700});
       const journey=join(directory,'journey.json');
       writeFileSync(journey,JSON.stringify({name:'draft ownership fixture',steps:[{
-        action:'assert-draft',marker,scenario:'xiaowan-switch-reply.json',agentId:'kimi-code-acp',agentLabel:'Kimi Code',
+        action:'assert-draft',marker,scenario:'xiaowan-switch-reply.json',agentId:'claude-code-acp',agentLabel:'Claude Code',
       }]}));
       const evidence=join(directory,'evidence');
       const result=spawnSync(process.execPath,['scripts/verify-agent-user-journey.mjs','emulator-1234',journey,evidence],
@@ -79,8 +79,8 @@ else process.exit(7);
       if(expectedFailure) assert.match(report.steps[0].detail,expectedFailure);
       else {
         const draft=JSON.parse(readFileSync(join(evidence,'1-draft.json'),'utf8'));
-        assert.equal(draft.draftAgentId,'kimi-code-acp');
-        assert.equal(draft.visibleAgentLabel,'Kimi Code');
+        assert.equal(draft.draftAgentId,'claude-code-acp');
+        assert.equal(draft.visibleAgentLabel,'Claude Code');
       }
       const observations=readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));
       assert(observations.every(args=>!args.includes('shared_prefs/acp_agent_profiles.xml')));

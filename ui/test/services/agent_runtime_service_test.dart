@@ -318,7 +318,7 @@ void main() {
         throwsA(isA<PlatformException>()),
       );
       final queuedInstall = AgentRuntimeService.prepareAgentInBackground(
-        'kimi-code-acp',
+        'opencode-acp',
         distributionId: 'alpine',
       );
       await expectLater(
@@ -1097,16 +1097,16 @@ void main() {
       requestId: 'request-1',
       questionId: 'answer',
       answers: <String>['继续'],
-      sessionId: 'kimi-session-1',
-      agentId: 'kimi-code-acp',
+      sessionId: 'claude-session-1',
+      agentId: 'claude-code-acp',
       conversationId: 42,
     );
 
     expect(capturedCall?.arguments, {
       'requestId': 'request-1',
-      'agentId': 'kimi-code-acp',
+      'agentId': 'claude-code-acp',
       'conversationId': 42,
-      'sessionId': 'kimi-session-1',
+      'sessionId': 'claude-session-1',
       'response': {
         'answers': {
           'answer': {

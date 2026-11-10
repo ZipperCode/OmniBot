@@ -106,11 +106,6 @@ internal object AcpHarnessAdapters {
             JsonObject(base - "terminal_output")
     }
 
-    val kimiCode: AcpHarnessAdapter = object : AcpHarnessAdapter {
-        override val configAdapterId = "kimi-code"
-        override val supportsHostManagedResponses = true
-    }
-
     val pi: AcpHarnessAdapter = object : AcpHarnessAdapter {
         override val configAdapterId = "pi"
         override val supportsHostManagedResponses = true
@@ -130,7 +125,6 @@ internal object AcpHarnessAdapters {
     fun forConfigAdapterId(id: String?): AcpHarnessAdapter = when (id) {
         "codex" -> codex
         "claude-code" -> claudeCode
-        "kimi-code" -> kimiCode
         "pi" -> pi
         "open-code" -> openCode
         else -> standard

@@ -20,7 +20,7 @@ class AgentBrandIcon extends StatelessWidget {
     this.avatarBackgroundColor,
   });
 
-  /// [AcpAgentProfile.id]（例如 `codex-acp`、`kimi-code-acp`）。
+  /// [AcpAgentProfile.id]（例如 `codex-acp`、`claude-code-acp`）。
   final String agentId;
 
   /// 图标绘制尺寸。
@@ -43,10 +43,6 @@ class AgentBrandIcon extends StatelessWidget {
     ),
     'codex-acp': _AgentBrand('assets/agents/codex.svg'),
     'codex-remote': _AgentBrand('assets/agents/codex.svg'),
-    'kimi-code-acp': _AgentBrand(
-      'assets/provider_icons/moonshot.svg',
-      brandColor: Color(0xFF1783FF),
-    ),
     'claude-code-acp': _AgentBrand(
       'assets/agents/claude_code.svg',
       brandColor: Color(0xFFD97757),
@@ -68,7 +64,6 @@ class AgentBrandIcon extends StatelessWidget {
     return switch (normalized) {
       'xiaowan' || 'xiaowan-acp' => 'xiaowan-acp',
       'codex' || 'codex-acp' || 'codex-remote' => 'codex-acp',
-      'kimi' || 'kimi-code' || 'kimi-code-acp' => 'kimi-code-acp',
       'claude' || 'claude-code' || 'claude-code-acp' => 'claude-code-acp',
       'opencode' || 'open-code' || 'opencode-acp' => 'opencode-acp',
       'pi' || 'pi-acp' || 'omnibot-pi-acp' => 'pi-acp',

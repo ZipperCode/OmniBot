@@ -25,7 +25,7 @@ class ManagedAcpAdapterPreparationTest {
     fun `a healthy installed adapter is reused during agent switching`() {
         assertFalse(
             shouldPrepareManagedAcpAdapter(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
                 commandAvailable = true,
                 allPackagesReady = true,
                 adapterHealthy = true,
@@ -37,7 +37,7 @@ class ManagedAcpAdapterPreparationTest {
     fun `missing or unhealthy adapters are still prepared`() {
         assertTrue(
             shouldPrepareManagedAcpAdapter(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
                 commandAvailable = false,
                 allPackagesReady = false,
                 adapterHealthy = false,
@@ -49,7 +49,7 @@ class ManagedAcpAdapterPreparationTest {
     fun `stale installer revision is prepared even when the old tree is healthy`() {
         assertTrue(
             shouldPrepareManagedAcpAdapter(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
                 commandAvailable = true,
                 allPackagesReady = true,
                 adapterHealthy = true,
@@ -59,7 +59,7 @@ class ManagedAcpAdapterPreparationTest {
         )
         assertFalse(
             shouldPrepareManagedAcpAdapter(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
+                agentId = AcpAgentProfileStore.CODEX_AGENT_ID,
                 commandAvailable = true,
                 allPackagesReady = true,
                 adapterHealthy = true,
@@ -176,7 +176,7 @@ class ManagedAcpAdapterPreparationTest {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         val installation = async {
-            gate.run("kimi-code-acp") {
+            gate.run("opencode-acp") {
                 started.complete(Unit)
                 release.await()
             }
@@ -187,7 +187,7 @@ class ManagedAcpAdapterPreparationTest {
             gate.run("codex-acp") { Unit }
             throw AssertionError("a foreground switch must not wait for installation")
         } catch (error: ManagedAcpPreparationInProgressException) {
-            assertEquals("kimi-code-acp", error.preparingAgentId)
+            assertEquals("opencode-acp", error.preparingAgentId)
         } finally {
             release.complete(Unit)
             installation.await()

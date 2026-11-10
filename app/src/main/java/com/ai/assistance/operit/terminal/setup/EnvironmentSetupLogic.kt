@@ -2,8 +2,6 @@ package com.ai.assistance.operit.terminal.setup
 
 import android.content.Context
 import cn.com.omnimind.bot.agent.runtime.AcpAgentCatalog
-import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NATIVE_HEALTH_COMMAND
-import cn.com.omnimind.bot.agent.runtime.KIMI_CODE_NPM_INSTALL_COMMAND
 import cn.com.omnimind.bot.agent.runtime.PI_RUNTIME_HEALTH_COMMAND
 import com.ai.assistance.operit.terminal.utils.SourceManager
 import com.rk.terminal.runtime.UbuntuRepositoryManager
@@ -16,7 +14,6 @@ object EnvironmentSetupLogic {
         val categoryId: String
     )
 
-    private const val KIMI_CODE_VERSION_COMMAND = "kimi --version"
 
     val packageDefinitions: List<PackageDefinition> = listOf(
         PackageDefinition("nodejs", "node --version", "dev"),
@@ -32,7 +29,6 @@ object EnvironmentSetupLogic {
         // of the installed executable is the safe readiness check.
         PackageDefinition("claude_code", "command -v claude-agent-acp", "ai"),
         PackageDefinition("opencode", "opencode --version", "ai"),
-        PackageDefinition("kimi", KIMI_CODE_NATIVE_HEALTH_COMMAND, "ai"),
         PackageDefinition("pi", PI_RUNTIME_HEALTH_COMMAND, "ai"),
         PackageDefinition("ssh_client", "ssh -V 2>&1", "ssh"),
         PackageDefinition("sshpass", "sshpass -V 2>&1", "ssh"),
@@ -61,7 +57,6 @@ object EnvironmentSetupLogic {
         "codex" to listOf("nodejs", "npm", "git", "bash", "curl", "ripgrep"),
         "claude_code" to listOf("nodejs", "npm", "git", "bash", "curl", "ripgrep"),
         "opencode" to listOf("nodejs", "npm", "git", "bash", "curl", "ripgrep"),
-        "kimi" to listOf("nodejs", "npm", "git", "bash", "curl", "ripgrep"),
         "pi" to listOf("nodejs", "npm", "git", "bash", "curl", "ripgrep"),
         "python" to listOf("python3"),
         "pip" to listOf("py3-pip"),
@@ -83,7 +78,6 @@ object EnvironmentSetupLogic {
         "codex" to listOf("nodejs", "git", "bash", "curl", "ripgrep"),
         "claude_code" to listOf("nodejs", "git", "bash", "curl", "ripgrep"),
         "opencode" to listOf("nodejs", "git", "bash", "curl", "ripgrep"),
-        "kimi" to listOf("nodejs", "git", "bash", "curl", "ripgrep"),
         "pi" to listOf("nodejs", "git", "bash", "curl", "ripgrep"),
         "python" to listOf("python3"),
         "pip" to listOf("python3-pip"),
@@ -180,10 +174,6 @@ object EnvironmentSetupLogic {
             commands += "ln -sf /root/.npm-global/bin/opencode /usr/local/bin/opencode || true"
         }
 
-        if ("kimi" in requested) {
-            commands += KIMI_CODE_NPM_INSTALL_COMMAND
-            commands += "ln -sf /root/.npm-global/bin/kimi /usr/local/bin/kimi || true"
-        }
         if ("pi" in requested) {
             commands += harnessInstallCommands["pi"]
                 ?: throw IllegalStateException("The ACP Harness catalog is required to install Pi.")
@@ -324,11 +314,6 @@ object EnvironmentSetupLogic {
                     commandCheck = PI_RUNTIME_HEALTH_COMMAND,
                     versionCommand = "omnibot-pi-acp --version",
                 )
-                "kimi" -> buildProbeSnippet(
-                    packageId = packageId,
-                    commandCheck = KIMI_CODE_NATIVE_HEALTH_COMMAND,
-                    versionCommand = KIMI_CODE_VERSION_COMMAND,
-                )
                 "ssh_client" -> buildProbeSnippet(
                     packageId = packageId,
                     commandCheck = "command -v ssh >/dev/null 2>&1",
@@ -388,7 +373,6 @@ object EnvironmentSetupLogic {
             "codex" -> "PATH=\"/root/.npm-global/bin:${'$'}PATH\"; export PATH; command -v codex && codex --version"
             "claude_code" -> "PATH=\"/root/.npm-global/bin:${'$'}PATH\"; export PATH; command -v claude-agent-acp"
             "opencode" -> "PATH=\"/root/.npm-global/bin:${'$'}PATH\"; export PATH; command -v opencode && opencode --version"
-            "kimi" -> KIMI_CODE_NATIVE_HEALTH_COMMAND
             "pi" -> PI_RUNTIME_HEALTH_COMMAND
             "ripgrep" -> "command -v rg"
             "tmux" -> "command -v tmux"
@@ -415,7 +399,6 @@ object EnvironmentSetupLogic {
             "openssh_client" -> "ssh_client"
             "ssh_server" -> "openssh_server"
             "claude", "claude-code" -> "claude_code"
-            "kimi-code", "kimi_code" -> "kimi"
             "pi-acp", "omnibot-pi-acp" -> "pi"
             else -> packageId.trim()
         }
@@ -485,9 +468,6 @@ object EnvironmentSetupLogic {
                 "PATH=\"/root/.npm-global/bin:${'$'}PATH\"; export PATH; opencode --version >/dev/null 2>&1"
             )
         }
-        if ("kimi" in requested) {
-            add("Kimi Code", KIMI_CODE_NATIVE_HEALTH_COMMAND)
-        }
         if ("pi" in requested) {
             add("Pi ACP adapter", PI_RUNTIME_HEALTH_COMMAND)
         }
@@ -542,7 +522,6 @@ object EnvironmentSetupLogic {
         "codex",
         "claude_code",
         "opencode",
-        "kimi",
         "pi",
     )
 }

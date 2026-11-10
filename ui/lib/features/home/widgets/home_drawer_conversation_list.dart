@@ -1350,7 +1350,6 @@ extension _HomeDrawerConversationList on HomeDrawerState {
       return LegacyTextLocalizer.localize('小万');
     }
     return switch (agentId) {
-      'kimi-code-acp' => 'Kimi Code',
       'codex-acp' || 'codex-remote' => 'Codex',
       'claude-code-acp' => 'Claude Code',
       'opencode-acp' => 'OpenCode',

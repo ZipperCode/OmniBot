@@ -48,8 +48,4 @@ APK SHA-256：`267413c527fe411167835c18b52bc262d7c6ffe75179d3606f444001c88b8bb9`
 
 在 `emulator-5556` 的应用安装入口完成 DSH 安装后，官方 ACP profile 文件和 bundle 均存在；官方 `initialize`、应用内 `session/new`、`session/prompt` 和 `stopReason=end_turn` 均通过。真实对话产生了可见回复，过程中出现的 `bash Failed` 是模型生成命令的工具结果，不是 ACP 安装或生命周期失败；同一 turn 正常结束，没有重放。
 
-### Kimi Code
-
-Kimi Code 0.41.0 通过官方 `kimi acp` 完成 `initialize`、`session/new`、`session/prompt` 和 `stopReason=end_turn`，真机 UI 显示处理完成。Responses 配置另通过本地 fixture 验证实际请求路径为 `/v1/responses`，故意返回 401 后官方 prompt 正常以错误结束；该 fixture 不代表线上模型回复成功，但证明配置转换和 wire API 选择生效。
-
 最终 developStandard debug APK 已重新构建并覆盖安装到 `emulator-5556`，`versionName=0.6.1`、`versionCode=11`。本补充只记录当前本地 APK 和模拟器证据，不表示已经发布 release，也不覆盖用户手机。

@@ -1,6 +1,6 @@
-// Start the existing, user-visible managed Harness installer from Agent mode.
-// Usage: ADB=/path/to/adb node scripts/start-harness-device-install.mjs emulator-N 'Kimi Code'
-// The named row must be visible. This reports dispatch only, never acceptance.
+// 从 Agent 模式启动现有的用户可见托管 Harness 安装器。
+// 用法: ADB=/path/to/adb node scripts/start-harness-device-install.mjs emulator-N 'Claude Code'
+// 指定名称的行必须可见。本脚本仅报告派发，不代表验收通过。
 import {execFileSync} from 'node:child_process';
 import assert from 'node:assert/strict';
 const [serial, name] = process.argv.slice(2);

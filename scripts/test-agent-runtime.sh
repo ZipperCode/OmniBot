@@ -29,7 +29,7 @@ Options:
   --skip-webchat  Skip WebChat conversation reconciliation tests.
   --harnesses DIR Run required Codex/Claude Code output regressions with a
                   disposable installed CLI directory (no real Provider calls).
-  --live-harnesses DIR  Also run the four external Harnesses against the real
+  --live-harnesses DIR  Also run the three external Harnesses against the real
                        configured API, including tools, switching and restart.
   --help          Show this help.
 

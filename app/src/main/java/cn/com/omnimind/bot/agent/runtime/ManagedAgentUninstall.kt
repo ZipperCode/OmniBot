@@ -9,7 +9,7 @@ import kotlinx.coroutines.withContext
 internal enum class ManagedAgentUninstallStrategy(val id: String) {
     CLAUDE_CODE("claude-code"), CODEX("codex"), OPENCODE("opencode"),
     // Kept only for removal of installations created before this Agent was retired.
-    DEEPSEEK_HARNESS("deepseek-harness"), PI("pi"), KIMI_CODE("kimi-code");
+    DEEPSEEK_HARNESS("deepseek-harness"), PI("pi");
 
     companion object {
         fun fromId(id: String): ManagedAgentUninstallStrategy = entries.firstOrNull { it.id == id }

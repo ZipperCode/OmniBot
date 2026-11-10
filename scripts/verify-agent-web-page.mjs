@@ -1,7 +1,7 @@
-// Diagnose an existing Android Chrome tab via an explicit adb-forwarded CDP port.
-// Usage: node scripts/verify-agent-web-page.mjs PORT 'Kimi Code Web' [--reload]
-// --reload is only for a test page without unsaved input. Never prints URLs,
-// credentials, page text, or network bodies. This is a rendering gate, not chat acceptance.
+// 通过显式 adb 转发的 CDP 端口诊断现有的 Android Chrome 标签页。
+// 用法: node scripts/verify-agent-web-page.mjs PORT 'Claude Code Web' [--reload]
+// --reload 仅用于无未保存输入的测试页面。绝不打印 URL、
+// 凭据、页面文本或网络请求体。此为渲染门禁，非聊天验收。
 import assert from 'node:assert/strict';
 const [port, title, flag] = process.argv.slice(2);
 assert(/^\d+$/.test(port || '') && title && (!flag || flag === '--reload'));

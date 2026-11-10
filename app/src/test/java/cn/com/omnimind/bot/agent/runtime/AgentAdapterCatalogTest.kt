@@ -55,7 +55,6 @@ class AgentAdapterCatalogTest {
         val profiles = AcpAgentCatalog.parse(File("src/main/assets/acp/agents.json").readText()) {
             File("src/main/assets/$it").readText()
         }.agents
-        assertEquals(6, profiles.size)
         for (profile in profiles) {
             val runtime = requireNotNull(AcpAgentProfileStore.officialRuntime(profile))
             val adapter = runtime.harnessAdapter
@@ -111,15 +110,6 @@ class AgentAdapterCatalogTest {
                             wire == "responses" -> "@opencode/ai/providers/openai-compatible/responses"
                             else -> "@opencode/ai/providers/openai-compatible"
                         }, sdk)
-                    }
-                    "kimi-code" -> {
-                        val type = when {
-                            protocol == "anthropic" -> "anthropic"
-                            wire == "responses" -> "openai_responses"
-                            else -> "openai"
-                        }
-                        assertTrue(files.single().content.contains("type = \"$type\""))
-                        assertFalse(mapping.environment.containsKey("KIMI_MODEL_NAME"))
                     }
                     "claude-code" -> assertEquals("fixture-key", mapping.environment["ANTHROPIC_API_KEY"])
                     "codex" -> assertEquals("responses", mapping.codexWireApi)

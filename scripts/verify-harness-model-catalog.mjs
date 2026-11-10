@@ -11,7 +11,7 @@ import {respondHarnessSuccess} from './harness-success-fixture.mjs';
 
 const [cliDirectory, fixtureDirectory, filter = ""] = process.argv.slice(2);
 assert(cliDirectory && fixtureDirectory, 'CLI and generated fixture directories required');
-const root = await mkdtemp(join(tmpdir(), 'oob-kimi-catalog-'));
+const root = await mkdtemp(join(tmpdir(), 'oob-harness-catalog-'));
 const files = (await readdir(fixtureDirectory)).filter(f => f.includes(filter) && f.endsWith('.json'));
 assert(files.length > 0);
 for (const file of files) {
@@ -27,7 +27,7 @@ for (const file of files) {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const rewrite = value => value.replaceAll('https://fixture.invalid', `http://127.0.0.1:${server.address().port}`).replaceAll('/root', home);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(KIMI|OPENAI|ANTHROPIC|CLAUDE|CODEX|DEEPSEEK|OPENCODE)/.test(key)));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENAI|ANTHROPIC|CLAUDE|CODEX|DEEPSEEK|OPENCODE)/.test(key)));
   Object.assign(env, {HOME: home}, Object.fromEntries(Object.entries(fixture.environment).map(([k, v]) => [k, rewrite(v)])));
   const writeConfigs = async files => {
     for (const file of files) {
@@ -40,7 +40,7 @@ for (const file of files) {
   Object.assign(env, {CLAUDE_CONFIG_DIR: join(home, '.claude'), OPENCODE_DISABLE_MODELS_FETCH: 'true',
     PATH: resolve(cliDirectory, 'node_modules/.bin') + ':' + env.PATH});
   const commands = {
-    'kimi-code': ['kimi', 'acp'], 'claude-code': ['claude-agent-acp'], 'codex': ['codex-acp'],
+    'claude-code': ['claude-agent-acp'], 'codex': ['codex-acp'],
     'open-code': ['opencode', 'acp'],
   };
   const [command, ...args] = commands[fixture.harness];

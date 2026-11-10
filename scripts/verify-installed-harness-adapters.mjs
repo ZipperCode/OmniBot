@@ -59,7 +59,7 @@ for (const filename of cases) {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}/v1`;
   const rewrite = value => String(value).replaceAll('https://fixture.invalid', base.slice(0, -3)).replaceAll('/root', home);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENAI|ANTHROPIC|CLAUDE|CODEX|KIMI|DEEPSEEK|OPENCODE|OMNIBOT_.*KEY)/.test(key)));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENAI|ANTHROPIC|CLAUDE|CODEX|DEEPSEEK|OPENCODE|OMNIBOT_.*KEY)/.test(key)));
   Object.assign(env, {HOME: home, XDG_CONFIG_HOME: join(home, '.config'), PATH: `${bin}:${env.PATH}`,
     CLAUDE_CONFIG_DIR: join(home, '.claude'), OPENCODE_DISABLE_MODELS_FETCH: 'true',
     ...Object.fromEntries(Object.entries(config.environment).map(([k, v]) => [k, rewrite(v)]))});
@@ -71,7 +71,6 @@ for (const filename of cases) {
   switch (config.harness) {
     case 'codex': command = 'codex-acp'; args = []; break;
     case 'claude-code': command = 'claude-agent-acp'; args = []; break;
-    case 'kimi-code': command = 'kimi'; args = ['acp']; break;
     case 'open-code': command = 'opencode'; args = ['acp'];
       env.OPENCODE_CONFIG = rewrite(config.files[0].path); break;
     default: throw Error(`Missing CLI for ${config.harness}`);

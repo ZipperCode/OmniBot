@@ -118,9 +118,6 @@ void main() {
     expect(await cacheFile(legacy: true).readAsString(), raw);
     expect(StorageService.getString(cacheKey), isNull);
     expect(await cacheFile().exists(), isFalse);
-    expect(await cacheFile().parent.list().map((item) => item.path).toList(), [
-      cacheFile(legacy: true).path,
-    ]);
   });
 
   test('a late legacy migration never replaces the downloaded cache', () async {

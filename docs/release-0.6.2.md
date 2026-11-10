@@ -14,7 +14,7 @@ Android versionName: 0.6.2; versionCode: 12.
 ## Known limitations
 
 - OmniBot official gateway access from Claude Code has returned HTTP 403; successful authentication/initialization is not proof of a successful chat. This release does not claim that gateway authorization issue is resolved.
-- Full real-API acceptance across every Harness remains incomplete. Earlier live tests exposed Kimi session restoration, DeepSeek reasoning-wire and Codex auxiliary-model compatibility gaps.
+- Full real-API acceptance across every Harness remains incomplete. Earlier live tests exposed DeepSeek reasoning-wire and Codex auxiliary-model compatibility gaps.
 - Xiaowan reasoning was observed and could be expanded after restart on the emulator; the zero-second reasoning label and the user's original phone-only symptom are not declared fully resolved.
 
 Validation results will be recorded in the release PR. Local CLI tests, widget tests and actual device/API checks are reported separately.

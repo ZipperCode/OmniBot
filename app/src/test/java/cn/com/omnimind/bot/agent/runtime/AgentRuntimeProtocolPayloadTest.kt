@@ -596,40 +596,6 @@ class AgentRuntimeProtocolPayloadTest {
         ).isEmpty())
     }
 
-    @Test
-    fun managedAgentInstallationUsesTheExistingOfficialTerminalSetupIds() {
-        assertEquals(
-            "kimi",
-            managedAgentTerminalPackageId(
-                officialCatalogAgents().first {
-                    it.id == AcpAgentProfileStore.KIMI_CODE_AGENT_ID
-                }
-            )
-        )
-        assertEquals(
-            "codex",
-            managedAgentTerminalPackageId(officialCatalogAgents().first {
-                it.id == AcpAgentProfileStore.CODEX_AGENT_ID
-            })
-        )
-        assertEquals(
-            "claude_code",
-            managedAgentTerminalPackageId(officialCatalogAgents().first {
-                it.id == "claude-code-acp"
-            })
-        )
-        assertEquals(
-            "opencode",
-            managedAgentTerminalPackageId(officialCatalogAgents().first {
-                it.id == "opencode-acp"
-            })
-        )
-        assertNull(
-            managedAgentTerminalPackageId(officialCatalogAgents().first {
-                it.id == AcpAgentProfileStore.XIAOWAN_AGENT_ID
-            })
-        )
-    }
 
     @Test
     fun localAgentMcpUsesTheSelectedHarnessCapability() {

@@ -46,9 +46,9 @@ void main() {
                 arguments: const ['acp'],
               ),
               _agent(
-                'kimi-code-acp',
-                'Kimi Code',
-                'kimi',
+                'pi-acp',
+                'Pi',
+                'omnibot-pi-acp',
                 'unchecked',
                 managedAdapter: true,
                 lastCheckError: 'Harness 未初始化，请点击“安装官方 Harness”准备运行组件。',
@@ -94,9 +94,9 @@ void main() {
                 'agents': [
                   {
                     ..._agent(
-                      'kimi-code-acp',
-                      'Kimi Code',
-                      'kimi',
+                      'pi-acp',
+                      'Pi',
+                      'omnibot-pi-acp',
                       'unchecked',
                       managedAdapter: true,
                     ),
@@ -115,12 +115,12 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final action = find.byKey(const Key('agent-check-kimi-code-acp'));
+        final action = find.byKey(const Key('agent-check-pi-acp'));
         final uninstall = find.byKey(
-          const Key('agent-uninstall-kimi-code-acp'),
+          const Key('agent-uninstall-pi-acp'),
         );
         final navigation = find.byKey(
-          const Key('agent-navigation-kimi-code-acp'),
+          const Key('agent-navigation-pi-acp'),
         );
         for (final control in [action, uninstall, navigation]) {
           expect(
@@ -137,7 +137,7 @@ void main() {
           );
           expect(
             actionBounds.left,
-            greaterThan(tester.getRect(find.text('Kimi Code')).right),
+            greaterThan(tester.getRect(find.text('Pi')).right),
           );
         } else {
           expect(
@@ -150,7 +150,7 @@ void main() {
         await tester.tap(uninstall);
         await tester.pumpAndSettle();
         expect(
-          find.byKey(const ValueKey('agent-uninstall-confirm-kimi-code-acp')),
+          find.byKey(const ValueKey('agent-uninstall-confirm-pi-acp')),
           findsOneWidget,
         );
         expect(
@@ -158,7 +158,7 @@ void main() {
           isEmpty,
         );
         await tester.tap(
-          find.byKey(const Key('agent-uninstall-cancel-kimi-code-acp')),
+          find.byKey(const Key('agent-uninstall-cancel-pi-acp')),
         );
         await tester.pumpAndSettle();
         expect(
@@ -466,10 +466,10 @@ void main() {
           await tester.pumpAndSettle();
           await tester.enterText(
             find.byKey(const Key('agent-contact-search')),
-            'Kimi',
+            'Pi',
           );
           await tester.pumpAndSettle();
-          expect(find.text('Kimi Code'), findsOneWidget);
+          expect(find.byKey(const Key('agent-config-pi-acp')), findsOneWidget);
           expect(find.text('Codex'), findsNothing);
           expect(find.byKey(const Key('agent-refresh')), findsNothing);
           expect(find.byKey(const Key('agent-shared-model')), findsNothing);
@@ -664,8 +664,8 @@ void main() {
     expect(find.text('Gemini CLI'), findsNothing);
     expect(find.text('DeepSeek Harness'), findsNothing);
     expect(find.text('OpenCode'), findsOneWidget);
-    expect(find.text('Kimi Code'), findsOneWidget);
-    expect(find.textContaining('Kimi Code ACP Agent'), findsNothing);
+    expect(find.text('Pi'), findsOneWidget);
+    expect(find.textContaining('Pi ACP Agent'), findsNothing);
     expect(find.textContaining('ACP initialize'), findsNothing);
     expect(find.text('可用'), findsWidgets);
     expect(find.text('未安装'), findsOneWidget);
@@ -690,10 +690,10 @@ void main() {
     expect(find.text('4 位 Agent'), findsNothing);
     expect(find.text('版本未检测'), findsNothing);
     expect(
-      tester.getCenter(find.byKey(const Key('agent-check-kimi-code-acp'))).dy,
+      tester.getCenter(find.byKey(const Key('agent-check-pi-acp'))).dy,
       closeTo(
         tester
-            .getCenter(find.byKey(const Key('agent-navigation-kimi-code-acp')))
+            .getCenter(find.byKey(const Key('agent-navigation-pi-acp')))
             .dy,
         1,
       ),
@@ -842,9 +842,9 @@ void main() {
                   'agents': <Map<String, dynamic>>[
                     _agent('codex-acp', 'Codex', 'codex-acp', 'online'),
                     _agent(
-                      'kimi-code-acp',
-                      'Kimi Code',
-                      'kimi',
+                      'pi-acp',
+                      'Pi',
+                      'omnibot-pi-acp',
                       'missing',
                       managedAdapter: true,
                     ),
@@ -853,7 +853,7 @@ void main() {
               case 'agent/prepare':
                 preparationCalls += 1;
                 expect(call.arguments, <String, Object?>{
-                  'agentId': 'kimi-code-acp',
+                  'agentId': 'pi-acp',
                   'force': true,
                 });
                 return preparation.future;
@@ -876,7 +876,7 @@ void main() {
       await tester.pumpWidget(buildPage());
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byKey(const Key('agent-check-kimi-code-acp')));
+      await tester.tap(find.byKey(const Key('agent-check-pi-acp')));
       await tester.pump();
       // The page-ready gate publishes the preparation stream after the frame.
       await tester.pump();
@@ -885,7 +885,7 @@ void main() {
       expect(
         tester
             .widget<IconButton>(
-              find.byKey(const Key('agent-navigation-kimi-code-acp')),
+              find.byKey(const Key('agent-navigation-pi-acp')),
             )
             .onPressed,
         isNull,
@@ -901,7 +901,7 @@ void main() {
       await tester.pump();
       expect(find.text('后台安装 / 升级中'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('agent-navigation-kimi-code-acp')));
+      await tester.tap(find.byKey(const Key('agent-navigation-pi-acp')));
       await tester.pump();
       expect(preparationCalls, 1);
 
@@ -1061,18 +1061,18 @@ void main() {
           if (call.method == 'listActions') {
             return <Map<String, dynamic>>[
               <String, dynamic>{
-                'id': 'open_kimi_web',
+                'id': 'open_opencode_web',
                 'pluginId': 'com.omnimind.agent-web',
-                'displayName': 'Kimi Code Web',
-                'description': 'Open Kimi Code Web',
+                'displayName': 'OpenCode Web',
+                'description': 'Open OpenCode Web',
                 'presentation': <String, dynamic>{
                   'placement': 'agent_settings',
-                  'packageId': 'kimi',
-                  'statusAction': 'get_kimi_web_status',
-                  'stopAction': 'stop_kimi_web',
+                  'packageId': 'opencode',
+                  'statusAction': 'get_opencode_web_status',
+                  'stopAction': 'stop_opencode_web',
                   'label': <String, String>{
-                    'zh': 'Kimi Code Web',
-                    'en': 'Kimi Code Web',
+                    'zh': 'OpenCode Web',
+                    'en': 'OpenCode Web',
                   },
                   'description': <String, String>{
                     'zh': '在系统浏览器中打开本机 Web 界面',
@@ -1084,22 +1084,22 @@ void main() {
           }
           if (call.method == 'invokeAction') {
             final actionId = (call.arguments as Map)['actionId'] as String;
-            if (actionId == 'get_kimi_web_status') {
+            if (actionId == 'get_opencode_web_status') {
               return <String, dynamic>{
                 'success': true,
                 'code': statusCode,
-                'serviceId': 'kimi',
-                'packageId': 'kimi',
+                'serviceId': 'opencode',
+                'packageId': 'opencode',
                 'running': statusCode != 'NOT_RUNNING',
               };
             }
-            if (actionId == 'stop_kimi_web') {
+            if (actionId == 'stop_opencode_web') {
               statusCode = 'NOT_RUNNING';
               return <String, dynamic>{
                 'success': true,
                 'code': 'STOPPED',
-                'serviceId': 'kimi',
-                'packageId': 'kimi',
+                'serviceId': 'opencode',
+                'packageId': 'opencode',
                 'running': false,
               };
             }
@@ -1125,13 +1125,13 @@ void main() {
     expect(find.text('运行中'), findsOneWidget);
     expect(
       find.byKey(
-        const Key('plugin-action-stop-com.omnimind.agent-web/open_kimi_web'),
+        const Key('plugin-action-stop-com.omnimind.agent-web/open_opencode_web'),
       ),
       findsOneWidget,
     );
     await tester.tap(
       find.byKey(
-        const Key('plugin-action-stop-com.omnimind.agent-web/open_kimi_web'),
+        const Key('plugin-action-stop-com.omnimind.agent-web/open_opencode_web'),
       ),
     );
     await tester.pump();
@@ -1140,17 +1140,17 @@ void main() {
     final stopInvocation = calls.lastWhere(
       (call) =>
           call.method == 'invokeAction' &&
-          (call.arguments as Map)['actionId'] == 'stop_kimi_web',
+          (call.arguments as Map)['actionId'] == 'stop_opencode_web',
     );
     expect(stopInvocation.arguments, <String, Object?>{
       'pluginId': 'com.omnimind.agent-web',
-      'actionId': 'stop_kimi_web',
+      'actionId': 'stop_opencode_web',
       'arguments': <String, dynamic>{},
     });
     expect(find.text('运行中'), findsNothing);
     expect(
       find.byKey(
-        const Key('plugin-action-button-com.omnimind.agent-web/open_kimi_web'),
+        const Key('plugin-action-button-com.omnimind.agent-web/open_opencode_web'),
       ),
       findsOneWidget,
     );

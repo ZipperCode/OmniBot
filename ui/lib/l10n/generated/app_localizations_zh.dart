@@ -1453,9 +1453,6 @@ class AppLocalizationsZh extends AppLocalizations {
   String get alpineOpenCode => 'OpenCode CLI（内置 ACP 支持）';
 
   @override
-  String get alpineKimiCode => 'Kimi Code 官方 CLI 与本地 Web 界面';
-
-  @override
   String get alpinePi => 'Pi Agent 与 MCP 工具支持';
 
   @override

@@ -234,7 +234,7 @@ class AgentRuntimeErrorSupportTest {
     @Test
     fun `harness preparation does not turn another switch into a wait`() {
         val error = IllegalStateException(
-            "Harness preparation is already running for kimi-code-acp. " +
+            "Harness preparation is already running for codex-acp. " +
                 "Wait for that installation to finish before starting another unprepared Harness."
         )
 

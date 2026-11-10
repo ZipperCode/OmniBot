@@ -63,10 +63,10 @@ git diff --check
 ### 四项模拟器验收进展（2026-09-06，未完成）
 
 - 时间：当前工作区保留同一已接纳 prompt 的开始时间，避免页面派发快照清空；`page dispatch snapshot preserves prompt timing through history commit` 覆盖接纳、页面快照、ACP 输出、完成与历史写入。相关 coordinator、footer、模型面板合计 107 项通过，APK 构建成功。
-- Web 与输入适配：`AgentWebRuntimeTest` 21 项、`AgentWebPluginTest` 2 项、`AcpPromptInputCompatibilityAdapterTest` 4 项通过，并加入 `scripts/test-agent-runtime.sh`。这些是配置／进程管理模拟测试，不是实际 Kimi／DeepSeek 网页对话通过。
+- Web 与输入适配：`AgentWebRuntimeTest` 21 项、`AgentWebPluginTest` 2 项、`AcpPromptInputCompatibilityAdapterTest` 4 项通过，并加入 `scripts/test-agent-runtime.sh`。这些是配置／进程管理模拟测试，不是实际 DeepSeek 网页对话通过。
 - `OmniFlowTargetSmall` 已启动，`emulator-5554` 覆盖安装成功，Launcher 启动返回 `Status: ok`。停在首次使用引导，尚未配置 Provider 或发送验证对话。
 - 模拟器 host GPU 截图全黑但可访问性树更新，设备 Awake 且无窗口 SECURE 标志；模拟器输出包含 `glUniformMatrix3fv error 0x502`。已正常关闭该模拟器，改为软件 GPU 冷启动，不清除用户数据。复跑命令：`emulator -avd OmniFlowTargetSmall -no-snapshot -no-audio -gpu swiftshader_indirect`。
-- 后续必验且不能省略：新回复时间实际可见并重开保留；各 Harness 真正输入／输出；Kimi Web 与 DeepSeek WebUI 实际启动和交互；切换模型后请求实际生效及返回会话不串配置。当前不具备将四项目标标为完成的证据。
+- 后续必验且不能省略：新回复时间实际可见并重开保留；各 Harness 真正输入／输出；DeepSeek WebUI 实际启动和交互；切换模型后请求实际生效及返回会话不串配置。当前不具备将四项目标标为完成的证据。
 - 软件 GPU 冷启动后截图恢复，已通过新增只读设备门禁 `ADB=/path/to/adb node scripts/verify-agent-device.mjs emulator-5554`（验证在线、启动完成、版本、进程与前台；不代表对话通过）。
 - Ubuntu 硬链接修复进展：最小复现为应用 UID 在自己的缓存目录创建普通硬链接也返回权限错误；内置 PRoot 帮助明确提供 `--link2symlink` 对应此场景。现在只对 rootfs 解压调用内置 PRoot，提前安装原有 PRoot 文件和库，不改变 ACP 最终启动参数。`scripts/verify-rootfs-hardlinks.mjs SERIAL plain` 稳定失败，默认 production 模式读取实际 `init-host.sh` 解压命令并验证官方归档的 gunzip/uncompress 内容一致，模拟器通过。脚本仅生成独立缓存夹具，不读取凭据；夹具保留在 app cache 的 `oob-rootfs-hardlinks.*`。
 - 重新构建及覆盖安装成功。首次失败的模拟器 rootfs 已移至 `local/ubuntu-failed-hardlinks-20260906` 保留可恢复副本，配置、history、workspace 未清除；通过应用 Start setup 重新安装，已观察到新 uncompress 链接正常生成，tar 进程仍在工作，尚不提前声称完整环境安装通过。
@@ -99,22 +99,13 @@ git diff --check
 
 ### 外部 Harness 实机流程继续（2026-09-06）
 
-- 当前模拟器 `verify-agent-tools.mjs` 实际确认 node/npm/python3/pip3/uv 已安装；kimi/dsh/codex-acp/claude-agent-acp/opencode 均未安装，因此外部输入输出与两种 Web UI 尚未通过。
-- 从 Settings → Agent Mode 的 Kimi Code 行执行现有 Install 动作。可重复命令：`ADB=/path/to/adb node scripts/start-harness-device-install.mjs emulator-5554 'Kimi Code'`。要求目标行已经可见，按行名称及当前可访问性 bounds 定位安装按钮；不绕过应用安装 owner，不自动重试。
-- 页面显示 Installing in background；设备进程树确认 PRoot 13497 → sh 13521 → `kimi-code@latest` 13531 正在执行官方 `@moonshot-ai/kimi-code@latest` 安装。此记录仅为进行中证据；后续先检查同一进程是否结束及应用结果，不能重复启动安装或把它记为输入输出通过。
-- 后续同一次安装已结束：npm 日志确认 `@moonshot-ai/kimi-code` 0.41.0 下载、node-pty 安装脚本执行，最终 exit 0 / info ok；设备库存 `kimi:present`，其他四种外部 Harness 仍缺失。未在安装进行中重启或重复安装；ACP 初始化及 Kimi Web 实测仍待完成。Agent 管理页 5 项既有测试通过（含后台安装不阻塞其他设置、插件 Web 动作入口）。
+- 当前模拟器 `verify-agent-tools.mjs` 实际确认 node/npm/python3/pip3/uv 已安装；dsh/codex-acp/claude-agent-acp/opencode 均未安装，因此外部输入输出与 Web UI 尚未通过。
+- Agent 管理页 5 项既有测试通过（含后台安装不阻塞其他设置、插件 Web 动作入口）。
 - 模型切换初步实测：Provider 页显示 95 个模型且 95/95 在聊天列表；聊天模型面板首次展开经历 Loading models 后返回实际模型列表。选择 `DeepSeek-V3-250324` 后面板显示对应名称，从真实输入框发送 `Reply MODEL_OK`，返回 `MODEL_OK`，`verify-reply-timing.mjs emulator-5554 MODEL_OK` 通过。此证据证明选择后仍能完成真实对话，但尚缺请求层模型 ID 核验、切回原模型及跨会话隔离，不将整项模型切换标为通过。
-- Kimi Web 已通过应用入口启动现有后台服务，并打开系统 Chrome；Chrome 首次引导选择不登录账号。真实页面白屏：Chrome 109.0.5414.123 的 `Array.prototype.toSorted` 为 undefined，官方 Kimi 前端抛 `TypeError: e.toSorted is not a function`，body 字符数及交互控件数均为 0。
-- 持久化白屏门禁：`adb -s SERIAL forward tcp:0 localabstract:chrome_devtools_remote` 返回端口后，执行 `node scripts/verify-agent-web-page.mjs PORT 'Kimi Code Web' [--reload]`。仅诊断当前匹配标签页；输出能力、控件数和已隐藏 URL 的异常，不记录凭据或网页内容。`--reload` 仅用于无未保存输入的测试页。此门禁已稳定捕获白屏，不能作为对话验证替代品。
-- 正在按 Chromium 官方下载说明准备 Android_Arm64 快照 1692964（官方 bucket generation 1788631464561751），用于独立测试浏览器验证，不覆盖原 Chrome、不修改 Kimi 前端。尚未安装／验证新版浏览器，不提前将白屏记为修复。
-- 对照结果：官方 zip 的 MD5/base64 与存储元数据一致（`9QCM4t16MQm1GNJKRj2xZA==`）；提取 ChromePublic.apk，确认包名 `org.chromium.chrome`、版本 155.0.8044.0 后安装成功，未覆盖 `com.android.chrome`。新浏览器不登录账号、不启用通知。相同 Kimi 服务无需重启，页面加载后标题为 `Kimi Code`；同一检测器返回 `arrayToSorted:function`、bodyCharacters 310、controls 16、exceptions []，白屏对照通过。该版本为测试快照，不作为生产浏览器版本建议；实际对话仍待验收。
-- Kimi Web 真实对话进展：将应用在旧 Chrome 中打开的原始本地鉴权链接仅在内存中转交新版 Chromium，未打印或保存 token；刷新后通过官方鉴权。完成官方欢迎页，跳过另行登录 Kimi 账号，工作台已显示共享 Provider 模型 `GLM-5.1 · thinking`。发送 `Reply KIMI_WEB_OK` 时官方页面要求先选工作区，使用其目录选择器选择 `/workspace`；确认选择后官方页面自动继续原发送，没有再次提交。实际回复 `KIMI_WEB_OK`，请求完成。
-- 新增 `verify-kimi-web-reply.mjs SERIAL MARKER`：要求 Kimi 会话页面可见、独立回复 TextView 恰好等于测试 marker（不是用户输入 `Reply MARKER`）、没有仍启用的 Interrupt。此脚本已在模拟器上通过。随后执行 `verify-agent-web-page.mjs 53356 'workspace | Kimi Code' --reload`，官方页面恢复，无脚本异常；再次运行回复断言确认恢复结果。此验收覆盖一条小型真实对话及刷新恢复，不代表 ACP、多工具交互、DeepSeek Web 或全部模型切换通过。
-- Kimi ACP 实测：在应用右上角模式选择菜单选择 Kimi Code，完成官方 ACP 初始化后进入独立新会话。输入框发送 `Reply KIMI_ACP_OK`，先显示 Processing，随后真实回复 `KIMI_ACP_OK`，显示 `15.0s / 03:04:34`。`verify-reply-timing.mjs emulator-5554 KIMI_ACP_OK` 通过。Home 离开再返回应用后同一断言再次通过（这是前后台恢复，不是杀进程恢复）。原 Kimi Web 进程未重启，ACP 使用独立进程；此结果覆盖基础文本路径，工具调用、取消及其余 Harness 尚未完成设备验收。
-- DeepSeek 准备进展：确认无 DeepSeek/npm 安装进程后，在 Agent Mode 可见行执行 `start-harness-device-install.mjs emulator-5554 'DeepSeek Harness'`。页面显示 Installing in background，现有安装 owner 启动 PRoot 18025，apt-get 18259 执行 `install -y --no-install-recommends build-essential python3`，其子 dpkg 18315 正在配置 dpkg。Kimi Web/ACP 独立进程继续保留。安装尚未结束，不能启动第二次安装或声称 DeepSeek ACP/Web 可用；下一步应继续检查同一进程及应用安装结果。
+- DeepSeek 准备进展：确认无 DeepSeek/npm 安装进程后，在 Agent Mode 可见行执行 `start-harness-device-install.mjs emulator-5554 'DeepSeek Harness'`。页面显示 Installing in background，现有安装 owner 启动 PRoot 18025，apt-get 18259 执行 `install -y --no-install-recommends build-essential python3`，其子 dpkg 18315 正在配置 dpkg。安装尚未结束，不能启动第二次安装或声称 DeepSeek ACP/Web 可用；下一步应继续检查同一进程及应用安装结果。
 - 请求模型的后续核验设施：`agent-provider-observer.mjs` 为测试专用透明 HTTP 转发器，只向明确指定的上游 origin 转发，保留请求与 SSE，不重试、不改写模型响应；日志只包含请求序号、端点、模型 ID、状态码，不含凭据和对话内容。2 项转发／脱敏测试通过并接入 `test-agent-runtime.sh`。真实 Provider 冒烟也经该转发器通过（GLM-5.1，目录 200、完成请求 200），这仍不是设备模型切换的证据。
-- 当前测试观察器在本机 loopback 55684 运行，上游为原 llmapi.paratera.com；模拟器专用 `oob-emulator-regression` Profile 已临时配置到 `http://10.0.2.2:55684`。保留运行进程，不强制更新已有 Kimi 会话。后续核验请求层模型 ID；验证完成必须用不覆盖 `OMNIBOT_TEST_BASE_URL` 的原环境运行 `configure-agent-test-provider.mjs emulator-5554`，恢复原测试 Provider 地址后再关闭观察器。手机和其他 Profile 未改。
-- 请求层设备证据：从 Kimi 切回独立小万会话，面板显示 GLM-5.1；发送 `Reply MODEL_A1`，观察器请求 id=3 确认 `/v1/chat/completions` 的 `model=GLM-5.1`，响应 200，实际回复 `MODEL_A1`，时间断言通过。随后展开模型选择列表出现真实 `session/load: timeout`，仅保留 GLM-5.1；对应观察器 id=4 `/v1/models` 为 transport_error。未自动重试或把第二次成功冒充首次成功。
+- 当前测试观察器在本机 loopback 55684 运行，上游为原 llmapi.paratera.com；模拟器专用 `oob-emulator-regression` Profile 已临时配置到 `http://10.0.2.2:55684`。保留运行进程。后续核验请求层模型 ID；验证完成必须用不覆盖 `OMNIBOT_TEST_BASE_URL` 的原环境运行 `configure-agent-test-provider.mjs emulator-5554`，恢复原测试 Provider 地址后再关闭观察器。手机和其他 Profile 未改。
+- 请求层设备证据：在独立小万会话中，面板显示 GLM-5.1；发送 `Reply MODEL_A1`，观察器请求 id=3 确认 `/v1/chat/completions` 的 `model=GLM-5.1`，响应 200，实际回复 `MODEL_A1`，时间断言通过。随后展开模型选择列表出现真实 `session/load: timeout`，仅保留 GLM-5.1；对应观察器 id=4 `/v1/models` 为 transport_error。未自动重试或把第二次成功冒充首次成功。
 - 失败后独立诊断：直连 Provider 与经观察器的现有 Provider smoke 均通过；观察器 id=5 models 200、id=6 completion 200。目前不足以把该次超时归因于应用或上游。测试观察器源码补充时间戳、耗时、客户端断开标志和异常类型（不打印异常正文）；当前仍运行的旧观察器尚未重启加载此诊断改动。下一步需核对超时边界并继续 A→B→A 的请求层验证；该项尚未通过。
 - 已确认并修复一项会触发正常慢响应失败的应用限制：`HttpController.fetchProviderModels` 的 connect/read/call timeout 均被单独限制为 4 秒，旧注释用于启动探测，而现有启动已读取缓存。新增真实本地 HTTP 服务延迟 5 秒返回模型目录的回归；修复前 SocketTimeoutException，修复后使用与其他 Provider 检查一致的 OkHttp 默认超时通过，没有增加重试或无限等待。CustomHeaders 3 项、Anthropic 9 项通过，新回归加入统一测试脚本。APK 构建成功，设备重新验收尚待完成；不据此声称所有上游超时已消失。
 - DeepSeek 安装最终结束：镜像尝试 npm 日志 19_16_17 与官方源尝试 19_22_21 均 exit 1，PRoot 18025／npm 19582 已不存在。日志末尾未给出具体原因，不应直接归因于磁盘或网络；尚无 DeepSeek 可用证据。确认安装终止后才开始覆盖安装模型刷新修复 APK，未打断活跃安装。

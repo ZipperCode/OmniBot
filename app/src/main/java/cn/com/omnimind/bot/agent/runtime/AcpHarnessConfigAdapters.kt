@@ -271,40 +271,6 @@ internal object ClaudeCodeConfigAdapter : AgentConfigAdapter {
     }
 }
 
-private fun isAnthropicCompatibleBaseUrl(value: String): Boolean {
-    return value.endsWith("/anthropic", ignoreCase = true) ||
-        value.endsWith("/apps/anthropic", ignoreCase = true)
-}
-
-internal object KimiCodeConfigAdapter : AgentConfigAdapter {
-    override fun launchConfigWrites(
-        input: AgentProviderMappingInput,
-        mapping: AgentProviderMapping,
-        providerModels: List<ProviderModelOption>,
-        existingConfig: String,
-    ): List<AgentConfigWrite> {
-        val provider = input.provider ?: return emptyList()
-        require(provider.protocolType != "gemini") {
-            "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
-        }
-        val model = input.model ?: return emptyList()
-        return buildKimiCodeManagedFiles(provider, model, providerModels = providerModels).map { (path, content) ->
-            AgentConfigWrite(path, content, "kimi-agent-config-write")
-        }
-    }
-
-    override fun map(input: AgentProviderMappingInput): AgentProviderMapping {
-        val provider = input.provider
-        require(provider?.protocolType != "gemini") {
-            "Kimi Code 需要兼容 OpenAI 或 Anthropic 的端点，不支持当前 Gemini 原生端点。"
-        }
-        return AgentProviderMapping(environment = kimiCodeBaseEnvironment() +
-            if (input.provider?.isHostManaged == true) {
-                mapOf("OPENAI_API_KEY" to input.provider.apiKey)
-            } else emptyMap())
-    }
-}
-
 internal object OpenCodeConfigAdapter : AgentConfigAdapter {
     override suspend fun readConfig(
         input: AgentProviderMappingInput,

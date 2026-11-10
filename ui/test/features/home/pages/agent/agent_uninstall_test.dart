@@ -103,7 +103,6 @@ void main() {
         'codex-acp',
         'claude-code-acp',
         'opencode-acp',
-        'kimi-code-acp',
       ];
       final agents = [
         for (final id in supported) agent(id),

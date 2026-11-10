@@ -38,7 +38,6 @@ internal class AgentWebPluginProvider(private val context: Context) : OmniPlugin
         kind = OmniPluginKind.BUNDLED_MODULE,
         capabilities = listOf(
             "OpenCode Web",
-            "Kimi Code Web",
             "Validated loopback handoff",
         ),
         required = true,
@@ -77,42 +76,17 @@ private class AgentWebPlugin(context: Context) : OmniPlugin {
 }
 
 internal object AgentWebTools {
-    const val OPEN_KIMI = "open_kimi_web"
-    const val KIMI_STATUS = "get_kimi_web_status"
-    const val STOP_KIMI = "stop_kimi_web"
     const val OPEN_OPENCODE = "open_opencode_web"
     const val OPENCODE_STATUS = "get_opencode_web_status"
     const val STOP_OPENCODE = "stop_opencode_web"
 
     val names = linkedSetOf(
-        OPEN_KIMI,
-        KIMI_STATUS,
-        STOP_KIMI,
         OPEN_OPENCODE,
         OPENCODE_STATUS,
         STOP_OPENCODE,
     )
 
     fun definitions(): List<OmniPluginToolDefinition> = listOf(
-        definition(
-            name = OPEN_KIMI,
-            displayName = "Open Kimi Code Web",
-            description = "Open the installed Kimi Code Web UI in the system browser. Call only " +
-                "after the user explicitly asks to open Kimi Web. The authenticated URL remains " +
-                "inside the native host and is never returned.",
-            efforts = listOf("low", "medium", "high", "xhigh", "max"),
-        ),
-        definition(
-            name = KIMI_STATUS,
-            displayName = "Get Kimi Code Web status",
-            description = "Check whether the managed Kimi Code Web process is starting or running.",
-        ),
-        definition(
-            name = STOP_KIMI,
-            displayName = "Stop Kimi Code Web",
-            description = "Stop the managed Kimi Code Web process only after the user " +
-                "explicitly asks to stop or close it.",
-        ),
         definition(
             name = OPEN_OPENCODE,
             displayName = "Open OpenCode Web",
@@ -160,17 +134,11 @@ internal object AgentWebTools {
 }
 
 internal object AgentWebActions {
-    const val OPEN_KIMI = AgentWebTools.OPEN_KIMI
-    const val KIMI_STATUS = AgentWebTools.KIMI_STATUS
-    const val STOP_KIMI = AgentWebTools.STOP_KIMI
     const val OPEN_OPENCODE = AgentWebTools.OPEN_OPENCODE
     const val OPENCODE_STATUS = AgentWebTools.OPENCODE_STATUS
     const val STOP_OPENCODE = AgentWebTools.STOP_OPENCODE
 
     val ids = linkedSetOf(
-        OPEN_KIMI,
-        KIMI_STATUS,
-        STOP_KIMI,
         OPEN_OPENCODE,
         OPENCODE_STATUS,
         STOP_OPENCODE,
@@ -192,32 +160,6 @@ internal object AgentWebActions {
             shortLabelEn = "OpenCode Web",
             descriptionZh = "使用统一 Provider 和模型，在系统浏览器中打开本机 Web 界面",
             descriptionEn = "Open the local Web UI with the shared Provider and model",
-        ),
-        action(
-            id = OPEN_KIMI,
-            displayName = "Kimi Code Web",
-            description = "Open the local Kimi Code browser interface.",
-            packageId = AgentWebService.KIMI.packageId,
-            agentId = "kimi-code-acp",
-            quickLaunchOrder = 1,
-            statusAction = KIMI_STATUS,
-            stopAction = STOP_KIMI,
-            labelZh = "Kimi Code Web",
-            labelEn = "Kimi Code Web",
-            shortLabelZh = "Kimi Web",
-            shortLabelEn = "Kimi Web",
-            descriptionZh = "使用统一 Provider 和模型，在系统浏览器中打开本机 Web 界面",
-            descriptionEn = "Open the local Web UI with the shared Provider and model",
-        ),
-        lifecycleAction(
-            id = KIMI_STATUS,
-            displayName = "Get Kimi Code Web status",
-            description = "Report whether the managed Kimi Code Web process is running.",
-        ),
-        lifecycleAction(
-            id = STOP_KIMI,
-            displayName = "Stop Kimi Code Web",
-            description = "Stop the managed Kimi Code Web process.",
         ),
         lifecycleAction(
             id = OPENCODE_STATUS,
@@ -296,12 +238,6 @@ private class AgentWebActionHandler(
 
     override suspend fun execute(actionId: String, args: JsonObject): JsonObject {
         return when (actionId) {
-            AgentWebActions.OPEN_KIMI -> controller.open(
-                AgentWebService.KIMI,
-                args.reasoningEffort(),
-            )
-            AgentWebActions.KIMI_STATUS -> controller.status(AgentWebService.KIMI)
-            AgentWebActions.STOP_KIMI -> controller.stop(AgentWebService.KIMI)
             AgentWebActions.OPEN_OPENCODE -> controller.open(AgentWebService.OPENCODE, args.reasoningEffort())
             AgentWebActions.OPENCODE_STATUS -> controller.status(AgentWebService.OPENCODE)
             AgentWebActions.STOP_OPENCODE -> controller.stop(AgentWebService.OPENCODE)
@@ -330,12 +266,6 @@ private class AgentWebToolHandler(
         return try {
             toolHandle.throwIfStopRequested()
             val result = when (toolName) {
-                AgentWebTools.OPEN_KIMI -> controller.open(
-                    AgentWebService.KIMI,
-                    args.reasoningEffort(),
-                )
-                AgentWebTools.KIMI_STATUS -> controller.status(AgentWebService.KIMI)
-                AgentWebTools.STOP_KIMI -> controller.stop(AgentWebService.KIMI)
                 AgentWebTools.OPEN_OPENCODE -> controller.open(AgentWebService.OPENCODE, args.reasoningEffort())
                 AgentWebTools.OPENCODE_STATUS -> controller.status(AgentWebService.OPENCODE)
                 AgentWebTools.STOP_OPENCODE -> controller.stop(AgentWebService.OPENCODE)

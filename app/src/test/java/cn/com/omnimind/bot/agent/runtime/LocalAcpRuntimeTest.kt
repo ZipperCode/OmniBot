@@ -288,7 +288,7 @@ class LocalAcpRuntimeTest {
 
     @Test
     fun `server request reply follows its captured owner without session metadata`() {
-        for (owner in listOf("kimi-code-acp", "codex-acp", REMOTE_CODEX_AGENT_ID)) {
+        for (owner in listOf("opencode-acp", "codex-acp", REMOTE_CODEX_AGENT_ID)) {
             val expected = if (owner == REMOTE_CODEX_AGENT_ID) AcpServerRequestRoute.Remote
                 else AcpServerRequestRoute.Local(owner)
             assertEquals(expected, resolveAcpServerRequestRoute(
@@ -354,10 +354,10 @@ class LocalAcpRuntimeTest {
     @Test
     fun `server request owner is released after the response lifecycle`() {
         val registry = AcpServerRequestOwnerRegistry()
-        registry.register("request-1", "kimi-code-acp", "session-1")
+        registry.register("request-1", "opencode-acp", "session-1")
 
         assertEquals(
-            AcpServerRequestOwner("kimi-code-acp", "session-1"),
+            AcpServerRequestOwner("opencode-acp", "session-1"),
             registry.ownerFor("request-1"),
         )
 
@@ -369,7 +369,7 @@ class LocalAcpRuntimeTest {
     fun `same request id on parallel ACP transports stays independently addressable`() {
         val registry = AcpServerRequestOwnerRegistry()
         registry.register("same-id", "xiaowan-acp", "xiaowan-session")
-        registry.register("same-id", "kimi-code-acp", "kimi-session")
+        registry.register("same-id", "opencode-acp", "opencode-session")
 
         assertEquals(null, registry.ownerFor("same-id"))
         assertEquals(
@@ -377,13 +377,13 @@ class LocalAcpRuntimeTest {
             registry.resolve("same-id", agentId = "xiaowan-acp"),
         )
         assertEquals(
-            AcpServerRequestOwner("kimi-code-acp", "kimi-session"),
-            registry.resolve("same-id", sessionId = "kimi-session"),
+            AcpServerRequestOwner("opencode-acp", "opencode-session"),
+            registry.resolve("same-id", sessionId = "opencode-session"),
         )
 
         registry.remove("same-id", agentId = "xiaowan-acp", sessionId = "xiaowan-session")
         assertEquals(
-            AcpServerRequestOwner("kimi-code-acp", "kimi-session"),
+            AcpServerRequestOwner("opencode-acp", "opencode-session"),
             registry.ownerFor("same-id"),
         )
     }
@@ -392,7 +392,7 @@ class LocalAcpRuntimeTest {
     fun `ambiguous ACP request id cannot fall back to selected Agent`() {
         val registry = AcpServerRequestOwnerRegistry()
         registry.register("same-id", "xiaowan-acp", null)
-        registry.register("same-id", "kimi-code-acp", null)
+        registry.register("same-id", "opencode-acp", null)
 
         var failed = false
         try {
@@ -406,7 +406,7 @@ class LocalAcpRuntimeTest {
     @Test
     fun `request identity mismatch cannot fall back to the only pending owner`() {
         val registry = AcpServerRequestOwnerRegistry()
-        registry.register("request-1", "kimi-code-acp", "kimi-session")
+        registry.register("request-1", "opencode-acp", "opencode-session")
 
         var failed = false
         try {
@@ -416,7 +416,7 @@ class LocalAcpRuntimeTest {
         }
         assertTrue(failed)
         registry.remove("request-1", agentId = "xiaowan-acp")
-        assertEquals(AcpServerRequestOwner("kimi-code-acp", "kimi-session"), registry.ownerFor("request-1"))
+        assertEquals(AcpServerRequestOwner("opencode-acp", "opencode-session"), registry.ownerFor("request-1"))
     }
 
     @Test

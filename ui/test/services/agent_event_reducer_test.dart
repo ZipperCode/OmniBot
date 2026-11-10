@@ -6046,8 +6046,8 @@ diff --git a/lib/main.dart b/lib/main.dart
     reducer.reduce(
       runtime: runtime,
       event: {
-        'agentId': 'kimi-code-acp',
-        'agentName': 'Kimi Code',
+        'agentId': 'claude-code-acp',
+        'agentName': 'Claude Code',
         'sessionId': 'session-top-level',
         'message': {
           'id': 'request-1',
@@ -6069,8 +6069,8 @@ diff --git a/lib/main.dart b/lib/main.dart
     expect(cardData['status'], 'pending');
     expect(cardData['conversationId'], 42);
     expect(cardData['sessionId'], 'session-top-level');
-    expect(cardData['agentId'], 'kimi-code-acp');
-    expect(cardData['agentName'], 'Kimi Code');
+    expect(cardData['agentId'], 'claude-code-acp');
+    expect(cardData['agentName'], 'Claude Code');
   });
 
   test('preserves request id when ACP places it inside params', () {

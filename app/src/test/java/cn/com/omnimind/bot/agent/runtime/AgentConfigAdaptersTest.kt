@@ -27,7 +27,7 @@ class AgentConfigAdaptersTest {
         val meta = AcpHarnessAdapters.codex.clientCapabilityMeta(base)
         assertEquals(base["terminal_output"], meta["terminal_output"])
         assertTrue(meta.toString().contains("sessionFailure"))
-        assertEquals(base, AcpHarnessAdapters.kimiCode.clientCapabilityMeta(base))
+        assertEquals(base, AcpHarnessAdapters.pi.clientCapabilityMeta(base))
     }
 
     @Test
@@ -93,37 +93,6 @@ class AgentConfigAdaptersTest {
         assertTrue(root["provider"].asJsonObject["custom"].asJsonObject["models"].asJsonObject.has("mine"))
     }
 
-    @Test
-    fun kimiAnthropicProtocolWinsOverStaleOpenAiWireSetting() {
-        val input = AgentProviderMappingInput(
-            agentId = "kimi-code-acp", harnessAdapter = AcpHarnessAdapters.kimiCode,
-            provider = AgentProviderCredentials("https://gateway.example/anthropic", "test-key",
-                protocolType = "anthropic", wireApi = "responses"), model = "org/model-a",
-        )
-        val mapping = AgentConfigAdapterRegistry.map(input)
-        assertFalse(mapping.environment.containsKey("KIMI_MODEL_NAME"))
-        val content = AgentConfigAdapterRegistry.launchConfigWrites(input, mapping, emptyList(), "").single().content
-        assertTrue(content.contains("type = \"anthropic\""))
-        assertTrue(content.contains("model = \"org/model-a\""))
-    }
-
-    @Test
-    fun kimiCatalogPreservesProviderIdsMetadataAndCurrentBinding() {
-        val config = buildKimiCodeManagedFiles(
-            AgentProviderCredentials("https://gateway.example/v1", "test-key", wireApi = "chat_completions"),
-            "current", providerModels = listOf(
-                ProviderModelOption(id = "org/model.a", displayName = "Model A", contextLimit = 64000),
-                ProviderModelOption(id = "org/model.a"),
-                ProviderModelOption(id = "model-b", reasoning = false, inputModalities = listOf("text")),
-            ),
-        ).getValue(KIMI_CODE_CONFIG_PATH)
-        assertTrue(config.contains("[models.\"org/model.a\"]"))
-        assertEquals(1, Regex("display_name = \"Model A\"").findAll(config).count())
-        assertTrue(config.contains("max_context_size = 64000"))
-        assertTrue(config.contains("capabilities = []"))
-        assertTrue(config.contains("default_model = \"current\""))
-        assertTrue(config.contains("[models.\"current\"]"))
-    }
 
     @Test
     fun codexRejectsAnthropicConfigurationInsteadOfInventingResponsesSupport() {
@@ -186,31 +155,6 @@ class AgentConfigAdaptersTest {
         }
     }
 
-    @Test
-    fun kimiProtocolSwitchReplacesOfficialCatalogWithoutEnvironmentOverride() {
-        val input = AgentProviderMappingInput(
-            agentId = "kimi-code",
-            provider = AgentProviderCredentials("https://gateway.example/v1/responses", "key\"quoted",
-                wireApi = "responses", customHeaders = mapOf("X-Route" to "mobile")),
-            model = "dispatch-model", harnessAdapter = AcpHarnessAdapters.kimiCode,
-        )
-        val mapping = AgentConfigAdapterRegistry.map(input)
-        assertFalse(mapping.environment.containsKey("KIMI_MODEL_NAME"))
-        val write = AgentConfigAdapterRegistry.launchConfigWrites(input, mapping, emptyList(), "").single()
-        assertEquals(KIMI_CODE_CONFIG_PATH, write.path)
-        assertTrue(write.content.contains("type = \"openai_responses\""))
-        assertTrue(write.content.contains("base_url = \"https://gateway.example/v1\""))
-        assertTrue(write.content.contains("model = \"dispatch-model\""))
-        assertTrue(write.content.contains("api_key = \"key\\\"quoted\""))
-        assertTrue(write.content.contains("\"X-Route\" = \"mobile\""))
-        val chat = input.copy(provider = input.provider!!.copy(wireApi = "chat_completions"), model = "other-model")
-        val chatMapping = AgentConfigAdapterRegistry.map(chat)
-        assertFalse(chatMapping.environment.containsKey("KIMI_MODEL_NAME"))
-        val chatConfig = AgentConfigAdapterRegistry.launchConfigWrites(chat, chatMapping, emptyList(), write.content).single().content
-        assertTrue(chatConfig.contains("type = \"openai\""))
-        assertTrue(chatConfig.contains("model = \"other-model\""))
-        assertFalse(chatConfig.contains("dispatch-model"))
-    }
 
     @Test
     fun openCodeMappingPreservesExplicitProviderSelection() {
@@ -305,18 +249,6 @@ class AgentConfigAdaptersTest {
         assertEquals(model, codex.codexModel)
         assertEquals("https://llmapi.paratera.com/v1", codex.codexBaseUrl)
         assertEquals(OpenAiWireApi.RESPONSES, codex.codexWireApi)
-
-        val kimi = AgentConfigAdapterRegistry.map(
-            AgentProviderMappingInput(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
-                provider = provider,
-                model = model,
-                harnessAdapter = AcpHarnessAdapters.kimiCode,
-            ),
-        )
-        assertFalse(kimi.environment.containsKey("KIMI_MODEL_NAME"))
-        assertFalse(kimi.environment.containsKey("KIMI_MODEL_API_KEY"))
-        assertEquals(KIMI_CODE_HOME, kimi.environment["KIMI_CODE_HOME"])
 
         val claude = AgentConfigAdapterRegistry.map(
             AgentProviderMappingInput(
@@ -458,24 +390,6 @@ class AgentConfigAdaptersTest {
             "X-Trace-Id: trace-1\nX-Region: cn",
             claude.environment["ANTHROPIC_CUSTOM_HEADERS"],
         )
-
-        val kimi = AgentConfigAdapterRegistry.map(
-            AgentProviderMappingInput(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
-                provider = configuredProvider,
-                model = "model-a",
-                harnessAdapter = AcpHarnessAdapters.kimiCode,
-            ),
-        )
-        val kimiConfig = AgentConfigAdapterRegistry.launchConfigWrites(
-            AgentProviderMappingInput(
-                agentId = AcpAgentProfileStore.KIMI_CODE_AGENT_ID,
-                provider = configuredProvider, model = "model-a", harnessAdapter = AcpHarnessAdapters.kimiCode,
-            ), kimi, emptyList(), "",
-        ).single().content
-        assertTrue(kimiConfig.contains("\"X-Trace-Id\" = \"trace-1\""))
-        assertTrue(kimiConfig.contains("\"X-Region\" = \"cn\""))
-        assertFalse(kimiConfig.contains("must-be-dropped"))
 
         val openCode = AgentConfigAdapterRegistry.map(
             AgentProviderMappingInput(
@@ -1245,25 +1159,6 @@ class AgentConfigAdaptersTest {
         assertTrue(ex.message!!.contains("Gemini"))
     }
 
-    @Test
-    fun kimiCodeRejectsNativeGeminiProtocol() {
-        val provider = AgentProviderCredentials(
-            baseUrl = "https://generativelanguage.googleapis.com",
-            apiKey = "gemini-key",
-            protocolType = "gemini",
-        )
-        val ex = org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
-            AgentConfigAdapterRegistry.map(
-                AgentProviderMappingInput(
-                    agentId = "kimi-code",
-                    provider = provider,
-                    model = "gemini-2.5-pro",
-                    harnessAdapter = AcpHarnessAdapters.kimiCode,
-                )
-            )
-        }
-        assertTrue(ex.message!!.contains("Gemini"))
-    }
 
     @Test
     fun openCodeConfiguresGeminiWithAiSdkGooglePackageAndNormalizedBaseUrl() {

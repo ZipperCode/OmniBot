@@ -18,21 +18,21 @@ void main() {
           expect(call.method, 'listActions');
           return <Map<String, dynamic>>[
             <String, dynamic>{
-              'id': 'open_kimi_web',
+              'id': 'open_opencode_web',
               'pluginId': 'com.omnimind.agent-web',
-              'displayName': 'Kimi Code Web',
-              'description': 'Open Kimi Code Web',
+              'displayName': 'OpenCode Web',
+              'description': 'Open OpenCode Web',
               'presentation': <String, dynamic>{
                 'placement': 'agent_settings',
                 'placements': <String>[
                   'agent_settings',
                   'home_drawer_quick_launch',
                 ],
-                'packageId': 'kimi',
+                'packageId': 'opencode',
                 'quickLaunchOrder': 1,
                 'label': <String, String>{
-                  'zh': 'Kimi Code Web',
-                  'en': 'Kimi Code Web',
+                  'zh': 'OpenCode Web',
+                  'en': 'OpenCode Web',
                 },
               },
             },
@@ -42,9 +42,9 @@ void main() {
     final actions = await OmniPluginService.listActions();
 
     expect(actions, hasLength(1));
-    expect(actions.single.id, 'open_kimi_web');
+    expect(actions.single.id, 'open_opencode_web');
     expect(actions.single.pluginId, 'com.omnimind.agent-web');
-    expect(actions.single.presentation['packageId'], 'kimi');
+    expect(actions.single.presentation['packageId'], 'opencode');
     expect(actions.single.supportsPlacement('agent_settings'), isTrue);
     expect(
       actions.single.supportsPlacement('home_drawer_quick_launch'),
@@ -57,7 +57,7 @@ void main() {
         english: false,
         fallback: '',
       ),
-      'Kimi Code Web',
+      'OpenCode Web',
     );
   });
 
@@ -67,7 +67,7 @@ void main() {
           expect(call.method, 'invokeAction');
           expect(call.arguments, <String, Object?>{
             'pluginId': 'com.omnimind.agent-web',
-            'actionId': 'open_kimi_web',
+            'actionId': 'open_opencode_web',
             'arguments': <String, dynamic>{'reasoning_effort': 'high'},
           });
           return <String, dynamic>{
@@ -79,7 +79,7 @@ void main() {
 
     final result = await OmniPluginService.invokeAction(
       'com.omnimind.agent-web',
-      'open_kimi_web',
+      'open_opencode_web',
       <String, dynamic>{'reasoning_effort': 'high'},
     );
 

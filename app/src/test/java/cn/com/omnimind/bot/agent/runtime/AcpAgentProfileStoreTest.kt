@@ -123,46 +123,51 @@ class AcpAgentProfileStoreTest {
 
     @Test
     fun `retirement removes launch settings but preserves immutable history owners after reopening`() {
-        val context = acpProfileStoreTestContext(directory.root)
-        val retiredId = "deepseek-harness-acp"
-        val retired = AcpAgentProfile(id = retiredId, name = "DeepSeek Harness", command = "dsh-acp")
-        val custom = AcpAgentProfile(id = "user-agent", name = "User Agent", command = "my-acp")
-        val preferences = context.getSharedPreferences("acp_agent_profiles", Context.MODE_PRIVATE)
-        preferences.edit()
-            .putString("profiles", Gson().toJson(listOf(retired, custom)))
-            .putString("selected_profile_id", retiredId)
-            .putString("session_bindings", Gson().toJson(mapOf("old-session" to retiredId)))
-            .putString("conversation_bindings", Gson().toJson(mapOf("42" to retiredId)))
-            .putString("health", Gson().toJson(mapOf(retiredId to AcpAgentHealth(installed = true))))
-            .putString("package_version:alpine:$retiredId", "{\"installedVersion\":\"0.1.1-rc.2\"}")
-            .putString("session_config:old-session", "{\"model\":\"original-model\"}")
-            .commit()
+        for ((retiredId, retiredName, retiredCommand) in listOf(
+            Triple("deepseek-harness-acp", "DeepSeek Harness", "dsh-acp"),
+            Triple("kimi-code-acp", "Kimi Code", "kimi"),
+        )) {
+            val root = directory.newFolder(retiredId)
+            val context = acpProfileStoreTestContext(root)
+            val retired = AcpAgentProfile(id = retiredId, name = retiredName, command = retiredCommand)
+            val custom = AcpAgentProfile(id = "user-agent", name = "User Agent", command = "my-acp")
+            val preferences = context.getSharedPreferences("acp_agent_profiles", Context.MODE_PRIVATE)
+            preferences.edit()
+                .putString("profiles", Gson().toJson(listOf(retired, custom)))
+                .putString("selected_profile_id", retiredId)
+                .putString("session_bindings", Gson().toJson(mapOf("old-session" to retiredId)))
+                .putString("conversation_bindings", Gson().toJson(mapOf("42" to retiredId)))
+                .putString("health", Gson().toJson(mapOf(retiredId to AcpAgentHealth(installed = true))))
+                .putString("package_version:alpine:$retiredId", "{\"installedVersion\":\"0.1.1-rc.2\"}")
+                .putString("session_config:old-session", "{\"model\":\"original-model\"}")
+                .commit()
 
-        repeat(2) {
-            val store = AcpAgentProfileStore(acpProfileStoreTestContext(directory.root))
-            assertFalse(store.list().any { it.id == retiredId })
-            assertTrue(store.list().any { it.id == custom.id })
-            assertFalse(preferences.contains("selected_profile_id"))
-            assertEquals(retiredId, store.agentIdForSession("old-session"))
-            assertEquals(retiredId, store.agentIdForConversation(42))
-            store.bindConversation(42, AcpAgentProfileStore.CODEX_AGENT_ID)
-            assertEquals(retiredId, store.agentIdForConversation(42))
-            assertThrows(IllegalStateException::class.java) {
-                store.repairConversationBinding(42, AcpAgentProfileStore.CODEX_AGENT_ID)
+            repeat(2) {
+                val store = AcpAgentProfileStore(acpProfileStoreTestContext(root))
+                assertFalse(store.list().any { it.id == retiredId })
+                assertTrue(store.list().any { it.id == custom.id })
+                assertFalse(preferences.contains("selected_profile_id"))
+                assertEquals(retiredId, store.agentIdForSession("old-session"))
+                assertEquals(retiredId, store.agentIdForConversation(42))
+                store.bindConversation(42, AcpAgentProfileStore.CODEX_AGENT_ID)
+                assertEquals(retiredId, store.agentIdForConversation(42))
+                assertThrows(IllegalStateException::class.java) {
+                    store.repairConversationBinding(42, AcpAgentProfileStore.CODEX_AGENT_ID)
+                }
+                assertEquals(mapOf("model" to "original-model"), store.sessionConfiguration("old-session"))
+                assertEquals(null, store.packageVersion("alpine", retiredId))
+                assertThrows(IllegalStateException::class.java) { store.requireProfile(retiredId) }
+                assertThrows(IllegalStateException::class.java) { store.save(retired) }
+                val rejection = assertThrows(IllegalStateException::class.java) {
+                    store.requireSupportedAgent(null, store.agentIdForSession("old-session"), custom.id)
+                }
+                assertTrue(rejection.message.orEmpty().startsWith("agent_retired:"))
+                store.requireSupportedAgent(custom.id, AcpAgentProfileStore.CODEX_AGENT_ID)
             }
-            assertEquals(mapOf("model" to "original-model"), store.sessionConfiguration("old-session"))
-            assertEquals(null, store.packageVersion("alpine", retiredId))
-            assertThrows(IllegalStateException::class.java) { store.requireProfile(retiredId) }
-            assertThrows(IllegalStateException::class.java) { store.save(retired) }
-            val rejection = assertThrows(IllegalStateException::class.java) {
-                store.requireSupportedAgent(null, store.agentIdForSession("old-session"), custom.id)
-            }
-            assertTrue(rejection.message.orEmpty().startsWith("agent_retired:"))
-            store.requireSupportedAgent(custom.id, AcpAgentProfileStore.CODEX_AGENT_ID)
+            val stored = preferences.getString("profiles", "").orEmpty()
+            assertFalse(stored.contains(retiredId))
+            assertFalse(preferences.getString("health", "").orEmpty().contains(retiredId))
         }
-        val stored = preferences.getString("profiles", "").orEmpty()
-        assertFalse(stored.contains(retiredId))
-        assertFalse(preferences.getString("health", "").orEmpty().contains(retiredId))
     }
 
     @Test
@@ -217,6 +222,7 @@ class AcpAgentProfileStoreTest {
         }
         assertTrue(error.message?.contains("agent_retired") == true)
     }
+
 
     @Test
     fun `session model survives reopening stays isolated and is removed on delete`() {

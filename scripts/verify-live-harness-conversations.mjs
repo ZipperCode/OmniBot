@@ -11,7 +11,7 @@ import {randomUUID} from 'node:crypto';
 import {createProviderObserver} from './agent-provider-observer.mjs';
 import {providerSmokeConfigFromEnvironment, providerModelsUrl, extractModelIds} from './agent_provider_smoke.mjs';
 
-const [cliDirectory, fixtures, filter = 'codex,claude-code,kimi-code,open-code'] = process.argv.slice(2);
+const [cliDirectory, fixtures, filter = 'codex,claude-code,open-code'] = process.argv.slice(2);
 assert(cliDirectory && fixtures, 'Usage: verify-live-harness-conversations.mjs CLI_DIRECTORY FIXTURES [HARNESS_IDS]');
 const {apiKey, baseUrl, model, timeoutMs} = providerSmokeConfigFromEnvironment();
 const secondModel = process.env.OMNIBOT_TEST_SECOND_MODEL;
@@ -27,7 +27,6 @@ const reports = [];
 const definitions = {
   codex: ['codex-openai_compatible-responses.json', 'codex-acp', []],
   'claude-code': ['claude-code-anthropic-chat_completions.json', 'claude-agent-acp', []],
-  'kimi-code': ['kimi-code-openai_compatible-chat_completions.json', 'kimi', ['acp']],
   'open-code': ['open-code-openai_compatible-chat_completions.json', 'opencode', ['acp']],
 };
 
@@ -63,7 +62,7 @@ for (const harness of filter.split(',')) {
     // Prevent config-string injection into generated JSON/TOML/YAML fixtures.
     assert(!/[\r\n"\\]/.test(apiKey + model + secondModel), 'Unsupported characters in fixture substitutions');
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) =>
-      !/^(OPENAI|ANTHROPIC|CLAUDE|CODEX|KIMI|DEEPSEEK|OPENCODE)|TOKEN|SECRET|PASSWORD|API_KEY/.test(k)));
+      !/^(OPENAI|ANTHROPIC|CLAUDE|CODEX|DEEPSEEK|OPENCODE)|TOKEN|SECRET|PASSWORD|API_KEY/.test(k)));
     Object.assign(env, {HOME: home, XDG_CONFIG_HOME: join(home, '.config'), CLAUDE_CONFIG_DIR: join(home, '.claude'),
       PATH: resolve(cliDirectory, 'node_modules/.bin') + ':' + env.PATH, OPENCODE_DISABLE_MODELS_FETCH: 'true'},
       Object.fromEntries(Object.entries(fixture.environment).map(([k, v]) => [k, rewrite(v)])));

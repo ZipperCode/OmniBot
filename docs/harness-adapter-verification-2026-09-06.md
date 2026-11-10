@@ -2,14 +2,13 @@
 
 ## Scope and recurring failure causes
 
-The existing registry already contains converters for Codex, Claude Code, Kimi Code, OpenCode and DeepSeek Harness; Xiaowan consumes the configured Provider directly. Keep these owners and the canonical ACP lifecycle. More registry names alone do not improve compatibility.
+The existing registry already contains converters for Codex, Claude Code, OpenCode and DeepSeek Harness; Xiaowan consumes the configured Provider directly. Keep these owners and the canonical ACP lifecycle. More registry names alone do not improve compatibility.
 
 Concrete defects found:
 
 - OpenCode always selected the Chat Completions SDK, including Responses/Anthropic profiles. Select `@ai-sdk/openai-compatible`, `@ai-sdk/openai`, or `@ai-sdk/anthropic` from configured protocol/wire.
 - OpenCode raw namespaced model IDs could lose the first segment. Remove only the managed `omnibot/` prefix.
 - Existing managed OpenCode model entries survived a refreshed nonempty catalog. Remove obsolete managed entries, preserving remaining model settings and unrelated custom providers. An absent catalog does not erase configuration.
-- Kimi's stale OpenAI Responses setting overrode an explicitly selected Anthropic protocol. Explicit protocol now owns both environment and config-file selection.
 - Codex silently mapped an Anthropic profile to Responses. Reject that incompatible configuration before launch; do not synthesize a converter or change the user's endpoint.
 - Claude Code's phone error is the existing protocol guard. The selected provider is configured as OpenAI; this does not prove the remote service lacks a separate Anthropic interface. Preserve the guard and show an actionable localized explanation.
 
@@ -29,7 +28,7 @@ node scripts/verify-harness-provider-wires.mjs /absolute/sdk-directory
 
 All three cases passed: exact endpoint, unmodified namespaced model, matching payload shape, one attempt. The test uses the real SDK serializers and an intercepted intentional 401 response, with no real credentials or network calls. It is not full Harness or real-provider inference acceptance.
 
-Native regression coverage is in `AgentConfigAdaptersTest`: official mapping, credentials/headers, model catalogs, reasoning metadata, known Claude endpoint normalization, unknown endpoint rejection, Kimi configuration transitions, OpenCode protocol switching and persisted catalog replacement. Full real-account inference across all six Harnesses remains a separate acceptance requirement.
+Native regression coverage is in `AgentConfigAdaptersTest`: official mapping, credentials/headers, model catalogs, reasoning metadata, known Claude endpoint normalization, unknown endpoint rejection, OpenCode protocol switching and persisted catalog replacement. Full real-account inference across remaining Harnesses remains a separate acceptance requirement.
 
 ## Local result
 

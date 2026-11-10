@@ -2786,12 +2786,6 @@ abstract class AppLocalizations {
   /// **'OpenCode CLI（内置 ACP 支持）'**
   String get alpineOpenCode;
 
-  /// No description provided for @alpineKimiCode.
-  ///
-  /// In zh, this message translates to:
-  /// **'Kimi Code 官方 CLI 与本地 Web 界面'**
-  String get alpineKimiCode;
-
   /// No description provided for @alpinePi.
   ///
   /// In zh, this message translates to:

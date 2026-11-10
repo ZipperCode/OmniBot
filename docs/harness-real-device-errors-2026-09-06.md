@@ -26,7 +26,6 @@ Existing `HarnessSwitchSendBarrier` and conversation target ownership retain dra
 | --- | --- |
 | Claude, original connection | Compatibility rejection; previous UI exposed native exception |
 | Claude, temporary Anthropic configuration | Initialized; actual prompt timed out after 234 s |
-| Kimi Code | Initialized, submitted one prompt; cancelled during prolonged wait |
 | Codex | Initialized; repeated selection retained active test conversation |
 | OpenCode | Initialized after switching away from active Codex conversation |
 | DeepSeek Harness | Initialized; submitted independent test prompt |
@@ -39,7 +38,6 @@ These observations are agent-operated device testing. They do not establish succ
 - APK build: **BUILD SUCCESSFUL in 3m**. Installed `/tmp/oob-safe-errors-20260906.apk` on PJE110 with `install -r`: **Success**.
 - APK SHA256: `67c2a086a9fc4db504a83414d23132c6a8a490ddc536ded08d954a5497ea48ec`.
 - After reinstall: switched to 小万, typed isolated draft `OOB_DRAFT_SWITCH_TEST`, attempted Claude with original configuration. UI showed only `当前模型连接不适用于这个助手，请更换模型连接或助手。`; remained on 小万; exact draft retained; no `PlatformException` in UI hierarchy.
-- Immediately selected Kimi after rejection: initialized, welcome identifies Kimi, exact draft retained. Removed only the isolated test draft afterward.
 - Codex background test reached official `terminal_end_turn` at 176,194 ms, but after APK restart its persisted assistant text was `stream disconnected before completion: error sending request for url (...)`. **This was not a successful model reply.** The phone adapter identified itself as 1.1.7; bundled requested version is 1.10.0. DeepSeek reached `terminal_error` at 45,668 ms (`DeepSeek API request ... failed`). These are runtime terminal evidence, distinct from checking rendered response contents.
 - Claude's original protocol guard remains. Successful initialization with temporary protocol selection followed by a timeout is insufficient evidence to remove compatibility validation or silently alter the shared connection type.
 

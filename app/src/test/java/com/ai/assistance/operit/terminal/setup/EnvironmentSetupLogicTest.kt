@@ -222,36 +222,6 @@ class EnvironmentSetupLogicTest {
     }
 
     @Test
-    fun buildInstallCommands_installsOfficialKimiCodeRuntime() {
-        val commands = EnvironmentSetupLogic.buildInstallCommands(
-            selectedPackageIds = listOf("kimi"),
-            repositorySetupCommand = "",
-        )
-
-        val apkAdd = commands.first { it.contains("omnibot_apk_add") }
-        assertTrue(apkAdd.contains("nodejs"))
-        assertTrue(apkAdd.contains("npm"))
-        assertTrue(apkAdd.contains("git"))
-        val npmInstall = commands.first { it.contains("@moonshot-ai/kimi-code@latest") }
-        assertTrue(npmInstall.contains("--no-audit"))
-        assertTrue(npmInstall.contains("registry.npmmirror.com"))
-        assertTrue(
-            commands.contains(
-                "ln -sf /root/.npm-global/bin/kimi /usr/local/bin/kimi || true",
-            ),
-        )
-    }
-
-    @Test
-    fun buildInventoryProbeCommand_requiresKimiCodeNodeVersion() {
-        val command = EnvironmentSetupLogic.buildInventoryProbeCommand(listOf("kimi"))
-
-        assertTrue(command.contains("command -v kimi"))
-        assertTrue(command.contains("major === 22 && minor < 19"))
-        assertTrue(command.contains("kimi --version"))
-    }
-
-    @Test
     fun buildAlpinePackageInstallCommand_repairsAndRetriesOneInterruptedTransaction() {
         val tempDir = Files.createTempDirectory("omnibot-apk-retry-test").toFile()
         try {

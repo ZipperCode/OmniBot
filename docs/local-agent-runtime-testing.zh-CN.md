@@ -35,6 +35,18 @@ scripts/test-agent-runtime.sh --offline
 
 ## 长期验证规则
 
+### Kimi Code 退役说明（2026-11-09）
+
+Kimi Code Agent/Harness/Web 专属能力与验证脚本已下线移除，内置 Harness 回归集与默认测试对象收敛为 Codex、Claude Code、OpenCode（Pi 按既有能力）。普通 Kimi / Moonshot 模型 Provider 仍受支持。
+
+本次离线验证：Flutter 的 Agent 页面、侧栏、共享 reducer、运行时服务与普通模型 Provider 聚焦回归共 602 项通过。维护脚本的卸载隔离与草稿归属回归在设备现有 Alpine 环境中 43 项通过，未安装依赖，临时测试目录已清理。Windows 宿主直接执行同组 Node 回归为 10 项通过、33 项失败，原因涉及 POSIX 路径、包装脚本与无扩展名的模拟 adb；本次不扩展其宿主兼容范围。
+
+原生聚焦回归 16 个测试类共 275 项通过，失败、错误、跳过均为 0；退役存储用例覆盖旧 Profile 不再激活、会话与对话 owner 不改写、会话配置保留和重新打开后的状态。使用已有依赖离线运行 `:app:testDevelopStandardDebugUnitTest` 与 `:app:assembleDevelopStandardDebug -Ptarget=lib/main_standard.dart`，排除 `installWebChatDependencies`、`installPiAcpDependencies`，结果 `BUILD SUCCESSFUL`。
+
+保留数据覆盖安装后，真实应用的 Agents 目录从 6 项变为 5 项，Kimi Code 卡片消失，其他预置 Agent 保留；打开 Claude Code 配置页后未保存修改。设置 → 终端环境的清单从 14 项变为 13 项，滚动检查完整 AI Agent 分组至 SSH 分组，Kimi Code 安装项已移除。安装与本地构建 APK 的 SHA256 一致：`c0c1324a153a219080b873dcde9ce93ac17697451319ad2a89e10ca26e703434`。
+
+未发起模型请求，未卸载设备现有包，未删除或改写用户历史；真机未读取历史数据库，历史保留由上述持久化行为回归验证。普通 Kimi Provider 本次未作真机推理验收。Flutter 聚焦分析无错误，保留既有 2 条 warning 与 6 条 info；仓库未配置可用 LSP。未执行发布全量门禁。
+
 ### Agent 身份与草稿归属
 
 维护用例必须明确区分本机 `codex-acp` 与远端 `codex-remote`。`status`、配置/模型读取等宿主请求指定 `agentId`；发送沿当前 Conversation/Session owner 进入正式 ACP `session/new` / `session/prompt`，不先调用全局 `connect` 或 `agent/select`。只打开设置、查看目录、切换未发送草稿不能创建聊天历史。
@@ -53,7 +65,7 @@ export OMNIBOT_TEST_SECOND_MODEL='GLM-5.2'
 scripts/test-agent-runtime.sh --live-harnesses /path/to/disposable-harness-installation
 ```
 
-`verify-live-harness-conversations.mjs` 默认逐一测试 Codex、Claude Code、Kimi、
+`verify-live-harness-conversations.mjs` 默认逐一测试 Codex、Claude Code、
 OpenCode。它复用原生生成的配置及透明本地转发器，模型回答
 来自所配置的真实 API。每个 Harness 使用独立临时目录和会话，结束后清理本次
 临时凭据与测试文件；不会更改手机配置或用户工作区。
@@ -97,7 +109,6 @@ UIAutomator 暂时无法读取窗口时，只在当前步骤期限内重复读�
 截图仅存调用者指定目录，可能包含已有历史，不自动加入 Git。
 
 这些场景目前在逐项真机验收中，**尚未覆盖或通过所有 Harness 的完整 demo**。
-`kimi-current-conversation.zh.json` 的首轮真机记录存在连接失败与取消；
 `xiaowan-model-switch.zh.json` 已走到实际发送，但回复阶段遇到设备读取失败，
 不能算整个场景通过。环境安装、新功能/MCP、全部 Harness 切换和恢复的端到端
 场景仍须补齐，不能以 CLI 测试或本地单元测试替代。

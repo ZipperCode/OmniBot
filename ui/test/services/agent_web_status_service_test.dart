@@ -5,27 +5,27 @@ import 'package:ui/services/omni_plugin_service.dart';
 void main() {
   OmniPluginActionItem action(Map<String, dynamic> presentation) {
     return OmniPluginActionItem(
-      id: 'open_kimi_web',
+      id: 'open_opencode_web',
       pluginId: 'com.omnimind.agent-web',
-      displayName: 'Kimi Code Web',
-      description: 'Open Kimi Code Web',
+      displayName: 'OpenCode Web',
+      description: 'Open OpenCode Web',
       presentation: presentation,
     );
   }
 
   test('lifecycle links come from the declarative presentation', () {
     final linked = action(<String, dynamic>{
-      'statusAction': 'get_kimi_web_status',
-      'stopAction': 'stop_kimi_web',
+      'statusAction': 'get_opencode_web_status',
+      'stopAction': 'stop_opencode_web',
     });
     expect(AgentWebStatusService.supportsLifecycle(linked), isTrue);
     expect(
       AgentWebStatusService.statusActionId(linked),
-      'get_kimi_web_status',
+      'get_opencode_web_status',
     );
-    expect(AgentWebStatusService.stopActionId(linked), 'stop_kimi_web');
+    expect(AgentWebStatusService.stopActionId(linked), 'stop_opencode_web');
     expect(AgentWebStatusService.keyFor(linked),
-        'com.omnimind.agent-web/open_kimi_web');
+        'com.omnimind.agent-web/open_opencode_web');
 
     final legacy = action(<String, dynamic>{'placement': 'agent_settings'});
     expect(AgentWebStatusService.supportsLifecycle(legacy), isFalse);

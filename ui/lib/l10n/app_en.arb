@@ -506,7 +506,6 @@
   "alpineCodex": "OpenAI Codex CLI for ACP Agents",
   "alpineClaudeCode": "Anthropic Claude Code CLI for ACP Agents",
   "alpineOpenCode": "OpenCode CLI with built-in ACP support",
-  "alpineKimiCode": "Kimi Code official CLI and local Web UI",
   "alpinePi": "Pi Agent with MCP tool support",
   "alpineSshClient": "SSH Client",
   "alpineSshpass": "SSH Password Helper",

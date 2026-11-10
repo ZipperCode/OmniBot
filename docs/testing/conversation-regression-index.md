@@ -1,6 +1,6 @@
 # 对话驱动的长期回归测试索引
 
-> 2026-10-29 支持范围更新：DeepSeek Harness 已退出内置 Agent 目录，专用安装、Web、沙箱和推理验证脚本已移除。下文 DSH 条目保留当时的测试事实，不再是当前回归门禁或可执行指南。通用 Harness 切换草稿旅程已改用 Kimi Code；当前测试入口见 [本地 Agent/ACP 测试集](../local-agent-runtime-testing.zh-CN.md)。
+> 2026-10-29 支持范围更新：DeepSeek Harness 已退出内置 Agent 目录，专用安装、Web、沙箱和推理验证脚本已移除。下文 DSH 条目保留当时的测试事实，不再是当前回归门禁或可执行指南；当前测试入口见 [本地 Agent/ACP 测试集](../local-agent-runtime-testing.zh-CN.md)。
 
 > 2026-10-29 身份契约更新：全局 Agent 选择已删除，旧 `selected_profile_id` 仅做移除迁移。下文通过该键或无身份 `connect/status` 得出的历史结果不代表当前验证方法；当前旅程检查草稿 target 和可见 Agent 名称，发送后核对持久 Conversation/Session owner。
 
@@ -474,7 +474,7 @@ Codex Plan 补验：用户指定模拟器验收，实际 UI 27 步（计划、�
 
 ### 2026-09-09：实际官方 Harness CLI 的重复协议验证
 
-- 使用既有独立 npm 测试目录 `/tmp/oob-all-harness-acceptance` 和当前 Kotlin AgentAdapterCatalogTest 生成的配置，启动真实 Codex、Claude、DSH、Kimi、OpenCode CLI，连接本机合成响应服务；不读取真实 API 密钥、不修改用户 CLI 配置。
+- 使用既有独立 npm 测试目录 `/tmp/oob-all-harness-acceptance` 和当前 Kotlin AgentAdapterCatalogTest 生成的配置，启动真实 Codex、Claude、DSH、OpenCode CLI，连接本机合成响应服务；不读取真实 API 密钥、不修改用户 CLI 配置。
 - `verify-installed-harness-adapters.mjs CLI_DIR app/build/reports/harness-adapters` 完整 14 组合连续两轮通过；Claude conversation 三组合核对两轮输出、续聊历史与会话归属；官方 tools.js 转换成功/失败工具结果两项通过。
 - `verify-codex-completed-messages.mjs` 将原安装补丁应用两次，验证幂等；完整文本、部分文本、正常回复、失败和 Plan 五类×两配置，共 10 项通过。已把 Plan 纳入该长期入口；原 `test-agent-runtime.sh --harnesses DIR` 调用该入口时将一并覆盖。
 - Codex 的失败通过协商的 Air sessionFailure 元数据报告；现有 AcpHarnessAdapters.codex.promptFailure 与 LocalAcpRuntime 在同一 PromptResponse 处理它，不能只读 end_turn。这里没有新增 Agent 生命周期或补丁。
@@ -553,11 +553,11 @@ Codex Plan 补验：用户指定模拟器验收，实际 UI 27 步（计划、�
 - 本次明确跳过真实 Provider/Harness CLI，不含设备旅程；此前实际本地 API、模拟器结果维持各自适用范围。并发切换设备验收和 DSH 沙箱仍未解决全部验收条件。**待真机验证**。
 
 
-### 2026-09-09：五种官方 Harness 的真实 API 生命周期对比
+### 2026-09-09：官方 Harness 的真实 API 生命周期对比
 
 - 使用既有 verify-live-harness-conversations.mjs，临时 CLI HOME、透明观察代理和实际服务商 API，GLM-5.1/GLM-5.2 均先经真实模型目录确认。未使用合成回复，未修改用户 CLI 配置。新增逐案例脱敏进度输出。
-- 五种 Harness 的可见回复、同 session 续聊、真实文件工具输出、实际模型切换、取消后下一轮均通过。Codex、Claude Code、Kimi Code、OpenCode 的进程重启 session/load 通过；DSH 未声明 loadSession，记录不支持，不计恢复通过。
-- Kimi 的思考设置实际请求变化通过；Claude/OpenCode/Codex 本次 session 未声明该选项，不能计思考能力通过。DSH 该断言失败，尚不能确定是 Harness 参数映射还是观察字段不全；待进一步定位。Codex 模型目录检查失败：实际出现 gpt-5.6-luna 请求，不能宣称所有请求都遵守配置。总结果失败，保留原始脱敏 JSON，不降级断言。
+- 既有 Harness 的可见回复、同 session 续聊、真实文件工具输出、实际模型切换、取消后下一轮均通过。Codex、Claude Code、OpenCode 的进程重启 session/load 通过；DSH 未声明 loadSession，记录不支持，不计恢复通过。
+- Claude/OpenCode/Codex 本次 session 未声明思考选项，不能计思考能力通过。DSH 该断言失败，尚不能确定是 Harness 参数映射还是观察字段不全；待进一步定位。Codex 模型目录检查失败：实际出现 gpt-5.6-luna 请求，不能宣称所有请求都遵守配置。总结果失败，保留原始脱敏 JSON，不降级断言。
 - 执行入口：OMNIBOT_TEST_MODEL=GLM-5.1 OMNIBOT_TEST_SECOND_MODEL=GLM-5.2 node scripts/verify-live-harness-conversations.mjs CLI_DIRECTORY app/build/reports/harness-adapters；凭据仅从环境读取。证据 artifacts/harness-real-api-20260909/。
 - 本次在 Mac 运行官方 CLI，不代表 Android DSH 沙箱通过，也不替代 App 点击流程与物理设备验收。**待真机验证**。
 

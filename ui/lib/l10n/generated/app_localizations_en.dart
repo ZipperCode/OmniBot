@@ -1554,9 +1554,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get alpineOpenCode => 'OpenCode CLI with built-in ACP support';
 
   @override
-  String get alpineKimiCode => 'Kimi Code official CLI and local Web UI';
-
-  @override
   String get alpinePi => 'Pi Agent with MCP tool support';
 
   @override

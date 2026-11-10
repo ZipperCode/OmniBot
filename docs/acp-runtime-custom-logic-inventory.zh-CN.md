@@ -156,7 +156,7 @@ Conversation
 |---|---|---|
 | `app/src/main/assets/acp/agents.json` | Agent id/name/command/arguments、发现命令、npm 包、安装命令、健康命令、配置 adapter id、能力声明、准备 revision | 保留为 declarative catalog；这是删除 Kotlin vendor 分支的基础。 |
 | `app/src/main/java/cn/com/omnimind/bot/agent/runtime/AcpAgentCatalog.kt` | 读取、版本校验、重复 id 校验、解析 runtime descriptor | 保留为 catalog interpreter；不要在这里加入 lifecycle 分支。 |
-| `app/src/main/java/cn/com/omnimind/bot/agent/runtime/AcpHarnessConfigAdapters.kt` | DeepSeek/Codex/Claude/Kimi/OpenCode 的配置读写转换 | 保留。用户已确认“每个 Harness 一套配置转换器”；转换器本身不能删除。 |
+| `app/src/main/java/cn/com/omnimind/bot/agent/runtime/AcpHarnessConfigAdapters.kt` | DeepSeek/Codex/Claude/OpenCode 的配置读写转换 | 保留。用户已确认“每个 Harness 一套配置转换器”；转换器本身不能删除。 |
 | `app/src/main/java/cn/com/omnimind/bot/agent/runtime/AcpHarnessAdapters.kt` | 每个 Harness 的 capability seam、`forConfigAdapterId` | 保留；最终所有调用方应按 catalog descriptor 解析，不再按硬编码 agent id 查找。 |
 
 ### 5.2 重复实现，优先归并
@@ -165,15 +165,13 @@ Conversation
 |---|---|---|
 | `com/ai/assistance/operit/terminal/setup/EnvironmentSetupLogic.kt` | packageDefinitions、NPM agent package ids、DeepSeek check/version/health command、安装依赖分类 | P0。只保留通用 terminal package 管理；Harness 内容全部由 `agents.json` 的 runtime descriptor 生成。 |
 | `AgentRuntimeManager.kt` | Codex/Claude/OpenCode id、配置文件路径、markers、managed probe/install timeout、config file size | P0。路径/命令/准备信息来自 catalog；Manager 只调用统一 preparation service。 |
-| `AcpAgentProfileStore.kt` | Xiaowan/Codex/Kimi/DeepSeek id、DeepSeek Cordis path、默认 Agent id | P1。默认 id、alias、路径从 catalog/migration map 读取；只保留旧 alias 迁移。 |
-| `KimiCodeRuntime.kt` | Kimi 包、home、命令、健康检查和环境变量 | P1。安装信息放 catalog；Provider 环境映射留在 Kimi converter。 |
+| `AcpAgentProfileStore.kt` | Xiaowan/Codex/DeepSeek id、DeepSeek Cordis path、默认 Agent id | P1。默认 id、alias、路径从 catalog/migration map 读取；只保留旧 alias 迁移。 |
 | `AcpHarnessAdapters.kt` | DeepSeek config home、settings path、ACP fs compat 脚本、reasoning/permission mode 集合 | P1。路径和脚本可由 catalog asset 提供；reasoning/permission 只能来自官方 capability negotiation。 |
-| `plugin/official/agentweb/AgentWebRuntimeModels.kt` | Kimi/DeepSeek Web command、session id、readiness timeout、DeepSeek private patch path | P1。若 Web surface 已被长期规则移除，整组删除；若仍要支持，单独作为 plugin capability，不能进入 ACP Agent lifecycle。 |
+| `plugin/official/agentweb/AgentWebRuntimeModels.kt` | DeepSeek Web command、session id、readiness timeout、DeepSeek private patch path | P1。若 Web surface 已被长期规则移除，整组删除；若仍要支持，单独作为 plugin capability，不能进入 ACP Agent lifecycle。 |
 
 ### 5.3 Harness 目录仍有的硬编码
 
 - DeepSeek：`/root/.dsh/omnibot-acp`、`dsh-acp-android`、Cordis plugin bundle、node-pty/build prerequisites、filesystem compatibility script。
-- Kimi：Node >= 22.19、`KIMI_CODE_NO_AUTO_UPDATE`、`KIMI_DISABLE_TELEMETRY`、Kimi provider host/reasoning values。
 - Claude：`claude-agent-acp`、Anthropic adapter package 和 settings path。
 - Codex：`codex-acp`、Codex config/auth/model catalog 文件以及固定 catalog metadata。
 - OpenCode：`opencode acp`、Linux ARM64 musl fallback、symlink 安装流程。
@@ -291,7 +289,7 @@ ACP Item / artifact 原文
 | `BrowserUseEngine.kt` | Android WebView tab/session、导航、点击、输入、截图、下载、userscript、桌面 UA、viewport、settle delay、输出 preview | 大型自研 browser runtime。优先迁移到官方 browser/MCP tool；迁移前不要拆散删除。 |
 | `BrowserRiskControl.kt` | Google/Bing/DDG/Yahoo/Baidu/Yandex/Ecosia/Brave/Sogou host 列表；550/180/260/140/320ms throttle；429/403/Captcha/Cloudflare 检测；停止自动重试 | 明确是我们自己的 anti-abuse/risk-control，不是 ACP。若产品不要求，P1 删除；若要求，独立成安全模块，不作为 Agent 配置。 |
 | `BrowserHostStore.kt` | bookmarks/history/downloads/userscripts/desktop mode，历史最多 500 条 | 浏览器领域状态；移到 Browser store。500 是存储保留策略，不是 Agent 限制。 |
-| `AgentWebRuntimeModels.kt`/`AgentWebRuntimeManager.kt` | Kimi/DeepSeek Web server launch、snapshot、open browser | 长期规则已经移除 standalone external App/WebView launcher/desktop shortcut/window bridge；需确认这组 plugin 是否仍是必要能力。若不是，整组删除；不能继续扩展。 |
+| `AgentWebRuntimeModels.kt`/`AgentWebRuntimeManager.kt` | DeepSeek Web server launch、snapshot、open browser | 长期规则已经移除 standalone external App/WebView launcher/desktop shortcut/window bridge；需确认这组 plugin 是否仍是必要能力。若不是，整组删除；不能继续扩展。 |
 
 ## 9. 全量清单：记忆、技能、调度和领域工具
 
@@ -447,7 +445,7 @@ AcpAgentConfigAudit（审计）
 | `f0844df43` | 2026-05-09 | 引入 BrowserRiskControl、挑战检测和浏览器节流。 |
 | `e5962e7c2` | 2026-05-22 | 引入 Omnibot Codex Bridge、本地/远程 Codex 独立链。 |
 | `e5ef76d63` | 2026-07-16 | 引入 Codex 文件附件上传链。 |
-| `6f15cd552` | 2026-09-03 | 引入 Kimi/DeepSeek Web plugin 运行时。 |
+| `6f15cd552` | 2026-09-03 | 引入 DeepSeek Web plugin 运行时。 |
 | `602e46065` | 2026-08-17 | 将多个 Agent 统一到官方 ACP runtime，但仍保留若干 provider/vendor 分支。 |
 | `245b131c8` | 2026-09-04 | 将 legacy request compatibility 独立成适配层。 |
 

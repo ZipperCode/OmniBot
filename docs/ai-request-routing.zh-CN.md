@@ -45,7 +45,7 @@ flowchart TD
 
 Gemini 的空路径地址默认补 `/v1beta`；显式版本（如 `/v1`、`/v1beta`）和自定义代理路径保持不变。模型目录与连接检查使用相同协议，自定义请求头继续按既有规则覆盖默认头。原有 Anthropic 配置可直接编辑，不需重建提供商。
 
-Pi 直接使用现有开源 SDK 的原生适配器；OpenCode 使用对应的原生 Provider。Codex、Claude Code、Kimi Code 不接受 Gemini 原生端点。Gemini 的 `#` 完整请求地址仅适用于原生 HTTP 场景；Pi、OpenCode 的 SDK 不支持此标记，会明确拒绝，需填写服务根路径。聊天协议扩展不改变记忆嵌入、语音或生图 API。
+Pi 直接使用现有开源 SDK 的原生适配器；OpenCode 使用对应的原生 Provider。Codex、Claude Code 不接受 Gemini 原生端点。Gemini 的 `#` 完整请求地址仅适用于原生 HTTP 场景；Pi、OpenCode 的 SDK 不支持此标记，会明确拒绝，需填写服务根路径。聊天协议扩展不改变记忆嵌入、语音或生图 API。
 
 Gemini 的工具定义使用原生 `parametersJsonSchema`，默认保留引用与定义；Gemini 3+ 显式启用严格工具 schema 时，按上游严格子集转换，不支持的结构明确失败。具名与强制工具选择保持原生约束。工具结果保留文本、错误和图片：Gemini 3+ 图片位于 `functionResponse.parts`，较早版本使用后置用户图片；Anthropic 成功结果保留内嵌图片，错误结果的图片排在该轮全部 `tool_result` 之后。
 

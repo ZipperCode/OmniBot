@@ -16,7 +16,6 @@ const PLANS = Object.freeze({
     commands: ['dsh', 'dsh-acp-android', 'dsh-acp', 'dsh-acp-demo'],
   },
   pi: { packages: [], commands: ['omnibot-pi-acp'] },
-  'kimi-code': { packages: ['@moonshot-ai/kimi-code'], commands: ['kimi'] },
 });
 
 function stat(file) {

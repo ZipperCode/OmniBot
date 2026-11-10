@@ -1,5 +1,5 @@
 {
-  "name": "Preserve draft across Kimi Code and Xiaowan selection, then send once",
+  "name": "Preserve draft across Claude Code and Xiaowan selection, then send once",
   "requireClockSync": true,
   "steps": [
     {
@@ -14,14 +14,14 @@
     },
     {
       "action": "tap",
-      "label": "Kimi Code"
+      "label": "Claude Code"
     },
     {
       "action": "assert-draft",
       "marker": "OOB_LIVE_SWITCH_DRAFT",
       "scenario": "xiaowan-switch-reply.json",
-      "agentId": "kimi-code-acp",
-      "agentLabel": "Kimi Code"
+      "agentId": "claude-code-acp",
+      "agentLabel": "Claude Code"
     },
     {
       "action": "tap",

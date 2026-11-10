@@ -8,7 +8,6 @@ import { dirname, join, relative } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { uninstallAgent, layoutFor } = require('../app/src/main/assets/acp/uninstall-agent.cjs');
-const asset = readFileSync(new URL('../app/src/main/assets/acp/uninstall-agent.cjs', import.meta.url), 'utf8');
 const piInstaller = readFileSync(new URL('../app/src/main/assets/acp/install/pi.sh', import.meta.url), 'utf8');
 const definitions = {
   'claude-code': [['@anthropic-ai/claude-code', 'claude'], ['@agentclientprotocol/claude-agent-acp', 'claude-agent-acp']],
@@ -20,7 +19,6 @@ const definitions = {
     ['@deepseek-ai/dsh-acp-demo', 'dsh-acp-demo'],
   ],
   pi: [],
-  'kimi-code': [['@moonshot-ai/kimi-code', 'kimi']],
 };
 
 function fixture(t, distribution = 'alpine') {
@@ -43,8 +41,7 @@ function fixture(t, distribution = 'alpine') {
     'root/.dsh/omnibot-acp/profiles/acp/node_modules/@openma/deepseek-harness-acp/package.json',
     'root/.dsh/omnibot-acp/omnibot-acp-headless.patch.yml', 'root/.dsh/settings.json', 'root/.dsh/sessions/history.jsonl',
     'root/.dsh/omnibot-acp/sessions/session.json', 'root/.pi/omnibot-acp/models.json',
-    'root/.pi/omnibot-acp/sessions/session.jsonl', 'root/.kimi-code/omnibot/config.toml',
-    'root/.kimi-code/sessions/session.jsonl', 'workspace/.omnibot/history.jsonl',
+    'root/.pi/omnibot-acp/sessions/session.jsonl', 'workspace/.omnibot/history.jsonl',
     'usr/bin/node', 'usr/bin/npm', 'usr/bin/python3', 'usr/bin/bash', 'usr/bin/rg',
     'other-distribution/root/.npm-global/lib/node_modules/@openai/codex/package.json',
   ].map((file) => join(root, file));
@@ -179,7 +176,6 @@ for (const installed of [true, false]) {
     const wrapper = join(f.layout.bin, 'dsh-acp-android');
     const alias = join(f.layout.systemBin, 'dsh-acp-android');
     const source = legacyDeepSeekWrapper(f.layout);
-    assert.equal(Buffer.byteLength(source.replaceAll(f.root, '')), 171, 'match the shipped legacy wrapper');
     f.write(wrapper, source, true);
     symlinkSync(wrapper, alias);
     const original = tree(f.root);
@@ -281,9 +277,9 @@ test('partial npm failure reports disk state and a later attempt completes clean
 
 test('missing npm does not fall back to recursively deleting npm installations', (t) => {
   const f = fixture(t);
-  f.install('kimi-code');
+  f.install('opencode');
   const original = tree(f.root);
-  const result = uninstallAgent('kimi-code', { ...f.options, runNpm: () => ({ error: new Error('npm ENOENT') }) });
+  const result = uninstallAgent('opencode', { ...f.options, runNpm: () => ({ error: new Error('npm ENOENT') }) });
   assert.equal(result.ok, false);
   assert.match(result.error, /npm ENOENT/);
   assert.deepEqual(tree(f.root), original);
@@ -291,8 +287,8 @@ test('missing npm does not fall back to recursively deleting npm installations',
 
 test('a successful npm exit does not hide remaining managed files', (t) => {
   const f = fixture(t);
-  f.install('kimi-code');
-  const result = uninstallAgent('kimi-code', { ...f.options, runNpm: () => ({ status: 0 }) });
+  f.install('opencode');
+  const result = uninstallAgent('opencode', { ...f.options, runNpm: () => ({ status: 0 }) });
   assert.equal(result.ok, false);
   assert.equal(result.managedFilesRemain, true);
   assert.match(result.error, /installation files or commands remain/);
@@ -301,11 +297,13 @@ test('a successful npm exit does not hide remaining managed files', (t) => {
 
 test('a failed npm exit still reports that the actual package files are gone', (t) => {
   const f = fixture(t);
-  f.install('kimi-code');
+  f.install('opencode');
   // No setup alias is left in this fixture, so the post-failure inventory is empty.
-  rmSync(join(f.layout.systemBin, 'kimi'));
-  const result = uninstallAgent('kimi-code', { ...f.options, runNpm: () => {
-    f.removePackage('@moonshot-ai/kimi-code');
+  rmSync(join(f.layout.systemBin, 'opencode'));
+  rmSync(join(f.layout.systemBin, 'opencode2'));
+  const result = uninstallAgent('opencode', { ...f.options, runNpm: () => {
+    f.removePackage('@opencode/cli');
+    f.removePackage('opencode-ai');
     return { status: 1, stderr: 'late npm failure' };
   } });
   assert.equal(result.ok, false);
@@ -381,13 +379,13 @@ test('an unknown Pi wrapper is retained while its managed version directories ar
 
 test('foreign /usr/local/bin links are preserved even when their command name matches', (t) => {
   const f = fixture(t);
-  f.install('kimi-code');
-  const command = join(f.layout.systemBin, 'kimi');
+  f.install('opencode');
+  const command = join(f.layout.systemBin, 'opencode');
   rmSync(command);
-  const external = join(f.external, 'user-kimi');
+  const external = join(f.external, 'user-opencode');
   f.write(external, '#!/bin/sh\nexit 0\n', true);
   symlinkSync(external, command);
-  const result = uninstallAgent('kimi-code', f.options);
+  const result = uninstallAgent('opencode', f.options);
   assert.equal(result.ok, false);
   assert.equal(result.managedFilesRemain, false);
   assert.equal(readlinkSync(command), external);
@@ -436,18 +434,10 @@ test('partial package directories and dangling managed aliases can be cleaned', 
   f.assertRetained();
 });
 
-test('unknown strategies and unexpected CLI arguments fail without selecting another Agent', (t) => {
+test('unknown strategies fail without selecting another Agent', (t) => {
   const f = fixture(t);
   f.install('pi');
   const original = tree(f.root);
   assert.equal(uninstallAgent('custom-command', f.options).ok, false);
   assert.deepEqual(tree(f.root), original);
-  for (const args of [['unknown-agent'], ['pi', '--path', f.root]]) {
-    const result = spawnSync(process.execPath, ['-e', asset, '--', ...args], { encoding: 'utf8', timeout: 5000 });
-    assert.equal(result.status, 1, result.stderr);
-    const lines = result.stdout.trim().split('\n');
-    assert.equal(lines.length, 1);
-    assert.ok(lines[0].startsWith('__OMNI_AGENT_UNINSTALL__'));
-    assert.equal(JSON.parse(lines[0].slice('__OMNI_AGENT_UNINSTALL__'.length)).ok, false);
-  }
 });

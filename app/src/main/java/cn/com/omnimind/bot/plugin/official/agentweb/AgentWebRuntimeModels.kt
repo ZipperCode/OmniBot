@@ -7,8 +7,6 @@ import cn.com.omnimind.bot.agent.runtime.AgentProviderCredentials
 import cn.com.omnimind.bot.agent.runtime.AcpHarnessAdapters
 import cn.com.omnimind.bot.agent.runtime.AgentConfigAdapterRegistry
 import cn.com.omnimind.bot.agent.runtime.AgentProviderMappingInput
-import cn.com.omnimind.bot.agent.runtime.buildKimiCodeEnvironment
-import cn.com.omnimind.bot.agent.runtime.buildKimiCodeManagedFiles
 import java.net.URI
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -17,7 +15,6 @@ import kotlinx.serialization.json.put
 internal const val OPENCODE_WEB_CONFIG_PATH = "/root/.config/opencode/omnibot-web.json"
 
 internal enum class AgentWebUrlKind {
-    KIMI,
     OPENCODE,
 }
 
@@ -32,18 +29,6 @@ internal enum class AgentWebService(
     val readinessTimeoutMs: Long,
     val minimumMajorVersion: Int? = null,
 ) {
-    KIMI(
-        id = "kimi",
-        displayName = "Kimi Code Web",
-        packageId = "kimi",
-        commandName = "kimi",
-        command = "kimi web --no-open --host 127.0.0.1",
-        // Retain the historical managed id so an app update can take
-        // ownership of, validate, and restart an older Web process.
-        sessionId = "omnibot-web-kimi",
-        urlKind = AgentWebUrlKind.KIMI,
-        readinessTimeoutMs = 60_000L,
-    ),
     OPENCODE(
         id = "opencode",
         displayName = "OpenCode Web",
@@ -157,14 +142,6 @@ internal fun buildAgentWebLaunchConfiguration(
     val environment: Map<String, String>
     val managedFiles: Map<String, String>
     when (service) {
-        AgentWebService.KIMI -> {
-            environment = buildKimiCodeEnvironment(
-                provider = credentials,
-                model = modelId,
-                reasoningEffort = reasoningEffort,
-            )
-            managedFiles = buildKimiCodeManagedFiles(credentials, modelId, reasoningEffort)
-        }
         AgentWebService.OPENCODE -> {
             require(reasoningEffort.isNullOrBlank()) {
                 "Choose OpenCode reasoning options in its Web interface."

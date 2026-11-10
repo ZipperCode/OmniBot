@@ -1,6 +1,6 @@
 # Full demo acceptance — current source, 2026-09-06
 
-Goal retained: clean source build; launch Ubuntu and Alpine; Xiaowan conversation, model and thought-level changes and continuation; Claude startup and session switch; DeepSeek Web UI conversation; Kimi conversation; OpenCode startup.
+Goal retained: clean source build; launch Ubuntu and Alpine; Xiaowan conversation, model and thought-level changes and continuation; Claude startup and session switch; DeepSeek Web UI conversation; OpenCode startup.
 
 - Clean source build: PASS. `./gradlew --no-daemon --no-parallel clean :app:assembleDevelopStandardDebug -Ptarget=lib/main_standard.dart`, BUILD SUCCESSFUL in 2m17s; 637 executed / 7 up-to-date.
 - APK `/tmp/oob-demo-clean-build-20260906.apk`, SHA256 `d2f07b8d30e728ba02ce8fe4fa320ef989023c50e6ab1b95c206822e128dc088`.
@@ -28,18 +28,17 @@ Goal retained: clean source build; launch Ubuntu and Alpine; Xiaowan conversatio
 - DeepSeek Web: launched from the visible drawer. Initial Android Chrome 109 failed `AbortSignal.any` when selecting a workspace. Installed the existing local Chromium 155 APK on the emulator after removing only disposable npm download cache; made it the emulator's browser. This is a test-environment change, not an app workaround.
 - Independent first-navigation issue reproduced in both browsers: official DSH root-token exchange issues HttpOnly SameSite=Strict cookie, but Android external-intent redirect requests exclude it (`Network.requestWillBeSentExtraInfo` blocked reason `SameSiteStrict`). Direct address-bar navigation to the same local root succeeds. No token/cookie secret printed, no authentication bypass or cookie-policy modification. This first-open rough edge remains unresolved.
 - Through Chromium 155's visible directory picker, selected `/workspace`, sent `Reply OOB_DEMO_DSH_WEB_RIVER_31`. Actual assistant paragraph matched marker. Verifier counted one user row, one assistant row, Send restored; repeated after foreground browser reload also passed. Screenshot `deepseek-web-reply.png`. Real GLM-5.1 response, ~21.7 s provider time. Background-tab observation timed out once; no resend occurred.
-- Kimi: selected through app mode menu, sent `Reply only KIMI_DEMO_WILLOW_42. Do not use tools.` Actual assistant response `KIMI_DEMO_WILLOW_42`, displayed 7.8 s and 18:38:49. Screenshot `kimi-reply.png`. PASS for actual Kimi conversation under current Anthropic connection.
 - OpenCode: both npm installs had exit 0, but initialization failed with exec code127. ELF interpreter is `/lib/ld-musl-aarch64.so.1`, absent from Ubuntu. The catalog had unconditionally selected musl, unlike terminal setup's separate distribution-aware installer. Replaced duplicate commands with one shared catalog asset consumed by both entry points; selects libc by rootfs, pins native binary to installed wrapper version, checks actual executable before relinking. Four shell execution tests passed, covering both distributions and loader failure. Device reinstallation/startup verification pending.
 - OpenCode follow-up: 25 native installation tests passed, including shell syntax for every package combination on both distributions; 46 ACP contract tests passed. Initial test failure was a missing catalog fixture after unifying installer ownership and was corrected to supply the real assets.
 - Build succeeded in 1m28s. APK `/tmp/oob-opencode-rootfs-20260906.apk`, SHA256 `2a75805a19c059e9f63703004944d2cdc59e03334a65b31e15e30850caf5384c`, data-preserving install succeeded on emulator and PJE110.
 - Clicked OpenCode Reinstall on simulator. Both wrapper and exact glibc binary npm installs exit0; UI returned Assistant installed / ready to chat. Runtime health now online, installed true, preparationRevision `opencode-rootfs-libc-v2`; launcher points to `opencode-linux-arm64/bin/opencode`.
 - Returned through visible settings back button, selected OpenCode from chat mode menu; welcome correctly identifies OpenCode. Startup requirement now passed. Sent an additional isolated `OPENCODE_DEMO_OAK_53` reply check; completion still being observed.
 - OpenCode actual response completed: `OPENCODE_DEMO_OAK_53`, 15.1 s, completion clock 18:49:00. Screenshot `opencode-reply.png`. PASS for startup plus real prompt/reply.
-- Simulator demo profile intentionally remains Anthropic with the same configured URL/key and GLM-5.1 binding, enabling the verified Claude/Kimi/OpenCode demonstrations. Phone connection settings were not changed.
+- Simulator demo profile intentionally remains Anthropic with the same configured URL/key and GLM-5.1 binding, enabling the verified Claude/OpenCode demonstrations. Phone connection settings were not changed.
 
 ## Completion audit still open
 
-Observed execution covers Ubuntu, Alpine, Xiaowan real model change/continuation, two Claude sessions with return isolation, DeepSeek Web real reply/reload, Kimi real reply, and OpenCode real reply. Do not mark the full task complete yet: DeepSeek initial app-to-browser navigation still needs a direct-use fix; high reasoning effort is proven in persisted session config but not yet in outgoing model payload. Real-phone full conversation stability remains separately blocked by certificate-intercepted network; simulator evidence is not phone acceptance.
+Observed execution covers Ubuntu, Alpine, Xiaowan real model change/continuation, two Claude sessions with return isolation, DeepSeek Web real reply/reload, and OpenCode real reply. Do not mark the full task complete yet: DeepSeek initial app-to-browser navigation still needs a direct-use fix; high reasoning effort is proven in persisted session config but not yet in outgoing model payload. Real-phone full conversation stability remains separately blocked by certificate-intercepted network; simulator evidence is not phone acceptance.
 
 ## Actual reasoning wire verification
 
@@ -68,7 +67,6 @@ Observed execution covers Ubuntu, Alpine, Xiaowan real model change/continuation
 | Thought configuration affects request | High then Low through UI, both observed on real upstream requests, same-session memory retained | Passed on emulator |
 | Claude startup/session switch | Two distinct marker sessions, returned first session retrieved only its marker | Passed on emulator |
 | DeepSeek Web direct open/chat | Fixed login navigation, real reply and reload persistence | Passed on emulator |
-| Kimi conversation | Actual marker reply7.8s | Passed on emulator |
 | OpenCode switch/start | Fixed rootfs binary, actual marker reply15.1s | Passed on emulator |
 | Real-phone install and full Harness stability | Latest APK install Success; native phone registry TLS request still fails self-signed certificate | Install passed; full real-phone acceptance blocked |
 

@@ -154,14 +154,6 @@ private val PROVIDER_OWNED_ENVIRONMENT_KEYS = setOf(
     "OMNIBOT_DSH_API_KEY",
     "DEEPSEEK_BASE_URL",
     "DSH_MODEL",
-    "KIMI_CODE_HOME",
-    "KIMI_MODEL_NAME",
-    "KIMI_MODEL_API_KEY",
-    "KIMI_MODEL_BASE_URL",
-    "KIMI_MODEL_PROVIDER_TYPE",
-    "KIMI_MODEL_CAPABILITIES",
-    "KIMI_MODEL_THINKING_EFFORT",
-    "KIMI_CODE_CUSTOM_HEADERS",
     "PI_CODING_AGENT_DIR",
     "OMNIBOT_PI_MODELS_PATH",
     "OMNIBOT_PI_MODEL",
@@ -201,7 +193,6 @@ internal object AgentConfigAdapterRegistry {
     private val adaptersById: Map<String, AgentConfigAdapter> = mapOf(
         "codex" to CodexConfigAdapter,
         "claude-code" to ClaudeCodeConfigAdapter,
-        "kimi-code" to KimiCodeConfigAdapter,
         "pi" to PiConfigAdapter,
         "open-code" to OpenCodeConfigAdapter,
     )

@@ -15,51 +15,11 @@ import org.junit.Test
 class AgentWebRuntimeTest {
     @Test
     fun `service commands bind explicitly to loopback`() {
-        assertEquals(
-            "kimi web --no-open --host 127.0.0.1",
-            AgentWebService.KIMI.command,
-        )
         assertTrue(AgentWebService.OPENCODE.command.contains("opencode serve --hostname 127.0.0.1 --port 0"))
         assertFalse(AgentWebService.OPENCODE.command.contains("--service"))
         assertEquals(2, AgentWebService.OPENCODE.minimumMajorVersion)
     }
 
-    @Test
-    fun `Kimi parser accepts only authenticated loopback URLs`() {
-        val token = "abc_DEF-1234567890_abcdefghijkl"
-        assertEquals(
-            "http://127.0.0.1:58627/#token=$token",
-            AgentWebTranscriptParser.findUrl(
-                AgentWebUrlKind.KIMI,
-                "\u001B[32mLocal:\u001B[0m http://127.0.0.1:58627/#token=$token\n",
-            ),
-        )
-        assertNull(
-            AgentWebTranscriptParser.findUrl(
-                AgentWebUrlKind.KIMI,
-                "http://127.0.0.1:58627/",
-            ),
-        )
-        assertNull(
-            AgentWebTranscriptParser.findUrl(
-                AgentWebUrlKind.KIMI,
-                "http://example.com:58627/#token=$token",
-            ),
-        )
-        assertNull(
-            AgentWebTranscriptParser.findUrl(
-                AgentWebUrlKind.KIMI,
-                "MCP connected at http://127.0.0.1:58627/#token=$token",
-            ),
-        )
-        assertEquals(
-            "http://[::1]:58627/#token=$token",
-            AgentWebTranscriptParser.findUrl(
-                AgentWebUrlKind.KIMI,
-                "Local: http://[::1]:58627/#token=$token",
-            ),
-        )
-    }
 
     @Test
     fun `configuration parser uses the most recent complete fingerprint`() {
@@ -74,66 +34,11 @@ class AgentWebRuntimeTest {
         )
     }
 
-    @Test
-    fun `Kimi environment follows the documented in-memory model channel`() {
-        val configuration = buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
-            provider = provider(
-                baseUrl = "https://gateway.example.com/v1/chat/completions",
-                customHeaders = mapOf("X-Route" to "mobile"),
-            ),
-            model = "glm-5",
-            reasoningEffort = "max",
-        )
-
-        assertEquals("glm-5", configuration.environment["KIMI_MODEL_NAME"])
-        assertEquals("secret", configuration.environment["KIMI_MODEL_API_KEY"])
-        assertEquals(
-            "https://gateway.example.com/v1",
-            configuration.environment["KIMI_MODEL_BASE_URL"],
-        )
-        assertEquals("openai", configuration.environment["KIMI_MODEL_PROVIDER_TYPE"])
-        assertEquals("max", configuration.environment["KIMI_MODEL_THINKING_EFFORT"])
-        assertEquals(
-            "image_in,thinking",
-            configuration.environment["KIMI_MODEL_CAPABILITIES"],
-        )
-        assertEquals("X-Route: mobile", configuration.environment["KIMI_CODE_CUSTOM_HEADERS"])
-    }
-
-    @Test
-    fun `Kimi does not advertise images on an explicitly text-only route`() {
-        val configuration = buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
-            provider = provider(
-                baseUrl = "https://api.deepseek.com",
-                protocolType = "deepseek",
-            ),
-            model = "deepseek-v4-flash",
-        )
-
-        assertEquals("thinking", configuration.environment["KIMI_MODEL_CAPABILITIES"])
-    }
-
-    @Test
-    fun `Kimi Responses uses official config instead of unsupported environment wire`() {
-        val configuration = buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
-            provider = provider(wireApi = "responses"),
-            model = "gpt-5",
-            reasoningEffort = "high",
-        )
-        assertFalse(configuration.environment.containsKey("KIMI_MODEL_NAME"))
-        val config = configuration.managedFiles.values.single()
-        assertTrue(config.contains("type = \"openai_responses\""))
-        assertTrue(config.contains("model = \"gpt-5\""))
-        assertTrue(config.contains("effort = \"high\""))
-    }
 
     @Test(expected = IllegalArgumentException::class)
     fun `Agent Web rejects Provider URL fragments`() {
         buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
+            service = AgentWebService.OPENCODE,
             provider = provider(baseUrl = "https://gateway.example.com/v1#"),
             model = "glm-5",
         )
@@ -142,7 +47,7 @@ class AgentWebRuntimeTest {
     @Test(expected = IllegalArgumentException::class)
     fun `Agent Web rejects Provider URL query parameters`() {
         buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
+            service = AgentWebService.OPENCODE,
             provider = provider(baseUrl = "https://gateway.example.com/v1?api-version=1"),
             model = "glm-5",
         )
@@ -151,7 +56,7 @@ class AgentWebRuntimeTest {
     @Test(expected = IllegalArgumentException::class)
     fun `Agent Web rejects control characters in model ids`() {
         buildAgentWebLaunchConfiguration(
-            service = AgentWebService.KIMI,
+            service = AgentWebService.OPENCODE,
             provider = provider(),
             model = "glm-5\nnext",
         )
@@ -162,7 +67,7 @@ class AgentWebRuntimeTest {
         val payload = AgentWebOperationResult(
             success = true,
             code = AgentWebResultCode.OPENED,
-            service = AgentWebService.KIMI,
+            service = AgentWebService.OPENCODE,
             running = true,
         ).toJson().toString()
 
@@ -281,10 +186,10 @@ class AgentWebRuntimeTest {
             wait = {},
         )
 
-        val first = manager.open(AgentWebService.KIMI)
-        val second = manager.open(AgentWebService.KIMI)
+        val first = manager.open(AgentWebService.OPENCODE)
+        val second = manager.open(AgentWebService.OPENCODE)
         configuration.provider = provider(apiKey = "rotated-secret")
-        val third = manager.open(AgentWebService.KIMI)
+        val third = manager.open(AgentWebService.OPENCODE)
 
         assertEquals(AgentWebResultCode.OPENED, first.code)
         assertFalse(first.reused)
@@ -293,7 +198,7 @@ class AgentWebRuntimeTest {
         assertEquals(2, gateway.launchCount)
         assertEquals(1, gateway.stopCount)
         assertEquals(3, gateway.openedUrls.size)
-        assertTrue(gateway.openedUrls.all { it.contains("#token=") })
+        assertTrue(gateway.openedUrls.all { it.contains("/auth/connect/") })
     }
 
     @Test
@@ -306,7 +211,7 @@ class AgentWebRuntimeTest {
             wait = {},
         )
 
-        val result = manager.open(AgentWebService.KIMI)
+        val result = manager.open(AgentWebService.OPENCODE)
 
         assertEquals(AgentWebResultCode.URL_TIMEOUT, result.code)
         assertFalse(result.success)
@@ -325,11 +230,11 @@ class AgentWebRuntimeTest {
             pollIntervalMs = 60_000L,
             wait = {},
         )
-        manager.open(AgentWebService.KIMI)
+        manager.open(AgentWebService.OPENCODE)
         configuration.provider = provider(apiKey = "rotated-secret")
         gateway.stopSucceeds = false
 
-        val result = manager.open(AgentWebService.KIMI)
+        val result = manager.open(AgentWebService.OPENCODE)
 
         assertEquals(AgentWebResultCode.STOP_FAILED, result.code)
         assertFalse(result.success)
@@ -348,7 +253,7 @@ class AgentWebRuntimeTest {
             wait = {},
         )
 
-        val result = manager.open(AgentWebService.KIMI)
+        val result = manager.open(AgentWebService.OPENCODE)
 
         assertEquals(AgentWebResultCode.STOP_FAILED, result.code)
         assertFalse(result.success)
@@ -363,10 +268,10 @@ class AgentWebRuntimeTest {
             configurationProvider = FakeConfigurationProvider(),
         )
 
-        val result = manager.open(AgentWebService.KIMI)
+        val result = manager.open(AgentWebService.OPENCODE)
 
         assertEquals(AgentWebResultCode.RUNTIME_MISSING, result.code)
-        assertEquals("kimi", result.toJson()["packageId"].toString().trim('"'))
+        assertEquals("opencode", result.toJson()["packageId"].toString().trim('"'))
         assertEquals(0, gateway.launchCount)
     }
 
@@ -429,9 +334,7 @@ class AgentWebRuntimeTest {
                 appendLine(marker)
                 if (publishUrl) {
                     appendLine(
-                        if (sessionId.contains("kimi")) {
-                            "Kimi server: http://127.0.0.1:58627/#token=${"k".repeat(32)}"
-                        } else if (sessionId.contains("opencode")) {
+                        if (sessionId.contains("opencode")) {
                             "server listening on http://127.0.0.1:4088\nserver password ${"p".repeat(43)}"
                         } else {
                             error("Unexpected Agent Web session: $sessionId")

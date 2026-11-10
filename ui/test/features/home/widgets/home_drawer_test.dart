@@ -2546,14 +2546,14 @@ void main() {
             return installed
                 ? <Map<String, Object?>>[
                     {
-                      'id': 'open_kimi_web',
+                      'id': 'open_opencode_web',
                       'pluginId': 'com.omnimind.agent-web',
-                      'displayName': 'Kimi Code Web',
+                      'displayName': 'OpenCode Web',
                       'presentation': <String, Object?>{
                         'placements': <String>['home_drawer_quick_launch'],
-                        'agentId': 'kimi-code-acp',
-                        'statusAction': 'get_kimi_web_status',
-                        'stopAction': 'stop_kimi_web',
+                        'agentId': 'opencode-acp',
+                        'statusAction': 'get_opencode_web_status',
+                        'stopAction': 'stop_opencode_web',
                       },
                     },
                   ]
@@ -2603,11 +2603,11 @@ void main() {
     await menuPress.up();
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('home-drawer-web-kimi-code-acp')),
+      find.byKey(const ValueKey('home-drawer-web-opencode-acp')),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('home-drawer-web-stop-kimi-code-acp')),
+      find.byKey(const ValueKey('home-drawer-web-stop-opencode-acp')),
       findsOneWidget,
     );
     await tester.tapAt(const Offset(4, 4));
@@ -3045,21 +3045,21 @@ void main() {
                 },
               },
               <String, Object?>{
-                'id': 'open_kimi_web',
+                'id': 'open_codex_web',
                 'pluginId': 'com.omnimind.agent-web',
-                'displayName': 'Kimi Code Web',
-                'description': 'Open Kimi Web',
+                'displayName': 'Codex Web',
+                'description': 'Open Codex Web',
                 'presentation': <String, Object?>{
                   'placements': <String>['home_drawer_quick_launch'],
-                  'agentId': 'kimi-code-acp',
+                  'agentId': 'codex-acp',
                   'quickLaunchOrder': 0,
                   'label': <String, String>{
-                    'zh': 'Kimi Code Web',
-                    'en': 'Kimi Code Web',
+                    'zh': 'Codex Web',
+                    'en': 'Codex Web',
                   },
                   'shortLabel': <String, String>{
-                    'zh': 'Kimi Web',
-                    'en': 'Kimi Web',
+                    'zh': 'Codex Web',
+                    'en': 'Codex Web',
                   },
                 },
               },
@@ -3096,12 +3096,12 @@ void main() {
     await tester.tap(webMenuButton);
     await tester.pumpAndSettle();
 
-    final kimi = find.byKey(const ValueKey('home-drawer-web-kimi-code-acp'));
-    expect(kimi, findsOneWidget);
+    final codex = find.byKey(const ValueKey('home-drawer-web-codex-acp'));
+    expect(codex, findsOneWidget);
 
     final openCode = find.byKey(const ValueKey('home-drawer-web-opencode-acp'));
     expect(openCode, findsOneWidget);
-    expect(tester.getCenter(kimi).dy, lessThan(tester.getCenter(openCode).dy));
+    expect(tester.getCenter(codex).dy, lessThan(tester.getCenter(openCode).dy));
     await tester.tap(openCode);
     await tester.pumpAndSettle();
 
@@ -3124,23 +3124,23 @@ void main() {
             if (call.method == 'listActions') {
               return <Map<String, Object?>>[
                 <String, Object?>{
-                  'id': 'open_kimi_web',
+                  'id': 'open_opencode_web',
                   'pluginId': 'com.omnimind.agent-web',
-                  'displayName': 'Kimi Code Web',
-                  'description': 'Open Kimi Web',
+                  'displayName': 'OpenCode Web',
+                  'description': 'Open OpenCode Web',
                   'presentation': <String, Object?>{
                     'placements': <String>['home_drawer_quick_launch'],
-                    'agentId': 'kimi-code-acp',
+                    'agentId': 'opencode-acp',
                     'quickLaunchOrder': 0,
-                    'statusAction': 'get_kimi_web_status',
-                    'stopAction': 'stop_kimi_web',
+                    'statusAction': 'get_opencode_web_status',
+                    'stopAction': 'stop_opencode_web',
                     'label': <String, String>{
-                      'zh': 'Kimi Code Web',
-                      'en': 'Kimi Code Web',
+                      'zh': 'OpenCode Web',
+                      'en': 'OpenCode Web',
                     },
                     'shortLabel': <String, String>{
-                      'zh': 'Kimi Web',
-                      'en': 'Kimi Web',
+                      'zh': 'OpenCode Web',
+                      'en': 'OpenCode Web',
                     },
                   },
                 },
@@ -3148,22 +3148,22 @@ void main() {
             }
             if (call.method == 'invokeAction') {
               final actionId = (call.arguments as Map)['actionId'] as String;
-              if (actionId == 'get_kimi_web_status') {
+              if (actionId == 'get_opencode_web_status') {
                 return <String, Object?>{
                   'success': true,
                   'code': statusCode,
-                  'serviceId': 'kimi',
-                  'packageId': 'kimi',
+                  'serviceId': 'opencode',
+                  'packageId': 'opencode',
                   'running': statusCode != 'NOT_RUNNING',
                 };
               }
-              if (actionId == 'stop_kimi_web') {
+              if (actionId == 'stop_opencode_web') {
                 statusCode = 'NOT_RUNNING';
                 return <String, Object?>{
                   'success': true,
                   'code': 'STOPPED',
-                  'serviceId': 'kimi',
-                  'packageId': 'kimi',
+                  'serviceId': 'opencode',
+                  'packageId': 'opencode',
                   'running': false,
                 };
               }
@@ -3201,7 +3201,7 @@ void main() {
       await tester.tap(webMenuButton);
       await tester.pumpAndSettle();
       final statusDot = find.byKey(
-        const ValueKey('home-drawer-web-status-kimi-code-acp'),
+        const ValueKey('home-drawer-web-status-opencode-acp'),
       );
       expect(statusDot, findsOneWidget);
       expect(find.text('Stop'), findsOneWidget);
@@ -3213,11 +3213,11 @@ void main() {
       final stopInvocation = calls.lastWhere(
         (call) =>
             call.method == 'invokeAction' &&
-            (call.arguments as Map)['actionId'] == 'stop_kimi_web',
+            (call.arguments as Map)['actionId'] == 'stop_opencode_web',
       );
       expect(stopInvocation.arguments, <String, Object?>{
         'pluginId': 'com.omnimind.agent-web',
-        'actionId': 'stop_kimi_web',
+        'actionId': 'stop_opencode_web',
         'arguments': <String, dynamic>{},
       });
       expect(menuStatusDot, findsNothing);

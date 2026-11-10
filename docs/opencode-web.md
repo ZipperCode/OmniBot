@@ -1,6 +1,6 @@
 # OpenCode 官方 Web UI 接入
 
-OpenCode Web 通过现有 `com.omnimind.agent-web` 插件提供，入口位于 Agent 模式的“本地 Web 界面”和侧栏 Web 菜单。与 Kimi 一样，用户可以打开、查看状态和停止对应服务；网页由系统浏览器显示。
+OpenCode Web 通过现有 `com.omnimind.agent-web` 插件提供，入口位于 Agent 模式的“本地 Web 界面”和侧栏 Web 菜单。用户可以打开、查看状态和停止对应服务；网页由系统浏览器显示。
 
 ## 官方接口选择
 

@@ -634,7 +634,6 @@ internal class AcpAgentProfileStore(context: Context) {
 
     companion object {
         const val CODEX_AGENT_ID = "codex-acp"
-        const val KIMI_CODE_AGENT_ID = "kimi-code-acp"
         const val XIAOWAN_AGENT_ID = "xiaowan-acp"
 
         /**
