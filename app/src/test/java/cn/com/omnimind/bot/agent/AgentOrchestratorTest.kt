@@ -27,6 +27,11 @@ import org.junit.Before
 import org.junit.Test
 import java.util.Locale
 
+import com.tencent.mmkv.MMKV
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyString
+import org.mockito.Mockito.mock
+import org.mockito.Mockito.mockStatic
 class AgentOrchestratorTest {
     @Test
     fun dispatchedGeneralAgentUsesParentApprovalAndDoesNotDisposeParentRouter() = runBlocking {
@@ -2020,20 +2025,68 @@ class AgentOrchestratorTest {
             )
         )
 
-        createOrchestrator(
-            llmClient = llmClient,
-            toolExecutor = toolExecutor,
-            toolImageContinuationPolicy = AgentToolImageContinuationPolicy(
-                supportsToolImageContinuation = false,
-                routeLabel = "model=mimo-v2.5"
+        withUnconfiguredVisionStore {
+            createOrchestrator(
+                llmClient = llmClient,
+                toolExecutor = toolExecutor,
+                toolImageContinuationPolicy = AgentToolImageContinuationPolicy(
+                    supportsToolImageContinuation = false,
+                    routeLabel = "model=mimo-v2.5"
+                )
+            ).run(
+                AgentOrchestrator.Input(
+                    callback = RecordingCallback(),
+                    initialMessages = initialMessages("看一下页面"),
+                    executionEnv = FakeExecutionEnvironment("看一下页面")
+                )
             )
-        ).run(
-            AgentOrchestrator.Input(
-                callback = RecordingCallback(),
-                initialMessages = initialMessages("看一下页面"),
-                executionEnv = FakeExecutionEnvironment("看一下页面")
+        }
+
+        val toolMessage = llmClient.requests[1].messages.last()
+        assertEquals("tool", toolMessage.role)
+        assertTrue(toolMessage.content is JsonPrimitive)
+        assertFalse(toolMessage.content.toString().contains("\"image_url\""))
+    }
+
+    @Test
+    fun toolResultForGenericToolWithoutVisionConfigAppendsTextWarningWithoutImageUrl() = runBlocking {
+        val llmClient = FakeLlmClient(
+            turns = listOf(
+                assistantTurn(toolCalls = listOf(toolCall("file_read"))),
+                assistantTurn(content = "已读取文件。")
             )
         )
+        val toolExecutor = FakeToolExecutor(
+            results = mapOf(
+                "file_read" to listOf(
+                    ToolExecutionResult.ContextResult(
+                        toolName = "file_read",
+                        summaryText = "已读取图片",
+                        previewJson = "{}",
+                        rawResultJson = "{}",
+                        success = true,
+                        imageDataUrl = "data:image/png;base64,AAA"
+                    )
+                )
+            )
+        )
+
+        withUnconfiguredVisionStore {
+            createOrchestrator(
+                llmClient = llmClient,
+                toolExecutor = toolExecutor,
+                toolImageContinuationPolicy = AgentToolImageContinuationPolicy(
+                    supportsToolImageContinuation = false,
+                    routeLabel = "model=text-only"
+                )
+            ).run(
+                AgentOrchestrator.Input(
+                    callback = RecordingCallback(),
+                    initialMessages = initialMessages("查看图片"),
+                    executionEnv = FakeExecutionEnvironment("查看图片")
+                )
+            )
+        }
 
         val toolMessage = llmClient.requests[1].messages.last()
         assertEquals("tool", toolMessage.role)
@@ -2445,6 +2498,16 @@ class AgentOrchestratorTest {
             toolImageContinuationPolicy = toolImageContinuationPolicy
         )
     }
+    private inline fun <T> withUnconfiguredVisionStore(block: () -> T): T {
+        val mockMmkv = mock(MMKV::class.java)
+        return mockStatic(MMKV::class.java).use { mockedMmkv ->
+            mockedMmkv.`when`<MMKV> { MMKV.defaultMMKV() }.thenReturn(mockMmkv)
+            mockedMmkv.`when`<MMKV> { MMKV.mmkvWithID(anyString()) }.thenReturn(mockMmkv)
+            mockedMmkv.`when`<MMKV> { MMKV.mmkvWithID(anyString(), anyInt()) }.thenReturn(mockMmkv)
+            block()
+        }
+    }
+
 
     private fun retryFixtureClient(
         scope: CoroutineScope,

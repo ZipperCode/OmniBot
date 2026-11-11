@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/services/assists_core_service.dart';
 import 'package:ui/services/models_dev_catalog_service.dart';
 import 'package:ui/services/storage_service.dart';
@@ -192,16 +194,63 @@ class ModelProviderProfilesPayload {
     );
   }
 }
+class ModelCapabilityOverride {
+  final String? modelType;
+  final bool? imageInput;
+  final bool? imageOutput;
+  final bool? audioOutput;
+  final bool? toolCall;
+
+  const ModelCapabilityOverride({
+    this.modelType,
+    this.imageInput,
+    this.imageOutput,
+    this.audioOutput,
+    this.toolCall,
+  });
+
+  bool get isEmpty =>
+      modelType == null &&
+      imageInput == null &&
+      imageOutput == null &&
+      audioOutput == null &&
+      toolCall == null;
+
+  factory ModelCapabilityOverride.fromMap(Map<dynamic, dynamic>? map) {
+    if (map == null) return const ModelCapabilityOverride();
+    return ModelCapabilityOverride(
+      modelType: ModelProviderConfigService.normalizeModelType(
+        map['modelType'] ?? map['model_type'] ?? map['type'],
+      ),
+      imageInput: _readBool(map['imageInput']),
+      imageOutput: _readBool(map['imageOutput']),
+      audioOutput: _readBool(map['audioOutput']),
+      toolCall: _readBool(map['toolCall']),
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+    if (modelType != null) 'modelType': modelType,
+    if (imageInput != null) 'imageInput': imageInput,
+    if (imageOutput != null) 'imageOutput': imageOutput,
+    if (audioOutput != null) 'audioOutput': audioOutput,
+    if (toolCall != null) 'toolCall': toolCall,
+  };
+}
 
 class ProviderModelOption {
   final String id;
   final String displayName;
   final String? ownedBy;
+  final String? modelType;
   final int? contextLimit;
   final int? inputLimit;
   final int? outputLimit;
   final List<String> inputModalities;
   final List<String> outputModalities;
+  final bool? supportsImageInput;
+  final bool? supportsImageOutput;
+  final bool? supportsAudioOutput;
   final String? modelsDevProviderId;
   final String? modelsDevProviderName;
   final String? providerLogoUrl;
@@ -226,11 +275,15 @@ class ProviderModelOption {
     required this.id,
     required this.displayName,
     this.ownedBy,
+    this.modelType,
     this.contextLimit,
     this.inputLimit,
     this.outputLimit,
     this.inputModalities = const [],
     this.outputModalities = const [],
+    this.supportsImageInput,
+    this.supportsImageOutput,
+    this.supportsAudioOutput,
     this.modelsDevProviderId,
     this.modelsDevProviderName,
     this.providerLogoUrl,
@@ -257,11 +310,20 @@ class ProviderModelOption {
       id: (map?['id'] ?? '').toString(),
       displayName: (map?['displayName'] ?? map?['id'] ?? '').toString(),
       ownedBy: map?['ownedBy']?.toString(),
+      modelType: ModelProviderConfigService.normalizeModelType(
+        map?['modelType'] ??
+            map?['model_type'] ??
+            map?['type'] ??
+            map?['mode'],
+      ),
       contextLimit: _readInt(map?['contextLimit']),
       inputLimit: _readInt(map?['inputLimit']),
       outputLimit: _readInt(map?['outputLimit']),
       inputModalities: _readStringList(map?['inputModalities']),
       outputModalities: _readStringList(map?['outputModalities']),
+      supportsImageInput: _readBool(map?['supportsImageInput']),
+      supportsImageOutput: _readBool(map?['supportsImageOutput']),
+      supportsAudioOutput: _readBool(map?['supportsAudioOutput']),
       modelsDevProviderId: _readNonEmptyString(map?['modelsDevProviderId']),
       modelsDevProviderName: _readNonEmptyString(map?['modelsDevProviderName']),
       providerLogoUrl: _readNonEmptyString(map?['providerLogoUrl']),
@@ -292,11 +354,15 @@ class ProviderModelOption {
     String? id,
     String? displayName,
     String? ownedBy,
+    String? modelType,
     int? contextLimit,
     int? inputLimit,
     int? outputLimit,
     List<String>? inputModalities,
     List<String>? outputModalities,
+    bool? supportsImageInput,
+    bool? supportsImageOutput,
+    bool? supportsAudioOutput,
     String? modelsDevProviderId,
     String? modelsDevProviderName,
     String? providerLogoUrl,
@@ -321,11 +387,15 @@ class ProviderModelOption {
       id: id ?? this.id,
       displayName: displayName ?? this.displayName,
       ownedBy: ownedBy ?? this.ownedBy,
+      modelType: modelType ?? this.modelType,
       contextLimit: contextLimit ?? this.contextLimit,
       inputLimit: inputLimit ?? this.inputLimit,
       outputLimit: outputLimit ?? this.outputLimit,
       inputModalities: inputModalities ?? this.inputModalities,
       outputModalities: outputModalities ?? this.outputModalities,
+      supportsImageInput: supportsImageInput ?? this.supportsImageInput,
+      supportsImageOutput: supportsImageOutput ?? this.supportsImageOutput,
+      supportsAudioOutput: supportsAudioOutput ?? this.supportsAudioOutput,
       modelsDevProviderId: modelsDevProviderId ?? this.modelsDevProviderId,
       modelsDevProviderName:
           modelsDevProviderName ?? this.modelsDevProviderName,
@@ -361,11 +431,15 @@ class ProviderModelOption {
       'id': id,
       'displayName': displayName,
       'ownedBy': ownedBy,
+      'modelType': modelType,
       'contextLimit': contextLimit,
       'inputLimit': inputLimit,
       'outputLimit': outputLimit,
       'inputModalities': inputModalities,
       'outputModalities': outputModalities,
+      'supportsImageInput': supportsImageInput,
+      'supportsImageOutput': supportsImageOutput,
+      'supportsAudioOutput': supportsAudioOutput,
       'modelsDevProviderId': modelsDevProviderId,
       'modelsDevProviderName': modelsDevProviderName,
       'providerLogoUrl': providerLogoUrl,
@@ -387,43 +461,43 @@ class ProviderModelOption {
       'temperature': temperature,
     };
   }
+}
 
-  static int? _readInt(Object? value) {
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value?.toString() ?? '');
-  }
+int? _readInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
+}
 
-  static String? _readNonEmptyString(Object? value) {
-    final normalized = value?.toString().trim() ?? '';
-    return normalized.isEmpty ? null : normalized;
-  }
+String? _readNonEmptyString(Object? value) {
+  final normalized = value?.toString().trim() ?? '';
+  return normalized.isEmpty ? null : normalized;
+}
 
-  static List<String> _readStringList(Object? value) {
-    if (value is List) {
-      return value
-          .map((item) => item.toString().trim().toLowerCase())
-          .where((item) => item.isNotEmpty)
-          .toSet()
-          .toList();
-    }
-    final raw = value?.toString().trim() ?? '';
-    if (raw.isEmpty) return const [];
-    return raw
-        .split(',')
-        .map((item) => item.trim().toLowerCase())
+List<String> _readStringList(Object? value) {
+  if (value is List) {
+    return value
+        .map((item) => item.toString().trim().toLowerCase())
         .where((item) => item.isNotEmpty)
         .toSet()
         .toList();
   }
+  final raw = value?.toString().trim() ?? '';
+  if (raw.isEmpty) return const [];
+  return raw
+      .split(',')
+      .map((item) => item.trim().toLowerCase())
+      .where((item) => item.isNotEmpty)
+      .toSet()
+      .toList();
+}
 
-  static bool? _readBool(Object? value) {
-    if (value is bool) return value;
-    final normalized = value?.toString().trim().toLowerCase() ?? '';
-    if (normalized == 'true') return true;
-    if (normalized == 'false') return false;
-    return null;
-  }
+bool? _readBool(Object? value) {
+  if (value is bool) return value;
+  final normalized = value?.toString().trim().toLowerCase() ?? '';
+  if (normalized == 'true') return true;
+  if (normalized == 'false') return false;
+  return null;
 }
 
 class ProviderModelGroup {
@@ -616,10 +690,20 @@ class ModelProviderConfigService {
     required String providerName,
     required String apiBase,
     required List<ProviderModelOption> models,
+    Map<String, ModelCapabilityOverride>? overrides,
   }) async {
     if (models.isEmpty) {
       return const [];
     }
+    // 在 enrich 前捕获 profileSnapshot 并核对 apiBase，避免异步完成后写入新 revision
+    final profileSnapshot = await _findProfileById(profileId);
+    final normalizedApiBase = normalizeApiBase(apiBase) ?? '';
+    final isMatchingEndpoint = profileSnapshot != null &&
+        normalizedApiBase.isNotEmpty &&
+        normalizeApiBase(profileSnapshot.baseUrl) == normalizedApiBase;
+
+    final capabilityOverrides = overrides ??
+        await getModelCapabilityOverrides(profileId: profileId);
     var catalog = const ModelsDevCatalog(providers: {});
     ModelsDevProviderEntry? provider;
     try {
@@ -637,13 +721,60 @@ class ModelProviderConfigService {
     final providerGroupId =
         provider?.id ??
         (providerName.trim().isNotEmpty ? providerName.trim() : profileId);
-    return models
+    final catalogEnriched = models
         .map(
           (item) => _enrichModelOption(
             item: item,
             catalog: catalog,
             provider: provider,
             providerGroupId: providerGroupId,
+          ),
+        )
+        .toList();
+
+    final catalogMetadataOnly = <ProviderModelOption>[];
+    for (final item in models) {
+      final modelMatch = catalog.isEmpty
+          ? null
+          : ModelsDevCatalogService.matchModelMetadata(
+              catalog: catalog,
+              provider: provider,
+              modelId: item.id,
+            );
+      final meta = modelMatch?.metadata;
+      if (meta != null) {
+        final inputMods = meta.inputModalities;
+        final outputMods = meta.outputModalities;
+        catalogMetadataOnly.add(
+          ProviderModelOption(
+            id: item.id,
+            displayName: meta.name.trim().isNotEmpty ? meta.name.trim() : item.id,
+            modelType: meta.modelType,
+            inputModalities: inputMods,
+            outputModalities: outputMods,
+            supportsImageInput: inputMods.isNotEmpty ? inputMods.contains('image') : null,
+            supportsImageOutput: outputMods.isNotEmpty ? outputMods.contains('image') : null,
+            supportsAudioOutput: outputMods.isNotEmpty ? outputMods.contains('audio') : null,
+            toolCall: meta.toolCall,
+          ),
+        );
+      }
+    }
+
+    if (isMatchingEndpoint && catalogMetadataOnly.isNotEmpty) {
+      await syncProviderCatalogMetadata(
+        profileId: profileId,
+        expectedProfileRevision: profileSnapshot.revision,
+        expectedProfileBaseUrl: profileSnapshot.baseUrl,
+        models: catalogMetadataOnly,
+      );
+    }
+
+    return catalogEnriched
+        .map(
+          (item) => applyCapabilityOverride(
+            item,
+            capabilityOverrides[item.id],
           ),
         )
         .toList();
@@ -668,6 +799,27 @@ class ModelProviderConfigService {
     final shouldUseMetadataName =
         item.displayName.trim().isEmpty || item.displayName.trim() == item.id;
     final metadataProviderGroupId = metadataProvider?.id ?? providerGroupId;
+    final resolvedImageInput = item.supportsImageInput ??
+        (item.inputModalities.isNotEmpty
+            ? item.inputModalities.any((m) => m.toLowerCase() == 'image')
+            : (metadata?.inputModalities.isNotEmpty == true
+                ? metadata!.inputModalities.any((m) => m.toLowerCase() == 'image')
+                : null));
+
+    final resolvedImageOutput = item.supportsImageOutput ??
+        (item.outputModalities.isNotEmpty
+            ? item.outputModalities.any((m) => m.toLowerCase() == 'image')
+            : (metadata?.outputModalities.isNotEmpty == true
+                ? metadata!.outputModalities.any((m) => m.toLowerCase() == 'image')
+                : null));
+
+    final resolvedAudioOutput = item.supportsAudioOutput ??
+        (item.outputModalities.isNotEmpty
+            ? item.outputModalities.any((m) => m.toLowerCase() == 'audio')
+            : (metadata?.outputModalities.isNotEmpty == true
+                ? metadata!.outputModalities.any((m) => m.toLowerCase() == 'audio')
+                : null));
+
     return item.copyWith(
       displayName: shouldUseMetadataName && metadataDisplayName.isNotEmpty
           ? metadataDisplayName
@@ -681,10 +833,14 @@ class ModelProviderConfigService {
       outputModalities: item.outputModalities.isNotEmpty
           ? item.outputModalities
           : (metadata?.outputModalities ?? item.outputModalities),
+      supportsImageInput: resolvedImageInput,
+      supportsImageOutput: resolvedImageOutput,
+      supportsAudioOutput: resolvedAudioOutput,
       modelsDevProviderId: metadataProvider?.id,
       modelsDevProviderName: metadataProvider?.name,
       providerLogoUrl: metadataProvider?.logoUrl,
       family: metadata?.family,
+      modelType: item.modelType ?? metadata?.modelType,
       attachment: item.attachment ?? metadata?.attachment,
       // Shared Provider metadata owns executable reasoning capabilities.
       reasoning: item.reasoning,
@@ -697,6 +853,189 @@ class ModelProviderConfigService {
         ownedBy: item.ownedBy ?? '',
       ),
     );
+  }
+
+  static ProviderModelOption applyCapabilityOverride(
+    ProviderModelOption item,
+    ModelCapabilityOverride? override,
+  ) {
+    if (override == null || override.isEmpty) {
+      return item;
+    }
+    final resolvedModelType = override.modelType ?? item.modelType;
+    final nextImageInput = override.imageInput ?? item.supportsImageInput;
+    final nextImageOutput = override.imageOutput ?? item.supportsImageOutput;
+    final nextAudioOutput = override.audioOutput ?? item.supportsAudioOutput;
+    final nextToolCall = override.toolCall ?? item.toolCall;
+
+    var nextInputModalities = item.inputModalities;
+    bool? nextAttachment = item.attachment;
+    if (nextImageInput != null) {
+      if (nextImageInput == true) {
+        if (!nextInputModalities.any((m) => m.toLowerCase() == 'image')) {
+          nextInputModalities = [...nextInputModalities, 'image'];
+        }
+        nextAttachment = true;
+      } else {
+        nextInputModalities = nextInputModalities
+            .where((m) => m.toLowerCase() != 'image')
+            .toList();
+        nextAttachment = false;
+      }
+    }
+
+    var nextOutputModalities = item.outputModalities;
+    if (nextImageOutput != null) {
+      if (nextImageOutput == true) {
+        if (!nextOutputModalities.any((m) => m.toLowerCase() == 'image')) {
+          nextOutputModalities = [...nextOutputModalities, 'image'];
+        }
+      } else {
+        nextOutputModalities = nextOutputModalities
+            .where((m) => m.toLowerCase() != 'image')
+            .toList();
+      }
+    }
+
+    if (nextAudioOutput != null) {
+      if (nextAudioOutput == true) {
+        if (!nextOutputModalities.any((m) => m.toLowerCase() == 'audio')) {
+          nextOutputModalities = [...nextOutputModalities, 'audio'];
+        }
+      } else {
+        nextOutputModalities = nextOutputModalities
+            .where((m) => m.toLowerCase() != 'audio')
+            .toList();
+      }
+    }
+
+    return item.copyWith(
+      modelType: resolvedModelType,
+      supportsImageInput: nextImageInput,
+      supportsImageOutput: nextImageOutput,
+      supportsAudioOutput: nextAudioOutput,
+      inputModalities: nextInputModalities,
+      outputModalities: nextOutputModalities,
+      attachment: nextAttachment,
+      toolCall: nextToolCall,
+    );
+  }
+
+  static Future<Map<String, ModelCapabilityOverride>> getModelCapabilityOverrides({
+    required String profileId,
+  }) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    try {
+      final result = await AssistsMessageService.assistCore
+          .invokeMethod<Map<dynamic, dynamic>>('getModelCapabilityOverrides', {
+        'profileId': normalizedProfileId,
+      });
+      if (result == null) return const {};
+      return result.map(
+        (key, value) => MapEntry(
+          key.toString(),
+          ModelCapabilityOverride.fromMap(value as Map?),
+        ),
+      );
+    } on MissingPluginException {
+      return const {};
+    }
+  }
+
+  static Future<void> saveModelCapabilityOverride({
+    required String profileId,
+    required String modelId,
+    required ModelCapabilityOverride override,
+  }) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    final normalizedModelId = modelId.trim();
+    if (normalizedProfileId.isEmpty) {
+      throw ArgumentError('profileId cannot be empty');
+    }
+    if (normalizedModelId.isEmpty) {
+      throw ArgumentError('modelId cannot be empty');
+    }
+    await AssistsMessageService.assistCore.invokeMethod(
+      'saveModelCapabilityOverride',
+      {
+        'profileId': normalizedProfileId,
+        'modelId': normalizedModelId,
+        'modelType': override.modelType,
+        'imageInput': override.imageInput,
+        'imageOutput': override.imageOutput,
+        'audioOutput': override.audioOutput,
+        'toolCall': override.toolCall,
+      },
+    );
+  }
+
+  static Future<void> clearModelCapabilityOverride({
+    required String profileId,
+    required String modelId,
+  }) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    final normalizedModelId = modelId.trim();
+    if (normalizedProfileId.isEmpty) {
+      throw ArgumentError('profileId cannot be empty');
+    }
+    if (normalizedModelId.isEmpty) {
+      throw ArgumentError('modelId cannot be empty');
+    }
+    await AssistsMessageService.assistCore.invokeMethod(
+      'clearModelCapabilityOverride',
+      {
+        'profileId': normalizedProfileId,
+        'modelId': normalizedModelId,
+      },
+    );
+  }
+  static Future<void> syncProviderCatalogMetadata({
+    required String profileId,
+    required int expectedProfileRevision,
+    required String expectedProfileBaseUrl,
+    required List<ProviderModelOption> models,
+  }) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    if (normalizedProfileId.isEmpty) return;
+    try {
+      await AssistsMessageService.assistCore.invokeMethod(
+        'syncProviderCatalogMetadata',
+        {
+          'profileId': normalizedProfileId,
+          'expectedProfileRevision': expectedProfileRevision,
+          'expectedProfileBaseUrl': expectedProfileBaseUrl,
+          'models': models.map((m) => m.toMap()).toList(),
+        },
+      );
+    } on MissingPluginException {
+      // Standalone unit test environment
+    } catch (_) {}
+  }
+
+
+  static Future<List<ProviderModelOption>> getCachedRemoteModelsForProfile(
+    String profileId, {
+    ModelProviderProfileSummary? profile,
+  }) async {
+    final normalizedProfileId = _canonicalProfileId(profileId);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.reload();
+    final cached = _readJsonMap(_kCachedFetchedModelsKey);
+    final bucket = cached[normalizedProfileId];
+    if (bucket is! Map) return const [];
+    final snapshot = profile ?? await _findProfileById(normalizedProfileId);
+    if (snapshot != null &&
+        (normalizeApiBase(bucket['apiBase']?.toString() ?? '') !=
+                normalizeApiBase(snapshot.baseUrl) ||
+            _readInt(bucket['profileRevision']) != snapshot.revision)) {
+      return const [];
+    }
+    final modelsRaw = bucket['models'];
+    if (modelsRaw is! List) return const [];
+    return modelsRaw
+        .map((item) => ProviderModelOption.fromMap(item as Map?))
+        .where((item) => item.id.isNotEmpty)
+        .toList();
   }
 
   static Future<List<ProviderModelOption>> fetchModels({
@@ -801,7 +1140,10 @@ class ModelProviderConfigService {
     final resolvedProfile = profile ?? await _findProfileById(profileId);
     final manualModelIds =
         await getManualModelIds(profileId: normalizedProfileId);
-    const remoteModels = <ProviderModelOption>[];
+    final remoteModels = await getCachedRemoteModelsForProfile(
+      normalizedProfileId,
+      profile: resolvedProfile,
+    );
     final merged = mergeModelOptions(
       remoteModels: remoteModels,
       manualModelIds: manualModelIds,
@@ -1238,4 +1580,40 @@ class ModelProviderConfigService {
       }),
     );
   }
+  static String? normalizeModelType(dynamic raw) {
+    if (raw == null) return null;
+    final str = raw.toString().trim().toLowerCase();
+    switch (str) {
+      case 'chat':
+      case 'chat_completion':
+      case 'chat-completion':
+      case 'text':
+      case 'text_generation':
+      case 'text-generation':
+      case 'conversation':
+        return 'chat';
+      case 'embedding':
+      case 'embeddings':
+      case 'embed':
+      case 'feature-extraction':
+      case 'text-embedding':
+        return 'embedding';
+      case 'image':
+      case 'images':
+      case 'image_generation':
+      case 'image-generation':
+      case 'text-to-image':
+        return 'image';
+      case 'tts':
+      case 'audio':
+      case 'speech':
+      case 'text-to-speech':
+      case 'audio_speech':
+        return 'tts';
+      default:
+        return null;
+    }
+  }
+
+  static bool? readBool(Object? value) => _readBool(value);
 }

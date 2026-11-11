@@ -330,4 +330,58 @@ class ProviderModelCapabilitiesTest {
             metadata = Json.parseToJsonElement(metadata.trimIndent()) as JsonObject,
             apiBase = apiBase,
         )
+
+    @Test
+    fun providerModelType_parsedFromExplicitDeclaration() {
+        for ((raw, expected) in listOf(
+            """{"type":"chat"}""" to "chat",
+            """{"model_type":"image"}""" to "image",
+            """{"modelType":"embedding"}""" to "embedding",
+            """{"mode":"tts"}""" to "tts",
+            """{"capabilities":{"image":true}}""" to "image",
+            """{"capabilities":{"embeddings":true}}""" to "embedding",
+            """{"capabilities":{"tts":true}}""" to "tts",
+            """{"supported_generation_methods":["generateContent"]}""" to "chat",
+            """{"supportedGenerationMethods":["embedContent"]}""" to "embedding",
+        )) {
+            val model = parse(raw)
+            assertEquals(raw, expected, model.modelType)
+        }
+    }
+
+    @Test
+    fun providerModelType_unknownDeclarationDoesNotGuessFromName() {
+        for (name in listOf("dall-e-3", "text-embedding-3-small", "gpt-4o", "tts-1")) {
+            val model = ProviderModelCapabilities.applyDeclared(
+                model = ProviderModelOption(id = name),
+                metadata = Json.parseToJsonElement("""{"type":"unknown"}""") as JsonObject,
+            )
+            assertNull(name, model.modelType)
+            assertNull(name, model.supportsImageInput)
+            assertNull(name, model.supportsImageOutput)
+        }
+    }
+
+    @Test
+    fun providerModalities_explicitTextOnlyNegatesImageInputEvenIfAttachmentWasTrue() {
+        val model = ProviderModelCapabilities.applyDeclared(
+            model = ProviderModelOption(id = "fixture", attachment = true),
+            metadata = Json.parseToJsonElement("""
+                {"input_modalities":["text"],"output_modalities":["text"]}
+            """) as JsonObject,
+        )
+        assertEquals(false, model.supportsImageInput)
+        assertEquals(false, model.attachment)
+        assertEquals(false, model.supportsImageOutput)
+    }
+
+    @Test
+    fun providerModalities_explicitImageOutputParsed() {
+        val model = parse("""
+            {"type":"image","input_modalities":["text"],"output_modalities":["image"]}
+        """)
+        assertEquals("image", model.modelType)
+        assertEquals(false, model.supportsImageInput)
+        assertEquals(true, model.supportsImageOutput)
+    }
 }

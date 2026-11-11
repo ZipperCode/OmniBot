@@ -275,7 +275,7 @@ abstract class AppLocalizations {
   /// No description provided for @settingsSceneModelSubtitle.
   ///
   /// In zh, this message translates to:
-  /// **'按场景绑定模型，未绑定场景使用默认模型'**
+  /// **'按场景配置基础与高级模型绑定'**
   String get settingsSceneModelSubtitle;
 
   /// No description provided for @settingsWorkspaceMemoryTitle.
@@ -1751,7 +1751,7 @@ abstract class AppLocalizations {
   /// No description provided for @sceneModelMappingDesc.
   ///
   /// In zh, this message translates to:
-  /// **'按场景绑定 Provider 与模型，未绑定的场景会继续使用默认模型。'**
+  /// **'按场景绑定 Provider 与模型，各场景独立生效。'**
   String get sceneModelMappingDesc;
 
   /// No description provided for @sceneModelRefreshList.

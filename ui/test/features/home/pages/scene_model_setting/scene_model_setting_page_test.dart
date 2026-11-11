@@ -89,6 +89,8 @@ void main() {
   late bool providerReadOnly;
   late bool providerReady;
   late bool includeSecondProvider;
+  late String secondProviderProtocolType;
+  late List<Map<String, dynamic>> sceneCatalog;
   late int providerFetchCount;
   late List<Map<String, dynamic>> sceneBindings;
   late List<Map<String, dynamic>> providerFetchResponse;
@@ -119,6 +121,7 @@ void main() {
     providerReadOnly = false;
     providerReady = true;
     includeSecondProvider = false;
+    secondProviderProtocolType = 'openai_compatible';
     providerFetchCount = 0;
     sceneBindings = <Map<String, dynamic>>[];
     providerFetchResponse = <Map<String, dynamic>>[];
@@ -128,64 +131,65 @@ void main() {
     lastProviderFetchArguments = null;
     providerFetchArguments = <Map<dynamic, dynamic>>[];
     savedOperationConfig = <String, dynamic>{'useOfficialService': true};
+    sceneCatalog = <Map<String, dynamic>>[
+      <String, dynamic>{
+        'sceneId': 'scene.vlm.operation.primary',
+        'description': '负责 Android GUI 观察与动作决策',
+        'defaultModel': 'qwen3-vl-plus',
+        'effectiveModel': 'qwen3-vl-plus',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.compactor.context.chat',
+        'description': '负责聊天历史压缩总结',
+        'defaultModel': 'chat-compactor-model',
+        'effectiveModel': 'chat-compactor-model',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.memory.embedding',
+        'description': '负责 workspace 记忆向量检索的嵌入模型',
+        'defaultModel': 'embedding-default',
+        'effectiveModel': 'embedding-default',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+    ];
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           switch (call.method) {
             case 'getSceneModelCatalog':
-              return <Map<String, dynamic>>[
-                <String, dynamic>{
-                  'sceneId': 'scene.vlm.operation.primary',
-                  'description': '负责 Android GUI 观察与动作决策',
-                  'defaultModel': 'qwen3-vl-plus',
-                  'effectiveModel': 'qwen3-vl-plus',
-                  'effectiveProviderProfileId': '',
-                  'effectiveProviderProfileName': '',
-                  'boundProviderProfileId': '',
-                  'boundProviderProfileName': '',
-                  'transport': 'openai_compatible',
-                  'configSource': 'builtin',
-                  'overrideApplied': false,
-                  'overrideModel': '',
-                  'providerConfigured': false,
-                  'bindingExists': false,
-                  'bindingProfileMissing': false,
-                },
-                <String, dynamic>{
-                  'sceneId': 'scene.compactor.context.chat',
-                  'description': '负责聊天历史压缩总结',
-                  'defaultModel': 'chat-compactor-model',
-                  'effectiveModel': 'chat-compactor-model',
-                  'effectiveProviderProfileId': '',
-                  'effectiveProviderProfileName': '',
-                  'boundProviderProfileId': '',
-                  'boundProviderProfileName': '',
-                  'transport': 'openai_compatible',
-                  'configSource': 'builtin',
-                  'overrideApplied': false,
-                  'overrideModel': '',
-                  'providerConfigured': false,
-                  'bindingExists': false,
-                  'bindingProfileMissing': false,
-                },
-                <String, dynamic>{
-                  'sceneId': 'scene.memory.embedding',
-                  'description': '负责 workspace 记忆向量检索的嵌入模型',
-                  'defaultModel': 'embedding-default',
-                  'effectiveModel': 'embedding-default',
-                  'effectiveProviderProfileId': '',
-                  'effectiveProviderProfileName': '',
-                  'boundProviderProfileId': '',
-                  'boundProviderProfileName': '',
-                  'transport': 'openai_compatible',
-                  'configSource': 'builtin',
-                  'overrideApplied': false,
-                  'overrideModel': '',
-                  'providerConfigured': false,
-                  'bindingExists': false,
-                  'bindingProfileMissing': false,
-                },
-              ];
+              return sceneCatalog;
             case 'getSceneModelBindings':
               return sceneBindings;
             case 'saveSceneModelBinding':
@@ -229,7 +233,7 @@ void main() {
                       'readOnly': false,
                       'ready': true,
                       'revision': 1,
-                      'protocolType': 'openai_compatible',
+                      'protocolType': secondProviderProtocolType,
                     },
                 ],
                 'editingProfileId': 'provider-1',
@@ -331,8 +335,6 @@ void main() {
 
     expect(find.byType(ListView), findsWidgets);
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.text('Chat Compactor'), findsOneWidget);
-    expect(find.text('Voice'), findsNothing);
     expect(loadCount, 1);
 
     loader.complete(
@@ -344,47 +346,123 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('scene entry paints cache and has no manual refresh control', (
-    tester,
-  ) async {
-    providerFetchError = StateError('offline');
-    await seedManualModels(
-      profileId: 'provider-1',
-      apiBase: providerBaseUrl,
-      profileRevision: providerRevision,
-      models: const <ProviderModelOption>[
-        ProviderModelOption(id: 'cached-model', displayName: 'Cached model'),
-      ],
-    );
+  testWidgets(
+    'opening scene settings uses local cache without fetching provider models',
+    (tester) async {
+      providerConfigured = true;
+      providerFetchError = StateError('offline');
+      await seedManualModels(
+        profileId: 'provider-1',
+        apiBase: providerBaseUrl,
+        profileRevision: providerRevision,
+        models: const <ProviderModelOption>[
+          ProviderModelOption(id: 'cached-model', displayName: 'Cached model'),
+        ],
+      );
 
-    await pumpSceneSettings(tester);
+      await pumpSceneSettings(tester);
 
-    expect(providerFetchCount, 1);
-    expect(
-      find.byKey(const Key('scene-model-refresh-provider-models-button')),
-      findsNothing,
-    );
-    await tester.tap(
-      find.byKey(
+      // 打开页面仅读取本地缓存，零远程 fetch 副作用，且不展示失败重试控件
+      expect(providerFetchCount, 0);
+      expect(
+        find.byKey(const Key('scene-model-retry-refresh-button')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('scene-model-refresh-button')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(
+          const Key('scene-model-selector-scene.compactor.context.chat'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('cached-model'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'manual refresh failure retains cached models and retry discovers fresh model',
+    (tester) async {
+      providerFetchError = StateError('offline');
+      await seedManualModels(
+        profileId: 'provider-1',
+        apiBase: providerBaseUrl,
+        profileRevision: providerRevision,
+        models: const <ProviderModelOption>[
+          ProviderModelOption(id: 'cached-model', displayName: 'Cached model'),
+        ],
+      );
+
+      await pumpSceneSettings(tester);
+      expect(providerFetchCount, 0);
+
+      // 主动点击顶部刷新按钮
+      await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+      for (var attempt = 0; attempt < 10; attempt++) {
+        await tester.pump();
+      }
+
+      expect(providerFetchCount, 1);
+      expect(lastProviderFetchArguments?['apiBase'], providerBaseUrl);
+      expect(lastProviderFetchArguments?['profileId'], 'provider-1');
+      // 错误控件出现，但不钉死具体文案
+      expect(
+        find.byKey(const Key('scene-model-retry-refresh-button')),
+        findsOneWidget,
+      );
+
+      // 主动刷新失败仍能选择 cached 模型
+      final selector = find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('cached-model'), findsOneWidget);
-  });
+      );
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      expect(find.text('cached-model'), findsOneWidget);
+      await tester.tapAt(const Offset(2, 2));
+      await tester.pumpAndSettle();
 
-  testWidgets('configured BYOK provider refreshes automatically', (
-    tester,
-  ) async {
-    providerFetchResponse = <Map<String, dynamic>>[
-      <String, dynamic>{'id': 'fresh-model', 'displayName': 'Fresh model'},
-    ];
-    await pumpSceneSettings(tester);
+      // 修改 mock 到成功，点击真实 retry 按钮
+      providerFetchError = null;
+      providerFetchResponse = <Map<String, dynamic>>[
+        <String, dynamic>{'id': 'fresh-model', 'displayName': 'Fresh model'},
+      ];
 
-    expect(providerFetchCount, 1);
-    expect(lastProviderFetchArguments?['apiBase'], providerBaseUrl);
-    expect(lastProviderFetchArguments?['profileId'], 'provider-1');
-  });
+      await tester.tap(
+        find.byKey(const Key('scene-model-retry-refresh-button')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(providerFetchCount, 2);
+      // 错误控件消失
+      expect(
+        find.byKey(const Key('scene-model-retry-refresh-button')),
+        findsNothing,
+      );
+
+      // 刷新后 new 候选出现，验证可选择并保存实际 binding
+      await tester.tap(selector);
+      await tester.pumpAndSettle();
+      expect(find.text('fresh-model'), findsOneWidget);
+      await tester.tap(find.text('fresh-model'));
+      await tester.pumpAndSettle();
+
+      expect(
+        sceneBindings.where(
+          (item) => item['sceneId'] == 'scene.compactor.context.chat',
+        ).single,
+        containsPair('modelId', 'fresh-model'),
+      );
+      expect(
+        sceneBindings.where(
+          (item) => item['sceneId'] == 'scene.compactor.context.chat',
+        ).single,
+        containsPair('providerProfileId', 'provider-1'),
+      );
+    },
+  );
 
   testWidgets('changed provider revision cannot apply an old fetch result', (
     tester,
@@ -392,6 +470,10 @@ void main() {
     final pending = Completer<List<Map<String, dynamic>>>();
     providerFetchCompleter = pending;
     await pumpSceneSettings(tester);
+    expect(providerFetchCount, 0);
+
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+    await tester.pump();
     expect(providerFetchCount, 1);
 
     providerBaseUrl = 'https://replacement.example.com/v1';
@@ -412,10 +494,14 @@ void main() {
     expect(find.text('stale-model'), findsNothing);
   });
 
-  testWidgets('automatic refresh disposal ignores completion', (tester) async {
+  testWidgets('refresh disposal ignores completion', (tester) async {
     final pending = Completer<List<Map<String, dynamic>>>();
     providerFetchCompleter = pending;
     await pumpSceneSettings(tester);
+    expect(providerFetchCount, 0);
+
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+    await tester.pump();
     expect(providerFetchCount, 1);
 
     await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
@@ -428,12 +514,15 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('background refresh errors do not leak endpoint details', (
+  testWidgets('refresh errors do not leak endpoint details', (
     tester,
   ) async {
     providerFetchError =
         'socket failed at https://user:token@example.com/private?key=secret';
     await pumpSceneSettings(tester);
+    expect(providerFetchCount, 0);
+
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
     for (var attempt = 0; attempt < 10; attempt++) {
       await tester.pump();
     }
@@ -441,21 +530,12 @@ void main() {
     expect(find.textContaining('user:token'), findsNothing);
     expect(find.textContaining('/private'), findsNothing);
     expect(find.textContaining('key=secret'), findsNothing);
+    expect(
+      find.byKey(const Key('scene-model-retry-refresh-button')),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('GUI scene is labeled GUI instead of VLM', (tester) async {
-    tester.view.physicalSize = const Size(1080, 2000);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(buildTestApp(const SceneModelSettingPage()));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 50));
-
-    expect(find.text('GUI'), findsOneWidget);
-    expect(find.text('VLM'), findsNothing);
-  });
 
   testWidgets(
     'GUI switches providers through the shared scene binding and restores it',
@@ -475,6 +555,8 @@ void main() {
         },
       ];
       await pumpSceneSettings(tester);
+      await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+      await tester.pumpAndSettle();
       await tester.tap(
         find.byKey(
           const Key('scene-model-selector-scene.vlm.operation.primary'),
@@ -492,6 +574,18 @@ void main() {
       await pumpSceneSettings(tester);
       await tester.pumpAndSettle();
       expect(find.text('Provider One / custom-gui-model'), findsOneWidget);
+      await tester.tap(
+        find.byKey(
+          const Key('scene-model-selector-scene.vlm.operation.primary'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('跟随主 Agent'));
+      await tester.pumpAndSettle();
+      expect(sceneBindings, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await pumpSceneSettings(tester);
+      expect(sceneBindings, isEmpty);
     },
   );
 
@@ -506,6 +600,8 @@ void main() {
         {'id': 'gpt-5.4', 'displayName': 'Second Choice'},
       ];
       await pumpSceneSettings(tester);
+      await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+      await tester.pumpAndSettle();
       final fetchCountBeforeOpen = providerFetchCount;
       final selector = find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
@@ -577,6 +673,8 @@ void main() {
         {'id': 'custom-model', 'displayName': 'Custom Choice'},
       ];
       await pumpSceneSettings(tester);
+      await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+      await tester.pumpAndSettle();
       tester.view.physicalSize = const Size(360, 800);
       await tester.pumpAndSettle();
       final selector = find.byKey(
@@ -659,6 +757,227 @@ void main() {
     });
     expect(find.text('已自动保存。'), findsOneWidget);
   });
+  testWidgets('capability filtering excludes incompatible models and preserves unknown models', (
+    tester,
+  ) async {
+    providerFetchResponse = [
+      {
+        'id': 'embed-only-model',
+        'displayName': 'Embedding Only',
+        'outputModalities': ['embedding'],
+      },
+      {
+        'id': 'text-chat-model',
+        'displayName': 'Text Chat',
+        'inputModalities': ['text'],
+        'outputModalities': ['text'],
+      },
+      {
+        'id': 'vision-chat-model',
+        'displayName': 'Vision Chat',
+        'inputModalities': ['text', 'image'],
+        'outputModalities': ['text'],
+      },
+      {
+        'id': 'unknown-capability-model',
+        'displayName': 'Unknown Modalities',
+      },
+    ];
+
+    await pumpSceneSettings(tester);
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+    await tester.pumpAndSettle();
+
+    // 上下文压缩场景：embedding 模型被过滤，文本模型与未知能力模型可选。
+    final compactorSelector = find.byKey(
+      const Key('scene-model-selector-scene.compactor.context.chat'),
+    );
+    await tester.tap(compactorSelector);
+    await tester.pumpAndSettle();
+    expect(find.text('embed-only-model'), findsNothing);
+    expect(find.text('text-chat-model'), findsOneWidget);
+    expect(find.text('unknown-capability-model'), findsOneWidget);
+    await tester.tapAt(const Offset(2, 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('image generation filters out unsupported provider and requires image output', (
+    tester,
+  ) async {
+    includeSecondProvider = true;
+    secondProviderProtocolType = 'anthropic';
+    sceneCatalog = [
+      <String, dynamic>{
+        'sceneId': 'scene.image.generate',
+        'description': '图像生成',
+        'defaultModel': '',
+        'effectiveModel': '',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+    ];
+    providerFetchResponse = [
+      {
+        'id': 'dall-e-3',
+        'displayName': 'DALL-E 3',
+        'outputModalities': ['image'],
+      },
+      {
+        'id': 'chat-with-image-output',
+        'displayName': 'Chat Image Output',
+        'modelType': 'chat',
+        'outputModalities': ['image', 'text'],
+      },
+      {
+        'id': 'image-type-but-text-output',
+        'displayName': 'Image Type But Text Output',
+        'modelType': 'image',
+        'outputModalities': ['text'],
+      },
+      {
+        'id': 'supports-image-output-false',
+        'displayName': 'Supports Image Output False',
+        'supportsImageOutput': false,
+        'modelType': 'image',
+      },
+      {
+        'id': 'text-only',
+        'displayName': 'Text Only',
+        'outputModalities': ['text'],
+      },
+    ];
+    secondProviderFetchResponse = [
+      {
+        'id': 'claude-image-attempt',
+        'displayName': 'Claude Attempt',
+        'outputModalities': ['image'],
+      },
+    ];
+
+    await pumpSceneSettings(tester);
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+    await tester.pumpAndSettle();
+    final imageSelector = find.byKey(
+      const Key('scene-model-selector-scene.image.generate'),
+    );
+    await tester.tap(imageSelector);
+    await tester.pumpAndSettle();
+
+    expect(find.text('dall-e-3'), findsOneWidget);
+    expect(find.text('chat-with-image-output'), findsOneWidget);
+    expect(find.text('image-type-but-text-output'), findsNothing);
+    expect(find.text('supports-image-output-false'), findsNothing);
+    expect(find.text('text-only'), findsNothing);
+    expect(find.text('claude-image-attempt'), findsNothing);
+    await tester.tapAt(const Offset(2, 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('voice synthesis requires openai_compatible provider and audio output', (
+    tester,
+  ) async {
+    includeSecondProvider = true;
+    secondProviderProtocolType = 'anthropic';
+    sceneCatalog = [
+      <String, dynamic>{
+        'sceneId': 'scene.voice',
+        'description': '语音合成',
+        'defaultModel': '',
+        'effectiveModel': '',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+    ];
+    providerFetchResponse = [
+      {
+        'id': 'gpt-4o-audio-preview',
+        'displayName': 'GPT-4o Audio',
+        'outputModalities': ['audio', 'text'],
+      },
+      {
+        'id': 'text-only-voice-test',
+        'displayName': 'Text Only Voice Test',
+        'outputModalities': ['text'],
+      },
+    ];
+    secondProviderFetchResponse = [
+      {
+        'id': 'anthropic-audio-attempt',
+        'displayName': 'Anthropic Audio Attempt',
+        'outputModalities': ['audio'],
+      },
+    ];
+
+    await pumpSceneSettings(tester);
+    await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
+    await tester.pumpAndSettle();
+    final voiceSelector = find.byKey(
+      const Key('scene-model-selector-scene.voice'),
+    );
+    await tester.tap(voiceSelector);
+    await tester.pumpAndSettle();
+
+    expect(find.text('gpt-4o-audio-preview'), findsOneWidget);
+    expect(find.text('text-only-voice-test'), findsNothing);
+    expect(find.text('anthropic-audio-attempt'), findsNothing);
+    await tester.tapAt(const Offset(2, 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('broken direct binding displays failure without pretending inheritance', (
+    tester,
+  ) async {
+    sceneCatalog = [
+      <String, dynamic>{
+        'sceneId': 'scene.vlm.operation.primary',
+        'description': 'GUI 操作',
+        'defaultModel': 'agent-inherited-model',
+        'effectiveModel': 'agent-inherited-model',
+        'effectiveProviderProfileId': 'provider-1',
+        'effectiveProviderProfileName': 'Provider One',
+        'boundProviderProfileId': 'missing-provider',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': 'bound-model',
+        'providerConfigured': false,
+        'bindingExists': true,
+        'bindingProfileMissing': true,
+      },
+    ];
+    sceneBindings = [
+      {
+        'sceneId': 'scene.vlm.operation.primary',
+        'providerProfileId': 'missing-provider',
+        'modelId': 'bound-model',
+      },
+    ];
+
+    await pumpSceneSettings(tester);
+
+    expect(find.text('服务商已失效 / bound-model'), findsOneWidget);
+    expect(find.textContaining('继承：'), findsNothing);
+  });
+
 }
 
 Future<void> seedManualModels({

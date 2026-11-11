@@ -29,7 +29,7 @@
   "settingsModelProviderTitle": "Model Providers",
   "settingsModelProviderSubtitle": "Configure model endpoints, API keys, and model lists",
   "settingsSceneModelTitle": "Scene Model Config",
-  "settingsSceneModelSubtitle": "Bind models by scene and use the default model for unbound scenes",
+  "settingsSceneModelSubtitle": "Configure model bindings and capabilities by scene",
   "settingsWorkspaceMemoryTitle": "Workspace Memory",
   "settingsWorkspaceMemoryLoading": "Loading...",
   "settingsWorkspaceMemoryEnabled": "Workspace memory enabled (embedding retrieval available)",
@@ -286,7 +286,7 @@
   "modelProviderFetchFailed": "Failed to fetch the model list: {error}",
 
   "sceneModelMapping": "Scene Mapping",
-  "sceneModelMappingDesc": "Bind Providers and models by scene. Unbound scenes will continue using the default model.",
+  "sceneModelMappingDesc": "Bind Providers and models by scene; each scene takes effect independently.",
   "sceneModelRefreshList": "Refresh model list",
   "sceneModelSearchHint": "Click the button on the right to search, collapse, and select models by Provider; the top search bar stays fixed.",
   "sceneModelNoScenes": "No configurable scenes",

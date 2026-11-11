@@ -1416,31 +1416,27 @@ object AgentToolDefinitions {
         put("type", "function")
         putJsonObject("function") {
             put("name", "image_generate")
-            put("displayName", "Generate Image")
+            put("displayName", "生成图片")
             put("toolType", "workspace")
             put(
                 "description",
-                "Generate one image with the configured OpenAI-compatible image provider and save it as a workspace file. Prefer this over file_write for AI-created raster artwork."
+                "使用独立图像生成场景（scene.image.generate）绑定的 Provider 与模型生成一张图片并保存到工作区文件。生图 Provider 与模型完全由场景绑定决定，不再接受参数指定。创作栅格图像时优先使用此工具，而非 file_write。"
             )
-            put("postToolRule", "Wait for the generated file result before reading, editing, or packaging it.")
+            put("postToolRule", "生成后等待文件产物结果，再读取、编辑或打包。")
             putJsonObject("parameters") {
                 put("type", "object")
                 putJsonObject("properties") {
                     putJsonObject("prompt") {
                         put("type", "string")
-                        put("description", "Image generation prompt.")
+                        put("description", "生图提示词。")
                     }
                     putJsonObject("outputPath") {
                         put("type", "string")
-                        put("description", "Workspace path or omnibot:// URI for the generated image, usually ending in .png or .webp.")
-                    }
-                    putJsonObject("model") {
-                        put("type", "string")
-                        put("description", "Image model id. Defaults to gpt-image-2.")
+                        put("description", "生成图片的 workspace 路径或 omnibot:// URI，通常以 .png、.webp 或 .jpeg 结尾。")
                     }
                     putJsonObject("size") {
                         put("type", "string")
-                        put("description", "Output size. Defaults to 1024x1024.")
+                        put("description", "输出图片尺寸，默认 1024x1024。")
                         putJsonArray("enum") {
                             add("auto")
                             add("1024x1024")
@@ -1450,7 +1446,7 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("quality") {
                         put("type", "string")
-                        put("description", "Generation quality. Defaults to auto.")
+                        put("description", "生成质量，默认 auto。")
                         putJsonArray("enum") {
                             add("auto")
                             add("low")
@@ -1460,7 +1456,7 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("format") {
                         put("type", "string")
-                        put("description", "Output file format. Defaults to png.")
+                        put("description", "输出文件格式，默认 png。")
                         putJsonArray("enum") {
                             add("png")
                             add("webp")
@@ -1469,16 +1465,12 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("background") {
                         put("type", "string")
-                        put("description", "Background handling for models that support it.")
+                        put("description", "背景处理策略（适用于支持该参数的模型），默认 auto。")
                         putJsonArray("enum") {
                             add("auto")
                             add("transparent")
                             add("opaque")
                         }
-                    }
-                    putJsonObject("providerProfileId") {
-                        put("type", "string")
-                        put("description", "Optional provider profile id. Defaults to the currently selected model provider profile.")
                     }
                 }
                 putJsonArray("required") {

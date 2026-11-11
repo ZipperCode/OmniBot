@@ -1193,6 +1193,10 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       return;
     }
     final userMessage = latestUserUtterance();
+    final userMessageId = _messages
+        .where((message) => message.user == 1)
+        .lastOrNull
+        ?.id;
     final userAttachments = await _latestUserAttachments();
     if (!isDispatchTargetCurrent()) return;
 
@@ -1246,6 +1250,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         conversationId: resolvedConversationId,
         sessionId: acpSessionId,
         requestId: _buildPromptRequestId(aiMessageId),
+        userMessageId: userMessageId,
         // Pure chat explicitly owns the in-process Xiaowan runtime with
         // tools disabled, independently of other conversations.
         agentId: _kXiaowanAcpAgentId,
@@ -1431,6 +1436,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
         // must provide a fresh id; otherwise LocalAcpRuntime's idempotency
         // table returns the already-failed turn and no new execution starts.
         requestId: requestIdOverride ?? _buildPromptRequestId(aiMessageId),
+        userMessageId: userMessageId,
         // The visible conversation target is authoritative. Runtime status
         // can briefly describe the previous process during an ACP switch;
         // using it here can send the first turn to the old Harness.

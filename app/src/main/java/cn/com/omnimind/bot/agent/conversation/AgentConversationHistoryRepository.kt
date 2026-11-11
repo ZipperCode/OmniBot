@@ -270,6 +270,43 @@ class AgentConversationHistoryRepository(
         )
     }
 
+    suspend fun updateUserMessageVisualAnalysis(
+        conversationId: Long,
+        conversationMode: String,
+        userMessageId: String,
+        updatedAttachments: List<Map<String, Any?>>
+    ) = withContext(Dispatchers.IO) {
+        if (conversationId <= 0 || userMessageId.isBlank() || updatedAttachments.isEmpty()) return@withContext
+        val effectiveMode = resolveConversationMode(conversationId, conversationMode)
+        val entry = loadThreadEntryByIdSafe(conversationId, effectiveMode, userMessageId) ?: return@withContext
+        if (entry.entryType != ENTRY_TYPE_USER_MESSAGE) return@withContext
+
+        val payload = AgentConversationHistorySupport.readMap(entry.payloadJson).toMutableMap()
+        val content = toStringAnyMap(payload["content"]).toMutableMap()
+        val existingAttachments = toListOfStringAnyMap(content["attachments"])
+        if (existingAttachments.isEmpty()) return@withContext
+
+        val merged = existingAttachments.map { ex ->
+            val exMap = LinkedHashMap(ex)
+            val match = updatedAttachments.firstOrNull { upd ->
+                val uId = upd["id"]?.toString()?.trim()
+                val eId = ex["id"]?.toString()?.trim()
+                !uId.isNullOrEmpty() && uId == eId
+            }
+            match?.get("visualAnalysis")?.toString()?.trim()?.takeIf(String::isNotEmpty)?.let {
+                exMap["visualAnalysis"] = it
+            }
+            exMap
+        }
+        content["attachments"] = AgentImageAttachmentSupport.prepareAttachments(merged).historyAttachments
+        payload["content"] = content
+        val updatedEntry = entry.copy(
+            payloadJson = gson.toJson(payload),
+            updatedAt = System.currentTimeMillis()
+        )
+        upsertEntry(updatedEntry)
+    }
+
     suspend fun upsertAssistantMessage(
         conversationId: Long,
         conversationMode: String,
@@ -538,6 +575,35 @@ class AgentConversationHistoryRepository(
                 } else {
                     val existingToolPayload = existingEntry?.let { AgentConversationHistorySupport.readMap(it.payloadJson) }.orEmpty()
                     gson.toJson(preserveFullToolPayload(existingToolPayload, restoredToolPayload))
+                }
+            } else if (type == ENTRY_TYPE_USER_MESSAGE && existingEntry != null) {
+                val existingPayload = AgentConversationHistorySupport.readMap(existingEntry.payloadJson)
+                val existingContent = toStringAnyMap(existingPayload["content"])
+                val existingAttachments = toListOfStringAnyMap(existingContent["attachments"])
+                val incomingContent = toStringAnyMap(message["content"])
+                val incomingAttachments = toListOfStringAnyMap(incomingContent["attachments"])
+                if (existingAttachments.isNotEmpty() && incomingAttachments.isNotEmpty()) {
+                    val mergedAttachments = incomingAttachments.map { inc ->
+                        val incMap = LinkedHashMap(inc)
+                        val match = existingAttachments.firstOrNull { ex ->
+                            val exId = ex["id"]?.toString()?.trim()
+                            val incId = inc["id"]?.toString()?.trim()
+                            !exId.isNullOrEmpty() && exId == incId
+                        }
+                        match?.get("visualAnalysis")?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { va ->
+                            incMap["visualAnalysis"] = va
+                        }
+                        incMap
+                    }
+                    val updatedIncomingContent = LinkedHashMap(incomingContent).apply {
+                        put("attachments", mergedAttachments)
+                    }
+                    val updatedMessage = LinkedHashMap(message).apply {
+                        put("content", updatedIncomingContent)
+                    }
+                    gson.toJson(updatedMessage)
+                } else {
+                    gson.toJson(message)
                 }
             } else {
                 gson.toJson(message)

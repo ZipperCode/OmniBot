@@ -1,14 +1,22 @@
 package cn.com.omnimind.baselib.llm
 
 object SceneModelCatalogResolver {
-    fun listCatalogItems(): List<SceneCatalogItem> {
-        val profiles = ModelProviderConfigStore.listProfiles()
-        val profilesById = profiles.associateBy { it.id }
-        val bindings = SceneModelBindingStore.getBindingMap()
-        return ModelSceneRegistry.listRuntimeProfiles()
-            .map { profile ->
+    fun listCatalogItems(): List<SceneCatalogItem> = resolveCatalogItems(
+        runtimeProfiles = ModelSceneRegistry.listRuntimeProfiles(),
+        providers = ModelProviderConfigStore.listProfiles(),
+        bindings = SceneModelBindingStore.getBindingMap(),
+    )
+
+    internal fun resolveCatalogItems(
+        runtimeProfiles: List<ModelSceneRegistry.SceneRuntimeProfile>,
+        providers: List<ModelProviderProfile>,
+        bindings: Map<String, SceneModelBindingEntry>,
+    ): List<SceneCatalogItem> {
+        val profilesById = providers.associateBy { it.id }
+        val scenesById = runtimeProfiles.associateBy { it.sceneId }
+        return runtimeProfiles.map { profile ->
                 val directBinding = bindings[profile.sceneId]
-                val effectiveBinding = directBinding ?: inheritedBinding(profile, bindings)
+                val effectiveBinding = directBinding ?: inheritedBinding(profile, bindings, scenesById)
                 val boundProfile = effectiveBinding?.providerProfileId?.let(profilesById::get)
                 val bindingApplied = effectiveBinding != null && boundProfile?.isConfigured() == true
                 val bindingProfileMissing = directBinding != null && boundProfile == null
@@ -38,13 +46,14 @@ object SceneModelCatalogResolver {
 
     private fun inheritedBinding(
         profile: ModelSceneRegistry.SceneRuntimeProfile,
-        bindings: Map<String, SceneModelBindingEntry>
+        bindings: Map<String, SceneModelBindingEntry>,
+        scenesById: Map<String, ModelSceneRegistry.SceneRuntimeProfile>,
     ): SceneModelBindingEntry? {
         val visited = mutableSetOf<String>()
         var parentId = profile.inheritsModelFrom
         while (parentId != null && visited.add(parentId)) {
             bindings[parentId]?.let { return it }
-            parentId = ModelSceneRegistry.getRuntimeProfile(parentId)?.inheritsModelFrom
+            parentId = scenesById[parentId]?.inheritsModelFrom
         }
         return null
     }

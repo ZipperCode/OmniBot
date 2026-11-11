@@ -56,6 +56,13 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -706,11 +713,17 @@ object HttpController {
     }
 
     private fun ResolvedSceneRequest.toRouteInfo(): ChatCompletionRouteInfo {
+        val visionSupport = ModelProviderConfigStore.resolveRouteVisionInputSupport(
+            profileId = providerProfileId,
+            modelId = resolvedModel,
+            protocolType = protocolType,
+            apiBase = apiBase,
+        )
         val providerCapabilities = DeepSeekProvider.requestCapabilities(
             protocolType = protocolType,
             apiBase = apiBase,
             model = resolvedModel,
-        )
+        ).copy(supportsVisionInput = visionSupport)
         return ChatCompletionRouteInfo(
             requestedModel = requestedModel,
             resolvedModel = resolvedModel,
@@ -1796,9 +1809,15 @@ object HttpController {
                     .ifEmpty { itemObj["displayName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty() }
                     .ifEmpty { itemObj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty() }
                     .ifEmpty { id }
+                val rawType = itemObj["type"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                val modelType = ProviderModelCapabilities.normalizeModelType(
+                    itemObj["model_type"]?.jsonPrimitive?.contentOrNull
+                        ?: itemObj["modelType"]?.jsonPrimitive?.contentOrNull
+                        ?: rawType
+                )
                 val ownedBy = itemObj["owned_by"]?.jsonPrimitive?.contentOrNull?.trim()
                     ?.takeIf { it.isNotEmpty() }
-                    ?: itemObj["type"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: rawType.takeIf { modelType == null }
                 val contextLimit = parseProviderModelInt(
                     itemObj = itemObj,
                     directKeys = listOf("contextLimit", "context_limit", "contextWindow", "context_window", "max_context_tokens"),
@@ -1829,6 +1848,7 @@ object HttpController {
                         id = id,
                         displayName = displayName,
                         ownedBy = ownedBy,
+                        modelType = modelType,
                         contextLimit = contextLimit,
                         inputLimit = inputLimit,
                         outputLimit = outputLimit,
@@ -4453,6 +4473,48 @@ object HttpController {
         }
     }
 
+    private data class CancellableSceneResponse(
+        val code: Int,
+        val isSuccessful: Boolean,
+        val body: String?,
+    )
+
+    private suspend fun executeCancellableSceneCall(
+        client: OkHttpClient,
+        request: Request
+    ): CancellableSceneResponse = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation {
+            call.cancel()
+        }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isCancelled) return
+                continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    response.use { resp ->
+                        if (continuation.isCancelled) return
+                        val bodyString = resp.body?.string()
+                        if (continuation.isCancelled) return
+                        continuation.resume(
+                            CancellableSceneResponse(
+                                code = resp.code,
+                                isSuccessful = resp.isSuccessful,
+                                body = bodyString
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    if (continuation.isCancelled) return
+                    continuation.resumeWithException(e)
+                }
+            }
+        })
+    }
+
     private suspend fun postSceneChatCompletionInternal(
         resolved: ResolvedSceneRequest,
         request: ChatCompletionRequest,
@@ -4498,8 +4560,8 @@ object HttpController {
             logRequestHeaders("[anthropic model=${resolved.resolvedModel}]", requestCall.headers.toMultimap().mapValues {
                 it.value.joinToString(",")
             })
-            val response = sceneCompletionClient.newCall(requestCall).execute()
-            val responseBody = response.body?.string()
+            val response = executeCancellableSceneCall(sceneCompletionClient, requestCall)
+            val responseBody = response.body
             OmniLog.d(TAG, "Anthropic Response Status: ${response.code}")
             logResponseBody("[anthropic model=${resolved.resolvedModel}]", responseBody)
             persistAiRequestLog(
@@ -4556,8 +4618,8 @@ object HttpController {
             logRequestHeaders("[gemini model=${resolved.resolvedModel}]", requestCall.headers.toMultimap().mapValues {
                 it.value.joinToString(",")
             })
-            val response = sceneCompletionClient.newCall(requestCall).execute()
-            val responseBody = response.body?.string()
+            val response = executeCancellableSceneCall(sceneCompletionClient, requestCall)
+            val responseBody = response.body
             OmniLog.d(TAG, "Gemini Response Status: ${response.code}")
             logResponseBody("[gemini model=${resolved.resolvedModel}]", responseBody)
             persistAiRequestLog(
@@ -4643,8 +4705,8 @@ object HttpController {
                 it.value.joinToString(",")
             })
 
-            val response = sceneCompletionClient.newCall(requestCall).execute()
-            val responseBody = response.body?.string()
+            val response = executeCancellableSceneCall(sceneCompletionClient, requestCall)
+            val responseBody = response.body
             OmniLog.d(TAG, "Response Status: ${response.code}")
             logResponseBody("[openai_compatible model=${variant.request.model}]", responseBody)
             persistAiRequestLog(

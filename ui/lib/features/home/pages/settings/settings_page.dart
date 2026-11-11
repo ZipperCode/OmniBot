@@ -354,7 +354,9 @@ class _SettingsPageState extends State<SettingsPage> with FlClashPageLoadMixin {
           _SettingItem(
             icon: LucideIcons.fileBox,
             title: context.l10n.settingsSceneModelTitle,
-            subtitle: context.l10n.settingsSceneModelSubtitle,
+            subtitle: isEnglish
+                ? 'Configure model bindings and capabilities by scene'
+                : '按场景配置基础与高级模型绑定',
             route: '/home/scene_model_setting',
           ),
           _SettingItem(

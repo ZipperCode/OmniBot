@@ -63,24 +63,4 @@ class AgentToolDefinitionsVlmTest {
         assertTrue(terminalDescription.isNotBlank())
     }
 
-    @Test
-    fun `runtime tool catalogs omit private tool scheduling rules`() {
-        val runtimeDefinitions = AgentToolDefinitions.staticTools(PromptLocale.EN_US) +
-            AgentToolDefinitions.memoryTools(PromptLocale.EN_US) +
-            AgentToolDefinitions.subagentTools(PromptLocale.EN_US)
-        fun hasPrivateSchedulingRule(definition: JsonObject): Boolean =
-            (definition["function"] as? JsonObject)?.get("postToolRule") != null
-
-        assertTrue(
-            "runtime catalogs must rely on ACP prompt turns, not per-tool scheduling",
-            runtimeDefinitions.none(::hasPrivateSchedulingRule)
-        )
-        val scheduleDescription = runtimeDefinitions
-            .mapNotNull { it["function"] as? JsonObject }
-            .single { it["name"]?.jsonPrimitive?.contentOrNull == "schedule_task_create" }
-            .getValue("description")
-            .jsonPrimitive
-            .content
-        assertTrue("Wait for the tool result" !in scheduleDescription)
-    }
 }

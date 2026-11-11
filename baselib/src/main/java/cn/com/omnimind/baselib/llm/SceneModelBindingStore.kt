@@ -14,6 +14,9 @@ object SceneModelBindingStore {
     private val gson = Gson()
     private val allowedScenes = setOf(
         "scene.dispatch.model",
+        "scene.vision.understanding",
+        "scene.image.generate",
+        "scene.voice",
         "scene.vlm.operation.primary",
         "scene.compactor.context.chat",
         "scene.memory.embedding",

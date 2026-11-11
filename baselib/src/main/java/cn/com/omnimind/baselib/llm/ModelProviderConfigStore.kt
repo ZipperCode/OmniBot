@@ -25,7 +25,8 @@ object ModelProviderConfigStore {
         "model_provider_builtin_official_profiles_seeded_v2"
     private const val KEY_DELETED_OFFICIAL_PROFILE_IDS =
         "model_provider_deleted_official_profile_ids_v1"
-
+    private const val KEY_MODEL_CAPABILITY_OVERRIDES =
+        "model_provider_capability_overrides_v1"
     internal const val MIGRATION_DONE_KEY = "model_provider_scene_config_flattened_v3"
     internal const val LEGACY_DEFAULT_PROFILE_ID = "legacy-default"
 
@@ -52,6 +53,8 @@ object ModelProviderConfigStore {
 
     @Volatile
     private var secretStore: ModelProviderSecretStore? = null
+    @Volatile
+    private var appContext: Context? = null
 
     /**
      * Must run after MMKV initialization and before provider configuration is used.
@@ -59,6 +62,7 @@ object ModelProviderConfigStore {
      */
     @Synchronized
     fun initialize(context: Context) {
+        appContext = context.applicationContext
         if (secretStore != null) {
             return
         }
@@ -163,24 +167,158 @@ object ModelProviderConfigStore {
             return@runCatching emptyList()
         }
         val discovered = bucket["models"]?.asJsonArray
-            ?.map { Gson().fromJson(it, ProviderModelOption::class.java) }
+            ?.map { ProviderModelCapabilities.normalize(gson.fromJson(it, ProviderModelOption::class.java)) }
             ?.filter { !it.id.isNullOrBlank() }.orEmpty()
-        resolveModelCapabilities(context, profile, discovered)
+
+        val catalogMetadata = bucket["catalogMetadata"]?.asJsonArray
+            ?.map { ProviderModelCapabilities.normalize(gson.fromJson(it, ProviderModelOption::class.java)) }
+            ?.filter { !it.id.isNullOrBlank() }
+            ?.associateBy { it.id }.orEmpty()
+
+        val merged = if (catalogMetadata.isEmpty()) {
+            discovered
+        } else {
+            val discoveredIds = discovered.map { it.id }.toSet()
+            val enrichedDiscovered = discovered.map { model ->
+                val meta = catalogMetadata[model.id]
+                if (meta == null) model else {
+                    model.copy(
+                        modelType = model.modelType ?: meta.modelType,
+                        inputModalities = if (model.inputModalities.isNotEmpty()) model.inputModalities else meta.inputModalities,
+                        outputModalities = if (model.outputModalities.isNotEmpty()) model.outputModalities else meta.outputModalities,
+                        supportsImageInput = model.supportsImageInput ?: meta.supportsImageInput,
+                        supportsImageOutput = model.supportsImageOutput ?: meta.supportsImageOutput,
+                        supportsAudioOutput = model.supportsAudioOutput ?: meta.supportsAudioOutput,
+                        toolCall = model.toolCall ?: meta.toolCall,
+                    )
+                }
+            }
+            val extraCatalogModels = catalogMetadata.values.filterNot { it.id in discoveredIds }
+            enrichedDiscovered + extraCatalogModels
+        }
+        resolveModelCapabilities(context, profile, merged)
     }.getOrDefault(emptyList())
 
     /**
-     * One offline capability projection for the editor and every Agent adapter.
-     * The discovery cache retains Provider declarations; bundled metadata only
-     * fills gaps here, so a newer bundle never inherits stale fallback values.
+     * 离线能力投影：对齐 Provider 声明与目录元数据，叠加用户人工标记（优先级：user > provider > catalog）。
      */
     fun resolveModelCapabilities(
         context: Context,
         profile: ModelProviderProfile,
         models: List<ProviderModelOption>,
-    ): List<ProviderModelOption> = models.map { model ->
-        ProviderModelCapabilities.normalize(
-            ProviderReasoningCatalog.enrich(context, profile, ProviderModelCapabilities.normalize(model))
-        )
+    ): List<ProviderModelOption> {
+        val overrides = getModelCapabilityOverrides(profile.id)
+        return models.map { model ->
+            val normalized = ProviderModelCapabilities.normalize(model)
+            val reasoningEnriched = ProviderReasoningCatalog.enrich(context, profile, normalized)
+            val override = overrides[model.id]
+            ProviderModelCapabilities.normalize(reasoningEnriched.applyOverride(override))
+        }
+    }
+    fun decodeCapabilityOverridesJson(raw: String?): Map<String, Map<String, ModelCapabilityOverride>> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            val type = object : TypeToken<Map<String, Map<String, ModelCapabilityOverride>>>() {}.type
+            gson.fromJson<Map<String, Map<String, ModelCapabilityOverride>>>(raw, type).orEmpty()
+        }.getOrDefault(emptyMap())
+    }
+
+    fun encodeCapabilityOverridesJson(overrides: Map<String, Map<String, ModelCapabilityOverride>>): String {
+        return gson.toJson(overrides)
+    }
+
+    @Synchronized
+    fun getModelCapabilityOverrides(profileId: String): Map<String, ModelCapabilityOverride> {
+        val normalizedProfileId = profileId.trim()
+        val mmkv = runCatching { MMKV.defaultMMKV() }.getOrNull() ?: return emptyMap()
+        val raw = mmkv.decodeString(KEY_MODEL_CAPABILITY_OVERRIDES)
+        return decodeCapabilityOverridesJson(raw)[normalizedProfileId].orEmpty()
+    }
+
+    @Synchronized
+    fun getModelCapabilityOverride(profileId: String, modelId: String): ModelCapabilityOverride? {
+        return getModelCapabilityOverrides(profileId)[modelId.trim()]
+    }
+
+    @Synchronized
+    fun saveModelCapabilityOverride(
+        profileId: String,
+        modelId: String,
+        override: ModelCapabilityOverride
+    ) {
+        val normalizedProfileId = profileId.trim()
+        val normalizedModelId = modelId.trim()
+        require(normalizedProfileId.isNotEmpty()) { "profileId is empty" }
+        require(normalizedModelId.isNotEmpty()) { "modelId is empty" }
+
+        val mmkv = checkNotNull(runCatching { MMKV.defaultMMKV() }.getOrNull()) {
+            "MMKV is not initialized; cannot persist model capability override"
+        }
+        val current = decodeCapabilityOverridesJson(mmkv.decodeString(KEY_MODEL_CAPABILITY_OVERRIDES)).toMutableMap()
+        val profileOverrides = current[normalizedProfileId]?.toMutableMap() ?: mutableMapOf()
+        if (override.isEmpty()) {
+            profileOverrides.remove(normalizedModelId)
+        } else {
+            profileOverrides[normalizedModelId] = override
+        }
+
+        if (profileOverrides.isEmpty()) {
+            current.remove(normalizedProfileId)
+        } else {
+            current[normalizedProfileId] = profileOverrides
+        }
+
+        check(mmkv.encode(KEY_MODEL_CAPABILITY_OVERRIDES, encodeCapabilityOverridesJson(current))) {
+            "failed to persist model capability overrides"
+        }
+    }
+
+    @Synchronized
+    fun clearModelCapabilityOverride(profileId: String, modelId: String) {
+        saveModelCapabilityOverride(profileId, modelId, ModelCapabilityOverride())
+    }
+
+    fun findCachedModel(profileId: String, modelId: String): ProviderModelOption? {
+        val normalizedModelId = modelId.trim()
+        if (normalizedModelId.isEmpty()) return null
+        val profile = getProfile(profileId) ?: return null
+        val context = appContext
+        val cached = if (context != null) {
+            cachedModels(context, profile).firstOrNull { it.id.equals(normalizedModelId, ignoreCase = true) }
+        } else null
+        if (cached != null) return cached
+
+        // 无 cached 目录也能把手动模型与人工标记纳入
+        val override = getModelCapabilityOverride(profileId, normalizedModelId)
+        if (override != null) {
+            val manualOption = ProviderModelOption(
+                id = normalizedModelId,
+                displayName = normalizedModelId,
+                ownedBy = "manual",
+            )
+            return ProviderModelCapabilities.normalize(manualOption.applyOverride(override))
+        }
+        return null
+    }
+
+    fun resolveRouteVisionInputSupport(
+        profileId: String?,
+        modelId: String,
+        protocolType: String?,
+        apiBase: String?,
+    ): Boolean? {
+        val override = profileId?.let { getModelCapabilityOverride(it, modelId) }
+        if (override?.imageInput != null) {
+            return override.imageInput
+        }
+        val modelOption = profileId?.let { findCachedModel(it, modelId) }
+        if (modelOption?.supportsImageInput != null) {
+            return modelOption.supportsImageInput
+        }
+        if (modelOption != null && modelOption.inputModalities.isNotEmpty()) {
+            return modelOption.inputModalities.any { it.equals("image", ignoreCase = true) }
+        }
+        return DeepSeekProvider.requestCapabilities(protocolType, apiBase, modelId).supportsVisionInput
     }
 
     /** Latest successful discovery, used only to construct offline launch config.
@@ -194,12 +332,55 @@ object ModelProviderConfigStore {
         val catalogs = runCatching {
             JsonParser.parseString(preferences.getString(key, null)).asJsonObject
         }.getOrNull() ?: com.google.gson.JsonObject()
-        catalogs.add(profile.id, Gson().toJsonTree(mapOf(
-            "apiBase" to normalizeBaseUrl(profile.baseUrl).orEmpty(),
-            "profileRevision" to profile.revision,
-            "models" to models.filter { it.id.isNotBlank() }.distinctBy { it.id }
-                .map(ProviderModelCapabilities::normalize),
-        )))
+        val existingBucket = catalogs[profile.id]?.asJsonObject
+        val existingCatalogMetadata = if (existingBucket != null &&
+            existingBucket["apiBase"]?.asString == normalizeBaseUrl(profile.baseUrl).orEmpty() &&
+            existingBucket["profileRevision"]?.asLong == profile.revision) {
+            existingBucket["catalogMetadata"]
+        } else null
+
+        val bucket = com.google.gson.JsonObject().apply {
+            addProperty("apiBase", normalizeBaseUrl(profile.baseUrl).orEmpty())
+            addProperty("profileRevision", profile.revision)
+            add("models", Gson().toJsonTree(
+                models.filter { it.id.isNotBlank() }.distinctBy { it.id }
+                    .map(ProviderModelCapabilities::normalize)
+            ))
+            if (existingCatalogMetadata != null) {
+                add("catalogMetadata", existingCatalogMetadata)
+            }
+        }
+        catalogs.add(profile.id, bucket)
+        preferences.edit().putString(key, catalogs.toString()).apply()
+    }
+
+    @Synchronized
+    fun rememberCatalogMetadata(
+        context: Context,
+        profile: ModelProviderProfile,
+        catalogModels: List<ProviderModelOption>
+    ) {
+        val currentProfile = getProfile(profile.id) ?: return
+        if (currentProfile.revision != profile.revision ||
+            !sameCanonicalEndpoint(currentProfile.baseUrl, profile.baseUrl)) return
+        val preferences = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        val key = "flutter.cached_provider_models_with_base_v2"
+        val catalogs = runCatching {
+            JsonParser.parseString(preferences.getString(key, null)).asJsonObject
+        }.getOrNull() ?: com.google.gson.JsonObject()
+        val existingBucket = catalogs[profile.id]?.asJsonObject ?: com.google.gson.JsonObject().apply {
+            addProperty("apiBase", normalizeBaseUrl(profile.baseUrl).orEmpty())
+            addProperty("profileRevision", profile.revision)
+            add("models", com.google.gson.JsonArray())
+        }
+        if (existingBucket["apiBase"]?.asString != normalizeBaseUrl(profile.baseUrl).orEmpty() ||
+            existingBucket["profileRevision"]?.asLong != profile.revision) {
+            return
+        }
+        val safeCatalogModels = catalogModels.filter { it.id.isNotBlank() }.distinctBy { it.id }
+            .map(ProviderModelCapabilities::normalize)
+        existingBucket.add("catalogMetadata", Gson().toJsonTree(safeCatalogModels))
+        catalogs.add(profile.id, existingBucket)
         preferences.edit().putString(key, catalogs.toString()).apply()
     }
 
@@ -386,6 +567,10 @@ object ModelProviderConfigStore {
 
         markDeletedOfficialProfileIfNeeded(mmkv, normalizedId)
         writeProfiles(mmkv, current)
+        val overrides = decodeCapabilityOverridesJson(mmkv.decodeString(KEY_MODEL_CAPABILITY_OVERRIDES)).toMutableMap()
+        if (overrides.remove(normalizedId) != null) {
+            mmkv.encode(KEY_MODEL_CAPABILITY_OVERRIDES, encodeCapabilityOverridesJson(overrides))
+        }
         val editingId = mmkv.decodeString(KEY_EDITING_PROFILE_ID)?.trim().orEmpty()
         if (editingId == normalizedId || editingId.isEmpty()) {
             mmkv.encode(KEY_EDITING_PROFILE_ID, current.first().id)

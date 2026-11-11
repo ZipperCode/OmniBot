@@ -2306,7 +2306,36 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
         ),
       );
     }
+    if (model.modelType != null) {
+      final typeLabel = switch (model.modelType) {
+        'chat' => '对话',
+        'embedding' => '嵌入',
+        'image' => '生图',
+        'tts' => '语音',
+        _ => model.modelType!,
+      };
+      widgets.add(_buildModalityTextChip(typeLabel));
+    }
+    if (model.toolCall == true) {
+      widgets.add(
+        _buildCompactIconChip(
+          key: 'provider-model-tool-${model.id}',
+          icon: LucideIcons.wrench,
+          tooltip: 'Tool Call',
+        ),
+      );
+    }
     widgets.addAll(_buildInputModalityWidgets(model));
+    if (model.supportsImageOutput == true ||
+        model.outputModalities.any((m) => m.toLowerCase() == 'image')) {
+      widgets.add(
+        _buildCompactIconChip(
+          key: 'provider-model-out-img-${model.id}',
+          icon: LucideIcons.imagePlus,
+          tooltip: 'Image output',
+        ),
+      );
+    }
     return widgets;
   }
 
@@ -2640,7 +2669,7 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: () {},
+                  onTap: () => _openModelCapabilityDialog(item),
                   borderRadius: BorderRadius.circular(10),
                   splashColor: context.omniPalette.accentPrimary.withValues(
                     alpha: 0.06,
@@ -2702,6 +2731,68 @@ class _ModelProviderSettingPageState extends State<ModelProviderSettingPage>
       ),
     );
   }
+  Future<void> _openModelCapabilityDialog(_ProviderModelItem item) async {
+    final current = _currentProfile;
+    if (current == null) return;
+    final overrides =
+        await ModelProviderConfigService.getModelCapabilityOverrides(
+      profileId: current.id,
+    );
+    final existingOverride =
+        overrides[item.id] ?? const ModelCapabilityOverride();
+
+    if (!mounted || _editingProfileId != current.id) return;
+
+    final result = await showOmniGlassCardSheet<bool>(
+      context: context,
+      useRootNavigator: false,
+      builder: (_) => _ModelCapabilityDialog(
+        profileId: current.id,
+        model: item.model,
+        initialOverride: existingOverride,
+      ),
+    );
+
+    if (result != true || !mounted || _editingProfileId != current.id) return;
+    showToast('已更新模型能力', type: ToastType.success);
+
+    final baseRemote =
+        await ModelProviderConfigService.getCachedRemoteModelsForProfile(
+          current.id,
+          profile: current,
+        );
+    final remoteSource = baseRemote;
+    final manualSource = _manualModelIds
+        .map(
+          (id) => ProviderModelOption(
+            id: id,
+            displayName: id,
+            ownedBy: 'manual',
+          ),
+        )
+        .toList();
+    final refreshedManual =
+        await ModelProviderConfigService.enrichModelsForProfile(
+      profileId: current.id,
+      providerName: current.name,
+      apiBase: current.baseUrl,
+      models: manualSource,
+    );
+    final refreshedRemote =
+        await ModelProviderConfigService.enrichModelsForProfile(
+      profileId: current.id,
+      providerName: current.name,
+      apiBase: current.baseUrl,
+      models: remoteSource,
+    );
+    if (mounted && _editingProfileId == current.id) {
+      setState(() {
+        _manualModels = refreshedManual;
+        _remoteModels = refreshedRemote;
+      });
+    }
+  }
+
 
   Future<void> _openProviderSwitchMenu(BuildContext anchorContext) async {
     if (_profiles.isEmpty) {
@@ -3903,6 +3994,302 @@ class _AddModelIdDialogState extends State<_AddModelIdDialog> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ModelCapabilityDialog extends StatefulWidget {
+  final String profileId;
+  final ProviderModelOption model;
+  final ModelCapabilityOverride initialOverride;
+
+  const _ModelCapabilityDialog({
+    required this.profileId,
+    required this.model,
+    required this.initialOverride,
+  });
+
+  @override
+  State<_ModelCapabilityDialog> createState() => _ModelCapabilityDialogState();
+}
+
+class _ModelCapabilityDialogState extends State<_ModelCapabilityDialog> {
+  late String? _modelType;
+  late bool? _imageInput;
+  late bool? _imageOutput;
+  late bool? _audioOutput;
+  late bool? _toolCall;
+  bool _busy = false;
+  @override
+  void initState() {
+    super.initState();
+    _modelType = widget.initialOverride.modelType;
+    _imageInput = widget.initialOverride.imageInput;
+    _imageOutput = widget.initialOverride.imageOutput;
+    _audioOutput = widget.initialOverride.audioOutput;
+    _toolCall = widget.initialOverride.toolCall;
+  }
+
+  void _close([bool? result]) {
+    Navigator.of(context).pop(result);
+  }
+
+  Future<void> _handleSave() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+    });
+    try {
+      final override = ModelCapabilityOverride(
+        modelType: _modelType,
+        imageInput: _imageInput,
+        imageOutput: _imageOutput,
+        audioOutput: _audioOutput,
+        toolCall: _toolCall,
+      );
+      await ModelProviderConfigService.saveModelCapabilityOverride(
+        profileId: widget.profileId,
+        modelId: widget.model.id,
+        override: override,
+      );
+      if (!mounted) return;
+      _close(true);
+    } catch (e) {
+      if (!mounted) return;
+      showToast('保存失败：${e.toString()}', type: ToastType.error);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _handleRestoreAuto() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+    });
+    try {
+      await ModelProviderConfigService.clearModelCapabilityOverride(
+        profileId: widget.profileId,
+        modelId: widget.model.id,
+      );
+      if (!mounted) return;
+      _close(true);
+    } catch (e) {
+      if (!mounted) return;
+      showToast('恢复自动识别失败：${e.toString()}', type: ToastType.error);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Widget _buildOption(
+    BuildContext context, {
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final palette = context.omniPalette;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: selected
+                ? palette.accentPrimary.withValues(alpha: 0.16)
+                : palette.surfaceSecondary.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: selected ? palette.accentPrimary : Colors.transparent,
+              width: 1,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              color: selected ? palette.accentPrimary : palette.textSecondary,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTriStateRow(
+    BuildContext context, {
+    required String label,
+    required bool? value,
+    required ValueChanged<bool?> onChanged,
+  }) {
+    final palette = context.omniPalette;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: palette.textPrimary,
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildOption(
+                context,
+                label: '自动',
+                selected: value == null,
+                onTap: () => onChanged(null),
+              ),
+              const SizedBox(width: 4),
+              _buildOption(
+                context,
+                label: '支持',
+                selected: value == true,
+                onTap: () => onChanged(true),
+              ),
+              const SizedBox(width: 4),
+              _buildOption(
+                context,
+                label: '不支持',
+                selected: value == false,
+                onTap: () => onChanged(false),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTypeSelector(BuildContext context) {
+    final palette = context.omniPalette;
+    const types = [
+      MapEntry<String?, String>(null, '自动'),
+      MapEntry<String?, String>('chat', '对话'),
+      MapEntry<String?, String>('embedding', '嵌入'),
+      MapEntry<String?, String>('image', '生图'),
+      MapEntry<String?, String>('tts', '语音'),
+    ];
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '模型类型',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+              color: palette.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: types.map((entry) {
+              return _buildOption(
+                context,
+                label: entry.value,
+                selected: _modelType == entry.key,
+                onTap: () => setState(() => _modelType = entry.key),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.omniPalette;
+    return OmniGlassAlertDialog(
+      title: Row(
+        children: [
+          Icon(LucideIcons.sliders, size: 20, color: palette.accentPrimary),
+          const SizedBox(width: 8),
+          const Text('模型能力标记'),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: palette.surfaceSecondary.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                widget.model.id,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: palette.textPrimary,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(height: 10),
+            _buildTypeSelector(context),
+            const Divider(height: 16),
+            _buildTriStateRow(
+              context,
+              label: '图片输入',
+              value: _imageInput,
+              onChanged: (v) => setState(() => _imageInput = v),
+            ),
+            _buildTriStateRow(
+              context,
+              label: '图片输出',
+              value: _imageOutput,
+              onChanged: (v) => setState(() => _imageOutput = v),
+            ),
+            _buildTriStateRow(
+              context,
+              label: '音频输出',
+              value: _audioOutput,
+              onChanged: (v) => setState(() => _audioOutput = v),
+            ),
+            _buildTriStateRow(
+              context,
+              label: '工具调用',
+              value: _toolCall,
+              onChanged: (v) => setState(() => _toolCall = v),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : _handleRestoreAuto,
+          child: const Text('恢复自动'),
+        ),
+        TextButton(
+          onPressed: _busy ? null : () => _close(),
+          child: Text(context.trLegacy('取消')),
+        ),
+        TextButton(
+          onPressed: _busy ? null : _handleSave,
+          child: const Text('保存'),
+        ),
+      ],
     );
   }
 }

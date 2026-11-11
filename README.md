@@ -70,7 +70,13 @@ Then open the scenario model settings:
   <img src="docs/tutorial/four.png" alt="Configure AI models" width="260" />
 </p>
 
-Note: `Memory embedding` requires an embedding model. For the best overall experience, the other scenarios should use multimodal or vision-capable models whenever possible.
+场景分为「基础能力」和「高级能力」。主 Agent 负责对话与工具调用；视觉理解、图像生成、语音合成按需独立配置，未配置的可选能力不阻断普通聊天。GUI 未单独绑定时跟随主 Agent，仍要求图片输入能力；记忆嵌入必须使用嵌入模型。
+
+纯文本主模型的图片附件与工具图片可由「视觉理解」转为同一回合的文字辅助，保留原始问题和附件。`image_analyze` 读取工作区图片，`image_generate` 使用独立「图像生成」场景，支持 OpenAI Images 兼容协议与 Gemini 原生图片输出；不隐式回退到主模型或当前编辑的 Provider。ChatGPT OAuth 不支持图像生成 API。
+
+选择器过滤已知不兼容模型，未知能力显示「待确认」。在「模型提供商」点击模型可标记类型、图片输入/输出、音频输出及工具调用，或恢复自动识别；人工标记优先，但不改变服务端能力。可清除辅助场景绑定，或将 GUI 切回跟随主 Agent。
+
+场景页默认读取本地模型目录与已有绑定；远程更新只在点击「刷新模型列表」时触发。失败时保留本地模型并允许重试。
 
 <p align="center">
   <img src="docs/tutorial/five.png" alt="Alpine environment" width="260" />

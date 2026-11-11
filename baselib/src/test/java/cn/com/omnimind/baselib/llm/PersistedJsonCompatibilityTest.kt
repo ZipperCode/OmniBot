@@ -19,8 +19,10 @@ class PersistedJsonCompatibilityTest {
     fun providerModelCatalogUsesStableJsonNamesForFlutterEvenUnderADifferentNamingPolicy() {
         val model = ProviderModelOption(
             id = "fixture-model", displayName = "Fixture Model", ownedBy = "fixture",
+            modelType = "chat",
             contextLimit = 128000, inputLimit = 96000, outputLimit = 32000,
             inputModalities = listOf("text", "image"), outputModalities = listOf("text"),
+            supportsImageInput = true, supportsImageOutput = false, supportsAudioOutput = false,
             modelsDevProviderId = "fixture", modelsDevProviderName = "Fixture Provider",
             providerLogoUrl = "https://example.invalid/logo.svg", family = "fixture", group = "chat",
             attachment = true, reasoning = true, supportedReasoningLevels = listOf("low", "high"),
@@ -33,9 +35,10 @@ class PersistedJsonCompatibilityTest {
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES).create()
         val encoded = namingIndependentGson.toJsonTree(model).asJsonObject
         assertEquals(setOf(
-            "id", "displayName", "ownedBy", "contextLimit", "inputLimit", "outputLimit",
-            "inputModalities", "outputModalities", "modelsDevProviderId", "modelsDevProviderName",
-            "providerLogoUrl", "family", "group", "attachment", "reasoning", "supportedReasoningLevels",
+            "id", "displayName", "ownedBy", "modelType", "contextLimit", "inputLimit", "outputLimit",
+            "inputModalities", "outputModalities", "supportsImageInput", "supportsImageOutput", "supportsAudioOutput",
+            "modelsDevProviderId", "modelsDevProviderName", "providerLogoUrl", "family", "group",
+            "attachment", "reasoning", "supportedReasoningLevels",
             "defaultReasoningLevel", "toolCall", "structuredOutput", "temperature",
             "reasoningCanDisable", "reasoningDefaultEnabled", "reasoningCapabilitySource",
             "reasoningSupportsAdaptive",

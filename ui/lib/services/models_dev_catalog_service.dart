@@ -17,6 +17,7 @@ class ModelsDevModelMetadata {
   final List<String> inputModalities;
   final List<String> outputModalities;
   final String? family;
+  final String? modelType;
   final String? status;
   final bool? attachment;
   final bool? reasoning;
@@ -32,6 +33,7 @@ class ModelsDevModelMetadata {
     this.outputLimit,
     this.inputModalities = const [],
     this.outputModalities = const [],
+    this.modelType,
     this.family,
     this.status,
     this.attachment,
@@ -379,6 +381,12 @@ class ModelsDevCatalogService {
             outputLimit: _readInt(limit['output']),
             inputModalities: _readStringList(modalities['input']),
             outputModalities: _readStringList(modalities['output']),
+            modelType: _normalizeModelType(
+              modelMap['model_type'] ??
+                  modelMap['modelType'] ??
+                  modelMap['type'] ??
+                  modelMap['mode'],
+            ),
             family: _readNonEmptyString(modelMap['family']),
             status: _readNonEmptyString(modelMap['status']),
             attachment: _readBool(modelMap['attachment']),
@@ -911,5 +919,39 @@ class ModelsDevCatalogService {
     final uri = Uri.tryParse(normalized);
     final host = uri?.host.trim().toLowerCase();
     return host == null || host.isEmpty ? null : host;
+  }
+  static String? _normalizeModelType(dynamic raw) {
+    if (raw == null) return null;
+    final str = raw.toString().trim().toLowerCase();
+    switch (str) {
+      case 'chat':
+      case 'chat_completion':
+      case 'chat-completion':
+      case 'text':
+      case 'text_generation':
+      case 'text-generation':
+      case 'conversation':
+        return 'chat';
+      case 'embedding':
+      case 'embeddings':
+      case 'embed':
+      case 'feature-extraction':
+      case 'text-embedding':
+        return 'embedding';
+      case 'image':
+      case 'images':
+      case 'image_generation':
+      case 'image-generation':
+      case 'text-to-image':
+        return 'image';
+      case 'tts':
+      case 'audio':
+      case 'speech':
+      case 'text-to-speech':
+      case 'audio_speech':
+        return 'tts';
+      default:
+        return null;
+    }
   }
 }

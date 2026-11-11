@@ -68,6 +68,8 @@ data class ProviderModelOption(
     val displayName: String = id,
     @field:SerializedName("ownedBy")
     val ownedBy: String? = null,
+    @field:SerializedName("modelType")
+    val modelType: String? = null,
     @field:SerializedName("contextLimit")
     val contextLimit: Int? = null,
     @field:SerializedName("inputLimit")
@@ -78,6 +80,12 @@ data class ProviderModelOption(
     val inputModalities: List<String> = emptyList(),
     @field:SerializedName("outputModalities")
     val outputModalities: List<String> = emptyList(),
+    @field:SerializedName("supportsImageInput")
+    val supportsImageInput: Boolean? = null,
+    @field:SerializedName("supportsImageOutput")
+    val supportsImageOutput: Boolean? = null,
+    @field:SerializedName("supportsAudioOutput")
+    val supportsAudioOutput: Boolean? = null,
     @field:SerializedName("modelsDevProviderId")
     val modelsDevProviderId: String? = null,
     @field:SerializedName("modelsDevProviderName")
@@ -119,6 +127,81 @@ data class ProviderModelOption(
     @field:SerializedName("temperature")
     val temperature: Boolean? = null
 )
+
+/**
+ * 用户在 Provider 页面人工标记的模型能力覆盖。
+ * 覆盖优先级高于 Provider 声明和模型目录元数据。
+ */
+data class ModelCapabilityOverride(
+    @field:SerializedName("modelType")
+    val modelType: String? = null,
+    @field:SerializedName("imageInput")
+    val imageInput: Boolean? = null,
+    @field:SerializedName("imageOutput")
+    val imageOutput: Boolean? = null,
+    @field:SerializedName("audioOutput")
+    val audioOutput: Boolean? = null,
+    @field:SerializedName("toolCall")
+    val toolCall: Boolean? = null,
+) {
+    fun isEmpty(): Boolean =
+        modelType == null && imageInput == null && imageOutput == null &&
+            audioOutput == null && toolCall == null
+
+    fun toMap(): Map<String, Any?> = mapOf(
+        "modelType" to modelType,
+        "imageInput" to imageInput,
+        "imageOutput" to imageOutput,
+        "audioOutput" to audioOutput,
+        "toolCall" to toolCall,
+    )
+}
+
+fun ProviderModelOption.applyOverride(override: ModelCapabilityOverride?): ProviderModelOption {
+    if (override == null || override.isEmpty()) return this
+    val resolvedModelType = override.modelType ?: this.modelType
+
+    val nextImageInput = override.imageInput ?: this.supportsImageInput
+    val nextImageOutput = override.imageOutput ?: this.supportsImageOutput
+    val nextAudioOutput = override.audioOutput ?: this.supportsAudioOutput
+    val nextToolCall = override.toolCall ?: this.toolCall
+
+    val nextInputModalities = when (nextImageInput) {
+        true -> if ("image" in this.inputModalities) this.inputModalities else this.inputModalities + "image"
+        false -> this.inputModalities.filterNot { it.equals("image", ignoreCase = true) }
+        null -> this.inputModalities
+    }
+
+    var nextOutputModalities = this.outputModalities
+    if (nextImageOutput == true) {
+        if ("image" !in nextOutputModalities) nextOutputModalities = nextOutputModalities + "image"
+    } else if (nextImageOutput == false) {
+        nextOutputModalities = nextOutputModalities.filterNot { it.equals("image", ignoreCase = true) }
+    }
+
+    if (nextAudioOutput == true) {
+        if ("audio" !in nextOutputModalities) nextOutputModalities = nextOutputModalities + "audio"
+    } else if (nextAudioOutput == false) {
+        nextOutputModalities = nextOutputModalities.filterNot { it.equals("audio", ignoreCase = true) }
+    }
+
+    val nextAttachment = when (nextImageInput) {
+        true -> true
+        false -> false
+        null -> this.attachment
+    }
+
+    return this.copy(
+        modelType = resolvedModelType,
+        supportsImageInput = nextImageInput,
+        supportsImageOutput = nextImageOutput,
+        supportsAudioOutput = nextAudioOutput,
+        inputModalities = nextInputModalities,
+        outputModalities = nextOutputModalities,
+        attachment = nextAttachment,
+        toolCall = nextToolCall,
+    )
+}
 
 data class SceneCatalogItem(
     val sceneId: String,

@@ -29,7 +29,7 @@
   "settingsModelProviderTitle": "模型提供商",
   "settingsModelProviderSubtitle": "配置模型地址、密钥与模型列表",
   "settingsSceneModelTitle": "场景模型配置",
-  "settingsSceneModelSubtitle": "按场景绑定模型，未绑定场景使用默认模型",
+  "settingsSceneModelSubtitle": "按场景配置基础与高级模型绑定",
   "settingsWorkspaceMemoryTitle": "Workspace 记忆配置",
   "settingsWorkspaceMemoryLoading": "加载中...",
   "settingsWorkspaceMemoryEnabled": "已启用 workspace 记忆（嵌入检索可用）",
@@ -286,7 +286,7 @@
   "modelProviderFetchFailed": "拉取模型列表失败：{error}",
 
   "sceneModelMapping": "场景映射",
-  "sceneModelMappingDesc": "按场景绑定 Provider 与模型，未绑定的场景会继续使用默认模型。",
+  "sceneModelMappingDesc": "按场景绑定 Provider 与模型，各场景独立生效。",
   "sceneModelRefreshList": "刷新模型列表",
   "sceneModelSearchHint": "点击右侧按钮后，可按 Provider 搜索、折叠并选择模型；顶部搜索框固定不随列表滚动。",
   "sceneModelNoScenes": "暂无可配置场景",

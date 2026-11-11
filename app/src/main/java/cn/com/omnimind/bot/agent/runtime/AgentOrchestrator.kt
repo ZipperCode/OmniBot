@@ -1,5 +1,6 @@
 package cn.com.omnimind.bot.agent
 
+import cn.com.omnimind.bot.agent.vision.VisionUnderstandingService
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.llm.AssistantToolCall
 import cn.com.omnimind.baselib.llm.AnthropicMessageProtocolState
@@ -666,14 +667,42 @@ class AgentOrchestrator(
             )
         }
 
+        val hasToolImage = result is ToolExecutionResult.ContextResult && !result.imageDataUrl.isNullOrBlank()
+        val shouldAnalyzeImageWithVision = hasToolImage && !toolImageContinuationPolicy.supportsToolImageContinuation
+        var visionSucceeded = false
+        val visionAnalysisSection = if (shouldAnalyzeImageWithVision) {
+            val toolImageDataUrl = (result as ToolExecutionResult.ContextResult).imageDataUrl!!
+            if (VisionUnderstandingService.isConfigured()) {
+                try {
+                    val prompt = "请分析工具 [${toolCall.function.name}] 返回的图片内容，提取关键信息、文字和结构。"
+                    val analysis = VisionUnderstandingService.analyzeImage(
+                        imageDataUrl = toolImageDataUrl,
+                        prompt = prompt,
+                        turnJob = env.turnJob
+                    )
+                    visionSucceeded = true
+                    "\n\n【视觉辅助：图片分析】\n$analysis"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    OmniLog.w(tag, "工具返回图片视觉辅助分析失败: ${e.javaClass.simpleName}")
+                    "\n\n【视觉辅助提示】图片分析失败：${e.message}"
+                }
+            } else {
+                "\n\n【视觉辅助提示】当前主模型不支持图片输入，且未配置【视觉理解】场景模型。工具已返回图片，但无法自动进行视觉分析。如需分析图片，请在设置中配置【视觉理解】场景模型。"
+            }
+        } else {
+            ""
+        }
+
         val skippedUnsupportedBrowserImage =
             result is ToolExecutionResult.ContextResult &&
                 !result.imageDataUrl.isNullOrBlank() &&
                 imageDataUrl == null &&
+                !visionSucceeded &&
                 toolCall.function.name.equals("browser_use", ignoreCase = true)
-        val modelTextContent = if (skippedUnsupportedBrowserImage) {
+        val browserUseHint = if (skippedUnsupportedBrowserImage) {
             buildString {
-                append(textContent)
                 append("\n\n")
                 append(
                     t(
@@ -683,8 +712,9 @@ class AgentOrchestrator(
                 )
             }
         } else {
-            textContent
+            ""
         }
+        val modelTextContent = textContent + visionAnalysisSection + browserUseHint
 
         val content: JsonElement = if (imageDataUrl != null) {
             buildJsonArray {

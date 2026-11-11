@@ -3378,6 +3378,9 @@ internal class LocalAcpRuntime(
             ?.takeIf { it.isNotEmpty() }
         val reasoningEffort = args.stringValue("effort")
             ?: args.stringValue("reasoningEffort")
+        val userMessageId = args.stringValue("userMessageId")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         val terminalEnvironment = (args["terminalEnvironment"] as? Map<*, *>)
             ?.entries
             ?.mapNotNull { (rawKey, rawValue) ->
@@ -3391,6 +3394,7 @@ internal class LocalAcpRuntime(
             conversationId?.let { put("conversationId", it) }
             conversationMode?.let { put("conversationMode", it) }
             reasoningEffort?.let { put("reasoningEffort", it) }
+            userMessageId?.let { put("userMessageId", it) }
             if (terminalEnvironment.isNotEmpty()) {
                 put("terminalEnvironment", buildJsonObject {
                     terminalEnvironment.forEach { (key, value) -> put(key, value) }
@@ -3662,6 +3666,9 @@ internal class LocalAcpRuntime(
                 mimeType.startsWith("image/", ignoreCase = true)
             val isAudio = attachment["isAudio"] == true ||
                 mimeType.startsWith("audio/", ignoreCase = true)
+            val attachmentMeta = attachment.stringValue("id")?.let { attachmentId ->
+                buildJsonObject { put("attachmentId", attachmentId) }
+            }
             if (isImage && capabilities.image && localFile != null) {
                 // ACP has a first-class image content block. A workspace
                 // ResourceLink is useful for generic files, but it is not a
@@ -3675,6 +3682,7 @@ internal class LocalAcpRuntime(
                     data = encoded,
                     mimeType = mimeType,
                     uri = source,
+                    _meta = attachmentMeta,
                 )
             } else if (isAudio && capabilities.audio && localFile != null) {
                 val encoded = Base64.encodeToString(
@@ -3694,14 +3702,16 @@ internal class LocalAcpRuntime(
                     name = name,
                     uri = source,
                     mimeType = mimeType,
-                    size = (attachment["size"] as? Number)?.toLong()
+                    size = (attachment["size"] as? Number)?.toLong(),
+                    _meta = attachmentMeta,
                 )
             } else if (isImage && capabilities.image && dataUrl != null) {
                 val encoded = dataUrl.substringAfter(",", dataUrl)
                 blocks += ContentBlock.Image(
                     data = encoded,
                     mimeType = mimeType,
-                    uri = source
+                    uri = source,
+                    _meta = attachmentMeta,
                 )
             } else if (isAudio && capabilities.audio && dataUrl != null) {
                 val encoded = dataUrl.substringAfter(",", dataUrl)

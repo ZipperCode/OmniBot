@@ -98,7 +98,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settingsSceneModelTitle => '场景模型配置';
 
   @override
-  String get settingsSceneModelSubtitle => '按场景绑定模型，未绑定场景使用默认模型';
+  String get settingsSceneModelSubtitle => '按场景配置基础与高级模型绑定';
 
   @override
   String get settingsWorkspaceMemoryTitle => 'Workspace 记忆配置';
@@ -891,7 +891,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get sceneModelMapping => '场景映射';
 
   @override
-  String get sceneModelMappingDesc => '按场景绑定 Provider 与模型，未绑定的场景会继续使用默认模型。';
+  String get sceneModelMappingDesc => '按场景绑定 Provider 与模型，各场景独立生效。';
 
   @override
   String get sceneModelRefreshList => '刷新模型列表';

@@ -1654,6 +1654,7 @@ mixin _ChatPageAgentMixin on _ChatPageStateBase {
         // runtime uses it to return the original turn instead of replaying
         // tool calls.
         requestId: aiMessageId,
+        userMessageId: userMessageId,
         agentId: dispatchAgentId,
         text: messageText,
         attachments: attachments,

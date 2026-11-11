@@ -1,8 +1,11 @@
 package cn.com.omnimind.bot.agent.tool.handlers
 
 import cn.com.omnimind.baselib.http.OkHttpManager
+import cn.com.omnimind.baselib.llm.ChatGptOAuthProvider
+import cn.com.omnimind.baselib.llm.DeepSeekProvider
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
-import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
+import cn.com.omnimind.baselib.llm.ModelProviderProfile
+import cn.com.omnimind.baselib.llm.ProviderModelOption
 import cn.com.omnimind.baselib.llm.SceneModelBindingStore
 import cn.com.omnimind.baselib.util.ContentEndpointSecurity
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
@@ -13,31 +16,29 @@ import cn.com.omnimind.bot.agent.AgentToolRegistry
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import java.io.IOException
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.suspendCancellableCoroutine
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.Response
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONObject
 
 class ImageGenerationToolHandler(
     private val helper: SharedHelper,
     private val workspaceManager: AgentWorkspaceManager,
 ) : ToolHandler {
-    override val toolNames: Set<String> = setOf("image_generate")
+    override val toolNames: Set<String> = setOf(TOOL_NAME)
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -60,7 +61,7 @@ class ImageGenerationToolHandler(
         callback: AgentCallback,
         toolHandle: AgentToolExecutionHandle,
     ): ToolExecutionResult {
-        val toolName = "image_generate"
+        val toolName = TOOL_NAME
         return try {
             val workspace = env.workspaceDescriptor
             helper.requireWorkspaceStorageAccess(callback)?.let { return it }
@@ -73,25 +74,17 @@ class ImageGenerationToolHandler(
                 args["prompt"]?.jsonPrimitive?.contentOrNull,
             )
             val outputPath = args["outputPath"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-            require(outputPath.isNotEmpty()) { "outputPath cannot be empty" }
+            require(outputPath.isNotEmpty()) { "输出路径不能为空" }
 
-            val route = resolveRoute(args, env)
+            val route = resolveRoute()
             val size = args["size"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotEmpty)
-                ?: "1024x1024"
             val quality = args["quality"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotEmpty)
-                ?: "auto"
             val requestedFormat = args["format"]?.jsonPrimitive?.contentOrNull?.trim()
-                ?.lowercase()
-                ?.takeIf { it in SUPPORTED_OUTPUT_FORMATS }
-                ?: outputPath.substringAfterLast('.', missingDelimiterValue = "")
-                    .lowercase()
-                    .takeIf { it in SUPPORTED_OUTPUT_FORMATS }
-                ?: "png"
+                ?.takeIf(String::isNotEmpty)
             val background = args["background"]?.jsonPrimitive?.contentOrNull?.trim()
                 ?.takeIf(String::isNotEmpty)
-                ?: "auto"
 
             val file = workspaceManager.resolvePath(
                 inputPath = outputPath,
@@ -102,12 +95,12 @@ class ImageGenerationToolHandler(
             helper.reportToolProgress(
                 callback,
                 toolName,
-                "Generating image",
+                "正在生成图片",
                 mapOf("model" to route.model, "outputPath" to outputPath),
                 toolHandle,
             )
 
-            val imageBytes = withContext(Dispatchers.IO) {
+            val generatedImage = withContext(Dispatchers.IO) {
                 requestGeneratedImage(
                     route = route,
                     prompt = prompt,
@@ -117,26 +110,30 @@ class ImageGenerationToolHandler(
                     background = background,
                 )
             }
-            requireSupportedImage(imageBytes)
+            val finalMimeType = requireSupportedImage(generatedImage.bytes)
 
             file.parentFile?.mkdirs()
-            file.writeBytes(imageBytes)
+            file.writeBytes(generatedImage.bytes)
 
-            val artifact = workspaceManager.buildArtifactForFile(file, toolName)
+            val artifact = workspaceManager.buildArtifactForFile(file, toolName).copy(
+                mimeType = finalMimeType,
+                previewKind = "image",
+            )
             val payload = linkedMapOf<String, Any?>(
                 "path" to (workspaceManager.shellPathForAndroid(file) ?: file.absolutePath),
                 "androidPath" to file.absolutePath,
                 "uri" to artifact.uri,
                 "size" to file.length(),
-                "mimeType" to workspaceManager.guessMimeType(file),
+                "mimeType" to finalMimeType,
                 "model" to route.model,
                 "providerProfileId" to route.providerProfileId,
                 "providerProfileName" to route.providerProfileName,
+                "protocol" to route.protocol.name.lowercase(),
             )
             val payloadJson = helper.encodeLocalizedPayload(payload)
             ToolExecutionResult.ContextResult(
                 toolName = toolName,
-                summaryText = helper.localized("Generated image: ${file.name}"),
+                summaryText = helper.localized("已生成图片: ${file.name}"),
                 previewJson = payloadJson,
                 rawResultJson = payloadJson,
                 success = true,
@@ -147,80 +144,139 @@ class ImageGenerationToolHandler(
             throw error
         } catch (error: Exception) {
             helper.workspacePermissionResult(error, callback)?.let { return it }
-            val safeMessage = "Image generation failed (${error.javaClass.simpleName})"
-            helper.errorResult(toolName, safeMessage, "Image generation failed")
+            val errorMessage = error.message?.takeIf(String::isNotBlank)
+                ?: "图像生成失败 (${error.javaClass.simpleName})"
+            helper.errorResult(toolName, errorMessage, "图像生成失败")
         }
     }
 
-    private suspend fun resolveRoute(
-        args: JsonObject,
-        env: AgentExecutionEnvironment,
-    ): ImageGenerationRoute {
-        val explicitProfileId = args["providerProfileId"]?.jsonPrimitive?.contentOrNull?.trim()
-            ?.takeIf(String::isNotEmpty)
-            ?: env.modelProviderProfileId?.trim()?.takeIf(String::isNotEmpty)
-            ?: SceneModelBindingStore.getBinding("scene.dispatch.model")?.providerProfileId?.trim()?.takeIf(String::isNotEmpty)
-        val profile = if (explicitProfileId != null) {
-            ModelProviderConfigStore.getProfile(explicitProfileId)
-                ?: throw IllegalStateException(
-                    "Image provider profile '$explicitProfileId' not found. Check image provider configuration."
-                )
-        } else {
-            ModelProviderConfigStore.getEditingProfile()
+    internal fun resolveRoute(): ImageGenerationRoute {
+        val binding = SceneModelBindingStore.getBinding(SCENE_ID)
+            ?: throw IllegalStateException("未配置图像生成场景模型，请在设置中为图像生成场景绑定 Provider 和模型。")
+        val providerProfileId = binding.providerProfileId.trim()
+        if (providerProfileId.isEmpty()) {
+            throw IllegalStateException("未配置图像生成场景 Provider，请在设置中为图像生成场景选择 Provider。")
         }
-        require(!cn.com.omnimind.baselib.llm.ChatGptOAuthProvider.isOAuth(profile.sourceType)) {
-            "ChatGPT OAuth does not support image generation. Select an image API provider."
+        val modelId = binding.modelId.trim()
+        if (modelId.isEmpty()) {
+            throw IllegalStateException("未配置图像生成场景模型，请在设置中为图像生成场景选择模型。")
         }
-        require(!profile.readOnly) {
-            "The current provider is read-only and cannot generate images. Select a BYOK provider profile."
+        val profile = ModelProviderConfigStore.getProfile(providerProfileId)
+            ?: throw IllegalStateException("图像生成 Provider（ID: $providerProfileId）不存在，请在设置中重新配置图像生成场景。")
+
+        if (ChatGptOAuthProvider.isOAuth(profile.sourceType)) {
+            throw IllegalStateException("ChatGPT OAuth 不支持图像生成，请选择支持图像生成的 API Provider。")
         }
-        require(profile.isConfigured()) {
-            "Confirm the BYOK provider destination before generating images."
+        if (profile.readOnly) {
+            throw IllegalStateException("当前图像生成 Provider 为只读，无法用于图像生成，请选择自定义 Provider。")
+        }
+        if (!profile.isConfigured()) {
+            throw IllegalStateException("图像生成 Provider 未配置 Base URL，请在设置中检查配置。")
         }
         val apiKey = profile.apiKey.trim()
-        require(apiKey.isNotEmpty()) {
-            "Image provider apiKey is empty. Configure a BYOK OpenAI-compatible provider profile."
+
+        validateModelCapabilitiesIfAvailable(profile, modelId)
+
+        val normalizedProtocol = DeepSeekProvider.normalizeProtocolType(profile.protocolType)
+        val protocol = when (normalizedProtocol) {
+            "openai_compatible" -> ImageGenerationProtocol.OPENAI_COMPATIBLE
+            "gemini" -> ImageGenerationProtocol.GEMINI
+            "anthropic" -> throw IllegalStateException("Anthropic 协议不支持图像生成，图像生成场景仅支持 OpenAI-Compatible 与 Gemini 协议。")
+            "deepseek" -> throw IllegalStateException("DeepSeek 协议不支持图像生成，图像生成场景仅支持 OpenAI-Compatible 与 Gemini 协议。")
+            else -> throw IllegalStateException("当前 Provider 协议（$normalizedProtocol）不支持图像生成，图像生成场景仅支持 OpenAI-Compatible 与 Gemini 协议。")
         }
-        val requestedModel = normalizeImageModelId(args["model"]?.jsonPrimitive?.contentOrNull)
-        val model = requestedModel ?: DEFAULT_IMAGE_MODEL
-        return ImageGenerationRoute(
-            endpoint = resolveImageGenerationEndpoint(
+
+        val endpoint = when (protocol) {
+            ImageGenerationProtocol.OPENAI_COMPATIBLE -> resolveImageGenerationEndpoint(
                 baseUrl = profile.baseUrl,
-                apiKey = apiKey,
-            ),
+            )
+            ImageGenerationProtocol.GEMINI -> GeminiImageProtocolHandler.resolveEndpoint(
+                baseUrl = profile.baseUrl,
+                model = modelId,
+            )
+        }
+
+        return ImageGenerationRoute(
+            protocol = protocol,
+            endpoint = endpoint,
             apiKey = apiKey,
             customHeaders = profile.customHeaders,
-            model = model,
+            model = modelId,
             providerProfileId = profile.id,
             providerProfileName = profile.name,
         )
     }
 
+    private fun validateModelCapabilitiesIfAvailable(
+        profile: ModelProviderProfile,
+        modelId: String,
+    ) {
+        val context = runCatching { helper.context }.getOrNull() ?: return
+        val cachedModel = runCatching {
+            ModelProviderConfigStore.cachedModels(context, profile)
+                .firstOrNull { it.id.equals(modelId, ignoreCase = true) }
+        }.getOrNull() ?: return
+
+        // 优先明确 supportsImageOutput == false 拒绝，type=image 不能推翻否定
+        val supportsImageOutput = resolveSupportsImageOutput(cachedModel)
+        if (supportsImageOutput == false) {
+            throw IllegalStateException("当前模型（$modelId）明确不支持图像输出，无法用于图像生成，请选择支持生图的模型。")
+        }
+
+        // 拒绝明确 embedding / tts
+        val declaredModelType = cachedModel.modelType?.trim()?.lowercase()
+        if (declaredModelType == "embedding" || declaredModelType == "tts") {
+            throw IllegalStateException("当前模型（$modelId）类型为 $declaredModelType，不支持图像生成，请选择支持生图的模型。")
+        }
+    }
+
+    private fun resolveSupportsImageOutput(option: ProviderModelOption): Boolean? {
+        option.supportsImageOutput?.let { return it }
+
+        if (option.outputModalities.isNotEmpty()) {
+            return option.outputModalities.any { it.equals("image", ignoreCase = true) }
+        }
+        return null
+    }
+
     private suspend fun requestGeneratedImage(
         route: ImageGenerationRoute,
         prompt: String,
-        size: String,
-        quality: String,
-        outputFormat: String,
-        background: String,
-    ): ByteArray {
-        val requestJson = JSONObject().apply {
-            put("model", route.model)
-            put("prompt", prompt)
-            put("n", 1)
-            put("size", size)
-            put("quality", quality)
-            put("output_format", outputFormat)
-            put("background", background)
+        size: String?,
+        quality: String?,
+        outputFormat: String?,
+        background: String?,
+    ): GeneratedImage {
+        val request = when (route.protocol) {
+            ImageGenerationProtocol.OPENAI_COMPATIBLE -> {
+                val requestJson = OpenAiImageProtocolHandler.buildRequestJson(
+                    model = route.model,
+                    prompt = prompt,
+                    size = size,
+                    quality = quality,
+                    outputFormat = outputFormat,
+                    background = background,
+                )
+                OpenAiImageProtocolHandler.buildHttpRequest(
+                    endpoint = route.endpoint,
+                    apiKey = route.apiKey,
+                    customHeaders = route.customHeaders,
+                    requestJson = requestJson,
+                    allowInsecureTransport = true,
+                )
+            }
+            ImageGenerationProtocol.GEMINI -> {
+                val requestJson = GeminiImageProtocolHandler.buildRequestJson(prompt = prompt)
+                GeminiImageProtocolHandler.buildHttpRequest(
+                    endpoint = route.endpoint,
+                    apiKey = route.apiKey,
+                    customHeaders = route.customHeaders,
+                    requestJson = requestJson,
+                    allowInsecureTransport = true,
+                )
+            }
         }
 
-        val request = buildRequest(
-            endpoint = route.endpoint,
-            apiKey = route.apiKey,
-            customHeaders = route.customHeaders,
-            requestJson = requestJson,
-            allowInsecureTransport = true,
-        )
         val response = OkHttpManager.sensitiveContentCall(
             client = httpClient,
             request = request,
@@ -228,92 +284,38 @@ class ImageGenerationToolHandler(
             allowInsecureTransport = true,
         ).awaitResponse()
 
-        response.use {
-            val bytes = it.body?.bytes() ?: ByteArray(0)
-            if (!it.isSuccessful) {
-                throw IllegalStateException("image generation request failed (${it.code})")
+        return response.use { resp ->
+            val bytes = resp.body?.bytes() ?: ByteArray(0)
+            if (!resp.isSuccessful) {
+                val bodyString = bytes.toString(Charsets.UTF_8)
+                val jsonPayload = runCatching { JSONObject(bodyString) }.getOrNull()
+                val apiMessage = jsonPayload?.optJSONObject("error")?.optString("message")?.takeIf(String::isNotBlank)
+                val code = resp.code
+                if (apiMessage != null) {
+                    throw IllegalStateException("图像生成请求失败 ($code): $apiMessage")
+                } else {
+                    throw IllegalStateException("图像生成请求失败 ($code)")
+                }
             }
             val payload = runCatching { JSONObject(bytes.toString(Charsets.UTF_8)) }
-                .getOrElse { throw IllegalStateException("image generation returned invalid JSON") }
-            return extractGeneratedImage(payload)
-                ?: throw IllegalStateException(
-                    "image generation response did not contain b64_json or image url"
-                )
-        }
-    }
+                .getOrElse { throw IllegalStateException("图像生成响应返回了无效 JSON") }
 
-    private fun buildRequest(
-        endpoint: String,
-        apiKey: String,
-        customHeaders: Map<String, String>,
-        requestJson: JSONObject,
-        allowInsecureTransport: Boolean = false,
-    ): Request {
-        val safeEndpoint = ContentEndpointSecurity.requireSafe(
-            rawUrl = endpoint,
-            allowInsecureLoopback = CredentialEndpointSecurity.isDebugLoopbackAllowed(),
-            allowInsecureTransport = allowInsecureTransport,
-        )
-        val mergedHeaders = ProviderCustomHeaderUtils.mergeHeaders(
-            builtIn = linkedMapOf(
-                "Content-Type" to "application/json",
-                "Accept" to "application/json",
-                "Authorization" to "Bearer $apiKey",
-            ),
-            custom = customHeaders,
-        )
-        return Request.Builder()
-            .url(safeEndpoint)
-            .apply {
-                mergedHeaders.forEach { (key, value) -> header(key, value) }
-            }
-            .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
-    }
-
-    private suspend fun extractGeneratedImage(payload: JSONObject): ByteArray? {
-        val data = payload.optJSONArray("data")
-        if (data != null && data.length() > 0) {
-            val first = data.optJSONObject(0) ?: JSONObject()
-            first.optString("b64_json").takeIf(String::isNotBlank)
-                ?.let(::decodeBase64Image)?.let { return it }
-            first.optString("url").takeIf(String::isNotBlank)
-                ?.let { return downloadImage(it) }
-        }
-        val responseFormat = payload.optString("format").takeIf(String::isNotBlank)
-        val output = payload.optJSONArray("output") ?: return null
-        for (index in 0 until output.length()) {
-            val item = output.optJSONObject(index) ?: continue
-            extractImageFromOutputItem(item, responseFormat)?.let { return it }
-            item.optString("url").takeIf(String::isNotBlank)
-                ?.let { return downloadImage(it) }
-        }
-        return null
-    }
-
-    private fun extractImageFromOutputItem(item: JSONObject, responseFormat: String?): ByteArray? {
-        item.optString("b64_json").takeIf(String::isNotBlank)?.let(::decodeBase64Image)
-            ?.let { return it }
-        item.optString("result").takeIf(String::isNotBlank)?.let(::decodeBase64Image)
-            ?.let { return it }
-        item.optString("image_base64").takeIf(String::isNotBlank)?.let(::decodeBase64Image)
-            ?.let { return it }
-        val content = item.optJSONArray("content") ?: return null
-        for (index in 0 until content.length()) {
-            val contentItem = content.optJSONObject(index) ?: continue
-            contentItem.optString("b64_json").takeIf(String::isNotBlank)
-                ?.let(::decodeBase64Image)?.let { return it }
-            contentItem.optString("image_base64").takeIf(String::isNotBlank)
-                ?.let(::decodeBase64Image)?.let { return it }
-            val dataUrl = contentItem.optString("image_url")
-                .takeIf { it.startsWith("data:", ignoreCase = true) }
-            dataUrl?.let(::decodeBase64Image)?.let { return it }
-            if (responseFormat == "b64_json") {
-                contentItem.optString("result").takeIf(String::isNotBlank)
-                    ?.let(::decodeBase64Image)?.let { return it }
+            when (route.protocol) {
+                ImageGenerationProtocol.OPENAI_COMPATIBLE -> {
+                    OpenAiImageProtocolHandler.extractImage(
+                        payload = payload,
+                        downloadImageFn = ::downloadImage,
+                        decodeBase64Fn = ::decodeBase64Image,
+                    ) ?: throw IllegalStateException("OpenAI 图像生成响应未包含图片数据（b64_json 或 url）")
+                }
+                ImageGenerationProtocol.GEMINI -> {
+                    GeminiImageProtocolHandler.extractImage(
+                        payload = payload,
+                        decodeBase64Fn = ::decodeBase64Image,
+                    )
+                }
             }
         }
-        return null
     }
 
     private suspend fun downloadImage(url: String): ByteArray {
@@ -330,47 +332,29 @@ class ImageGenerationToolHandler(
             allowInsecureTransport = true,
         ).awaitResponse().use { response ->
             if (!response.isSuccessful) {
-                throw IllegalStateException("image download failed (${response.code})")
+                throw IllegalStateException("图像下载失败 (${response.code})")
             }
             (response.body?.bytes() ?: ByteArray(0)).also(::requireSupportedImage)
         }
     }
 
-    private fun normalizeImageModelId(rawModel: String?): String? =
-        rawModel?.trim()?.takeIf(String::isNotEmpty)?.replace(Regex("\\s+"), "")
-
-    private data class ImageGenerationRoute(
-        val endpoint: String,
-        val apiKey: String,
-        val customHeaders: Map<String, String>,
-        val model: String,
-        val providerProfileId: String,
-        val providerProfileName: String,
-    )
-
     companion object {
-        internal const val DEFAULT_IMAGE_MODEL = "gpt-image-2"
-        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        private val SUPPORTED_OUTPUT_FORMATS = setOf("png", "webp", "jpeg")
-        private val IMAGE_GENERATION_ENDPOINT_SUFFIXES = listOf(
-            "/v1/images/generations",
-            "/images/generations",
-        )
+        const val TOOL_NAME = "image_generate"
+        const val SCENE_ID = "scene.image.generate"
 
         /**
-         * The configured image provider owns prompt capacity.  The runtime only
+         * The configured image provider owns prompt capacity. The runtime only
          * normalizes the required tool argument, so a local policy cannot reject
          * an otherwise valid provider request before it reaches the harness.
          */
         internal fun requireImageGenerationPrompt(rawPrompt: String?): String =
             rawPrompt?.trim().orEmpty().also { prompt ->
-                require(prompt.isNotEmpty()) { "prompt cannot be empty" }
+                require(prompt.isNotEmpty()) { "生图提示词不能为空" }
             }
 
-        internal fun resolveImageGenerationEndpoint(baseUrl: String, apiKey: String): String {
-            require(apiKey.isNotBlank()) { "Image provider apiKey is empty" }
+        internal fun resolveImageGenerationEndpoint(baseUrl: String): String {
             val raw = baseUrl.trim()
-            require(raw.isNotEmpty()) { "Image provider baseUrl is empty" }
+            require(raw.isNotEmpty()) { "图像生成 Provider Base URL 不能为空" }
             val stripped = ModelProviderConfigStore.stripDirectRequestUrlMarker(raw).trimEnd('/')
             if (ModelProviderConfigStore.hasDirectRequestUrlMarker(raw)) {
                 return stripped
@@ -385,6 +369,11 @@ class ImageGenerationToolHandler(
             }
         }
 
+        private val IMAGE_GENERATION_ENDPOINT_SUFFIXES = listOf(
+            "/v1/images/generations",
+            "/images/generations",
+        )
+
         internal fun decodeBase64Image(encoded: String): ByteArray? {
             val normalized = encoded.substringAfter(',', encoded).filterNot(Char::isWhitespace)
             if (normalized.isBlank()) return null
@@ -396,9 +385,8 @@ class ImageGenerationToolHandler(
             return decoded
         }
 
-
-        internal fun requireSupportedImage(bytes: ByteArray) {
-            require(bytes.isNotEmpty()) { "image generation returned empty image data" }
+        internal fun requireSupportedImage(bytes: ByteArray): String {
+            require(bytes.isNotEmpty()) { "图像生成返回了空的图片数据" }
             val png = bytes.size >= 8 &&
                 bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
                 bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte()
@@ -408,10 +396,17 @@ class ImageGenerationToolHandler(
             val webp = bytes.size >= 12 &&
                 bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII) == "RIFF" &&
                 bytes.copyOfRange(8, 12).toString(Charsets.US_ASCII) == "WEBP"
-            require(png || jpeg || webp) { "image generation returned an unsupported file type" }
+            require(png || jpeg || webp) { "图像生成返回了不支持的文件格式" }
+            return when {
+                png -> "image/png"
+                jpeg -> "image/jpeg"
+                webp -> "image/webp"
+                else -> "image/png"
+            }
         }
     }
 }
+
 private suspend fun Call.awaitResponse(): Response =
     suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { cancel() }

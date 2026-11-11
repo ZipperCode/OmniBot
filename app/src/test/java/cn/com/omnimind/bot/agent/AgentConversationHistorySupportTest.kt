@@ -1518,6 +1518,30 @@ class AgentConversationHistorySupportTest {
     }
 
     @Test
+    fun `buildPromptSeedFromEntries replays visualAnalysis from attachment metadata into prompt text`() {
+        val entry = buildUserEntry(
+            id = 1,
+            entryId = "u-vision",
+            text = "图里有什么？",
+            attachments = listOf(
+                mapOf(
+                    "id" to "att-1",
+                    "path" to "/data/user/0/cn.com.omnimind.bot/workspace/sample.png",
+                    "name" to "sample.png",
+                    "isImage" to true,
+                    "visualAnalysis" to "图中有两只猫"
+                )
+            )
+        )
+
+        val seed = AgentConversationHistorySupport.buildPromptSeedFromEntries(listOf(entry))
+        val message = seed.historyMessages.single()
+        val text = message.content.toString()
+        assertTrue(text.contains("图中有两只猫"))
+        assertTrue(text.contains("图里有什么？"))
+    }
+
+    @Test
     fun `buildPromptSeedFromEntries keeps non-image attachments as workspace path hints`() {
         val entry = buildUserEntry(
             id = 1,

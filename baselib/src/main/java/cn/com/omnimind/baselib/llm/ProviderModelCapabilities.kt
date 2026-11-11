@@ -31,6 +31,37 @@ object ProviderModelCapabilities {
         val anthropicEffort = capabilityObjects.firstNotNullOfOrNull { it["effort"] as? JsonObject }
         val parameters = metadata.stringArray("supported_parameters", "supportedParameters").orEmpty()
 
+        val declaredModelType = normalizeModelType(
+            metadata.text("model_type", "modelType", "type", "mode", "pipeline_tag")
+        ) ?: capabilityObjects.firstNotNullOfOrNull {
+            normalizeModelType(it.text("type", "mode", "pipeline_tag"))
+                ?: if (it.boolean("chat") == true) "chat"
+                else if (it.boolean("embeddings", "embedding") == true) "embedding"
+                else if (it.boolean("image", "image_generation", "images") == true) "image"
+                else if (it.boolean("tts", "audio", "speech") == true) "tts"
+                else null
+        } ?: metadata.stringArray("supported_generation_methods", "supportedGenerationMethods")?.let { methods ->
+            if (methods.any { it.equals("generateContent", ignoreCase = true) }) "chat"
+            else if (methods.any { it.equals("embedContent", ignoreCase = true) }) "embedding"
+            else if (methods.any { it.contains("image", ignoreCase = true) }) "image"
+            else null
+        } ?: model.modelType
+
+        val declaredInputModalities = metadata.stringArray("input_modalities", "inputModalities")
+            ?: capabilityObjects.firstNotNullOfOrNull { it.stringArray("input_modalities", "inputModalities") }
+            ?: model.inputModalities
+
+        val declaredOutputModalities = metadata.stringArray("output_modalities", "outputModalities")
+            ?: capabilityObjects.firstNotNullOfOrNull { it.stringArray("output_modalities", "outputModalities") }
+            ?: model.outputModalities
+
+        val declaredToolCall = metadata.boolean("tool_call", "toolCall", "tools", "function_calling")
+            ?: capabilityObjects.firstNotNullOfOrNull { it.boolean("tool_call", "toolCall", "tools", "function_calling") }
+            ?: model.toolCall
+
+        val declaredAttachment = metadata.boolean("attachment", "attachments", "vision")
+            ?: capabilityObjects.firstNotNullOfOrNull { it.boolean("attachment", "attachments", "vision", "image") }
+            ?: model.attachment
         val explicitReasoning = metadata.boolean("reasoning", "thinking", "supports_reasoning", "supportsReasoning")
             ?: capabilityObjects.firstNotNullOfOrNull {
                 it.boolean("reasoning", "thinking", "supports_reasoning", "supportsReasoning")
@@ -112,6 +143,11 @@ object ProviderModelCapabilities {
             contentRequired != model.reasoningContentRequired ||
             effort != null || thinking != null || anthropicEffort != null || reasoning != null
         return normalize(model.copy(
+            modelType = declaredModelType,
+            inputModalities = declaredInputModalities,
+            outputModalities = declaredOutputModalities,
+            attachment = declaredAttachment,
+            toolCall = declaredToolCall,
             reasoning = reasoningSupported,
             supportedReasoningLevels = levels,
             defaultReasoningLevel = defaultLevel,
@@ -129,10 +165,31 @@ object ProviderModelCapabilities {
     fun normalize(model: ProviderModelOption): ProviderModelOption {
         // Older cached JSON can omit constructor-default fields. Restore those
         // defaults before copy() validates the non-null model properties.
+        val normalizedType = normalizeModelType(model.modelType)
+        val inputModalities = model.inputModalities.orEmpty()
+        val outputModalities = model.outputModalities.orEmpty()
+
+        val imageInput = model.supportsImageInput
+            ?: if (inputModalities.isNotEmpty()) inputModalities.any { it.equals("image", ignoreCase = true) } else null
+        val imageOutput = model.supportsImageOutput
+            ?: if (outputModalities.isNotEmpty()) outputModalities.any { it.equals("image", ignoreCase = true) } else null
+        val audioOutput = model.supportsAudioOutput
+            ?: if (outputModalities.isNotEmpty()) outputModalities.any { it.equals("audio", ignoreCase = true) } else null
+
+        val attachment = when (imageInput) {
+            true -> true
+            false -> false
+            null -> model.attachment
+        }
         val restored = model.copy(
             displayName = model.displayName.orEmpty().ifEmpty { model.id },
-            inputModalities = model.inputModalities.orEmpty(),
-            outputModalities = model.outputModalities.orEmpty(),
+            modelType = normalizedType,
+            inputModalities = inputModalities,
+            outputModalities = outputModalities,
+            supportsImageInput = imageInput,
+            supportsImageOutput = imageOutput,
+            supportsAudioOutput = audioOutput,
+            attachment = attachment,
             supportedReasoningLevels = model.supportedReasoningLevels.orEmpty(),
         )
         if (restored.reasoning == false) {
@@ -213,6 +270,16 @@ object ProviderModelCapabilities {
         return when (uri.rawPath.orEmpty().trimEnd('/')) {
             "", "/v1" -> DeepSeekRoute.OPENAI
             "/anthropic", "/anthropic/v1" -> DeepSeekRoute.ANTHROPIC
+            else -> null
+        }
+    }
+    fun normalizeModelType(raw: String?): String? {
+        val lower = raw?.trim()?.lowercase() ?: return null
+        return when (lower) {
+            "chat", "chat_completion", "chat-completion", "text", "text_generation", "text-generation", "conversation" -> "chat"
+            "embedding", "embeddings", "embed", "feature-extraction", "text-embedding" -> "embedding"
+            "image", "images", "image_generation", "image-generation", "text-to-image" -> "image"
+            "tts", "audio", "speech", "text-to-speech", "audio_speech" -> "tts"
             else -> null
         }
     }

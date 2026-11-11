@@ -8,13 +8,6 @@ import com.tencent.mmkv.MMKV
 object SceneModelOverrideStore {
     private const val TAG = "SceneModelOverrideStore"
     private const val KEY_SCENE_OVERRIDE_MAP = "scene_model_override_map"
-    private val allowedScenes = setOf(
-        "scene.dispatch.model",
-        "scene.vlm.operation.primary",
-        "scene.compactor.context.chat",
-        "scene.memory.embedding",
-        "scene.memory.rollup"
-    )
     private val gson = Gson()
 
     fun getOverrideEntries(): List<SceneModelOverrideEntry> {
@@ -69,7 +62,7 @@ object SceneModelOverrideStore {
         val normalized = map.entries
             .mapNotNull { (sceneId, model) ->
                 val normalizedSceneId = sceneId.trim()
-                    .takeIf { it in allowedScenes }
+                    .takeIf(SceneModelBindingStore::isValidSceneId)
                     ?: return@mapNotNull null
                 val normalizedModel = model.trim()
                     .takeIf { isValidModelName(it) }
@@ -87,7 +80,7 @@ object SceneModelOverrideStore {
             parsed.entries
                 .mapNotNull { (sceneId, model) ->
                     val normalizedSceneId = sceneId.trim()
-                        .takeIf { it in allowedScenes }
+                        .takeIf(SceneModelBindingStore::isValidSceneId)
                         ?: return@mapNotNull null
                     val normalizedModel = model.trim()
                         .takeIf { isValidModelName(it) }

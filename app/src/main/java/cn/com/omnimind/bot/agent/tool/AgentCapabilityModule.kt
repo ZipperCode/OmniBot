@@ -12,6 +12,7 @@ import cn.com.omnimind.bot.agent.tool.handlers.BrowserToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ContextToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.FileToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ImageGenerationToolHandler
+import cn.com.omnimind.bot.agent.tool.handlers.ImageAnalyzeToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.MemoryLoadToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.MemoryToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.PrivilegedToolHandler
@@ -80,6 +81,7 @@ class BuiltInAgentCapabilityModule(
         BrowserToolHandler(helper, workspaceManager),
         WebSearchToolHandler(),
         ImageGenerationToolHandler(helper, workspaceManager),
+        ImageAnalyzeToolHandler(helper, workspaceManager),
         StickerToolHandler(helper, workspaceManager),
         FileToolHandler(helper, workspaceManager),
         SkillsToolHandler(helper, workspaceManager),
@@ -96,6 +98,7 @@ class BuiltInAgentCapabilityModule(
         val definitions: List<AgentCapabilityToolDefinition> =
             DeviceDisplayToolHandler.definitions +
                 PhoneDevelopmentToolHandler.definitions +
-                TaskRuntimeToolHandler.definitions
+                TaskRuntimeToolHandler.definitions +
+                ImageAnalyzeToolHandler.definitions
     }
 }

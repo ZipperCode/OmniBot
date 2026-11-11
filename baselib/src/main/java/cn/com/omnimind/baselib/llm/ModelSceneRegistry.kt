@@ -335,9 +335,7 @@ object ModelSceneRegistry {
             ?.takeIf { it.isNotEmpty() }
         val model = when {
             rawModel.isNotEmpty() -> rawModel
-            sceneId == SceneVoiceConfigStore.SCENE_ID ||
-                sceneId == "scene.dispatch.model" ||
-                inheritsModelFrom != null -> ""
+            SceneModelBindingStore.isValidSceneId(sceneId) || inheritsModelFrom != null -> ""
             else -> return null
         }
         return SceneInfo(

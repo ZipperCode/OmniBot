@@ -1129,10 +1129,28 @@ internal object AgentConversationHistorySupport {
     ): JsonElement? {
         val content = toStringAnyMap(payload["content"])
         val attachments = toListOfStringAnyMap(content["attachments"])
-        val text = AgentAttachmentPromptSupport.buildUserMessageText(
+        val rawText = AgentAttachmentPromptSupport.buildUserMessageText(
             text = content["text"]?.toString().orEmpty(),
             attachments = attachments
         )
+        val visionAnalyses = attachments.mapNotNull { att ->
+            val analysis = att["visualAnalysis"]?.toString()?.trim()
+            if (analysis.isNullOrEmpty()) null else {
+                val label = att["name"]?.toString()?.trim()
+                    ?: att["fileName"]?.toString()?.trim()
+                    ?: att["path"]?.toString()?.let { java.io.File(it).name }
+                if (label.isNullOrEmpty()) analysis else "[$label]:\n$analysis"
+            }
+        }
+        val text = if (visionAnalyses.isNotEmpty()) {
+            buildString {
+                append(rawText)
+                append("\n\n【视觉辅助：图片分析】\n")
+                append(visionAnalyses.joinToString("\n\n"))
+            }
+        } else {
+            rawText
+        }
         val imageBlocks = attachments.mapNotNull { attachment ->
             if (!shouldSendAttachmentToModel(attachment)) {
                 return@mapNotNull null

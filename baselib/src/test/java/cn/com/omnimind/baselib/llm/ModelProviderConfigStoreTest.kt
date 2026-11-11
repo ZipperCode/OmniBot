@@ -3,6 +3,7 @@ package cn.com.omnimind.baselib.llm
 import cn.com.omnimind.baselib.util.CredentialEndpointSecurity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -166,4 +167,82 @@ class ModelProviderConfigStoreTest {
             assertEquals("https://provider.example/native", saved.baseUrl)
         }
     }
+
+    @Test
+    fun capabilityOverrides_encodeAndDecodeRoundTrip() {
+        val overrides = mapOf(
+            "profile-1" to mapOf(
+                "gpt-4o" to ModelCapabilityOverride(
+                    modelType = "chat",
+                    imageInput = true,
+                    imageOutput = false,
+                    audioOutput = false,
+                    toolCall = true,
+                ),
+                "dall-e" to ModelCapabilityOverride(
+                    modelType = "image",
+                    imageInput = false,
+                    imageOutput = true,
+                    audioOutput = false,
+                    toolCall = false,
+                )
+            )
+        )
+        val encoded = ModelProviderConfigStore.encodeCapabilityOverridesJson(overrides)
+        val decoded = ModelProviderConfigStore.decodeCapabilityOverridesJson(encoded)
+        assertEquals(overrides, decoded)
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun capabilityOverrides_saveFailsFailClosedWhenMmkvNotInitialized() {
+        ModelProviderConfigStore.saveModelCapabilityOverride(
+            "profile-1",
+            "model-1",
+            ModelCapabilityOverride(modelType = "chat")
+        )
+    }
+
+
+    @Test
+    fun capabilityOverrides_applyOverridePrioritizesUserOverExistingCapabilities() {
+        val baseModel = ProviderModelOption(
+            id = "test-model",
+            modelType = "chat",
+            inputModalities = listOf("text", "image"),
+            outputModalities = listOf("text"),
+            supportsImageInput = true,
+            supportsImageOutput = false,
+            toolCall = true,
+        )
+        // 用户否定图片输入，开启图片输出
+        val override = ModelCapabilityOverride(
+            modelType = "image",
+            imageInput = false,
+            imageOutput = true,
+            toolCall = false,
+        )
+        val overridden = baseModel.applyOverride(override)
+        assertEquals("image", overridden.modelType)
+        assertEquals(false, overridden.supportsImageInput)
+        assertEquals(false, overridden.attachment)
+        assertEquals(listOf("text"), overridden.inputModalities)
+        assertEquals(true, overridden.supportsImageOutput)
+        assertTrue(overridden.outputModalities.contains("image"))
+        assertEquals(false, overridden.toolCall)
+    }
+
+    @Test
+    fun capabilityOverrides_emptyOverrideLeavesModelUnchanged() {
+        val baseModel = ProviderModelOption(
+            id = "test-model",
+            modelType = "chat",
+            inputModalities = listOf("text"),
+            outputModalities = listOf("text"),
+            supportsImageInput = false,
+            toolCall = true,
+        )
+        val overridden = baseModel.applyOverride(ModelCapabilityOverride())
+        assertEquals(baseModel, overridden)
+    }
+
 }

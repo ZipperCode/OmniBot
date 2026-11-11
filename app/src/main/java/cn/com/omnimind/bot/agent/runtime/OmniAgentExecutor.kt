@@ -2,6 +2,13 @@ package cn.com.omnimind.bot.agent
 
 import android.content.Context
 import cn.com.omnimind.assists.controller.http.HttpController
+import cn.com.omnimind.baselib.util.OmniLog
+import cn.com.omnimind.bot.agent.vision.VisionUnderstandingService
+import java.io.File
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.bot.agent.workspace.memory.LongTermMemoryIndex
@@ -188,6 +195,7 @@ class OmniAgentExecutor(
         acpSessionId: String? = null,
         acpTurnId: String? = null,
         turnJob: Job,
+        userMessageId: String? = null,
     ): AgentResult {
         var toolRouter: AgentToolRouter? = null
         var pluginSession: OmniPluginSession? = null
@@ -281,7 +289,8 @@ class OmniAgentExecutor(
                         explicitProtocolType = modelOverride?.protocolType,
                         explicitWireApi = modelOverride?.wireApi,
                         explicitProviderProfileId = modelOverride?.oauthProfileId,
-                    )
+                    ),
+                    providerProfileId = modelOverride?.providerProfileId,
                 )
             }.getOrDefault(AgentToolImageContinuationPolicy.DEFAULT)
             val eventAdapter = AgentEventAdapter(json)
@@ -335,7 +344,8 @@ class OmniAgentExecutor(
                                 explicitProtocolType = effectiveOverride?.protocolType,
                                 explicitWireApi = effectiveOverride?.wireApi,
                                 explicitProviderProfileId = effectiveOverride?.oauthProfileId,
-                            )
+                            ),
+                            providerProfileId = effectiveOverride?.providerProfileId,
                         )
                 },
                 subagentCompactorFactory = { subagentModel, subagentOverride, subagentReasoningEffort ->
@@ -397,7 +407,12 @@ class OmniAgentExecutor(
                         memoryContext = promptIdentityContext,
                         terminalDistribution = terminalDistribution,
                         conversationMode = conversationMode,
-                        historyMessagesOverride = historyMessagesOverride
+                        historyMessagesOverride = historyMessagesOverride,
+                        supportsVisionInput = toolImageContinuationPolicy.supportsToolImageContinuation,
+                        turnJob = turnJob,
+                        conversationId = conversationId,
+                        historyRepository = historyRepository,
+                        userMessageId = userMessageId
                     ),
                     conversationId = conversationId,
                     promptCacheKey = promptCacheKey,
@@ -435,7 +450,7 @@ class OmniAgentExecutor(
         }
     }
 
-    private fun buildInitialMessages(
+    private suspend fun buildInitialMessages(
         promptSeed: AgentConversationHistoryRepository.PromptSeed,
         userMessage: String,
         attachments: List<Map<String, Any?>>,
@@ -448,7 +463,12 @@ class OmniAgentExecutor(
         memoryContext: WorkspaceMemoryPromptContext?,
         terminalDistribution: TerminalDistribution.Spec = TerminalDistribution.alpine,
         conversationMode: String = AgentConversationModePolicy.AGENT_MODE,
-        historyMessagesOverride: List<ChatCompletionMessage>? = null
+        historyMessagesOverride: List<ChatCompletionMessage>? = null,
+        supportsVisionInput: Boolean = true,
+        turnJob: Job? = null,
+        conversationId: Long? = null,
+        historyRepository: AgentConversationHistoryRepository? = null,
+        userMessageId: String? = null
     ): List<ChatCompletionMessage> {
         val locale = AppLocaleManager.resolvePromptLocale(context)
         val chatOnly = AgentConversationModePolicy.isChatOnlyMode(conversationMode)
@@ -484,14 +504,40 @@ class OmniAgentExecutor(
             }
         }
         val historyMessages = historyMessagesOverride ?: promptSeed.historyMessages
+        val effectiveHistoryMessages = if (!supportsVisionInput) {
+            sanitizeHistoryForTextOnlyModel(historyMessages)
+        } else {
+            historyMessages
+        }
+        val replayHistory = effectiveHistoryMessages.toMutableList()
+        val latestHistoryUser = replayHistory.lastOrNull()
+            ?.takeIf { message ->
+                message.role == "user" &&
+                    !AgentConversationHistorySupport.isContextSummaryMessage(message)
+            }
+        val needsCurrentUser = !continueMode || (latestHistoryUser == null && replayHistory.none(::isUserTurnMessage))
+        val currentUserMessage = if (needsCurrentUser) {
+            buildCurrentUserMessage(
+                userMessage = userMessage,
+                attachments = attachments,
+                supportsVisionInput = supportsVisionInput,
+                turnJob = turnJob,
+                conversationId = conversationId,
+                conversationMode = conversationMode,
+                historyRepository = historyRepository,
+                userMessageId = userMessageId
+            )
+        } else {
+            latestHistoryUser ?: ChatCompletionMessage(role = "user", content = JsonPrimitive(userMessage))
+        }
         return mergeInitialPromptMessages(
             leadingMessages = leadingMessages,
             historyMessages = if (chatOnly) {
-                filterChatOnlyHistoryMessages(historyMessages)
+                filterChatOnlyHistoryMessages(effectiveHistoryMessages)
             } else {
-                historyMessages
+                effectiveHistoryMessages
             },
-            currentUserMessage = buildCurrentUserMessage(userMessage, attachments),
+            currentUserMessage = currentUserMessage,
             continueMode = continueMode
         )
     }
@@ -515,9 +561,15 @@ class OmniAgentExecutor(
         )
     }
 
-    private fun buildCurrentUserMessage(
+    private suspend fun buildCurrentUserMessage(
         userMessage: String,
-        attachments: List<Map<String, Any?>>
+        attachments: List<Map<String, Any?>>,
+        supportsVisionInput: Boolean = true,
+        turnJob: Job? = null,
+        conversationId: Long? = null,
+        conversationMode: String = AgentConversationModePolicy.AGENT_MODE,
+        historyRepository: AgentConversationHistoryRepository? = null,
+        userMessageId: String? = null
     ): cn.com.omnimind.baselib.llm.ChatCompletionMessage {
         val rawText = AgentAttachmentPromptSupport.buildUserMessageText(
             text = userMessage,
@@ -526,9 +578,10 @@ class OmniAgentExecutor(
         val normalizedAttachments = normalizeAttachments(
             attachments.filter(AgentAttachmentPromptSupport::shouldSendAttachmentToModel)
         )
-        val imageParts = normalizedAttachments
-            .filter { it.isImage }
-            .mapNotNull { attachment ->
+        val imageAttachments = normalizedAttachments.filter { it.isImage }
+
+        if (supportsVisionInput) {
+            val imageParts = imageAttachments.mapNotNull { attachment ->
                 val imageUrl = resolveImageAttachmentUrl(attachment)
                 if (imageUrl.isBlank()) {
                     null
@@ -541,25 +594,124 @@ class OmniAgentExecutor(
                     }
                 }
             }
-        val content = if (imageParts.isEmpty()) {
-            JsonPrimitive(rawText)
-        } else {
-            buildJsonArray {
-                if (rawText.isNotBlank()) {
-                    add(
-                        buildJsonObject {
-                            put("type", "text")
-                            put("text", rawText)
-                        }
-                    )
+            val content = if (imageParts.isEmpty()) {
+                JsonPrimitive(rawText)
+            } else {
+                buildJsonArray {
+                    if (rawText.isNotBlank()) {
+                        add(
+                            buildJsonObject {
+                                put("type", "text")
+                                put("text", rawText)
+                            }
+                        )
+                    }
+                    imageParts.forEach { add(it) }
                 }
-                imageParts.forEach { add(it) }
+            }
+            return cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+                role = "user",
+                content = content
+            )
+        }
+
+        // 纯文本主模型：通过独立视觉理解服务转为文本辅助
+        if (imageAttachments.isEmpty()) {
+            return cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+                role = "user",
+                content = JsonPrimitive(rawText)
+            )
+        }
+
+        if (!VisionUnderstandingService.isConfigured()) {
+            val unconfiguredHint = "\n\n【视觉辅助提示】当前主模型不支持图片输入，且未配置【视觉理解】场景模型。图片文件已保存在上述路径，但尚未进行视觉理解分析。如需分析图片，请在设置中配置【视觉理解】场景模型。"
+            return cn.com.omnimind.baselib.llm.ChatCompletionMessage(
+                role = "user",
+                content = JsonPrimitive(rawText + unconfiguredHint)
+            )
+        }
+
+        val basePrompt = userMessage.trim().ifBlank {
+            "请详细分析并描述这张图片的内容，包括文字、图表和关键信息。"
+        }
+        val visionResults = mutableListOf<String>()
+        val updatedAttachments = attachments.map { LinkedHashMap(it) }
+        var anyNewlyAnalyzed = false
+        for ((index, attachment) in imageAttachments.withIndex()) {
+            val existing = attachment.visualAnalysis?.trim()
+            val label = attachment.path?.let { File(it).name } ?: "图片 ${index + 1}"
+            val analysis = if (!existing.isNullOrBlank()) {
+                existing
+            } else {
+                val imageUrl = resolveImageAttachmentUrl(attachment)
+                if (imageUrl.isBlank()) {
+                    throw IllegalStateException("无法读取图片数据：$label")
+                }
+                val result = VisionUnderstandingService.analyzeImage(
+                    imageDataUrl = imageUrl,
+                    prompt = basePrompt,
+                    turnJob = turnJob
+                )
+                anyNewlyAnalyzed = true
+                result
+            }
+            val target = updatedAttachments.firstOrNull { raw ->
+                val tId = raw["id"]?.toString()?.trim()
+                val aId = attachment.id?.trim()
+                !tId.isNullOrEmpty() && tId == aId
+            }
+            target?.put("visualAnalysis", analysis)
+            visionResults.add("[$label]:\n$analysis")
+        }
+
+        if (anyNewlyAnalyzed && conversationId != null && conversationId > 0 && !userMessageId.isNullOrBlank() && historyRepository != null) {
+            runCatching {
+                historyRepository.updateUserMessageVisualAnalysis(
+                    conversationId = conversationId,
+                    conversationMode = conversationMode,
+                    userMessageId = userMessageId,
+                    updatedAttachments = updatedAttachments
+                )
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                OmniLog.w("OmniAgentExecutor", "更新用户消息视觉辅助附件元数据失败: ${error.javaClass.simpleName}")
             }
         }
+
+        val visionSummary = buildString {
+            append("\n\n【视觉辅助：图片分析】\n")
+            append(visionResults.joinToString("\n\n"))
+        }
+
         return cn.com.omnimind.baselib.llm.ChatCompletionMessage(
             role = "user",
-            content = content
+            content = JsonPrimitive(rawText + visionSummary)
         )
+    }
+
+    private fun sanitizeHistoryForTextOnlyModel(
+        messages: List<cn.com.omnimind.baselib.llm.ChatCompletionMessage>
+    ): List<cn.com.omnimind.baselib.llm.ChatCompletionMessage> {
+        return messages.map { message ->
+            val content = message.content
+            if (content !is JsonArray) {
+                return@map message
+            }
+            val filtered = content.filterNot { element ->
+                val obj = element as? JsonObject ?: return@filterNot false
+                val type = obj["type"]?.jsonPrimitive?.contentOrNull
+                type == "image_url" || type == "input_image"
+            }
+            val sanitized = when {
+                filtered.isEmpty() -> JsonPrimitive("[图片]")
+                filtered.size == 1 && filtered[0] is JsonObject -> {
+                    val text = (filtered[0] as JsonObject)["text"]?.jsonPrimitive?.contentOrNull
+                    if (text != null) JsonPrimitive(text) else JsonArray(filtered)
+                }
+                else -> JsonArray(filtered)
+            }
+            message.copy(content = sanitized)
+        }
     }
 
     private data class PromptAttachment(
@@ -567,7 +719,9 @@ class OmniAgentExecutor(
         val url: String?,
         val dataUrl: String?,
         val path: String?,
-        val mimeType: String?
+        val mimeType: String?,
+        val visualAnalysis: String? = null,
+        val id: String? = null
     )
 
     private fun normalizeAttachments(attachments: List<Map<String, Any?>>): List<PromptAttachment> {
@@ -580,7 +734,9 @@ class OmniAgentExecutor(
                 url = item["url"]?.toString(),
                 dataUrl = item["dataUrl"]?.toString(),
                 path = item["path"]?.toString(),
-                mimeType = mimeType
+                mimeType = mimeType,
+                visualAnalysis = item["visualAnalysis"]?.toString(),
+                id = item["id"]?.toString()
             )
         }
     }

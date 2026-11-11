@@ -2,9 +2,12 @@ package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.assists.controller.http.HttpController
 import cn.com.omnimind.baselib.llm.DeepSeekProvider
+import com.tencent.mmkv.MMKV
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mockito.ArgumentMatchers.anyString
+import org.mockito.Mockito
 
 class AgentToolImageContinuationPolicyResolverTest {
     @Test
@@ -75,5 +78,34 @@ class AgentToolImageContinuationPolicyResolverTest {
         val policy = AgentToolImageContinuationPolicyResolver.resolve(routeInfo)
 
         assertTrue(policy.supportsToolImageContinuation)
+    }
+
+    @Test
+    fun selectedProviderImageRejectionSurvivesExplicitTransportRoute() {
+        val routeInfo = HttpController.ChatCompletionRouteInfo(
+            requestedModel = "scene.dispatch.model",
+            resolvedModel = "text-only-model",
+            apiBase = "http://127.0.0.1:18794/v1",
+            providerProfileId = null,
+            providerProfileName = null,
+            routeTag = "custom_openai_compat",
+            bindingApplied = false,
+            bindingProfileMissing = false,
+            overrideApplied = true,
+        )
+        val store = Mockito.mock(MMKV::class.java)
+        Mockito.`when`(store.decodeString(anyString())).thenReturn(
+            """{"selected-provider":{"text-only-model":{"imageInput":false}}}"""
+        )
+        Mockito.mockStatic(MMKV::class.java).use { mmkv ->
+            mmkv.`when`<MMKV> { MMKV.defaultMMKV() }.thenReturn(store)
+
+            val policy = AgentToolImageContinuationPolicyResolver.resolve(
+                routeInfo,
+                providerProfileId = "selected-provider",
+            )
+
+            assertFalse(policy.supportsToolImageContinuation)
+        }
     }
 }

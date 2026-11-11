@@ -204,6 +204,29 @@ class SceneOperationConfig {
 }
 
 class SceneModelConfigService {
+  static const String sceneDispatchModel = 'scene.dispatch.model';
+  static const String sceneVisionUnderstanding = 'scene.vision.understanding';
+  static const String sceneVlmOperationPrimary = 'scene.vlm.operation.primary';
+  static const String sceneImageGenerate = 'scene.image.generate';
+  static const String sceneVoice = 'scene.voice';
+  static const String sceneCompactorContextChat = 'scene.compactor.context.chat';
+  static const String sceneMemoryEmbedding = 'scene.memory.embedding';
+  static const String sceneMemoryRollup = 'scene.memory.rollup';
+
+  static const List<String> basicSceneIds = [
+    sceneDispatchModel,
+    sceneVisionUnderstanding,
+    sceneVlmOperationPrimary,
+    sceneImageGenerate,
+    sceneVoice,
+  ];
+
+  static const List<String> advancedSceneIds = [
+    sceneCompactorContextChat,
+    sceneMemoryEmbedding,
+    sceneMemoryRollup,
+  ];
+
   static Future<List<SceneCatalogItem>> getSceneCatalog() async {
     try {
       final result = await AssistsMessageService.assistCore

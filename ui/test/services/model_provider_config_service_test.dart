@@ -159,6 +159,10 @@ void main() {
               ],
               'editingProfileId': 'provider-1',
             };
+          case 'getModelCapabilityOverrides':
+            return <String, dynamic>{};
+          case 'syncProviderCatalogMetadata':
+            return true;
           case 'fetchProviderModels':
             fetchCalls.add(call);
             return <Map<String, dynamic>>[
@@ -606,5 +610,138 @@ void main() {
       ).map((item) => item.id),
       ['gpt-4o'],
     );
+  });
+
+  test('ProviderModelOption parses modelType and tri-state capability flags', () {
+    final option = ProviderModelOption.fromMap({
+      'id': 'image-model-1',
+      'displayName': 'Image Model',
+      'modelType': 'image',
+      'supportsImageInput': false,
+      'supportsImageOutput': true,
+      'supportsAudioOutput': false,
+      'toolCall': false,
+    });
+
+    expect(option.modelType, 'image');
+    expect(option.supportsImageInput, isFalse);
+    expect(option.supportsImageOutput, isTrue);
+    expect(option.supportsAudioOutput, isFalse);
+    expect(option.toolCall, isFalse);
+
+    final roundTrip = ProviderModelOption.fromMap(option.toMap());
+    expect(roundTrip.modelType, 'image');
+    expect(roundTrip.supportsImageInput, isFalse);
+    expect(roundTrip.supportsImageOutput, isTrue);
+    expect(roundTrip.supportsAudioOutput, isFalse);
+    expect(roundTrip.toolCall, isFalse);
+  });
+
+  test('applyCapabilityOverride prioritizes user override and negates modalities cleanly', () {
+    const baseModel = ProviderModelOption(
+      id: 'gpt-4o',
+      displayName: 'GPT-4o',
+      modelType: 'chat',
+      inputModalities: ['text', 'image'],
+      outputModalities: ['text'],
+      supportsImageInput: true,
+      supportsImageOutput: false,
+      toolCall: true,
+    );
+
+    final userOverride = const ModelCapabilityOverride(
+      modelType: 'image',
+      imageInput: false,
+      imageOutput: true,
+      audioOutput: false,
+      toolCall: false,
+    );
+
+    final result = ModelProviderConfigService.applyCapabilityOverride(
+      baseModel,
+      userOverride,
+    );
+
+    expect(result.modelType, 'image');
+    expect(result.supportsImageInput, isFalse);
+    expect(result.attachment, isFalse);
+    expect(result.inputModalities, ['text']);
+    expect(result.supportsImageOutput, isTrue);
+    expect(result.outputModalities.contains('image'), isTrue);
+    expect(result.toolCall, isFalse);
+  });
+
+  test('enrichModelsForProfile preserves user override over catalog metadata', () async {
+    SharedPreferences.setMockInitialValues({});
+    await StorageService.init();
+    ModelsDevCatalogService.setCatalogForTesting(
+      ModelsDevCatalogService.parseCatalog(_modelsDevCatalogJson),
+    );
+
+    // gpt-4o in _modelsDevCatalogJson has tool_call: true, inputModalities: ['text', 'image', 'pdf']
+    // User override sets toolCall: false, imageInput: false
+    final userOverrides = {
+      'gpt-4o': const ModelCapabilityOverride(
+        toolCall: false,
+        imageInput: false,
+      ),
+    };
+
+    final enriched = await ModelProviderConfigService.enrichModelsForProfile(
+      profileId: 'provider-1',
+      providerName: 'OpenAI',
+      apiBase: 'https://api.openai.com/v1',
+      models: const [ProviderModelOption(id: 'gpt-4o', displayName: 'gpt-4o')],
+      overrides: userOverrides,
+    );
+
+    expect(enriched.single.toolCall, isFalse);
+    expect(enriched.single.supportsImageInput, isFalse);
+    expect(enriched.single.inputModalities.contains('image'), isFalse);
+  });
+
+  test('MethodChannel saves, clears, and reads capability overrides', () async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(assistCoreChannel, (call) async {
+      calls.add(call);
+      if (call.method == 'getModelCapabilityOverrides') {
+        return <String, dynamic>{
+          'gpt-4o': {
+            'modelType': 'chat',
+            'imageInput': true,
+            'toolCall': true,
+          },
+        };
+      }
+      return true;
+    });
+
+    await ModelProviderConfigService.saveModelCapabilityOverride(
+      profileId: 'provider-1',
+      modelId: 'gpt-4o',
+      override: const ModelCapabilityOverride(
+        modelType: 'chat',
+        imageInput: true,
+        toolCall: true,
+      ),
+    );
+    expect(calls.last.method, 'saveModelCapabilityOverride');
+    expect(calls.last.arguments['modelType'], 'chat');
+    expect(calls.last.arguments['imageInput'], isTrue);
+
+    final loaded =
+        await ModelProviderConfigService.getModelCapabilityOverrides(
+      profileId: 'provider-1',
+    );
+    expect(loaded['gpt-4o']?.modelType, 'chat');
+    expect(loaded['gpt-4o']?.imageInput, isTrue);
+
+    await ModelProviderConfigService.clearModelCapabilityOverride(
+      profileId: 'provider-1',
+      modelId: 'gpt-4o',
+    );
+    expect(calls.last.method, 'clearModelCapabilityOverride');
   });
 }

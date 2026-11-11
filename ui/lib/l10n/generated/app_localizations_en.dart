@@ -104,7 +104,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get settingsSceneModelSubtitle =>
-      'Bind models by scene and use the default model for unbound scenes';
+      'Configure model bindings and capabilities by scene';
 
   @override
   String get settingsWorkspaceMemoryTitle => 'Workspace Memory';
@@ -942,7 +942,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get sceneModelMappingDesc =>
-      'Bind Providers and models by scene. Unbound scenes will continue using the default model.';
+      'Bind Providers and models by scene; each scene takes effect independently.';
 
   @override
   String get sceneModelRefreshList => 'Refresh model list';

@@ -29,7 +29,10 @@ import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.ReasoningEffort
 import cn.com.omnimind.baselib.llm.ModelProviderConfigStore
 import cn.com.omnimind.baselib.llm.ModelSceneRegistry
+import cn.com.omnimind.baselib.llm.ModelCapabilityOverride
 import cn.com.omnimind.baselib.llm.ProviderModelOption
+import cn.com.omnimind.baselib.llm.ProviderModelCapabilities
+import cn.com.omnimind.baselib.llm.ProviderReasoningCatalog
 import cn.com.omnimind.baselib.llm.ProviderCustomHeaderUtils
 import cn.com.omnimind.baselib.llm.SceneModelCatalogResolver
 import cn.com.omnimind.baselib.llm.SceneCatalogItem
@@ -382,11 +385,15 @@ class AssistsCoreManager(private val context: Context) {
             "id" to id,
             "displayName" to displayName,
             "ownedBy" to ownedBy,
+            "modelType" to modelType,
             "contextLimit" to contextLimit,
             "inputLimit" to inputLimit,
             "outputLimit" to outputLimit,
             "inputModalities" to inputModalities,
             "outputModalities" to outputModalities,
+            "supportsImageInput" to supportsImageInput,
+            "supportsImageOutput" to supportsImageOutput,
+            "supportsAudioOutput" to supportsAudioOutput,
             "modelsDevProviderId" to modelsDevProviderId,
             "modelsDevProviderName" to modelsDevProviderName,
             "providerLogoUrl" to providerLogoUrl,
@@ -1646,9 +1653,15 @@ class AssistsCoreManager(private val context: Context) {
                     ModelProviderConfigStore.sameCanonicalEndpoint(apiBase, profile.baseUrl)) {
                     ModelProviderConfigStore.rememberModels(context, profile, models)
                 }
-                val resolvedModels = ModelProviderConfigStore.resolveModelCapabilities(
-                    context, profile.copy(baseUrl = apiBase), models,
-                )
+                val resolvedModels = models.map { model ->
+                    ProviderModelCapabilities.normalize(
+                        ProviderReasoningCatalog.enrich(
+                            context,
+                            profile.copy(baseUrl = apiBase),
+                            ProviderModelCapabilities.normalize(model)
+                        )
+                    )
+                }
                 withContext(Dispatchers.Main) {
                     result.success(resolvedModels.map { it.toMap() })
                 }
@@ -1673,6 +1686,99 @@ class AssistsCoreManager(private val context: Context) {
                             mapOf("failureKind" to it)
                         }
                     )
+                }
+            }
+        }
+    }
+
+    fun saveModelCapabilityOverride(call: MethodCall, result: MethodChannel.Result) {
+        val profileId = call.argument<String>("profileId")?.trim()
+            ?.ifEmpty { null } ?: ModelProviderConfigStore.getEditingProfileId()
+        val modelId = call.argument<String>("modelId")?.trim().orEmpty()
+        if (modelId.isEmpty()) {
+            result.error("INVALID_ARGUMENT", "modelId is required", null)
+            return
+        }
+        val modelType = call.argument<String>("modelType")?.trim()?.lowercase()
+            ?.takeIf { it in setOf("chat", "embedding", "image", "tts") }
+        val imageInput = call.argument<Boolean>("imageInput")
+        val imageOutput = call.argument<Boolean>("imageOutput")
+        val audioOutput = call.argument<Boolean>("audioOutput")
+        val toolCall = call.argument<Boolean>("toolCall")
+
+        val override = ModelCapabilityOverride(
+            modelType = modelType,
+            imageInput = imageInput,
+            imageOutput = imageOutput,
+            audioOutput = audioOutput,
+            toolCall = toolCall,
+        )
+        ModelProviderConfigStore.saveModelCapabilityOverride(profileId, modelId, override)
+        result.success(true)
+    }
+
+    fun clearModelCapabilityOverride(call: MethodCall, result: MethodChannel.Result) {
+        val profileId = call.argument<String>("profileId")?.trim()
+            ?.ifEmpty { null } ?: ModelProviderConfigStore.getEditingProfileId()
+        val modelId = call.argument<String>("modelId")?.trim().orEmpty()
+        if (modelId.isEmpty()) {
+            result.error("INVALID_ARGUMENT", "modelId is required", null)
+            return
+        }
+        ModelProviderConfigStore.clearModelCapabilityOverride(profileId, modelId)
+        result.success(true)
+    }
+
+    fun getModelCapabilityOverrides(call: MethodCall, result: MethodChannel.Result) {
+        val profileId = call.argument<String>("profileId")?.trim()
+            ?.ifEmpty { null } ?: ModelProviderConfigStore.getEditingProfileId()
+        val overrides = ModelProviderConfigStore.getModelCapabilityOverrides(profileId)
+        result.success(overrides.mapValues { (_, v) -> v.toMap() })
+    }
+    fun syncProviderCatalogMetadata(call: MethodCall, result: MethodChannel.Result) {
+        val profileId = call.argument<String>("profileId")?.trim()
+            ?.ifEmpty { null } ?: ModelProviderConfigStore.getEditingProfileId()
+        val expectedProfileRevision = call.argument<Number>("expectedProfileRevision")?.toLong()
+        val expectedProfileBaseUrl = call.argument<String>("expectedProfileBaseUrl")?.trim().orEmpty()
+        val modelsRaw = call.argument<List<Map<*, *>>>("models") ?: emptyList()
+
+        workJob.launch {
+            try {
+                val profile = ModelProviderConfigStore.getProfile(profileId)
+                if (profile != null && expectedProfileRevision != null &&
+                    profile.revision == expectedProfileRevision &&
+                    ModelProviderConfigStore.sameCanonicalEndpoint(profile.baseUrl, expectedProfileBaseUrl)) {
+                    val models = modelsRaw.mapNotNull { raw ->
+                        val id = (raw["id"] as? String)?.trim().orEmpty()
+                        if (id.isEmpty()) return@mapNotNull null
+                        val modelType = ProviderModelCapabilities.normalizeModelType(raw["modelType"] as? String)
+                        val inputModalities = (raw["inputModalities"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+                        val outputModalities = (raw["outputModalities"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()
+                        val supportsImageInput = raw["supportsImageInput"] as? Boolean
+                        val supportsImageOutput = raw["supportsImageOutput"] as? Boolean
+                        val supportsAudioOutput = raw["supportsAudioOutput"] as? Boolean
+                        val toolCall = raw["toolCall"] as? Boolean
+                        ProviderModelOption(
+                            id = id,
+                            displayName = (raw["displayName"] as? String)?.trim() ?: id,
+                            ownedBy = raw["ownedBy"] as? String,
+                            modelType = modelType,
+                            inputModalities = inputModalities,
+                            outputModalities = outputModalities,
+                            supportsImageInput = supportsImageInput,
+                            supportsImageOutput = supportsImageOutput,
+                            supportsAudioOutput = supportsAudioOutput,
+                            toolCall = toolCall,
+                        )
+                    }
+                    ModelProviderConfigStore.rememberCatalogMetadata(context, profile, models)
+                }
+                withContext(Dispatchers.Main) {
+                    result.success(true)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    result.success(false)
                 }
             }
         }

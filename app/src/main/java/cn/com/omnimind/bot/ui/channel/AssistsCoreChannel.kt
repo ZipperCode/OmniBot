@@ -93,6 +93,18 @@ class AssistsCoreChannel {
                 "fetchProviderModels" -> {
                     assistsCoreManager!!.fetchProviderModels(call, result)
                 }
+                "saveModelCapabilityOverride" -> {
+                    assistsCoreManager!!.saveModelCapabilityOverride(call, result)
+                }
+                "clearModelCapabilityOverride" -> {
+                    assistsCoreManager!!.clearModelCapabilityOverride(call, result)
+                }
+                "getModelCapabilityOverrides" -> {
+                    assistsCoreManager!!.getModelCapabilityOverrides(call, result)
+                }
+                "syncProviderCatalogMetadata" -> {
+                    assistsCoreManager!!.syncProviderCatalogMetadata(call, result)
+                }
                 "getSceneModelCatalog" -> {
                     assistsCoreManager!!.getSceneModelCatalog(call, result)
                 }

@@ -181,6 +181,7 @@ internal object AgentImageAttachmentSupport {
         if (!shouldSendAttachmentToModel(raw)) {
             base["sendToModel"] = false
         }
+        copyIfNotBlank(base, "visualAnalysis", raw["visualAnalysis"]?.toString())
 
         if (!isImage) {
             return base to base

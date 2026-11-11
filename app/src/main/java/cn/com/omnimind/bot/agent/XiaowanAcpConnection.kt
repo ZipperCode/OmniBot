@@ -802,6 +802,12 @@ private class XiaowanAgentSession(
             ?.contentOrNull
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
+        val userMessageId = (_meta as? JsonObject)
+            ?.get("userMessageId")
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         val streamBridge = XiaowanAcpEventBridge(
             context = context,
             sessionId = sessionId.value,
@@ -886,6 +892,7 @@ private class XiaowanAgentSession(
             callback = streamBridge,
             runControl = sessionRunControl,
             turnJob = checkNotNull(promptJob) { "活动 ACP Turn 缺少执行任务" },
+            userMessageId = userMessageId,
             permissionRequester = object : AgentPermissionRequester {
                 override suspend fun requestPermission(
                     toolCallId: String,
@@ -1212,6 +1219,8 @@ internal fun buildXiaowanPromptParts(content: List<ContentBlock>): XiaowanPrompt
                     "data:$mimeType;base64,$data"
                 }
                 attachments += buildMap<String, Any?> {
+                    (block._meta as? JsonObject)?.get("attachmentId")
+                        ?.jsonPrimitive?.content?.takeIf(String::isNotBlank)?.let { put("id", it) }
                     put("name", "image")
                     put("fileName", "image")
                     put("mimeType", mimeType)
@@ -1249,6 +1258,8 @@ internal fun buildXiaowanPromptParts(content: List<ContentBlock>): XiaowanPrompt
                 val isImage = block.mimeType?.startsWith("image/", ignoreCase = true) == true
                 val localPath = uri.removePrefix("file://")
                 attachments += buildMap<String, Any?> {
+                    (block._meta as? JsonObject)?.get("attachmentId")
+                        ?.jsonPrimitive?.content?.takeIf(String::isNotBlank)?.let { put("id", it) }
                     put("name", block.name)
                     put("fileName", block.name)
                     put("mimeType", block.mimeType ?: "application/octet-stream")

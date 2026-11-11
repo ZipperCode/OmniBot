@@ -2,10 +2,32 @@
   "scene.dispatch.model": {
     "model": "",
     "prompt": null,
-    "description": "可执行任务三段式分流（decision/app-scope/task-match）默认模型（Flutter 侧）",
+    "description": "主 Agent 默认模型，负责对话、推理和工具调用",
     "description_i18n": {
-      "zh-CN": "可执行任务三段式分流（decision/app-scope/task-match）默认模型（Flutter 侧）",
-      "en-US": "Default model for three-stage executable-task routing (decision / app-scope / task-match) on the Flutter side"
+      "zh-CN": "主 Agent 默认模型，负责对话、推理和工具调用",
+      "en-US": "Default Agent model for conversation, reasoning, and tool use"
+    }
+  },
+  "scene.vision.understanding": {
+    "model": "",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": null,
+    "description": "图片理解与文字识别；为不支持图片输入的主模型提供视觉辅助",
+    "description_i18n": {
+      "zh-CN": "图片理解与文字识别；为不支持图片输入的主模型提供视觉辅助",
+      "en-US": "Image understanding and OCR assistance for text-only Agent models"
+    }
+  },
+  "scene.image.generate": {
+    "model": "",
+    "transport": "openai_compatible",
+    "response_parser": "text_content",
+    "prompt": null,
+    "description": "独立的图像生成 Provider 与模型，不跟随主 Agent",
+    "description_i18n": {
+      "zh-CN": "独立的图像生成 Provider 与模型，不跟随主 Agent",
+      "en-US": "Dedicated image-generation Provider and model, independent of the Agent"
     }
   },
   "scene.vlm.operation.primary": {

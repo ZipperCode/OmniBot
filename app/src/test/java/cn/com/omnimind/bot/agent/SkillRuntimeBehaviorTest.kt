@@ -116,12 +116,6 @@ class SkillRuntimeBehaviorTest {
     }
 
     @Test
-    fun imageGenerationDefaultsUseStandardImageModel() {
-        assertEquals("gpt-image-2", ImageGenerationToolHandler.DEFAULT_IMAGE_MODEL)
-        assertTrue(AgentToolDefinitions.imageGenerateTool.toString().contains("gpt-image-2"))
-    }
-
-    @Test
     fun imageGenerationPromptCapacityIsOwnedByTheConfiguredProvider() {
         val promptBeyondTheFormerHostLimit = "画一幅城市夜景。".repeat(12_000)
 
@@ -149,22 +143,19 @@ class SkillRuntimeBehaviorTest {
         assertEquals(
             "https://cloud.omnimind.com.cn/v1/images/generations",
             ImageGenerationToolHandler.resolveImageGenerationEndpoint(
-                "https://cloud.omnimind.com.cn",
-                "sk-test"
+                "https://cloud.omnimind.com.cn"
             )
         )
         assertEquals(
             "https://cloud.omnimind.com.cn/v1/images/generations",
             ImageGenerationToolHandler.resolveImageGenerationEndpoint(
-                "https://cloud.omnimind.com.cn/v1/images/generations",
-                "sk-test"
+                "https://cloud.omnimind.com.cn/v1/images/generations"
             )
         )
         assertEquals(
             "https://cloud.omnimind.com.cn/custom/images",
             ImageGenerationToolHandler.resolveImageGenerationEndpoint(
-                "https://cloud.omnimind.com.cn/custom/images#",
-                "sk-test"
+                "https://cloud.omnimind.com.cn/custom/images#"
             )
         )
     }
