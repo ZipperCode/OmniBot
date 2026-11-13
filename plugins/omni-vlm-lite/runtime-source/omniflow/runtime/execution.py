@@ -8,7 +8,6 @@ import json
 import math
 import re
 from typing import Any, Callable
-import unicodedata
 import xml.etree.ElementTree as ET
 
 from omniflow.core.config import (
@@ -490,6 +489,27 @@ async def execute_robust_action(
     installed_packages: frozenset[str] | None = None,
 ) -> StepResult:
     function_id = function.id if function is not None else None
+    if action.tool == "wait":
+        raw_condition = action.args.get("condition")
+        raw_target = action.args.get("target_description")
+        raw_duration = action.args.get("duration_ms")
+        if raw_condition is not None:
+            if not isinstance(raw_condition, str) or raw_condition not in {"text_present", "text_absent", "screen_changed"}:
+                return StepResult(False, action=action, before=observation, error="invalid_wait_condition", origin="blocked")
+            if raw_condition in {"text_present", "text_absent"}:
+                if not isinstance(raw_target, str) or not raw_target.strip():
+                    return StepResult(False, action=action, before=observation, error="invalid_wait_condition", origin="blocked")
+            else:
+                if "target_description" in action.args and action.args["target_description"] is not None:
+                    return StepResult(False, action=action, before=observation, error="invalid_wait_condition", origin="blocked")
+            if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or not (1 <= raw_duration <= 10000) or int(raw_duration) != raw_duration:
+                return StepResult(False, action=action, before=observation, error="invalid_wait_duration", origin="blocked")
+        else:
+            if "target_description" in action.args and action.args["target_description"] is not None:
+                return StepResult(False, action=action, before=observation, error="invalid_wait_condition", origin="blocked")
+            if raw_duration is not None:
+                if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration < 0:
+                    return StepResult(False, action=action, before=observation, error="invalid_wait_duration", origin="blocked")
     if (
         _action_uses_transfer_target(action)
         and _observation_screenshot_path(source_state)
@@ -535,10 +555,24 @@ async def execute_robust_action(
         host=host,
         installed_packages=installed_packages,
     )
+    wait_diag = None
+    if action.tool == "wait" and result.result is not None:
+        extra_map = result.result.extra if isinstance(result.result.extra, dict) else {}
+        diag_map = extra_map.get("diagnostics")
+        if isinstance(diag_map, dict):
+            wait_diag = {
+                k: v for k, v in diag_map.items()
+                if k in {"wait_condition", "condition_met", "elapsed_ms"}
+            }
     result = replace(
         result,
         function_id=function_id,
-        detail=_merge_action_detail(decision.detail, semantic_detail),
+        detail=_merge_action_detail(
+            decision.detail,
+            semantic_detail,
+            result_detail=result.detail,
+            wait_diagnostics=wait_diag,
+        ),
     )
     return result
 
@@ -561,12 +595,19 @@ async def prepare_action(
 def _merge_action_detail(
     decision_detail: dict[str, Any] | None,
     semantic_detail: dict[str, object] | None,
+    *,
+    result_detail: dict[str, Any] | None = None,
+    wait_diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if decision_detail is None and semantic_detail is None:
+    if decision_detail is None and semantic_detail is None and result_detail is None and wait_diagnostics is None:
         return None
     detail = dict(decision_detail or {})
+    if result_detail:
+        detail.update(result_detail)
     if semantic_detail is not None:
         detail["semantic_grounding"] = dict(semantic_detail)
+    if wait_diagnostics:
+        detail["wait_diagnostics"] = dict(wait_diagnostics)
     return detail
 
 
@@ -796,10 +837,6 @@ def default_transfer(
     request: dict[str, Any] = {
         "source_xml": source_xml,
         "target_xml": target_xml,
-        "source_package_name": source_state.package_name,
-        "target_package_name": observation.package_name,
-        "source_activity_name": source_state.activity_name,
-        "target_activity_name": observation.activity_name,
         "action_type": action.tool,
         "top_k": 3,
     }
@@ -813,9 +850,6 @@ def default_transfer(
         request["source_point"] = source_point
     except (KeyError, TypeError, ValueError):
         return TransferResult(None, reason="omnitransfer_invalid_source_point")
-    source_title = _source_semantic_title(source_xml, source_point)
-    if source_title:
-        request["source_element"] = {"text": source_title}
     try:
         result = transfer_action(**request)
     except Exception as exc:
@@ -898,10 +932,6 @@ def _transfer_swipe(
             request: dict[str, Any] = {
                 "target_xml": target_xml,
                 "source_xml": source_xml,
-                "source_package_name": source_state.package_name,
-                "target_package_name": observation.package_name,
-                "source_activity_name": source_state.activity_name,
-                "target_activity_name": observation.activity_name,
                 "action_type": action.tool,
                 "top_k": 3,
             }
@@ -1326,49 +1356,6 @@ def _bounds(value: Any) -> tuple[int, int, int, int] | None:
     if len(numbers) != 4 or numbers[2] <= numbers[0] or numbers[3] <= numbers[1]:
         return None
     return numbers[0], numbers[1], numbers[2], numbers[3]
-
-
-def _source_semantic_title(
-    source_xml: str,
-    source_point: tuple[float, float],
-) -> str:
-    root = _xml_root(source_xml)
-    if root is None:
-        return ""
-    source = _actionable_element_at_point(root, source_point)
-    if source is None:
-        return ""
-    direct_label = _text(
-        source.attrib.get("text") or source.attrib.get("content-desc")
-    )
-    if _is_semantic_label(direct_label):
-        return direct_label
-    title = _element_title(source)
-    if _is_semantic_label(title):
-        return title
-    return next(
-        (
-            label
-            for descendant in source.iter()
-            if (
-                label := _text(
-                    descendant.attrib.get("text")
-                    or descendant.attrib.get("content-desc")
-                )
-            )
-            if _is_semantic_label(label)
-        ),
-        "",
-    )
-
-
-def _is_semantic_label(value: str) -> bool:
-    normalized = _text(value)
-    return bool(normalized) and any(
-        unicodedata.category(character) != "Co"
-        for character in normalized
-        if not character.isspace()
-    )
 
 
 def _xml_root(xml_text: str) -> ET.Element | None:

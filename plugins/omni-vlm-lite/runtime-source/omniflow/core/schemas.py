@@ -19,20 +19,26 @@ CHECKER_RULE_SCHEMA_FILENAME = "omniflow_checker_rule.v2.json"
 VLM_ACTION_TOOL_NAMES = (
     "click",
     "input_text",
+    "long_press",
     "swipe",
     "open_app",
     "press_key",
+    "wait",
+    "collect_screen",
     "get_state",
     "finished",
 )
 _VLM_ACTION_ARGUMENT_NAMES = {
-    "click": ("target_description", "x", "y"),
-    "input_text": ("target_description", "text", "x", "y"),
+    "click": ("target_description", "x", "y", "node_id", "node_resource_id"),
+    "input_text": ("target_description", "text", "x", "y", "node_id", "node_resource_id"),
+    "long_press": ("target_description", "x", "y", "duration_ms", "node_id", "node_resource_id"),
     "swipe": ("direction", "x1", "y1", "x2", "y2"),
     "open_app": ("package_name",),
     "press_key": ("key",),
+    "wait": ("duration_ms", "condition", "target_description"),
+    "collect_screen": ("direction", "x1", "y1", "x2", "y2", "max_pages", "max_items", "ocr"),
     "get_state": ("reason", "ocr", "x1", "y1", "x2", "y2"),
-    "finished": ("content",),
+    "finished": ("content", "observation_id", "expected_text"),
 }
 
 
@@ -60,9 +66,35 @@ def _schema_path(filename: str) -> Path:
     raise FileNotFoundError(filename)
 
 
-def load_canonical_action_schema() -> dict[str, Any]:
-    return _load_schema(canonical_action_schema_path())
+_FALLBACK_COLLECT_SCREEN_SPEC = {
+    "name": "collect_screen",
+    "kind": "action",
+    "replayable": False,
+    "recordable": False,
+    "editor_visible": False,
+    "ui_label": {"zh_cn": "多屏采集", "en_us": "Collect screen"},
+    "description": {"zh_cn": "在指定区域内按方向连续滚动并采集页面文本条目。", "en_us": "Continuously scroll and collect text items in the specified region."},
+    "args": [
+        {"name": "direction", "type": "string", "required": True, "enum_values": ["down", "up"]},
+        {"name": "x1", "type": "number", "required": True, "minimum": 0, "maximum": 1000},
+        {"name": "y1", "type": "number", "required": True, "minimum": 0, "maximum": 1000},
+        {"name": "x2", "type": "number", "required": True, "minimum": 0, "maximum": 1000},
+        {"name": "y2", "type": "number", "required": True, "minimum": 0, "maximum": 1000},
+        {"name": "max_pages", "type": "integer", "minimum": 1, "maximum": 20},
+        {"name": "max_items", "type": "integer", "minimum": 1, "maximum": 200},
+        {"name": "ocr", "type": "boolean", "persisted": False},
+    ],
+}
 
+
+def load_canonical_action_schema() -> dict[str, Any]:
+    payload = _load_schema(canonical_action_schema_path())
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        if not any(isinstance(t, dict) and t.get("name") == "collect_screen" for t in tools):
+            payload = dict(payload)
+            payload["tools"] = list(tools) + [_FALLBACK_COLLECT_SCREEN_SPEC]
+    return payload
 
 def load_omniflow_run_log_schema() -> dict[str, Any]:
     return _load_schema(omniflow_run_log_schema_path())
@@ -164,8 +196,10 @@ def vlm_action_tools(*, include_summary: bool = False) -> list[dict[str, Any]]:
             allowed_arguments
         )
         parameters["properties"] = {
-            key: value for key, value in properties.items() if key in allowed
+            key: dict(value) for key, value in properties.items() if key in allowed
         }
+        if name == "wait" and "duration_ms" in parameters["properties"]:
+            parameters["properties"]["duration_ms"]["maximum"] = 10000
         parameters["required"] = [
             key for key in parameters.get("required", ()) if key in allowed
         ]
@@ -205,7 +239,76 @@ def canonicalize_action(
     known_arg_names = {str(item.get("name") or "") for item in all_arg_specs}
     unknown = sorted(set(raw_args) - known_arg_names)
     if unknown:
+        if tool == "collect_screen":
+            raise ValueError("invalid_collect_screen_arguments")
         raise ValueError(f"canonical_action_args_unknown:{tool}:{','.join(unknown)}")
+    if tool == "wait":
+        raw_condition = raw_args.get("condition")
+        raw_target = raw_args.get("target_description")
+        raw_duration = raw_args.get("duration_ms")
+        has_condition = "condition" in raw_args and raw_condition is not None
+        has_target = "target_description" in raw_args and raw_target is not None
+        if has_condition:
+            if not isinstance(raw_condition, str) or raw_condition not in {"text_present", "text_absent", "screen_changed"}:
+                raise ValueError("invalid_wait_condition")
+            if raw_condition in {"text_present", "text_absent"}:
+                if not has_target or not isinstance(raw_target, str) or not raw_target.strip():
+                    raise ValueError("invalid_wait_condition")
+            else:
+                if has_target:
+                    raise ValueError("invalid_wait_condition")
+            if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or not (1 <= raw_duration <= 10000) or int(raw_duration) != raw_duration:
+                raise ValueError("invalid_wait_duration")
+        else:
+            if has_target:
+                raise ValueError("invalid_wait_condition")
+            if raw_duration is not None:
+                if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)) or raw_duration < 0 or int(raw_duration) != raw_duration:
+                    raise ValueError("invalid_wait_duration")
+                if isinstance(raw_duration, (int, float)) and raw_duration > 60000:
+                    raw_args = dict(raw_args)
+                    raw_args["duration_ms"] = 60000
+    if tool == "collect_screen":
+        raw_direction = raw_args.get("direction")
+        raw_x1 = raw_args.get("x1")
+        raw_y1 = raw_args.get("y1")
+        raw_x2 = raw_args.get("x2")
+        raw_y2 = raw_args.get("y2")
+        raw_max_pages = raw_args.get("max_pages")
+        raw_max_items = raw_args.get("max_items")
+        raw_ocr = raw_args.get("ocr")
+
+        if not isinstance(raw_direction, str) or raw_direction not in {"down", "up"}:
+            raise ValueError("invalid_collect_screen_arguments")
+
+        for coord in (raw_x1, raw_y1, raw_x2, raw_y2):
+            if isinstance(coord, bool) or not isinstance(coord, (int, float)) or not math.isfinite(coord):
+                raise ValueError("invalid_collect_screen_arguments")
+        if not (0 <= raw_x1 < raw_x2 <= 1000) or not (0 <= raw_y1 < raw_y2 <= 1000):
+            raise ValueError("invalid_collect_screen_arguments")
+
+        if raw_max_pages is not None:
+            if (
+                isinstance(raw_max_pages, bool)
+                or not isinstance(raw_max_pages, (int, float))
+                or not math.isfinite(raw_max_pages)
+                or int(raw_max_pages) != raw_max_pages
+                or not (1 <= raw_max_pages <= 20)
+            ):
+                raise ValueError("invalid_collect_screen_arguments")
+
+        if raw_max_items is not None:
+            if (
+                isinstance(raw_max_items, bool)
+                or not isinstance(raw_max_items, (int, float))
+                or not math.isfinite(raw_max_items)
+                or int(raw_max_items) != raw_max_items
+                or not (1 <= raw_max_items <= 200)
+            ):
+                raise ValueError("invalid_collect_screen_arguments")
+
+        if raw_ocr is not None and not isinstance(raw_ocr, bool):
+            raise ValueError("invalid_collect_screen_arguments")
     arg_specs = [
         item
         for item in all_arg_specs
@@ -223,6 +326,8 @@ def canonicalize_action(
         if spec.get("required") and str(spec.get("name") or "") not in args
     ]
     if missing:
+        if tool == "collect_screen":
+            raise ValueError("invalid_collect_screen_arguments")
         raise ValueError(
             f"canonical_action_required_args_missing:{tool}:{','.join(missing)}"
         )

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 通用与导航 -->
+    <item name="btn_back" type="id" />
+    <item name="btn_reset" type="id" />
+    <item name="input_marker" type="id" />
+    <item name="btn_set_marker" type="id" />
+    <item name="text_current_marker" type="id" />
+    <item name="text_display_id" type="id" />
+    <item name="text_header_title" type="id" />
+
+    <!-- 首页菜单项 -->
+    <item name="btn_menu_long_press" type="id" />
+    <item name="btn_menu_loading" type="id" />
+    <item name="btn_menu_dynamic" type="id" />
+    <item name="btn_menu_collection" type="id" />
+    <item name="btn_menu_form" type="id" />
+    <item name="btn_menu_canvas" type="id" />
+
+    <!-- 场景1：长按 -->
+    <item name="btn_target" type="id" />
+    <item name="text_long_press_status" type="id" />
+
+    <!-- 场景2：加载与确认 -->
+    <item name="btn_load_trigger" type="id" />
+    <item name="btn_confirm" type="id" />
+    <item name="switch_persistent_loading" type="id" />
+    <item name="text_load_status" type="id" />
+
+    <!-- 场景3：动态与消歧 -->
+    <item name="checkout" type="id" />
+    <item name="btn_disambiguate_1" type="id" />
+    <item name="btn_disambiguate_2" type="id" />
+    <item name="text_checkout_status" type="id" />
+
+    <!-- 场景4：多屏长列表 -->
+    <item name="scroll_collection" type="id" />
+    <item name="text_collection_header" type="id" />
+    <item name="item_01" type="id" />
+    <item name="item_02" type="id" />
+    <item name="item_03" type="id" />
+    <item name="item_04" type="id" />
+    <item name="item_05" type="id" />
+    <item name="item_06" type="id" />
+    <item name="item_07" type="id" />
+    <item name="item_08" type="id" />
+    <item name="item_09" type="id" />
+    <item name="item_10" type="id" />
+    <item name="item_11" type="id" />
+    <item name="item_12" type="id" />
+    <item name="item_13" type="id" />
+    <item name="item_14" type="id" />
+    <item name="item_15" type="id" />
+    <item name="item_16" type="id" />
+    <item name="item_17" type="id" />
+    <item name="item_18" type="id" />
+    <item name="item_19" type="id" />
+    <item name="item_20" type="id" />
+    <item name="item_21" type="id" />
+    <item name="item_22" type="id" />
+    <item name="item_23" type="id" />
+    <item name="item_24" type="id" />
+    <item name="item_25" type="id" />
+    <item name="item_26" type="id" />
+    <item name="item_27" type="id" />
+    <item name="item_28" type="id" />
+    <item name="item_29" type="id" />
+    <item name="item_30" type="id" />
+    <item name="item_31" type="id" />
+    <item name="item_32" type="id" />
+    <item name="item_33" type="id" />
+    <item name="item_34" type="id" />
+    <item name="item_35" type="id" />
+    <item name="item_36" type="id" />
+    <item name="item_37" type="id" />
+    <item name="item_38" type="id" />
+    <item name="item_39" type="id" />
+    <item name="item_40" type="id" />
+    <item name="item_41" type="id" />
+    <item name="item_42" type="id" />
+    <item name="item_43" type="id" />
+    <item name="item_44" type="id" />
+    <item name="item_45" type="id" />
+    <item name="item_46" type="id" />
+    <item name="item_47" type="id" />
+    <item name="item_48" type="id" />
+    <item name="item_49" type="id" />
+    <item name="item_50" type="id" />
+    <item name="item_duplicate_1" type="id" />
+    <item name="item_duplicate_2" type="id" />
+
+    <!-- 场景5：表单提交 -->
+    <item name="input_first" type="id" />
+    <item name="input_second" type="id" />
+    <item name="btn_form_submit" type="id" />
+    <item name="switch_entry_disabled" type="id" />
+    <item name="text_form_status" type="id" />
+    <item name="text_form_hint" type="id" />
+
+    <!-- 场景6：Canvas绘图 -->
+    <item name="view_canvas" type="id" />
+    <item name="text_canvas_status" type="id" />
+</resources>

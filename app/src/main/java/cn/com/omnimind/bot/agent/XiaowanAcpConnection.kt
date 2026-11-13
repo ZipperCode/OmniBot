@@ -987,8 +987,13 @@ private class XiaowanAgentSession(
     }
 
     override suspend fun cancel() {
-        sessionRunControl.stopAll()
-        activePromptJob?.cancelAndJoin()
+        val targetPromptJob = activePromptJob
+        val stopActions = sessionRunControl.snapshotStopActions()
+        targetPromptJob?.cancel()
+        stopActions.forEach { action ->
+            runCatching { action() }
+        }
+        targetPromptJob?.join()
     }
 
     override suspend fun close(_meta: JsonElement?): CloseSessionResponse =
@@ -998,7 +1003,6 @@ private class XiaowanAgentSession(
             closeMutex.withLock {
                 if (!cleanupComplete) {
                     closed.set(true)
-                    sessionRunControl.stopAll()
                     this@XiaowanAgentSession.cancel()
                     val sessionKey = sessionId.value
                     cn.com.omnimind.androidgui.DisplayInputCoordinator.closeSessionVirtualDisplays(sessionKey)
@@ -1576,6 +1580,7 @@ internal class XiaowanAcpEventBridge(
             val first = seenToolCallIds.add(acpId)
             if (!first && !toolTypesById.containsKey(acpId)) return@withLock // terminal replay
             val input = JsonPrimitive(toolCall.function.arguments)
+            val toolNameOutput = JsonObject(mapOf("toolName" to JsonPrimitive(name)))
             if (first) {
                 reasoningSegmentPending = true
                 toolIdsByName.getOrPut(name) { ArrayDeque() }.addLast(acpId)
@@ -1586,6 +1591,7 @@ internal class XiaowanAcpEventBridge(
                     kind = xiaowanToolKind(name, toolType),
                     status = ToolCallStatus.PENDING,
                     rawInput = input,
+                    rawOutput = toolNameOutput,
                 ))
             } else {
                 emitUpdate(SessionUpdate.ToolCallUpdate(
@@ -1593,6 +1599,7 @@ internal class XiaowanAcpEventBridge(
                     title = xiaowanToolTitle(context, name),
                     kind = xiaowanToolKind(name, toolType),
                     rawInput = input,
+                    rawOutput = toolNameOutput,
                 ))
             }
         }
@@ -1654,6 +1661,7 @@ internal class XiaowanAcpEventBridge(
         reasoningSegmentPending = true
         if (first) toolIdsByName.getOrPut(toolName) { ArrayDeque() }.addLast(toolCallId)
         toolTypesById[toolCallId] = toolType
+        val toolNameOutput = JsonObject(mapOf("toolName" to JsonPrimitive(toolName)))
         if (!first) {
             emitUpdate(SessionUpdate.ToolCallUpdate(
                 toolCallId = ToolCallId(toolCallId),
@@ -1661,6 +1669,7 @@ internal class XiaowanAcpEventBridge(
                 kind = xiaowanToolKind(toolName, toolType),
                 status = ToolCallStatus.IN_PROGRESS,
                 rawInput = arguments,
+                rawOutput = toolNameOutput,
             ))
             return
         }
@@ -1675,7 +1684,7 @@ internal class XiaowanAcpEventBridge(
                 ),
                 locations = emptyList(),
                 rawInput = arguments,
-                rawOutput = JsonNull,
+                rawOutput = toolNameOutput,
                 _meta = JsonNull,
             )
         )
@@ -1744,9 +1753,7 @@ internal class XiaowanAcpEventBridge(
                 locations = emptyList(),
                 // Progress describes output produced while executing. Omitting
                 // rawInput keeps the original model arguments on this ACP item.
-                rawOutput = extras.takeIf { it.isNotEmpty() }
-                    ?.let(::jsonObjectFromMap) ?: JsonNull,
-                _meta = JsonNull,
+                rawOutput = jsonObjectFromMap(extras + ("toolName" to toolName)),
             )
         )
     }
@@ -2619,11 +2626,16 @@ internal class StandardAgentRunControl : AgentRunControl {
         return handle
     }
 
-    suspend fun stopAll() {
+    fun snapshotStopActions(): List<suspend () -> Unit> {
         val handles = activeHandles.values.toList()
         activeHandles.clear()
-        handles.forEach { handle ->
-            runCatching { handle.requestStop() }
+        return handles.map { it.snapshotStopAction() }
+    }
+
+    suspend fun stopAll() {
+        val actions = snapshotStopActions()
+        actions.forEach { action ->
+            runCatching { action() }
         }
     }
 }
@@ -2656,12 +2668,20 @@ internal class StandardAgentToolExecutionHandle(
         }
     }
 
+    fun snapshotStopAction(): suspend () -> Unit {
+        val action = stopAction
+        val job = executionJob
+        return {
+            manualStopRequested = true
+            try {
+                action?.invoke()
+            } catch (_: Exception) {}
+            job?.cancel(ManualToolStopCancellationException())
+        }
+    }
+
     suspend fun requestStop() {
-        manualStopRequested = true
-        try {
-            stopAction?.invoke()
-        } catch (_: Exception) {}
-        executionJob?.cancel(ManualToolStopCancellationException())
+        snapshotStopAction().invoke()
     }
 
     override fun complete() {

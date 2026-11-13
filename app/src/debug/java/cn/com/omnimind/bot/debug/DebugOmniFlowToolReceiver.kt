@@ -5,10 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import android.util.Log
-import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.omniflow.OmniFlow
 import cn.com.omnimind.bot.omniflow.OmniFlowPluginRuntime
-import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
+import cn.com.omnimind.bot.omniflow.createOmniFlowModelClient
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import java.io.File
@@ -35,9 +34,14 @@ class DebugOmniFlowToolReceiver : BroadcastReceiver() {
                     OmniFlow.callTool(
                         context = appContext,
                         toolCall = OmniFlow.ToolCall(name, arguments),
-                        modelClient = if (OmniFlowPluginRuntime.isEnabled()) {
-                            HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
-                                .asOmniFlowModelClient()
+                        modelClient = if (
+                            OmniFlowPluginRuntime.isEnabled() &&
+                            ((name == "run_gui" || name == "run_function") || (name == "save_function" && arguments["enhance"] == true))
+                        ) {
+                            createOmniFlowModelClient(
+                                scope = CoroutineScope(currentCoroutineContext()),
+                                environment = null,
+                            )
                         } else {
                             null
                         },

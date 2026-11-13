@@ -14,6 +14,9 @@ import cn.com.omnimind.baselib.util.OmniLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -598,6 +601,8 @@ class AgentOrchestrator(
         descriptor: AgentToolRegistry.RuntimeToolDescriptor,
         parsedArgs: JsonObject
     ): ToolExecutionResult {
+        currentCoroutineContext().ensureActive()
+        env.turnJob?.ensureActive()
         val toolHandle = env.runControl.beginToolExecution(
             toolName = toolCall.function.name,
             toolCallId = toolCall.id
@@ -622,9 +627,13 @@ class AgentOrchestrator(
                 }
                 toolHandle.bindExecutionJob(deferred)
                 deferred.await()
+            }.also {
+                env.turnJob?.ensureActive()
             }
         } catch (error: CancellationException) {
-            if (toolHandle.isManualStopRequested()) {
+            val turnJob = env.turnJob
+            val isParentAlive = (turnJob == null || turnJob.isActive) && currentCoroutineContext().isActive
+            if (toolHandle.isManualStopRequested() && isParentAlive) {
                 buildInterruptedToolResult(
                     toolName = toolCall.function.name,
                     toolHandle = toolHandle

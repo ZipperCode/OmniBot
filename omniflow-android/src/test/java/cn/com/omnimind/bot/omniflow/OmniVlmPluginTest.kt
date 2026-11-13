@@ -90,7 +90,7 @@ class OmniVlmPluginTest {
         override suspend fun streamTurn(
             request: ChatCompletionRequest,
             onReasoningUpdate: (suspend (String) -> Unit)?,
-        ): ChatCompletionTurn = error("not used")
+        ): OmniFlowModelTurn = error("not used")
     }
 
     private object TestContext : android.content.ContextWrapper(null)

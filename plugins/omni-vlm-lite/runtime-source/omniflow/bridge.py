@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import json
+import marshal
 from pathlib import Path
 import sys
 import time
@@ -27,6 +31,41 @@ from omniflow.functions.assets import save_function
 from omniflow.runtime.engine import InputRequired, OmniFlow
 from omniflow.vlm.planner import VLMPlanner
 
+try:
+    import omniflow.core.schemas  # noqa: F401
+except ImportError:
+    pass
+try:
+    import omniflow.runlog  # noqa: F401
+except ImportError:
+    pass
+try:
+    import omniflow.runtime.app_experience  # noqa: F401
+    import omniflow.runtime.screen_collection  # noqa: F401
+except ImportError:
+    pass
+
+_TRACKED_MODULES: tuple[str, ...] = (
+    "bridge",
+    "runtime.engine",
+    "vlm.planner",
+    "core.schemas",
+    "runtime.app_experience",
+    "runtime.screen_collection",
+    "runlog",
+)
+
+
+def _inspect_loaded_modules() -> dict[str, dict[str, Any]]:
+    captured = getattr(sys, "_omniflow_loaded_modules", {})
+    result: dict[str, dict[str, Any]] = {}
+    for name in _TRACKED_MODULES:
+        if name in captured:
+            result[name] = dict(captured[name])
+        else:
+            result[name] = {"status": "missing"}
+    return result
+
 PROTOCOL_VERSION = "2025-11-25"
 _DEFAULT_GUI_MAX_STEPS = DEFAULT_MAX_STEPS
 _MAX_GUI_MAX_STEPS = 64
@@ -45,6 +84,8 @@ _MANAGEMENT_TOOL_NAMES = frozenset(
         "list_run_logs",
         "get_run_log",
         "get_run_log_state",
+        "list_app_experiences",
+        "set_app_experience_enabled",
     }
 )
 
@@ -65,6 +106,7 @@ class JsonLineBridge:
         self.catalog = catalog
         self.flow = OmniFlow(store_path, catalog=catalog)
         self._host_call_index = 0
+        self._loaded_modules = _inspect_loaded_modules()
 
     def serve_forever(self) -> None:
         for line in self.reader:
@@ -126,6 +168,7 @@ class JsonLineBridge:
                     "omniflow/runtime": {
                         **_bridge_identity(),
                         "protocol_version": PROTOCOL_VERSION,
+                        "loaded_modules": dict(self._loaded_modules),
                     }
                 },
             }
@@ -160,6 +203,8 @@ class JsonLineBridge:
             metadata = body.get("_meta")
             run_metadata = dict(metadata) if isinstance(metadata, dict) else {}
             return self._run(request_id, {**args, **run_metadata})
+        if tool == "learn_app_experiences":
+            return self._learn_app_experiences(request_id, args)
         if tool not in _MANAGEMENT_TOOL_NAMES:
             return self._execute_tool(request_id, call, body.get("_meta"))
 
@@ -225,6 +270,10 @@ class JsonLineBridge:
                 "STATE_NOT_FOUND",
                 f"RunLog state not found: {state_id}",
             )
+        if tool == "list_app_experiences":
+            return self._list_app_experiences(request_id, args)
+        if tool == "set_app_experience_enabled":
+            return self._set_app_experience_enabled(request_id, args)
         return _management_error(
             "UNKNOWN_FUNCTION_MANAGEMENT_TOOL",
             f"Unknown Function management tool: {tool}",
@@ -317,6 +366,181 @@ class JsonLineBridge:
         function = flow.store.get_function(tool_call.name)
         result = flow.call_tool(tool_call)
         return _run_result(result, body=run_metadata, function=function)
+
+    def _list_app_experiences(
+        self,
+        request_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        _require_contract(args, set(), {"limit", "offset", "package_name"})
+        store = getattr(self.flow, "experience_store", None)
+        if store is None:
+            if getattr(self.flow, "_experience_store_error", None) == "app_experience_store_invalid":
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "应用经验存储损坏",
+                    "revision": -1,
+                    "items": [],
+                    "total": 0,
+                    "next_offset": None,
+                }
+            return _management_error("APP_EXPERIENCE_STORE_UNAVAILABLE", "应用经验存储不可用")
+
+        raw_limit = args.get("limit")
+        if raw_limit is None:
+            limit = 20
+        elif isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or not (1 <= raw_limit <= 100):
+            return _management_error("INVALID_LIMIT", "limit 必须为 1 至 100 之间的整数")
+        else:
+            limit = raw_limit
+
+        raw_offset = args.get("offset")
+        if raw_offset is None:
+            offset = 0
+        elif isinstance(raw_offset, bool) or not isinstance(raw_offset, int) or raw_offset < 0:
+            return _management_error("INVALID_OFFSET", "offset 必须为非负整数")
+        else:
+            offset = raw_offset
+
+        raw_pkg = args.get("package_name")
+        if raw_pkg is not None:
+            if not isinstance(raw_pkg, str):
+                return _management_error("INVALID_PACKAGE_NAME", "package_name 必须为字符串")
+            package_name = raw_pkg.strip() or None
+        else:
+            package_name = None
+
+        try:
+            return store.list_items(limit=limit, offset=offset, package_name=package_name)
+        except ValueError as err:
+            if "app_experience_store_invalid" in str(err):
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "应用经验存储损坏",
+                    "revision": -1,
+                    "items": [],
+                    "total": 0,
+                    "next_offset": None,
+                }
+            return _management_error("APP_EXPERIENCE_STORE_ERROR", str(err))
+        except Exception as err:
+            return _management_error("APP_EXPERIENCE_STORE_ERROR", str(err))
+
+    def _set_app_experience_enabled(
+        self,
+        request_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        _require_contract(
+            args,
+            {"experience_id", "enabled", "expected_revision"},
+            {"experience_id", "enabled", "expected_revision"},
+        )
+        store = getattr(self.flow, "experience_store", None)
+        if store is None:
+            if getattr(self.flow, "_experience_store_error", None) == "app_experience_store_invalid":
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "应用经验存储损坏",
+                    "revision": -1,
+                }
+            return _management_error("APP_EXPERIENCE_STORE_UNAVAILABLE", "应用经验存储不可用")
+
+        exp_id = str(args.get("experience_id") or "").strip()
+        if not exp_id:
+            return _management_error("EXPERIENCE_ID_EMPTY", "experience_id 不能为空")
+
+        raw_enabled = args.get("enabled")
+        if not isinstance(raw_enabled, bool):
+            return _management_error("INVALID_ENABLED", "enabled 必须为布尔值")
+        enabled = raw_enabled
+
+        raw_revision = args.get("expected_revision")
+        if isinstance(raw_revision, bool) or not isinstance(raw_revision, int) or raw_revision < 0:
+            return _management_error("INVALID_EXPECTED_REVISION", "expected_revision 必须为非负整数")
+        expected_revision = raw_revision
+
+        try:
+            return store.set_enabled(exp_id, enabled, expected_revision)
+        except ValueError as err:
+            if "app_experience_store_invalid" in str(err):
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "应用经验存储损坏",
+                    "revision": -1,
+                }
+            return _management_error("APP_EXPERIENCE_STORE_ERROR", str(err))
+        except Exception as err:
+            return _management_error("APP_EXPERIENCE_STORE_ERROR", str(err))
+
+    def _learn_app_experiences(
+        self,
+        request_id: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        _require_contract(args, {"run_id"}, {"run_id"})
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return _management_error("RUN_LOG_ID_EMPTY", "run_id 不能为空")
+        store = getattr(self.flow, "experience_store", None)
+        if store is None:
+            if getattr(self.flow, "_experience_store_error", None) == "app_experience_store_invalid":
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "应用经验存储损坏",
+                    "revision": -1,
+                }
+            return _management_error("APP_EXPERIENCE_STORE_UNAVAILABLE", "应用经验存储不可用")
+
+        raw_log = self.host_call(request_id, "get_run_log", {"run_id": run_id})
+        if not isinstance(raw_log, dict):
+            return _management_error("RUN_LOG_NOT_FOUND", f"未找到运行日志: {run_id}", run_id=run_id)
+
+        actual_run_id = str(raw_log.get("run_id") or raw_log.get("id") or "").strip()
+        if actual_run_id != run_id:
+            return _management_error("RUN_LOG_ID_MISMATCH", f"运行日志编号不匹配: 请求 {run_id}，实际 {actual_run_id}", run_id=run_id)
+
+        finished_at = raw_log.get("finished_at_ms")
+        if isinstance(finished_at, bool) or not isinstance(finished_at, int) or finished_at <= 0:
+            return _management_error("RUN_LOG_NOT_SEALED", f"运行日志未封存: {run_id}", run_id=run_id)
+        state_ids: set[str] = set()
+        for step in raw_log.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            for obs_key in ("observation", "next_observation"):
+                obs_val = step.get(obs_key)
+                if isinstance(obs_val, dict):
+                    aux = obs_val.get("auxiliaries")
+                    if isinstance(aux, dict) and aux.get("state_id"):
+                        state_ids.add(str(aux["state_id"]))
+            for sid_key in ("before_state_id", "after_state_id"):
+                sid = step.get(sid_key)
+                if sid:
+                    state_ids.add(str(sid))
+        states: dict[str, Observation] = {}
+        for sid in sorted(state_ids):
+            state_data = self.host_call(request_id, "get_state", {"state_id": sid})
+            if isinstance(state_data, dict):
+                states[sid] = Observation.from_value({**state_data, "state_id": sid})
+
+        try:
+            return store.update_from_run(raw_log, states)
+        except ValueError as err:
+            if "app_experience_store_invalid" in str(err):
+                return {
+                    "success": False,
+                    "error_code": "app_experience_store_invalid",
+                    "error": "app_experience_store_invalid",
+                    "revision": -1,
+                }
+            return _management_error("APP_EXPERIENCE_UPDATE_ERROR", str(err))
+        except Exception as err:
+            return _management_error("APP_EXPERIENCE_UPDATE_ERROR", str(err))
 
     def _catalog(self, body: dict[str, Any]) -> dict[str, Any]:
         self.flow.store.reload()
@@ -735,6 +959,35 @@ def _require_contract(
 
 
 def _management_tool_definition(name: str) -> dict[str, Any]:
+    if name == "list_app_experiences":
+        return {
+            "name": name,
+            "description": "List reusable structured app experiences.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+                    "offset": {"type": "integer", "default": 0, "minimum": 0},
+                    "package_name": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        }
+    if name == "set_app_experience_enabled":
+        return {
+            "name": name,
+            "description": "Enable or disable an app experience.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "experience_id": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "expected_revision": {"type": "integer"},
+                },
+                "required": ["experience_id", "enabled", "expected_revision"],
+                "additionalProperties": False,
+            },
+        }
     if name != "save_function":
         return {"name": name, "inputSchema": {"type": "object"}}
     return {
@@ -934,6 +1187,16 @@ def _run_result(
         "error_message": error or None,
         "done_reason": done_reason,
         "finished_content": result.detail.get("finished_content"),
+        "finished_evidence": result.detail.get("finished_evidence") or (
+            result.detail.get("terminal_detail", {}).get("finished_evidence")
+            if isinstance(result.detail.get("terminal_detail"), dict)
+            else None
+        ),
+        "collection": result.detail.get("collection") or (
+            result.detail.get("terminal_detail", {}).get("collection")
+            if isinstance(result.detail.get("terminal_detail"), dict)
+            else None
+        ),
         "model": str(body.get("model") or "") or None,
         "model_calls": int(result.model_calls),
         "fallback_steps": int(result.fallback_steps),
@@ -1091,6 +1354,7 @@ def _bridge_identity() -> dict[str, Any]:
         "omnitransfer_source_sha256": properties.get("omnitransfer.source.sha256", ""),
         "omnitransfer_ready": transfer["ready"],
         "omnitransfer_backend": transfer["backend"],
+        "loaded_modules": _inspect_loaded_modules(),
     }
 
 

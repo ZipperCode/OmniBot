@@ -11,6 +11,7 @@ android {
 
     defaultConfig {
         minSdk = 29
+        testApplicationId = "cn.com.omnimind.androidgui.test"
         consumerProguardFiles("consumer-rules.pro")
     }
 

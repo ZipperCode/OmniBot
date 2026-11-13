@@ -638,6 +638,190 @@ class HttpAgentLlmClientTest {
     }
 
     @Test
+    fun `successful non streaming chat completion body on onFailure completes turn with tool and usage`() = runBlocking {
+        val scope = CoroutineScope(Job() + Dispatchers.Default)
+        var attempts = 0
+        val emittedCalls = mutableListOf<AssistantToolCall>()
+        try {
+            val client = HttpAgentLlmClient(
+                scope = scope,
+                modelOverride = testOverride(),
+                resolveRouteInfoOp = { model, _, _, _, _, protocolType, _ ->
+                    routeInfo(
+                        requestedModel = model,
+                        resolvedModel = "gemini-3.8-flash",
+                        protocolType = protocolType ?: "openai_compatible",
+                        requiresReasoningEcho = false,
+                        wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+                    )
+                },
+                streamRequestOp = { _, _, listener, _, _, _, _, _, _, _ ->
+                    attempts += 1
+                    val source = dummyEventSource()
+                    listener.onFailure(
+                        source,
+                        IllegalStateException("Expected text/event-stream"),
+                        okResponse(
+                            """{"object":"chat.completion","model":"gemini-3.8-flash","choices":[{"message":{"role":"assistant","content":null,"reasoning_content":"分析合成表单","tool_calls":[{"id":"call-enhance-1","type":"function","function":{"name":"submit_json","arguments":"{\"functions\":[],\"arguments\":{}}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":120,"completion_tokens":15,"total_tokens":135}}"""
+                        ),
+                    )
+                    source
+                },
+                json = json,
+            )
+
+            val turn = client.streamTurn(request = simpleRequest(), onToolCallInput = { emittedCalls += it })
+
+            assertEquals("gemini-3.8-flash", turn.resolvedModel)
+            val call = turn.message.toolCalls?.single()
+            assertNotNull(call)
+            assertEquals("call-enhance-1", call?.id)
+            assertEquals("submit_json", call?.function?.name)
+            assertEquals("""{"functions":[],"arguments":{}}""", call?.function?.arguments)
+            assertEquals("分析合成表单", turn.reasoning)
+            assertEquals("tool_calls", turn.finishReason)
+            assertEquals(120, turn.usage?.promptTokens)
+            assertEquals(15, turn.usage?.completionTokens)
+            assertEquals(135, turn.usage?.totalTokens)
+            assertEquals(1, attempts)
+            assertEquals(listOf("submit_json"), emittedCalls.map { it.function.name })
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `non streaming chat completion on onFailure fails when body has empty choices or no tool and content`() = runBlocking {
+        val scope = CoroutineScope(Job() + Dispatchers.Default)
+        try {
+            for (body in listOf(
+                """{"object":"chat.completion","choices":[]}""",
+                """{"object":"chat.completion","choices":[{"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}""",
+                """{"message":"仅错误描述，不是完成响应"}""",
+                """{"object":"chat.completion.chunk","choices":[{"delta":{"content":"未完成"}}]}""",
+                "不是 JSON",
+            )) {
+            val client = HttpAgentLlmClient(
+                scope = scope,
+                modelOverride = testOverride(),
+                resolveRouteInfoOp = { model, _, _, _, _, protocolType, _ ->
+                    routeInfo(
+                        requestedModel = model,
+                        resolvedModel = "gemini-3.8-flash",
+                        protocolType = protocolType ?: "openai_compatible",
+                        requiresReasoningEcho = false,
+                        wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+                    )
+                },
+                streamRequestOp = { _, _, listener, _, _, _, _, _, _, _ ->
+                    val source = dummyEventSource()
+                    listener.onFailure(
+                        source,
+                        IllegalStateException("Expected text/event-stream"),
+                        okResponse(
+                            body,
+                        ),
+                    )
+                    source
+                },
+                json = json,
+            )
+
+            val error = runCatching { client.streamTurn(request = simpleRequest()) }.exceptionOrNull()
+            assertNotNull(error)
+            assertTrue("应拒绝未完成或非完成响应：$error", error is AgentStreamRequestException || error is IllegalStateException)
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `non streaming chat completion on onFailure fails when body contains error envelope`() = runBlocking {
+        val scope = CoroutineScope(Job() + Dispatchers.Default)
+        try {
+            val client = HttpAgentLlmClient(
+                scope = scope,
+                modelOverride = testOverride(),
+                resolveRouteInfoOp = { model, _, _, _, _, protocolType, _ ->
+                    routeInfo(
+                        requestedModel = model,
+                        resolvedModel = "gemini-3.8-flash",
+                        protocolType = protocolType ?: "openai_compatible",
+                        requiresReasoningEcho = false,
+                        wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+                    )
+                },
+                streamRequestOp = { _, _, listener, _, _, _, _, _, _, _ ->
+                    val source = dummyEventSource()
+                    listener.onFailure(
+                        source,
+                        IllegalStateException("Expected text/event-stream"),
+                        okResponse(
+                            """{"error":{"message":"quota exceeded","type":"insufficient_quota","code":"quota_exceeded"}}"""
+                        ),
+                    )
+                    source
+                },
+                json = json,
+            )
+
+            val error = runCatching { client.streamTurn(request = simpleRequest()) }.exceptionOrNull()
+            assertNotNull(error)
+            assertTrue("Expected AgentStreamRequestException on error envelope, got: $error", error is AgentStreamRequestException)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `non streaming chat completion on onFailure does not overwrite existing stream payload`() = runBlocking {
+        val scope = CoroutineScope(Job() + Dispatchers.Default)
+        try {
+            val client = HttpAgentLlmClient(
+                scope = scope,
+                modelOverride = testOverride(),
+                resolveRouteInfoOp = { model, _, _, _, _, protocolType, _ ->
+                    routeInfo(
+                        requestedModel = model,
+                        resolvedModel = "gemini-3.8-flash",
+                        protocolType = protocolType ?: "openai_compatible",
+                        requiresReasoningEcho = false,
+                        wireApi = OpenAiWireApi.CHAT_COMPLETIONS,
+                    )
+                },
+                streamRequestOp = { _, _, listener, _, _, _, _, _, _, _ ->
+                    val source = dummyEventSource()
+                    listener.onOpen(source, okResponse())
+                    listener.onEvent(
+                        source,
+                        null,
+                        "message",
+                        """{"choices":[{"delta":{"content":"partial output"}}]}"""
+                    )
+                    listener.onFailure(
+                        source,
+                        java.io.IOException("stream reset"),
+                        okResponse(
+                            """{"object":"chat.completion","model":"gemini-3.8-flash","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-overwrite","type":"function","function":{"name":"save_function","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"""
+                        ),
+                    )
+                    source
+                },
+                maxTransientStreamRetries = 0,
+                json = json,
+            )
+
+            val error = runCatching { client.streamTurn(request = simpleRequest()) }.exceptionOrNull()
+            assertNotNull(error)
+            assertTrue("Expected AgentStreamRequestException, got: $error", error is AgentStreamRequestException)
+            assertTrue((error as AgentStreamRequestException).responseStarted)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `responses route restores namespaced ACP tool name before execution`() = runBlocking {
         val scope = CoroutineScope(Job() + Dispatchers.Default)
         var sentWireName = ""

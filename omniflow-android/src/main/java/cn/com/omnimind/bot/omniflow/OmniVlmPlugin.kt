@@ -14,7 +14,6 @@ class OmniVlmPlugin internal constructor(
         val stepSkillGuidance: String = "",
         val deferUserInput: Boolean = true,
         val maxSteps: Int? = null,
-        val maxRejectedActionRetries: Int? = null,
         val display: String? = null,
         val displayId: Int? = null,
         val hostManagedUi: Boolean = false,
@@ -153,7 +152,6 @@ internal fun OmniVlmPlugin.Request.runGuiArguments(): Map<String, Any?> = buildM
     }
     put("defer_user_input", deferUserInput)
     maxSteps?.let { put("max_steps", it) }
-    maxRejectedActionRetries?.let { put("max_rejected_action_retries", it) }
     display?.let { put("display", it) }
     displayId?.let { put("display_id", it) }
 }

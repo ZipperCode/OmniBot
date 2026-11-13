@@ -62,9 +62,47 @@ GUI 规划沿用同一 OmniFlow 执行循环：优先使用目标相关的无障
 
 端侧 OCR 使用固定模型与字典，首次需要时加载；结果包含实际状态 `ready` / `unavailable` / `failed`、文字、置信度、原屏幕像素框与 `source=ocr`。识别框不是可点击控件。相同显示屏、原图内容与识别区域可复用识别缓存。全局图按最长边 1600 和约 1.6MP 的预算缩小，预算内图片不放大、不重复重编码；高清区域保留原始像素。直接设备工具通过既有图片通道发送区域图，文本仅保留区域元数据，不重复携带图片 Base64。
 
+### 长按、条件等待与节点选择器
+
+`long_press(x, y, duration_ms?, target_description?, node_id?, node_resource_id?)` 沿同一 Android 执行器运行，默认长按 800ms；虚拟屏无障碍派发被拒绝时仍保留长按时长，不降级为短按。已受理的手势不会因超时或取消而重复注入。
+
+`wait(duration_ms, condition?, target_description?)` 支持 `text_present`、`text_absent` 和 `screen_changed`，条件超时必须为 `1..10000ms`。文字条件要求非空目标；其他等待禁止携带目标。`text_absent` 必须先在基线看见目标，空树不能证明文字消失；纯视觉页面比较实际像素并连续确认变化。条件失败返回明确错误，不表示任务完成。旧无条件等待保留原有时长语义。
+
+点击、输入和长按可指定当前观测的唯一 `node_id` 或完整等值 `node_resource_id`。显式选择器缺失、冲突或歧义直接拒绝，不回退坐标；XML 的 `index` 不充当节点身份。选择器仍受观测新鲜度、输入锁和遮挡守卫约束，不持久化到 Function。条件等待的时长、条件和目标，以及长按时长，沿公共 RunLog 导入与 Function 回放保留。
+
+### 进展与完成证据
+
+同一 GUI 循环统一统计被动观察：重复读屏、无变化等待和条件超时不会相互清零。新页面、未读过的 OCR/局部图证据或首次满足的条件可以推进；同屏重复满足同一条件不算新进展。连续两次无进展返回 `no_progress_detected`，不会自动重复点击。
+
+`finished(content?, observation_id?, expected_text?)` 可绑定当前观测与规范化等值文字。过期观测或缺少匹配文字时，原工具调用收到失败反馈，由下一次规划重新决策；没有文字声明时记录 `model_asserted`。`finished_evidence` 仅保留观测/状态身份、状态、来源和匹配节点 ID；`matched` 只证明声明文字在当前 XML 或 ready OCR 中出现，不代表任意业务目标已得到保证。ACP 完成仍由原有生命周期负责。
+
+对已确证未执行的选择器、观测或遮挡拒绝，同屏重复相同工具与规范参数不会再次派发；模型收到 `repeated_rejected_action`，连续重复沿同一无进展计数终止。宿主每次 `model_turn` 只请求模型一次，不在内部追加反思请求。网络重试仍由既有模型传输层负责，仅在尚未出现可见输出时有界执行。
+
+### GUI 模型配置
+
+GUI 复用既有 Provider 与模型配置：专用 GUI 绑定优先；没有专用绑定时继承当前会话的实际 Provider/模型，否则沿共享 Agent 场景。失效的专用绑定明确失败，不自动换模型。一次调用开始时冻结路由、能力、思考意图与输出预算，配置修改在下一次调用生效；只读 Function 管理不创建模型客户端。
+
+GUI 输出预算由实际 GUI 模型的上下文容量与会话阈值计算，再受模型输出上限约束，不再固定为 512；已有更小预算不会被扩大。思考档位按会话意图与实际模型元数据适配，明确不支持图片的模型在网络请求前失败，未知能力交 Provider 返回实际结果。协议参数映射仍归既有 Provider 适配层。
+
+### 多屏采集
+
+`collect_screen(direction, x1, y1, x2, y2, max_pages?, max_items?, ocr?)` 在同一后台应用的指定区域逐页读取；`down/up` 表示向后/向前阅读，区域为全屏 `0..1000` 坐标且必须有面积。默认最多 5 页、100 项，可设置为 `1..20` 页和 `1..200` 项，OCR 默认关闭。每次内部滑动都使用新观测、经过原输入锁守卫、记录为规范 `swipe` 并消耗总步数；采集本身不可录制或回放为 Function。
+
+结果 `collection` 保留条目文字、访问页序、区域框、XML/OCR 来源和状态 ID。相邻页按有序重叠去重，同文但不同位置的消息不会全局去重；无法确证重叠时标记 `overlap_uncertain`。页数、条目数、全 run 共 32768 字符或步数到限均明确 `truncated` 与停止原因，不表示完整历史已经读完。
+
+切包、显示失效、观察或滑动失败立即结束当前 GUI run，`success=false, partial=true` 保留已采集内容，不重启应用、不再请求模型覆盖失败；取消原样传播。普通滑动也检查整段路径的高层窗口及可交互兄弟遮挡，纯视觉路径检查截图有效性和起点、中点、终点变化；不声称能够确证透明遮罩。
+
+### 应用经验
+
+封存后的运行记录可自动生成结构化操作参考，保存在 Function 目录旁的 `app-experiences.json`，不改变 Function 格式或长期记忆。只学习有宿主接地确证、稳定资源 ID、页面变化且整次运行具有完成文字证据的点击、长按和输入入口；不保存任务目标、输入值、业务文字、OCR、截图、坐标或临时节点 ID。无可靠资源 ID 的页面继续普通规划。
+
+新规则先试用，来源运行不计成功；后续两个独立运行确实选用同一规则、动作有效且完成文字匹配后才转为已验证。同槽新试用遮蔽旧版，连续两次可归因失败回退；同屏无效果仅归因到当前停滞周期实际使用的步骤，延迟变页后的其他停滞不回罚。权限、规划或传输中断、取消和缺少确证的结果保持中性；重新试用退役版只关联当时仍有效的前任，回退不重新启用用户停用的版本。已验证只表示这条规则通过试用，不保证全应用任务。
+
+执行中心的“应用经验”提供刷新、分页、详情与启停；版本冲突刷新而不重发写入，任务执行中显示“任务结束后更新”。管理读取和启停不创建模型，内部学习不进入公开工具目录，且仅读取当前已封存运行引用的状态。经验损坏时保留原文件并继续普通规划；学习失败只附加短错误码，不改变 GUI 终态、不重做动作。容量达到 500 槽或每槽 8 版时停止新增，不删除旧经验。
+
 ### 本地内置运行时组包
 
-内置 `2.1.9` 使用不可变的 `artifacts/omniflow-gui-runtime-2.1.8.zip` 为底包，叠加 `runtime-source/` 与规范动作 Schema。运行 `python scripts/build-omniflow-runtime.py` 生成新包并同步目录中的版本、大小和 SHA-256；加 `--check` 可只读核对可复现结果。没有发布的远端资产不登记下载 URL；APK 内置包与开发覆盖是不同来源，本次能力不依赖设备上的开发覆盖。
+内置 `2.1.9` 使用不可变的 `artifacts/omniflow-gui-runtime-2.1.8.zip` 为底包，叠加 `runtime-source/`、规范动作 Schema 与公共 RunLog Schema。运行 `python scripts/build-omniflow-runtime.py` 生成新包并同步目录中的版本、大小和 SHA-256；加 `--check` 可只读核对可复现结果。没有发布的远端资产不登记下载 URL；APK 内置包与开发覆盖是不同来源，本次能力不依赖设备上的开发覆盖。
 
 内置运行时以 APK 声明的归档 SHA-256 判定更新，不能只比较组件版本号。离线目录没有远端下载摘要时，不得把缺少市场来源标记的旧内置包视为市场安装；应沿既有内置包升级路径重新校验并加载新版源码。
 
@@ -93,6 +131,8 @@ Use these official Agent tools in order:
 An apply operation compiles the Python file before worker initialization and automatically restores
 the previous content if reload fails. The override changes OmniFlow only. OmniTransfer remains the
 canonical pinned implementation and missing mappings still fall back through the normal runtime.
+
+Windows 上连续覆盖同一文件使用 NIO 原子替换；文件系统不支持原子移动时才降级为普通替换。目录重基先移动旧目录作为备份：备份失败保留原目录，安装失败尝试恢复，恢复失败保留备份供恢复，不删除原有内容。
 
 Never change payment safety policy through the developer override. GUI automation may prepare an
 order, but must not confirm or submit a real payment without explicit user confirmation.

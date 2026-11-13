@@ -2,6 +2,8 @@ package cn.com.omnimind.androidgui
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.ComponentName
+import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.os.Binder
@@ -263,6 +265,78 @@ open class PrivilegedDisplayServiceStub(
     private val context: Context? = null,
     private val allowedClientUid: Int? = null,
 ) : Binder(), IPrivilegedDisplayService {
+    companion object {
+        internal val PACKAGE_NAME_REGEX = Regex("^[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)+$")
+        internal val CLASS_NAME_REGEX = Regex("^(\\.[a-zA-Z_][a-zA-Z0-9_]*|[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)*)$")
+
+        /**
+         * 解析命令输出或组件描述为唯一合法的 Launcher Component。
+         * 若存在多候选、空结果、格式畸形或包名不匹配，则严格返回 null，不进行任何猜测。
+         */
+        internal fun parseLauncherComponent(output: String, expectedPackage: String): String? {
+            if (!PACKAGE_NAME_REGEX.matches(expectedPackage)) {
+                return null
+            }
+            val candidateLines = output.lines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+
+            if (candidateLines.size != 1) {
+                return null
+            }
+
+            val line = candidateLines.first()
+            val slashIndex = line.indexOf('/')
+            if (slashIndex <= 0 || slashIndex == line.length - 1) {
+                return null
+            }
+
+            val pkg = line.substring(0, slashIndex)
+            val cls = line.substring(slashIndex + 1)
+
+            if (pkg != expectedPackage) {
+                return null
+            }
+
+            if (!PACKAGE_NAME_REGEX.matches(pkg) || !CLASS_NAME_REGEX.matches(cls)) {
+                return null
+            }
+
+            return "$pkg/$cls"
+        }
+    }
+
+    /**
+     * 解析目标应用在同 user 下唯一有效导出的 Launcher Component。
+     * 直接通过 `cmd package query-activities --brief --components` 精准检测（可直接发现 multiple），
+     * 明确基于目标 userId 执行查询，解析失败返回 null。
+     */
+    protected open fun resolveLauncherComponent(packageName: String, userId: Int): String? {
+        if (!PACKAGE_NAME_REGEX.matches(packageName) || userId < 0) {
+            return null
+        }
+
+        val (exitCode, output) = executeRootCommandWithOutput(
+            "/system/bin/cmd",
+            "package",
+            "query-activities",
+            "--brief",
+            "--components",
+            "--user",
+            userId.toString(),
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "-p",
+            packageName,
+        )
+        if (exitCode != 0 || output.isBlank()) {
+            return null
+        }
+
+        return parseLauncherComponent(output, packageName)
+    }
 
     private val virtualDisplays = ConcurrentHashMap<Int, VirtualDisplay>()
 
@@ -465,6 +539,13 @@ open class PrivilegedDisplayServiceStub(
     }
 
     override fun launchActivity(displayId: Int, packageName: String): Boolean {
+        if (!isDisplayAllowed(displayId)) {
+            return false
+        }
+        if (!PACKAGE_NAME_REGEX.matches(packageName)) {
+            return false
+        }
+
         // 1. 检查目标应用是否已在主屏或自建虚拟屏存在现有根任务，无损保留任务状态迁移
         val allowedDisplays = mutableSetOf(Display.DEFAULT_DISPLAY)
         allowedDisplays.addAll(virtualDisplays.keys)
@@ -477,7 +558,6 @@ open class PrivilegedDisplayServiceStub(
         if (candidateTasks.size > 1) {
             return false
         }
-
         if (candidateTasks.size == 1) {
             val existing = candidateTasks.first()
             if (existing.displayId == displayId) {
@@ -506,19 +586,25 @@ open class PrivilegedDisplayServiceStub(
             }
         }
 
-        // 2. 不存在现有任务时才执行 am start，严禁执行 force-stop 或 CLEAR_TASK
+        // 2. 不存在现有任务时才执行启动
+        val userId = resolveAppUserId()
+        if (userId < 0) {
+            return false
+        }
+
+        val component = resolveLauncherComponent(packageName, userId) ?: return false
+
+        // 严禁执行 force-stop 或 CLEAR_TASK，使用唯一有效 exported component 在指定 display 和 user 启动
         return executeRootCommand(
             "/system/bin/am",
             "start",
             "-W",
             "--display",
             displayId.toString(),
-            "-a",
-            "android.intent.action.MAIN",
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "-p",
-            packageName,
+            "-n",
+            component,
+            "--user",
+            userId.toString(),
         )
     }
 
@@ -1019,7 +1105,24 @@ open class PrivilegedDisplayServiceStub(
     }
 
     open fun executeRootCommand(vararg command: String): Boolean = runCatching {
-        val process = ProcessBuilder(*command).start()
+        val process = ProcessBuilder(*command)
+            .redirectErrorStream(true)
+            .start()
+        val buffer = ByteArray(1024)
+        process.inputStream.use { stream ->
+            while (stream.read(buffer) != -1) {
+                // 读取并丢弃合并输出，避免大对象分配并防止管道写满死锁
+            }
+        }
         process.waitFor() == 0
     }.getOrDefault(false)
+
+    open fun executeRootCommandWithOutput(vararg command: String): Pair<Int, String> = runCatching {
+        val process = ProcessBuilder(*command)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val exitCode = process.waitFor()
+        Pair(exitCode, output)
+    }.getOrDefault(Pair(-1, ""))
 }

@@ -15,7 +15,7 @@ import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.bot.omniflow.OmniFlow
 import cn.com.omnimind.bot.omniflow.OmniFlowPluginRuntime
 import cn.com.omnimind.bot.omniflow.OmniFlowPythonRuntime
-import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
+import cn.com.omnimind.bot.omniflow.createOmniFlowModelClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -25,6 +25,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -73,12 +74,18 @@ class OmniFlowManagementToolHandler(context: Context) : ToolHandler {
                     )
                 }
             }
-            val modelClient = if (OmniFlowPluginRuntime.isEnabled()) {
-                    HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
-                        .asOmniFlowModelClient()
-                } else {
-                    null
-                }
+            val modelClient = if (
+                OmniFlowPluginRuntime.isEnabled() &&
+                toolName == OmniFlowManagementTools.SAVE_FUNCTION &&
+                normalizedArguments["enhance"] == true
+            ) {
+                createOmniFlowModelClient(
+                    scope = CoroutineScope(currentCoroutineContext()),
+                    environment = env,
+                )
+            } else {
+                null
+            }
             val payload = OmniFlow.callTool(
                 context = helper.context,
                 toolCall = OmniFlow.ToolCall(toolName, normalizedArguments),
@@ -86,12 +93,7 @@ class OmniFlowManagementToolHandler(context: Context) : ToolHandler {
             ).payload
             val encoded = helper.mapToJsonElement(payload).toString()
             if (payload["success"] == false) {
-                ToolExecutionResult.Error(
-                    toolName,
-                    payload["error_message"]?.toString()
-                        ?: payload["error_code"]?.toString()
-                        ?: "OmniFlow management tool failed",
-                )
+                omniFlowManagementErrorResult(toolName, payload)
             } else {
                 ToolExecutionResult.ContextResult(
                     toolName = toolName,
@@ -216,4 +218,54 @@ private fun jsonElementToManagementValue(
         value.doubleOrNull != null -> value.doubleOrNull
         else -> value.content
     }
+}
+
+internal fun omniFlowManagementErrorResult(
+    toolName: String,
+    payload: Map<String, Any?>,
+): ToolExecutionResult.Error = ToolExecutionResult.Error(
+    toolName = toolName,
+    message = resolveOmniFlowManagementErrorMessage(payload),
+)
+
+internal fun resolveOmniFlowManagementErrorMessage(payload: Map<String, Any?>): String {
+    val legacyMessage = payload["error_message"]?.toString()?.trim()?.takeIf(String::isNotEmpty)
+    if (legacyMessage != null) return legacyMessage
+
+    val legacyCode = payload["error_code"]?.toString()?.trim()?.takeIf(String::isNotEmpty)
+    if (legacyCode != null) return legacyCode
+
+    val errorObj = payload["error"]
+    if (errorObj is Map<*, *>) {
+        val code = (errorObj["code"] ?: errorObj["error_code"])?.toString()?.trim()?.takeIf(String::isNotEmpty)
+        val message = (errorObj["message"] ?: errorObj["error_message"])?.toString()?.trim()?.takeIf(String::isNotEmpty)
+        val formatted = formatManagementErrorCodeAndMessage(code, message)
+        if (formatted != null) return formatted
+    } else if (errorObj is JsonObject) {
+        val code = (errorObj["code"] ?: errorObj["error_code"])?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        val message = (errorObj["message"] ?: errorObj["error_message"])?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        val formatted = formatManagementErrorCodeAndMessage(code, message)
+        if (formatted != null) return formatted
+    } else if (errorObj is JsonPrimitive) {
+        val content = errorObj.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
+        if (content != null) return content
+    } else if (errorObj != null) {
+        val str = errorObj.toString().trim().takeIf(String::isNotEmpty)
+        if (str != null) return str
+    }
+
+    return "OmniFlow management tool failed"
+}
+
+private fun formatManagementErrorCodeAndMessage(code: String?, message: String?): String? = when {
+    code != null && message != null -> {
+        if (code == message || message.startsWith("$code:") || message.startsWith("$code ")) {
+            message
+        } else {
+            "$code: $message"
+        }
+    }
+    code != null -> code
+    message != null -> message
+    else -> null
 }

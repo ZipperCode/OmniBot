@@ -19,6 +19,7 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import cn.com.omnimind.androidgui.AndroidGuiOverlayHost
+import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.androidgui.KeyguardStateMonitor
 import cn.com.omnimind.baselib.util.OmniLog
 import cn.com.omnimind.bot.task.runtime.TaskExecutionInfo
@@ -35,6 +36,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 
+internal const val DEFAULT_STAGE_WIDTH_UNSPECIFIED = -1
+
 /**
  * 屏幕任务浮层几何状态。
  * 单一任务生命周期内保持，新任务时重置。
@@ -45,10 +48,21 @@ internal data class TaskGeometry(
     var capsuleY: Int = -1,
     var stageX: Int = -1,
     var stageY: Int = -1,
-    var stageWidthDp: Int = 296,
+    var stageWidthDp: Int = DEFAULT_STAGE_WIDTH_UNSPECIFIED,
     var stageCanvasHeightDp: Int = -1,
     var dockedX: Int = -1,
     var dockedY: Int = -1
+)
+
+internal data class StageWidthBounds(
+    val minWidthPx: Int,
+    val maxWidthPx: Int,
+    val defaultWidthPx: Int,
+    val minWidthDp: Int,
+    val maxWidthDp: Int,
+    val defaultWidthDp: Int,
+    val backgroundAspect: Float,
+    val isLandscape: Boolean
 )
 /**
  * 屏幕任务专用悬浮窗宿主。
@@ -58,6 +72,101 @@ object ScreenTaskOverlayHost {
 
     private const val TAG = "ScreenTaskOverlayHost"
 
+    const val MIN_STAGE_WIDTH_DP = 120
+    const val MIN_STAGE_HEIGHT_DP = 108
+    const val FALLBACK_ASPECT_RATIO_WIDTH_TO_HEIGHT = 9f / 19.5f // 约 0.461538f
+
+    internal fun resolveBackgroundAspectRatio(displayId: Int?, sessionId: String?): Float {
+        if (displayId != null && displayId > 0) {
+            val owner = DeviceDisplayManager.activeVirtualDisplayOwner()
+            if (owner != null && (sessionId.isNullOrEmpty() || owner == sessionId)) {
+                val dims = DeviceDisplayManager.getVirtualDisplayDimensions(displayId)
+                if (dims != null && dims.first > 0 && dims.second > 0) {
+                    return dims.first.toFloat() / dims.second.toFloat()
+                }
+            }
+        }
+        return FALLBACK_ASPECT_RATIO_WIDTH_TO_HEIGHT
+    }
+
+    internal fun calculateStageWidthBounds(
+        screenWidthPx: Int,
+        screenHeightPx: Int,
+        density: Float,
+        safeInsets: Rect,
+        backgroundAspect: Float
+    ): StageWidthBounds {
+        val isLandscape = backgroundAspect > 1.0f
+        val shortEdgePx = minOf(screenWidthPx, screenHeightPx).toFloat()
+
+        val rawDefaultWidthPx = if (isLandscape) {
+            shortEdgePx * 0.76f
+        } else {
+            shortEdgePx * 0.34f
+        }
+
+        val safeDensity = if (density > 0f) density else 1f
+        val baseMinWidthPx = MIN_STAGE_WIDTH_DP * safeDensity
+
+        val widthFactor = if (isLandscape) 0.94f else 0.85f
+        val maxByScreenWidthPx = screenWidthPx * widthFactor
+        val maxByScreenHeightPx = screenHeightPx * 0.85f * backgroundAspect
+        val maxReferencePx = minOf(maxByScreenWidthPx, maxByScreenHeightPx)
+
+        val safeAvailableWidthPx = (screenWidthPx - safeInsets.left - safeInsets.right).toFloat().coerceAtLeast(1f)
+        val rawMaxWidthPx = minOf(maxReferencePx, safeAvailableWidthPx)
+
+        val effectiveMinWidthPx = minOf(baseMinWidthPx, safeAvailableWidthPx)
+        val effectiveMaxWidthPx = maxOf(effectiveMinWidthPx, rawMaxWidthPx)
+        val effectiveDefaultWidthPx = rawDefaultWidthPx.coerceIn(effectiveMinWidthPx, effectiveMaxWidthPx)
+
+        val minWidthPxInt = Math.round(effectiveMinWidthPx)
+        val maxWidthPxInt = Math.round(effectiveMaxWidthPx)
+        val defaultWidthPxInt = Math.round(effectiveDefaultWidthPx)
+
+        val minWidthDp = Math.round(minWidthPxInt / safeDensity).coerceAtLeast(1)
+        val maxWidthDp = Math.round(maxWidthPxInt / safeDensity).coerceAtLeast(minWidthDp)
+        val defaultWidthDp = Math.round(defaultWidthPxInt / safeDensity).coerceIn(minWidthDp, maxWidthDp)
+
+        return StageWidthBounds(
+            minWidthPx = minWidthPxInt,
+            maxWidthPx = maxWidthPxInt,
+            defaultWidthPx = defaultWidthPxInt,
+            minWidthDp = minWidthDp,
+            maxWidthDp = maxWidthDp,
+            defaultWidthDp = defaultWidthDp,
+            backgroundAspect = backgroundAspect,
+            isLandscape = isLandscape
+        )
+    }
+
+    internal fun calculateStageWidthBounds(
+        context: Context,
+        displayId: Int?,
+        sessionId: String?,
+        safeInsets: Rect? = null
+    ): StageWidthBounds {
+        val dm = context.resources.displayMetrics
+        val insets = safeInsets ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
+        val bgAspect = resolveBackgroundAspectRatio(displayId, sessionId)
+        return calculateStageWidthBounds(dm.widthPixels, dm.heightPixels, dm.density, insets, bgAspect)
+    }
+
+    internal fun resolveStageWidthDp(
+        currentStageWidthDp: Int,
+        bounds: StageWidthBounds
+    ): Int {
+        if (currentStageWidthDp <= 0) {
+            return bounds.defaultWidthDp
+        }
+        return currentStageWidthDp.coerceIn(bounds.minWidthDp, bounds.maxWidthDp)
+    }
+
+    internal fun getExpectedStageWidthPx(context: Context): Int {
+        val bounds = calculateStageWidthBounds(context, activeDisplayId, activeSessionId)
+        val stageWidthDp = resolveStageWidthDp(overlayGeometry.stageWidthDp, bounds)
+        return dp(context, stageWidthDp)
+    }
     private val mainHandler = Handler(Looper.getMainLooper())
     private val overlayScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -212,6 +321,8 @@ object ScreenTaskOverlayHost {
 
         // 新任务到达，重置几何状态
         overlayGeometry = TaskGeometry()
+        val bounds = calculateStageWidthBounds(appContext, targetDisplayId, targetSessionId)
+        overlayGeometry.stageWidthDp = bounds.defaultWidthDp
         snapAnimator?.cancel()
         snapAnimator = null
         isExpanded = false
@@ -254,13 +365,14 @@ object ScreenTaskOverlayHost {
                     handleOpenPip(appContext, tId, sId, turn, token, dId)
                 },
                 hostCallbacks = object : ScreenTaskOverlayHostCallbacks {
-                    override fun getSafeInsets(): Rect = this@ScreenTaskOverlayHost.getSafeInsets(appContext, topOverlayView)
                     override fun getWindowPosition(): Pair<Int, Int> = this@ScreenTaskOverlayHost.getWindowPosition()
                     override fun moveWindowBy(dx: Float, dy: Float) = this@ScreenTaskOverlayHost.moveWindowBy(dx, dy)
                     override fun snapWindow(mode: OverlayDisplayMode) = this@ScreenTaskOverlayHost.snapWindow(mode)
                     override fun resizeStage(newWidthPx: Int, newCanvasHeightPx: Int) = this@ScreenTaskOverlayHost.resizeStage(newWidthPx, newCanvasHeightPx)
                     override fun requestModeChange(mode: OverlayDisplayMode) = this@ScreenTaskOverlayHost.setOverlayMode(mode)
                     override fun getSavedCanvasHeightDp(): Int = this@ScreenTaskOverlayHost.getSavedCanvasHeightDp()
+                    override fun getExpectedStageWidthPx(): Int = this@ScreenTaskOverlayHost.getExpectedStageWidthPx(appContext)
+                    override fun getSafeInsets(): Rect = this@ScreenTaskOverlayHost.getSafeInsets(appContext, topOverlayView)
                 }
             )
         }
@@ -781,12 +893,9 @@ object ScreenTaskOverlayHost {
                 initialY = if (overlayGeometry.capsuleY >= 0) overlayGeometry.capsuleY else safeInsets.top
             }
             OverlayDisplayMode.EXPANDED -> {
-                val minWidthDp = minOf(296, maxWidthAvailableDp)
-                val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
-                    maxWidthAvailableDp
-                } else {
-                    overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
-                }
+                val bounds = calculateStageWidthBounds(ctx, activeDisplayId, activeSessionId, safeInsets)
+                val stageWidthDp = resolveStageWidthDp(overlayGeometry.stageWidthDp, bounds)
+                overlayGeometry.stageWidthDp = stageWidthDp
                 targetWidth = dp(ctx, stageWidthDp)
                 targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
                 initialX = if (overlayGeometry.stageX >= 0) overlayGeometry.stageX else (screenWidth - targetWidth) / 2
@@ -801,7 +910,10 @@ object ScreenTaskOverlayHost {
         }
 
         val estimatedHeight = when (mode) {
-            OverlayDisplayMode.EXPANDED -> if (overlayGeometry.stageCanvasHeightDp > 0) dp(ctx, overlayGeometry.stageCanvasHeightDp) else dp(ctx, 400)
+            OverlayDisplayMode.EXPANDED -> {
+                val baseHeightDp = if (overlayGeometry.stageCanvasHeightDp > 0) overlayGeometry.stageCanvasHeightDp else 400
+                dp(ctx, maxOf(baseHeightDp, MIN_STAGE_HEIGHT_DP))
+            }
             OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
             OverlayDisplayMode.DOCKED -> dp(ctx, 48)
         }
@@ -866,12 +978,9 @@ object ScreenTaskOverlayHost {
                 targetY = if (overlayGeometry.capsuleY >= 0) overlayGeometry.capsuleY else safeInsets.top
             }
             OverlayDisplayMode.EXPANDED -> {
-                val minWidthDp = minOf(296, maxWidthAvailableDp)
-                val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
-                    maxWidthAvailableDp
-                } else {
-                    overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
-                }
+                val bounds = calculateStageWidthBounds(ctx, activeDisplayId, activeSessionId, safeInsets)
+                val stageWidthDp = resolveStageWidthDp(overlayGeometry.stageWidthDp, bounds)
+                overlayGeometry.stageWidthDp = stageWidthDp
                 targetWidth = dp(ctx, stageWidthDp)
                 targetHeight = WindowManager.LayoutParams.WRAP_CONTENT
                 targetX = if (overlayGeometry.stageX >= 0) overlayGeometry.stageX else (screenWidth - targetWidth) / 2
@@ -886,7 +995,10 @@ object ScreenTaskOverlayHost {
         }
 
         val estimatedHeight = when (mode) {
-            OverlayDisplayMode.EXPANDED -> if (overlayGeometry.stageCanvasHeightDp > 0) dp(ctx, overlayGeometry.stageCanvasHeightDp) else dp(ctx, 400)
+            OverlayDisplayMode.EXPANDED -> {
+                val baseHeightDp = if (overlayGeometry.stageCanvasHeightDp > 0) overlayGeometry.stageCanvasHeightDp else 400
+                dp(ctx, maxOf(baseHeightDp, MIN_STAGE_HEIGHT_DP))
+            }
             OverlayDisplayMode.CAPSULE -> dp(ctx, 48)
             OverlayDisplayMode.DOCKED -> dp(ctx, 48)
         }
@@ -903,7 +1015,7 @@ object ScreenTaskOverlayHost {
         params.x = targetX
         params.y = targetY
 
-        view.setOverlayMode(mode)
+        view.setOverlayMode(mode, targetWidth)
         runCatching { wm.updateViewLayout(view, params) }
 
         // 单次 post 测量实际高度进行 clamp，避免底部展开越界
@@ -1083,21 +1195,24 @@ object ScreenTaskOverlayHost {
         val dm = ctx.resources.displayMetrics
         val screenWidth = dm.widthPixels
         val safeInsets = getSafeInsets(ctx, view)
+        val availableHeight = (dm.heightPixels - safeInsets.top - safeInsets.bottom).coerceAtLeast(1)
 
-        val maxWidthPx = (screenWidth - safeInsets.left - safeInsets.right).coerceAtLeast(1)
-        val minWidthPx = minOf(dp(ctx, 296), maxWidthPx)
-        val clampedWidth = newWidthPx.coerceIn(minWidthPx, maxWidthPx)
+        val bounds = calculateStageWidthBounds(ctx, activeDisplayId, activeSessionId, safeInsets)
+        val clampedWidth = newWidthPx.coerceIn(bounds.minWidthPx, bounds.maxWidthPx)
 
         params.width = clampedWidth
+        val stageHeight = minOf(newCanvasHeightPx + view.getStageChromeHeightPx(), availableHeight)
+        params.height = stageHeight
         val maxX = (screenWidth - clampedWidth - safeInsets.right).coerceAtLeast(safeInsets.left)
-        if (params.x > maxX) {
-            params.x = maxX
-        }
+        params.x = params.x.coerceIn(safeInsets.left, maxX)
+        val maxY = (dm.heightPixels - stageHeight - safeInsets.bottom).coerceAtLeast(safeInsets.top)
+        params.y = params.y.coerceIn(safeInsets.top, maxY)
 
         val density = dm.density
-        overlayGeometry.stageWidthDp = (clampedWidth / density).toInt()
-        overlayGeometry.stageCanvasHeightDp = (newCanvasHeightPx / density).toInt()
+        overlayGeometry.stageWidthDp = Math.round(clampedWidth / density)
+        overlayGeometry.stageCanvasHeightDp = Math.round(newCanvasHeightPx / density)
         overlayGeometry.stageX = params.x
+        overlayGeometry.stageY = params.y
 
         runCatching { wm.updateViewLayout(view, params) }
     }
@@ -1112,14 +1227,9 @@ object ScreenTaskOverlayHost {
         val safeInsets = getSafeInsets(context, view)
 
         val screenWidthDp = screenWidth / dm.density
-        val maxWidthAvailableDp = ((screenWidth - safeInsets.left - safeInsets.right) / dm.density).toInt().coerceAtLeast(1)
         val maxAllowedWidthDp = (screenWidthDp - 16f).toInt().coerceAtLeast(1)
-        val minWidthDp = minOf(296, maxWidthAvailableDp)
-        val stageWidthDp = if (maxWidthAvailableDp <= minWidthDp) {
-            maxWidthAvailableDp
-        } else {
-            overlayGeometry.stageWidthDp.coerceIn(minWidthDp, maxWidthAvailableDp)
-        }
+        val bounds = calculateStageWidthBounds(context, activeDisplayId, activeSessionId, safeInsets)
+        val stageWidthDp = resolveStageWidthDp(overlayGeometry.stageWidthDp, bounds)
         overlayGeometry.stageWidthDp = stageWidthDp
 
         val mode = overlayGeometry.mode
@@ -1132,10 +1242,13 @@ object ScreenTaskOverlayHost {
             OverlayDisplayMode.EXPANDED -> dp(context, stageWidthDp)
             OverlayDisplayMode.DOCKED -> dp(context, 48)
         }
-        val targetHeight = if (mode == OverlayDisplayMode.DOCKED) dp(context, 48) else WindowManager.LayoutParams.WRAP_CONTENT
-
-        if (mode == OverlayDisplayMode.EXPANDED) {
-            view.adaptCanvasHeight()
+        val targetHeight = when (mode) {
+            OverlayDisplayMode.EXPANDED -> {
+                view.adaptCanvasHeight(dp(context, stageWidthDp))
+                params.height
+            }
+            OverlayDisplayMode.DOCKED -> dp(context, 48)
+            OverlayDisplayMode.CAPSULE -> WindowManager.LayoutParams.WRAP_CONTENT
         }
 
         params.width = targetWidth
@@ -1200,7 +1313,7 @@ object ScreenTaskOverlayHost {
         return WindowManager.LayoutParams().apply {
             type = windowType
             format = PixelFormat.TRANSLUCENT
-            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            flags = WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED

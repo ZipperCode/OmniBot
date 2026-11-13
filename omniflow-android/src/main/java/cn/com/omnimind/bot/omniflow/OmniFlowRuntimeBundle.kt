@@ -58,3 +58,27 @@ fun parseOmniFlowRuntimeManifest(input: InputStream): OmniFlowRuntimeManifest {
         jsonRepairVersion = required("json_repair.version"),
     )
 }
+
+data class OmniFlowRuntimeProvenance(
+    val schemaVersion: String = SCHEMA_VERSION,
+    val runtimeVersion: String,
+    val protocolVersion: String,
+    val source: String,
+    val manifestSourceSha256: String,
+    val contractSha256: String,
+    val loadedModules: Map<String, Any?> = emptyMap(),
+) {
+    fun asMap(): Map<String, Any?> = buildMap {
+        put("schema_version", schemaVersion)
+        put("runtime_version", runtimeVersion)
+        put("protocol_version", protocolVersion)
+        put("source", source)
+        put("manifest_source_sha256", manifestSourceSha256)
+        put("contract_sha256", contractSha256)
+        put("loaded_modules", loadedModules)
+    }
+
+    companion object {
+        const val SCHEMA_VERSION = "omniflow.runtime-provenance.v1"
+    }
+}

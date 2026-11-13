@@ -193,7 +193,10 @@
         "app_name": {"type": "string"},
         "goal_status": {"type": "string"},
         "keycode": {"type": "string", "pattern": "^KEYCODE_"},
-        "clear_text": {"type": "boolean"}
+        "clear_text": {"type": "boolean"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "condition": {"enum": ["text_present", "text_absent", "screen_changed"]},
+        "target_description": {"type": "string"}
       }
     },
     "result": {

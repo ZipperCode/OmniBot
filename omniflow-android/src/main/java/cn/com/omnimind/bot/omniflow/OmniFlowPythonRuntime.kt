@@ -26,6 +26,12 @@ object OmniFlowPythonRuntime {
     @Volatile
     private var client: OmniFlowPythonClient? = null
 
+    val isBusy: Boolean
+        get() = client?.isBusy == true
+
+    val isReady: Boolean
+        get() = ready && client?.hasLiveSession == true
+
     @Volatile
     private var ready: Boolean = false
 
@@ -172,7 +178,7 @@ object OmniFlowPythonRuntime {
         }
 
     fun start(context: Context) {
-        if (ready) return
+        if (ready && client?.hasLiveSession == true) return
         warmupJob(context.applicationContext)
     }
 
@@ -186,8 +192,8 @@ object OmniFlowPythonRuntime {
         hostCall: OmniFlowPythonHostCall? = null,
     ): Map<String, Any?> {
         awaitReady(context.applicationContext)
-        return requireNotNull(client) { "omniflow_python_client_unavailable" }
-            .call(operation, payload, hostCall)
+        val activeClient = requireNotNull(client) { "omniflow_python_client_unavailable" }
+        return activeClient.call(operation, payload, hostCall)
     }
 
     internal suspend fun completeJson(request: ChatCompletionRequest): String =
@@ -216,11 +222,11 @@ object OmniFlowPythonRuntime {
     }
 
     private suspend fun ensureReady(context: Context): OmniFlowRuntimeManifest {
-        if (ready && client != null) {
+        if (ready && client?.hasLiveSession == true) {
             return requireNotNull(activeManifest) { "omniflow_runtime_manifest_unavailable" }
         }
         return prepareMutex.withLock {
-            if (ready && client != null) {
+            if (ready && client?.hasLiveSession == true) {
                 return requireNotNull(activeManifest) { "omniflow_runtime_manifest_unavailable" }
             }
             val host = requireNotNull(platform) { "omniflow_platform_not_configured" }
@@ -270,11 +276,24 @@ object OmniFlowPythonRuntime {
             val initialization = candidate.initialize()
             val metadata = initialization["_meta"] as? Map<*, *>
             val runtime = metadata?.get("omniflow/runtime") as? Map<*, *> ?: emptyMap<Any, Any>()
-            if (initialization["protocolVersion"] != preparedRuntime.manifest.protocol) {
-                OmniLog.w(
-                    TAG,
-                    "protocol_diff expected=${preparedRuntime.manifest.protocol} " +
-                        "actual=${initialization["protocolVersion"]}",
+            val actualRuntimeVersion = runtime["runtime_version"]?.toString().orEmpty()
+            val actualContractSha256 = runtime["contract_sha256"]?.toString().orEmpty()
+            val actualProtocolVersion = initialization["protocolVersion"]?.toString()
+                ?: runtime["protocol_version"]?.toString().orEmpty()
+
+            if (actualProtocolVersion != preparedRuntime.manifest.protocol) {
+                throw IllegalStateException(
+                    "unsupported_omniflow_protocol:expected=${preparedRuntime.manifest.protocol},actual=$actualProtocolVersion"
+                )
+            }
+            if (actualRuntimeVersion.isNotBlank() && actualRuntimeVersion != preparedRuntime.manifest.version) {
+                throw IllegalStateException(
+                    "omniflow_runtime_version_mismatch:expected=${preparedRuntime.manifest.version},actual=$actualRuntimeVersion"
+                )
+            }
+            if (actualContractSha256.isNotBlank() && actualContractSha256 != preparedRuntime.manifest.bridgeContractSha256) {
+                throw IllegalStateException(
+                    "omniflow_bridge_contract_mismatch:expected=${preparedRuntime.manifest.bridgeContractSha256},actual=$actualContractSha256"
                 )
             }
             if (runtime["omnitransfer_ready"] != true) {
@@ -284,6 +303,32 @@ object OmniFlowPythonRuntime {
                         "failed mappings will fall back to the online VLM",
                 )
             }
+            val resolvedSource = when {
+                developerOverride -> "developer_override"
+                preparedRuntime.source == "packaged" -> "packaged"
+                else -> "installed"
+            }
+            val rawModules = runtime["loaded_modules"] as? Map<*, *>
+            val loadedModules: Map<String, Any?> = rawModules?.entries?.mapNotNull { (key, value) ->
+                val name = key?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val moduleMap = (value as? Map<*, *>)?.entries?.mapNotNull { (mk, mv) ->
+                    val field = mk?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                    when (field) {
+                        "source_sha256", "code_sha256", "status" -> field to mv?.toString()
+                        else -> null
+                    }
+                }?.toMap() ?: return@mapNotNull null
+                name to moduleMap
+            }?.toMap().orEmpty()
+            val provenance = OmniFlowRuntimeProvenance(
+                runtimeVersion = actualRuntimeVersion.ifBlank { preparedRuntime.manifest.version },
+                protocolVersion = actualProtocolVersion,
+                source = resolvedSource,
+                manifestSourceSha256 = preparedRuntime.manifest.omniFlowSourceSha256,
+                contractSha256 = actualContractSha256.ifBlank { preparedRuntime.manifest.bridgeContractSha256 },
+                loadedModules = loadedModules,
+            )
+            candidate.attachSessionProvenance(provenance.asMap())
             client = candidate
             activeManifest = preparedRuntime.manifest
             ready = true
@@ -300,7 +345,9 @@ object OmniFlowPythonRuntime {
     private fun warmupJob(context: Context): Deferred<OmniFlowRuntimeManifest> =
         synchronized(warmupLock) {
             warmupDeferred?.let { existing ->
-                if (!existing.isCancelled) return@synchronized existing
+                if (!existing.isCompleted || (!existing.isCancelled && ready && client?.hasLiveSession == true)) {
+                    return@synchronized existing
+                }
             }
             val startedAt = SystemClock.elapsedRealtime()
             runtimeScope.async {
@@ -337,8 +384,8 @@ object OmniFlowPythonRuntime {
         }
 
     private suspend fun awaitReady(context: Context) {
-        if (ready && client != null) return
-        warmupJob(context).await()
+        if (ready && client?.hasLiveSession == true) return
+        warmupJob(context.applicationContext).await()
     }
 
     private suspend fun prepareRuntime(context: Context): PreparedOmniFlowRuntime {
@@ -386,6 +433,8 @@ object OmniFlowPythonRuntime {
         ready = false
         activeClient?.close()
     }
+
+    internal fun activeClientForTest(): OmniFlowPythonClient? = client
 }
 
 internal fun isOmniFlowRuntimeCompatibilityFailure(error: Throwable): Boolean {

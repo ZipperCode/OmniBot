@@ -105,6 +105,30 @@ class OmniFlowToolClient {
   }) {
     return _call('list_run_logs', {'limit': limit, 'offset': offset});
   }
+  static Future<Map<String, dynamic>> listAppExperiences({
+    int limit = 20,
+    int offset = 0,
+    String? packageName,
+  }) {
+    return _call('list_app_experiences', {
+      'limit': limit,
+      'offset': offset,
+      if (packageName?.trim().isNotEmpty == true)
+        'package_name': packageName!.trim(),
+    });
+  }
+
+  static Future<Map<String, dynamic>> setAppExperienceEnabled(
+    String experienceId,
+    bool enabled,
+    int expectedRevision,
+  ) {
+    return _call('set_app_experience_enabled', {
+      'experience_id': experienceId,
+      'enabled': enabled,
+      'expected_revision': expectedRevision,
+    });
+  }
 
   static Future<Map<String, dynamic>> getFunction(String functionId) {
     return _call('get_function', {'function_id': functionId});

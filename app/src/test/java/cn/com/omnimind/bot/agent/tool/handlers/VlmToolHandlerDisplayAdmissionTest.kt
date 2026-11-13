@@ -19,8 +19,11 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -84,6 +87,9 @@ class VlmToolHandlerDisplayAdmissionTest {
         val ctxResult = result as ToolExecutionResult.ContextResult
         assertTrue("结果应为失败", !ctxResult.success)
         assertTrue("应包含 background_display_required", ctxResult.summaryText.contains("background_display_required"))
+        val parsedMain = Json.parseToJsonElement(ctxResult.rawResultJson).jsonObject
+        assertFalse("前置准入失败不得透传未由本 run 产生的 collection", parsedMain.containsKey("collection"))
+        assertFalse("前置准入失败不得透传 finished_evidence", parsedMain.containsKey("finished_evidence"))
 
         assertNull("TaskRuntime 不得被标记为主屏", TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
         assertNull("会话目标不得被污染为主屏", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
@@ -114,6 +120,9 @@ class VlmToolHandlerDisplayAdmissionTest {
         assertTrue(ctxResult.summaryText.contains("background_display_required"))
 
         assertNull("TaskRuntime 不得被标记为主屏", TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
+        val parsedZero = Json.parseToJsonElement(ctxResult.rawResultJson).jsonObject
+        assertFalse("前置准入失败不得透传未由本 run 产生的 collection", parsedZero.containsKey("collection"))
+        assertFalse("前置准入失败不得透传 finished_evidence", parsedZero.containsKey("finished_evidence"))
         assertNull("会话目标不得被污染为主屏", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
     }
 
@@ -141,5 +150,8 @@ class VlmToolHandlerDisplayAdmissionTest {
         assertTrue(!ctxResult.success)
         assertNull("TaskRuntime 不得被标记为主屏或未登记屏", TaskRuntime.getActiveTask(taskId)?.screenDisplayId)
         assertNull("会话目标不得被污染", DeviceDisplayManager.getSessionDisplayTarget(sessionId))
+        val parsedUnknown = Json.parseToJsonElement(ctxResult.rawResultJson).jsonObject
+        assertFalse("前置准入失败不得透传未由本 run 产生的 collection", parsedUnknown.containsKey("collection"))
+        assertFalse("前置准入失败不得透传 finished_evidence", parsedUnknown.containsKey("finished_evidence"))
     }
 }

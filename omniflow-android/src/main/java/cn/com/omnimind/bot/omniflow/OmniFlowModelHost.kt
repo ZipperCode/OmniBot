@@ -15,22 +15,96 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlin.math.abs
+
+data class OmniFlowModelTurn(
+    val turn: ChatCompletionTurn,
+    val executionConfig: OmniFlowModelExecutionConfig? = null,
+)
+
+data class OmniFlowModelExecutionConfig(
+    val schemaVersion: String = SCHEMA_VERSION,
+    val providerProfileSha256: String,
+    val resolvedModel: String,
+    val routeSource: String,
+    val contextCapacity: Int,
+    val outputBudget: Int,
+    val maxCompletionTokens: Int? = null,
+    val maxTokens: Int? = null,
+    val reasoningEffort: String? = null,
+    val enableThinking: Boolean? = null,
+    val thinkingType: String? = null,
+    val reasoningSupported: Boolean? = null,
+    val reasoningCanDisable: Boolean? = null,
+    val supportedReasoningLevels: List<String>? = null,
+    val defaultReasoningLevel: String? = null,
+    val omittedFields: List<String> = buildList {
+        if (maxCompletionTokens == null) add("max_completion_tokens")
+        if (maxTokens == null) add("max_tokens")
+        if (reasoningEffort == null) add("reasoning_effort")
+        if (enableThinking == null) add("enable_thinking")
+        if (thinkingType == null) add("thinking_type")
+        if (reasoningSupported == null) add("reasoning_supported")
+        if (reasoningCanDisable == null) add("reasoning_can_disable")
+        if (supportedReasoningLevels == null) add("supported_reasoning_levels")
+        if (defaultReasoningLevel == null) add("default_reasoning_level")
+    },
+) {
+    companion object {
+        const val SCHEMA_VERSION = "omniflow.model-execution-config.v1"
+        const val ROUTE_GUI_BINDING = "gui_binding"
+        const val ROUTE_CONVERSATION = "conversation"
+        const val ROUTE_SHARED_SCENE = "shared_scene"
+
+        val KNOWN_NULLABLE_FIELDS: Set<String> = linkedSetOf(
+            "max_completion_tokens",
+            "max_tokens",
+            "reasoning_effort",
+            "enable_thinking",
+            "thinking_type",
+            "reasoning_supported",
+            "reasoning_can_disable",
+            "supported_reasoning_levels",
+            "default_reasoning_level",
+        )
+
+        fun sha256Hex(value: String): String =
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(value.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+    }
+
+    fun asMap(): Map<String, Any?> = linkedMapOf<String, Any?>(
+        "schema_version" to schemaVersion,
+        "provider_profile_sha256" to providerProfileSha256,
+        "resolved_model" to resolvedModel,
+        "route_source" to routeSource,
+        "context_capacity" to contextCapacity,
+        "output_budget" to outputBudget,
+        "max_completion_tokens" to maxCompletionTokens,
+        "max_tokens" to maxTokens,
+        "reasoning_effort" to reasoningEffort,
+        "enable_thinking" to enableThinking,
+        "thinking_type" to thinkingType,
+        "reasoning_supported" to reasoningSupported,
+        "reasoning_can_disable" to reasoningCanDisable,
+        "supported_reasoning_levels" to supportedReasoningLevels,
+        "default_reasoning_level" to defaultReasoningLevel,
+        "omitted_fields" to omittedFields,
+    ).filterValues { it != null }
+}
 
 interface OmniFlowModelClient {
     suspend fun streamTurn(
         request: ChatCompletionRequest,
         onReasoningUpdate: (suspend (String) -> Unit)? = null,
-    ): ChatCompletionTurn
+    ): OmniFlowModelTurn
 }
 
 class OmniFlowModelHost(
     private val modelClient: OmniFlowModelClient,
     private val imageCompressor: (String) -> String = OmniFlowImageHelper::compressVlmImage,
     private val onReasoningUpdate: suspend (String) -> Unit = {},
-    private val maxRejectedActionRetries: Int? = null,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -45,43 +119,20 @@ class OmniFlowModelHost(
             jsonValue(mapValue(payload["request"])),
         )
         require(request.model == requestedModel) { "model_turn_request_model_mismatch" }
-        val rejectedAction = stalledPreviousAction(payload)
-        var activeRequest = request.copy(
+        val activeRequest = request.copy(
             messages = request.messages.map { message ->
                 message.copy(content = compressImages(message.content))
             },
         )
-        val turns = mutableListOf<ChatCompletionTurn>()
-        var rejectedAttempts = 0
-        lateinit var turn: ChatCompletionTurn
-        while (true) {
-            val candidate = modelClient.streamTurn(
-                request = activeRequest,
-                onReasoningUpdate = { thinking ->
-                    thinking.trim().takeIf(String::isNotEmpty)?.let {
-                        onReasoningUpdate(it)
-                    }
-                },
-            )
-            turns += candidate
-            if (rejectedAction == null || !repeatsRejectedAction(candidate, rejectedAction)) {
-                turn = candidate
-                break
-            }
-            rejectedAttempts += 1
-            if (
-                maxRejectedActionRetries != null &&
-                    rejectedAttempts > maxRejectedActionRetries
-            ) {
-                error("model_repeated_explicitly_rejected_action:${rejectedAction.tool}")
-            }
-            activeRequest = activeRequest.copy(
-                messages = activeRequest.messages + ChatCompletionMessage(
-                    role = "user",
-                    content = JsonPrimitive(rejectedAction.reflectionPrompt()),
-                ),
-            )
-        }
+        val modelTurn = modelClient.streamTurn(
+            request = activeRequest,
+            onReasoningUpdate = { thinking ->
+                thinking.trim().takeIf(String::isNotEmpty)?.let {
+                    onReasoningUpdate(it)
+                }
+            },
+        )
+        val turn = modelTurn.turn
         val resolvedModel = turn.resolvedModel?.trim().orEmpty().ifBlank { requestedModel }
         return linkedMapOf<String, Any?>(
             "requested_model" to requestedModel,
@@ -98,8 +149,8 @@ class OmniFlowModelHost(
             },
             "reasoning" to turn.reasoning.trim().takeIf(String::isNotEmpty),
             "finish_reason" to turn.finishReason,
-            "usage" to aggregateUsage(turns),
-            "rejected_stalled_actions" to rejectedAttempts.takeIf { it > 0 },
+            "usage" to usage(turn),
+            "execution_config" to modelTurn.executionConfig?.asMap(),
         ).filterValues { it != null }
     }
 
@@ -113,114 +164,38 @@ class OmniFlowModelHost(
         )
         // The provider/ACP stream owns its lifetime.  Do not synthesize a
         // failure merely because a model is slow before its next chunk.
-        val turn = modelClient.streamTurn(request)
-        val content = submitJsonArguments(turn)
+        val modelTurn = modelClient.streamTurn(request)
+        val content = submitJsonArguments(modelTurn.turn)
         return mapOf("content" to content)
     }
 
     private fun usage(turn: ChatCompletionTurn): Map<String, Any?>? {
-        val usage = turn.usage ?: return null
-        val promptDetails = usage.promptTokensDetails as? JsonObject
-        val completionDetails = usage.completionTokensDetails as? JsonObject
+        val usage = turn.usage
+        val promptDetails = usage?.promptTokensDetails as? JsonObject
+        val completionDetails = usage?.completionTokensDetails as? JsonObject
+        val hasUsage = usage != null
         return linkedMapOf<String, Any?>(
-            "prompt_tokens" to usage.promptTokens,
-            "completion_tokens" to usage.completionTokens,
-            "total_tokens" to usage.totalTokens,
+            "model_calls" to 1,
+            "responses_with_usage" to if (hasUsage) 1 else 0,
+            "responses_without_usage" to if (hasUsage) 0 else 1,
+            "prompt_tokens" to usage?.promptTokens,
+            "completion_tokens" to usage?.completionTokens,
+            "total_tokens" to usage?.totalTokens,
             "reasoning_tokens" to completionDetails.intValue("reasoning_tokens"),
             "text_tokens" to completionDetails.intValue("text_tokens"),
             "image_tokens" to promptDetails.intValue("image_tokens"),
             "cached_tokens" to promptDetails.intValue("cached_tokens"),
-            "prefill_tokens_per_second" to usage.prefillTokensPerSecond,
-            "decode_tokens_per_second" to usage.decodeTokensPerSecond,
-        ).filterValues { it != null }.takeIf(Map<String, Any?>::isNotEmpty)
-    }
-
-    private fun aggregateUsage(turns: List<ChatCompletionTurn>): Map<String, Any?>? {
-        if (turns.isEmpty()) return null
-        val perTurn = turns.mapNotNull(::usage)
-        return linkedMapOf<String, Any?>(
-            "model_calls" to turns.size,
-            "responses_with_usage" to perTurn.size,
-            "responses_without_usage" to (turns.size - perTurn.size),
-            "prompt_tokens" to sumUsage(perTurn, "prompt_tokens"),
-            "completion_tokens" to sumUsage(perTurn, "completion_tokens"),
-            "total_tokens" to sumUsage(perTurn, "total_tokens"),
-            "reasoning_tokens" to sumUsage(perTurn, "reasoning_tokens"),
-            "text_tokens" to sumUsage(perTurn, "text_tokens"),
-            "image_tokens" to sumUsage(perTurn, "image_tokens"),
-            "cached_tokens" to sumUsage(perTurn, "cached_tokens"),
-        ).filterValues { value -> value !is Number || value.toLong() != 0L }
-            .takeIf(Map<String, Any?>::isNotEmpty)
-    }
-
-    private fun sumUsage(values: List<Map<String, Any?>>, key: String): Int =
-        values.sumOf { (it[key] as? Number)?.toLong() ?: 0L }
-            .coerceAtMost(Int.MAX_VALUE.toLong())
-            .toInt()
-
-    private fun stalledPreviousAction(payload: Map<String, Any?>): RejectedAction? {
-        val state = mapValue(payload["state"])
-        val extra = mapValue(state["extra"])
-        val error = firstText(extra["previous_action_error"])
-        if (error !in STALLED_ACTION_ERRORS) return null
-        val previous = mapValue(extra["previous_action"])
-        val tool = firstText(previous["tool"])
-        if (tool.isEmpty()) return null
-        val display = mapValue(state["display"])
-        val width = (display["width"] as? Number)?.toDouble() ?: 0.0
-        val height = (display["height"] as? Number)?.toDouble() ?: 0.0
-        val rawArgs = mapValue(previous["args"]).mapValues { (key, value) ->
-            when (key) {
-                "x", "x1", "x2" -> canonicalCoordinateToPixels(value, width)
-                "y", "y1", "y2" -> canonicalCoordinateToPixels(value, height)
-                else -> value
+            "prefill_tokens_per_second" to usage?.prefillTokensPerSecond,
+            "decode_tokens_per_second" to usage?.decodeTokensPerSecond,
+        ).filterValues { value ->
+            when (value) {
+                null -> false
+                is Double -> value > 0.0
+                is Float -> value > 0.0f
+                is Number -> value.toLong() != 0L
+                else -> true
             }
-        }
-        return RejectedAction(tool = tool, arguments = rawArgs, error = error)
-    }
-
-    private fun canonicalCoordinateToPixels(value: Any?, extent: Double): Any? =
-        if (value is Number && extent > 0.0) value.toDouble() / 1000.0 * extent else value
-
-    private fun repeatsRejectedAction(
-        turn: ChatCompletionTurn,
-        rejected: RejectedAction,
-    ): Boolean {
-        val call = turn.message.toolCalls.orEmpty().singleOrNull() ?: return false
-        if (call.function.name.trim() != rejected.tool) return false
-        val arguments = runCatching {
-            json.parseToJsonElement(call.function.arguments) as? JsonObject
-        }.getOrNull() ?: return false
-        return rejected.arguments.all { (key, expected) ->
-            equivalentArgument(expected, arguments[key])
-        }
-    }
-
-    private fun equivalentArgument(expected: Any?, actual: JsonElement?): Boolean {
-        val primitive = actual as? JsonPrimitive ?: return false
-        return when (expected) {
-            is Number -> primitive.doubleOrNull?.let {
-                abs(it - expected.toDouble()) <= COORDINATE_MATCH_TOLERANCE_PX
-            } == true
-            is Boolean -> primitive.contentOrNull?.toBooleanStrictOrNull() == expected
-            null -> primitive.contentOrNull == null
-            else -> primitive.contentOrNull == expected.toString()
-        }
-    }
-
-    private data class RejectedAction(
-        val tool: String,
-        val arguments: Map<String, Any?>,
-        val error: String,
-    ) {
-        fun reflectionPrompt(): String =
-            "REFLECTION REQUIRED. Your proposed native tool_call was explicitly " +
-                "rejected because it repeats the previous action after `$error`: " +
-                "$tool $arguments. Do not return this same control or coordinate " +
-                "again. Explain the failure to yourself, inspect the current screenshot " +
-                "and execution history, then return exactly one DIFFERENT native " +
-                "tool_call that makes progress. If a primary button is gray or disabled, " +
-                "select the required visible option, radio item, or choice card first."
+        }.takeIf(Map<String, Any?>::isNotEmpty)
     }
 
     private fun JsonObject?.intValue(key: String): Int? =
@@ -249,12 +224,6 @@ class OmniFlowModelHost(
     }
 
     companion object {
-        private const val COORDINATE_MATCH_TOLERANCE_PX = 2.0
-        private val STALLED_ACTION_ERRORS = setOf(
-            "action_completed_without_state_change",
-            "action_already_succeeded_on_current_state",
-            "repeated_action_without_progress",
-        )
 
         fun compressVlmImage(value: String): String = OmniFlowImageHelper.compressVlmImage(value)
 

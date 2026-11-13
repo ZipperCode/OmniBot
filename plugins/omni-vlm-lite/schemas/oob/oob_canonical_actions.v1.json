@@ -126,10 +126,42 @@
       "kind": "action",
       "ui_label": {"zh_cn": "等待", "en_us": "Wait"},
       "description": {"zh_cn": "等待页面加载、动画或外部状态变化。", "en_us": "Wait for page loading, animation, or external state changes."},
-      "prompt_guide": {"zh_cn": "- wait(duration_ms): 只在页面明确处于加载、动画或等待外部状态变化时使用。", "en_us": "- wait(duration_ms): Use only when the page is clearly loading, animating, or waiting for an external state change."},
-      "model_visible": false,
+      "prompt_guide": {
+        "zh_cn": "- wait(duration_ms, condition?, target_description?): 等待页面加载或条件满足；duration_ms 毫秒，condition 可选 text_present、text_absent、screen_changed，文字条件必须附带 target_description。",
+        "en_us": "- wait(duration_ms, condition?, target_description?): Wait for page loading or conditions; duration_ms in milliseconds, condition optionally text_present, text_absent, screen_changed, text conditions require target_description."
+      },
+      "model_visible": true,
       "args": [
-        {"name": "duration_ms", "type": "integer", "required": true, "description": {"zh_cn": "等待时长，单位毫秒。", "en_us": "Wait duration in milliseconds."}, "minimum": 0}
+        {"name": "duration_ms", "type": "integer", "required": true, "description": {"zh_cn": "等待时长，单位毫秒。", "en_us": "Wait duration in milliseconds."}, "minimum": 0},
+        {"name": "condition", "type": "string", "description": {"zh_cn": "可选等待条件；可为 text_present、text_absent 或 screen_changed。", "en_us": "Optional wait condition; can be text_present, text_absent, or screen_changed."}, "enum_values": ["text_present", "text_absent", "screen_changed"]},
+        {"name": "target_description", "type": "string", "persisted": true, "description": {"zh_cn": "可选。当 condition 为 text_present 或 text_absent 时，指定要等待出现或消失的目标文本描述。", "en_us": "Optional target text description to wait for appearance or disappearance when condition is text_present or text_absent."}}
+      ]
+    },
+    {
+      "name": "collect_screen",
+      "kind": "action",
+      "ui_label": {"zh_cn": "多屏采集", "en_us": "Collect screen"},
+      "description": {
+        "zh_cn": "在指定区域内按方向连续滚动并采集多屏文本内容。",
+        "en_us": "Scroll continuously in a specified region along a direction to collect multi-page text content."
+      },
+      "prompt_guide": {
+        "zh_cn": "- collect_screen(direction, x1, y1, x2, y2, max_pages?, max_items?, ocr?): 在指定区域内沿 direction（down 阅读后页/up 阅读前页）滚动采集多屏文本；区域坐标全屏 0..1000，max_pages 默认 5（1..20），max_items 默认 100（1..200），ocr 可选端侧识别。",
+        "en_us": "- collect_screen(direction, x1, y1, x2, y2, max_pages?, max_items?, ocr?): Scroll in region along direction (down for next pages/up for previous pages) to collect multi-page text; coordinates in 0..1000, max_pages default 5 (1..20), max_items default 100 (1..200), ocr optional on-device recognition."
+      },
+      "model_visible": true,
+      "replayable": false,
+      "recordable": false,
+      "editor_visible": false,
+      "args": [
+        {"name": "direction", "type": "string", "required": true, "persisted": false, "description": {"zh_cn": "滚动阅读方向；down 为向后阅读（手指向上滑），up 为向前阅读（手指向下滑）。", "en_us": "Scroll reading direction; down reads forward/later content (fingers scroll up), up reads backward/earlier content (fingers scroll down)."}, "enum_values": ["down", "up"]},
+        {"name": "x1", "type": "number", "required": true, "persisted": false, "description": {"zh_cn": "采集区域左边缘的全屏 0..1000 相对坐标。", "en_us": "Left edge of collection region in full-screen 0..1000 relative coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "y1", "type": "number", "required": true, "persisted": false, "description": {"zh_cn": "采集区域上边缘的全屏 0..1000 相对坐标。", "en_us": "Top edge of collection region in full-screen 0..1000 relative coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "x2", "type": "number", "required": true, "persisted": false, "description": {"zh_cn": "采集区域右边缘的全屏 0..1000 相对坐标。", "en_us": "Right edge of collection region in full-screen 0..1000 relative coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "y2", "type": "number", "required": true, "persisted": false, "description": {"zh_cn": "采集区域下边缘的全屏 0..1000 相对坐标。", "en_us": "Bottom edge of collection region in full-screen 0..1000 relative coordinates."}, "minimum": 0, "maximum": 1000},
+        {"name": "max_pages", "type": "integer", "persisted": false, "description": {"zh_cn": "最多扫描页数，默认 5，范围 1..20。", "en_us": "Maximum pages to scan, default 5, range 1..20."}, "minimum": 1, "maximum": 20},
+        {"name": "max_items", "type": "integer", "persisted": false, "description": {"zh_cn": "最多收集文本条目数，默认 100，范围 1..200。", "en_us": "Maximum items to collect, default 100, range 1..200."}, "minimum": 1, "maximum": 200},
+        {"name": "ocr", "type": "boolean", "persisted": false, "description": {"zh_cn": "是否启用端侧 OCR 辅助提取未暴露无障碍文本的项，默认 false。", "en_us": "Whether to enable on-device OCR to assist extracting items without accessibility text, default false."}}
       ]
     },
     {
@@ -155,11 +187,13 @@
       "kind": "decision",
       "ui_label": {"zh_cn": "完成", "en_us": "Finished"},
       "description": {"zh_cn": "仅当当前页面或上一轮工具结果直接证明用户目标已经完成时结束。", "en_us": "End only when the current page or previous tool result directly proves the user's goal is complete."},
-      "prompt_guide": {"zh_cn": "- finished(content?): 仅在当前页面或上一轮工具结果直接证明目标完成时调用；不确定就继续执行下一步。", "en_us": "- finished(content?): Call only when the current page or previous tool result directly proves completion; if uncertain, continue with the next action."},
+      "prompt_guide": {"zh_cn": "- finished(content?, observation_id?, expected_text?): 仅在当前页面或上一轮工具结果直接证明目标完成时调用；不确定就继续执行下一步。", "en_us": "- finished(content?, observation_id?, expected_text?): Call only when the current page or previous tool result directly proves completion; if uncertain, continue with the next action."},
       "replayable": false,
       "args_template": {"content": "Done"},
       "args": [
-        {"name": "content", "type": "string", "description": {"zh_cn": "给用户的最终完成说明，可为空。", "en_us": "Final completion note for the user. May be empty."}}
+        {"name": "content", "type": "string", "description": {"zh_cn": "给用户的最终完成说明，可为空。", "en_us": "Final completion note for the user. May be empty."}},
+        {"name": "observation_id", "type": "string", "persisted": false, "description": {"zh_cn": "当前页面观测 ID，用于防止在过期页面误完成。", "en_us": "Current page observation ID, preventing completion on expired observations."}},
+        {"name": "expected_text", "type": "string", "persisted": false, "description": {"zh_cn": "当前观测中应匹配的文字；匹配仅证明文字出现。", "en_us": "Text to match in the current observation; matching only proves text presence."}}
       ]
     },
     {

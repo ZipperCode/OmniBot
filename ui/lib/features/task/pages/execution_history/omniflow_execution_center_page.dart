@@ -11,6 +11,7 @@ import 'package:ui/theme/theme_context.dart';
 import 'package:go_router/go_router.dart';
 import 'package:ui/features/home/pages/authorize/accessibility_permission_prompt.dart';
 import 'package:ui/features/task/pages/execution_history/widgets/function_detail_sheet.dart';
+import 'package:ui/features/task/pages/execution_history/widgets/app_experience_detail_sheet.dart';
 import 'package:ui/features/task/run_log/run_log_metrics.dart';
 import 'package:ui/features/task/run_log/omniflow_tool_client.dart';
 import 'package:ui/models/conversation_model.dart';
@@ -72,6 +73,7 @@ class _OmniFlowExecutionCenterPageState
   OmniPluginItem? _plugin;
   List<Map<String, dynamic>> _functions = const [];
   List<Map<String, dynamic>> _runLogs = const [];
+  List<Map<String, dynamic>> _experiences = const [];
   bool _pluginLoading = true;
   String? _pluginError;
   bool _functionsLoaded = false;
@@ -84,6 +86,13 @@ class _OmniFlowExecutionCenterPageState
   bool _runLogsHasMore = false;
   int _runLogsNextOffset = 0;
   String? _runLogsError;
+  bool _experiencesLoaded = false;
+  bool _experiencesLoading = false;
+  bool _experiencesHasMore = false;
+  int _experiencesNextOffset = 0;
+  int _experiencesRevision = 0;
+  String? _experiencesError;
+  final Set<String> _togglingExperienceIds = <String>{};
   bool _initialFunctionOpened = false;
   final Set<String> _registeringRunIds = <String>{};
 
@@ -93,7 +102,7 @@ class _OmniFlowExecutionCenterPageState
   void initState() {
     super.initState();
     _tabController = TabController(
-      length: 2,
+      length: 3,
       initialIndex: _initialTabIndex(widget.initialTab),
       vsync: this,
     )..addListener(_handleTabChanged);
@@ -130,6 +139,8 @@ class _OmniFlowExecutionCenterPageState
           _runLogs = const [];
           _functionsLoaded = false;
           _runLogsLoaded = false;
+          _experiences = const [];
+          _experiencesLoaded = false;
           _pluginLoading = false;
         });
         return;
@@ -153,21 +164,27 @@ class _OmniFlowExecutionCenterPageState
     if (!_ready) return;
     if (_tabController.index == 0) {
       if (!_functionsLoaded) await _loadFunctions(reset: true);
-    } else {
+    } else if (_tabController.index == 1) {
       await Future.wait([
         if (!_runLogsLoaded) _loadRunLogs(reset: true),
         if (!_functionsLoaded) _loadFunctions(reset: true),
       ]);
+    } else if (_tabController.index == 2) {
+      if (!_experiencesLoaded) await _loadExperiences(reset: true);
     }
   }
 
   Future<void> _loadActive({required bool reset}) {
     if (_tabController.index == 0) return _loadFunctions(reset: reset);
-    return Future.wait([
-      _loadRunLogs(reset: reset),
-      _loadFunctions(reset: reset),
-    ]).then((_) {});
+    if (_tabController.index == 1) {
+      return Future.wait([
+        _loadRunLogs(reset: reset),
+        _loadFunctions(reset: reset),
+      ]).then((_) {});
+    }
+    return _loadExperiences(reset: reset);
   }
+
 
   Future<void> _loadFunctions({required bool reset}) async {
     if (_functionsLoading) return;
@@ -257,6 +274,223 @@ class _OmniFlowExecutionCenterPageState
         _runLogsError = error.toString();
       });
     }
+  }
+
+  Future<void> _loadExperiences({required bool reset}) async {
+    if (_experiencesLoading) return;
+    final offset = reset ? 0 : _experiencesNextOffset;
+    setState(() {
+      _experiencesLoading = true;
+      if (reset) _experiencesError = null;
+    });
+    try {
+      final result = await OmniFlowToolClient.listAppExperiences(
+        limit: _pageSize,
+        offset: offset,
+      );
+      if (!mounted) return;
+
+      if (result['success'] == false) {
+        final errorCode = _string(result['error_code']).toLowerCase();
+        final errorMessage = _string(result['error_message']);
+        if (errorCode == 'app_experience_busy' ||
+            errorCode == 'busy' ||
+            errorCode == 'omniflow_busy' ||
+            errorMessage.contains('busy') ||
+            errorMessage.contains('任务结束后更新')) {
+          throw StateError('任务结束后更新');
+        }
+        throw StateError(
+          _string(result['error_message']).nullIfEmpty ??
+              _string(result['error_code']).nullIfEmpty ??
+              _text(context, '获取应用经验失败', 'Failed to load app experiences'),
+        );
+      }
+
+      final items = _mapList(result['items']);
+      final revision = _intValue(result['revision']) ?? 0;
+
+      if (!reset && _experiencesLoaded && revision != _experiencesRevision) {
+        _experiencesLoading = false;
+        await _loadExperiences(reset: true);
+        return;
+      }
+
+      final merged = reset
+          ? items
+          : _mergeById(_experiences, items, idKey: 'id');
+
+      setState(() {
+        _experiences = merged;
+        _experiencesLoaded = true;
+        _experiencesLoading = false;
+        _experiencesRevision = revision;
+        _experiencesHasMore = _hasMore(result, items.length, merged.length);
+        _experiencesNextOffset = _nextOffset(
+          result,
+          fallback: offset + items.length,
+        );
+      });
+    } catch (error) {
+      if (!mounted) return;
+      final isBusy = _isBusyError(error);
+      final errorText = isBusy ? '任务结束后更新' : _omniFlowErrorText(error);
+      setState(() {
+        _experiencesLoaded = true;
+        _experiencesLoading = false;
+        _experiencesError = errorText;
+      });
+    }
+  }
+
+  Future<void> _toggleExperienceEnabled(
+    Map<String, dynamic> experience,
+    bool newEnabled,
+  ) async {
+    final experienceId = _string(experience['id']);
+    if (experienceId.isEmpty || _togglingExperienceIds.contains(experienceId)) {
+      return;
+    }
+    setState(() => _togglingExperienceIds.add(experienceId));
+    try {
+      final result = await OmniFlowToolClient.setAppExperienceEnabled(
+        experienceId,
+        newEnabled,
+        _experiencesRevision,
+      );
+      if (!mounted) return;
+
+      final errorCode = _string(result['error_code']);
+      final isConflict = errorCode == 'app_experience_revision_conflict';
+      final isBusy = errorCode == 'app_experience_busy' ||
+          errorCode.toLowerCase() == 'busy' ||
+          errorCode.toLowerCase() == 'omniflow_busy' ||
+          _string(result['error_message']).contains('任务结束后更新');
+
+      if (isConflict) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _text(
+                context,
+                '版本已变更，已刷新最新经验',
+                'Version conflict; refreshed latest experiences',
+              ),
+            ),
+          ),
+        );
+        await _loadExperiences(reset: true);
+        return;
+      }
+
+      if (isBusy) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('任务结束后更新')),
+        );
+        return;
+      }
+
+      if (result['success'] == false) {
+        throw StateError(
+          _string(result['error_message']).nullIfEmpty ??
+              errorCode.nullIfEmpty ??
+              _text(context, '更新应用经验状态失败', 'Failed to update experience state'),
+        );
+      }
+
+      final returnedItem = _map(result['item']);
+      final existingLabel = _string(experience['application_label']);
+      final itemToMerge = <String, dynamic>{
+        ...experience,
+        ...returnedItem,
+        if (existingLabel.isNotEmpty &&
+            _string(returnedItem['application_label']).isEmpty)
+          'application_label': existingLabel,
+      };
+      final updatedRevision =
+          _intValue(result['revision']) ?? (_experiencesRevision + 1);
+
+      setState(() {
+        _experiencesRevision = updatedRevision;
+        _experiences = _experiences.map((item) {
+          if (_string(item['id']) == experienceId) {
+            return itemToMerge;
+          }
+          return item;
+        }).toList(growable: false);
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            newEnabled
+                ? _text(context, '已启用应用经验', 'Experience enabled')
+                : _text(context, '已停用应用经验', 'Experience disabled'),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      if (_isConflictError(error)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              _text(
+                context,
+                '版本已变更，已刷新最新经验',
+                'Version conflict; refreshed latest experiences',
+              ),
+            ),
+          ),
+        );
+        await _loadExperiences(reset: true);
+        return;
+      }
+      if (_isBusyError(error)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('任务结束后更新')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_omniFlowErrorText(error))),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _togglingExperienceIds.remove(experienceId));
+      }
+    }
+  }
+
+  Future<void> _showExperienceDetails(Map<String, dynamic> experience) {
+    final experienceId = _string(experience['id']);
+    return showOmniGlassBottomSheet<void>(
+      context: context,
+      useRootNavigator: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.28),
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            final activeExp = _experiences.firstWhere(
+              (item) => _string(item['id']) == experienceId,
+              orElse: () => experience,
+            );
+            return AppExperienceDetailSheet(
+              experience: activeExp,
+              isToggling: _togglingExperienceIds.contains(experienceId),
+              onToggleEnabled: (newEnabled) async {
+                await _toggleExperienceEnabled(activeExp, newEnabled);
+                if (sheetContext.mounted) {
+                  setSheetState(() {});
+                }
+              },
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _refreshActive() => _loadActive(reset: true);
@@ -565,6 +799,7 @@ class _OmniFlowExecutionCenterPageState
                 tabs: [
                   Tab(text: _text(context, '复用指令', 'Functions')),
                   Tab(text: _text(context, '运行记录', 'Run Logs')),
+                  Tab(text: _text(context, '应用经验', 'Experiences')),
                 ],
               ),
               Expanded(child: _buildBody()),
@@ -578,6 +813,7 @@ class _OmniFlowExecutionCenterPageState
   int _initialTabIndex(String? value) {
     return switch (value?.trim().toLowerCase()) {
       'run_log' || 'run_logs' || 'runlog' || 'runlogs' || 'logs' || '1' => 1,
+      'experiences' => 2,
       _ => 0,
     };
   }
@@ -646,6 +882,17 @@ class _OmniFlowExecutionCenterPageState
           onOpenFunction: _showFunctionDetails,
           registeringRunIds: _registeringRunIds,
         ),
+        _ExperiencesTab(
+          experiences: _experiences,
+          loading: _experiencesLoading,
+          error: _experiencesError,
+          hasMore: _experiencesHasMore,
+          togglingExperienceIds: _togglingExperienceIds,
+          onRefresh: () => _loadExperiences(reset: true),
+          onLoadMore: () => _loadExperiences(reset: false),
+          onOpenDetails: _showExperienceDetails,
+          onToggle: (exp, val) => _toggleExperienceEnabled(exp, val),
+        ),
       ],
     );
   }
@@ -705,7 +952,7 @@ class _FunctionsTab extends StatelessWidget {
           const EdgeInsets.symmetric(vertical: 6),
         ),
         itemCount: functions.length + (hasMore ? 1 : 0),
-        separatorBuilder: (_, __) =>
+        separatorBuilder: (_, _) =>
             const Divider(height: 1, indent: 16, endIndent: 16),
         itemBuilder: (context, index) {
           if (index >= functions.length) {
@@ -865,7 +1112,7 @@ class _RunLogsTab extends StatelessWidget {
           const EdgeInsets.symmetric(vertical: 6),
         ),
         itemCount: runLogs.length + (hasMore ? 1 : 0),
-        separatorBuilder: (_, __) =>
+        separatorBuilder: (_, _) =>
             const Divider(height: 1, indent: 16, endIndent: 16),
         itemBuilder: (context, index) {
           if (index >= runLogs.length) {
@@ -1062,6 +1309,198 @@ Map<String, dynamic>? _linkedFunction(
   return null;
 }
 
+class _ExperiencesTab extends StatelessWidget {
+  const _ExperiencesTab({
+    required this.experiences,
+    required this.loading,
+    required this.error,
+    required this.hasMore,
+    required this.togglingExperienceIds,
+    required this.onRefresh,
+    required this.onLoadMore,
+    required this.onOpenDetails,
+    required this.onToggle,
+  });
+
+  final List<Map<String, dynamic>> experiences;
+  final bool loading;
+  final String? error;
+  final bool hasMore;
+  final Set<String> togglingExperienceIds;
+  final AsyncCallback onRefresh;
+  final AsyncCallback onLoadMore;
+  final ValueChanged<Map<String, dynamic>> onOpenDetails;
+  final void Function(Map<String, dynamic> experience, bool enabled) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading && experiences.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (error != null && experiences.isEmpty) {
+      final isBusy = error == '任务结束后更新';
+      return _MessageState(
+        icon: isBusy ? Icons.schedule_rounded : Icons.error_outline_rounded,
+        title: isBusy
+            ? _text(context, '任务进行中', 'Task in progress')
+            : _text(context, '加载失败', 'Failed to load'),
+        message: error!,
+        actionLabel: isBusy
+            ? _text(context, '刷新', 'Refresh')
+            : _text(context, '重试', 'Retry'),
+        onAction: onRefresh,
+      );
+    }
+    if (experiences.isEmpty) {
+      return _EmptyTab(
+        icon: Icons.auto_awesome_outlined,
+        title: _text(context, '暂无应用经验', 'No App Experiences yet'),
+        message: _text(
+          context,
+          '在任务运行并确证后会自动记录应用经验。',
+          'Experiences will be recorded automatically after runs.',
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView.separated(
+        key: const ValueKey('experiences-list'),
+        padding: edgeToEdgeScrollPadding(
+          context,
+          const EdgeInsets.symmetric(vertical: 6),
+        ),
+        itemCount: experiences.length + (hasMore ? 1 : 0),
+        separatorBuilder: (_, _) =>
+            const Divider(height: 1, indent: 16, endIndent: 16),
+        itemBuilder: (context, index) {
+          if (index >= experiences.length) {
+            return _LoadMoreRow(
+              key: const ValueKey('experiences-load-more'),
+              loading: loading,
+              onPressed: onLoadMore,
+            );
+          }
+          final experience = experiences[index];
+          final experienceId = _string(experience['id']);
+          return _ExperienceListItem(
+            key: ValueKey('experience-$experienceId'),
+            experience: experience,
+            isToggling: togglingExperienceIds.contains(experienceId),
+            onOpenDetails: () => onOpenDetails(experience),
+            onToggle: (newVal) => onToggle(experience, newVal),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ExperienceListItem extends StatelessWidget {
+  const _ExperienceListItem({
+    super.key,
+    required this.experience,
+    required this.isToggling,
+    required this.onOpenDetails,
+    required this.onToggle,
+  });
+
+  final Map<String, dynamic> experience;
+  final bool isToggling;
+  final VoidCallback onOpenDetails;
+  final ValueChanged<bool> onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.omniPalette;
+    final appLabel = _string(experience['application_label']).nullIfEmpty ??
+        _text(context, '未知应用', 'Unknown App');
+    final enabled = experience['enabled'] != false;
+    final status = _string(experience['status']).toLowerCase();
+    final rule = _map(experience['rule']);
+    final action = _string(rule['action']);
+    final actionTitle = _experienceActionTitle(context, action);
+
+    final (statusLabel, statusColor) = _resolveExperienceStatus(
+      context,
+      enabled,
+      status,
+    );
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onOpenDetails,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            appLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: statusColor.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            statusLabel,
+                            style: TextStyle(
+                              color: statusColor,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      actionTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Switch.adaptive(
+                value: enabled,
+                onChanged: isToggling ? null : onToggle,
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: Theme.of(context).colorScheme.outline,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _LoadMoreRow extends StatelessWidget {
   const _LoadMoreRow({
     super.key,
@@ -1207,6 +1646,58 @@ Color _runStatusColor(BuildContext context, String status) =>
       'failed' || 'error' => Theme.of(context).colorScheme.error,
       _ => Theme.of(context).colorScheme.outline,
     };
+
+(String, Color) _resolveExperienceStatus(
+  BuildContext context,
+  bool enabled,
+  String status,
+) {
+  if (!enabled) {
+    return (
+      _text(context, '已停用', 'Disabled'),
+      Theme.of(context).colorScheme.outline,
+    );
+  }
+  return switch (status.toLowerCase()) {
+    'verified' => (
+      _text(context, '已验证', 'Verified'),
+      Colors.green.shade700,
+    ),
+    'retired' => (
+      _text(context, '已回退', 'Retired'),
+      Colors.orange.shade800,
+    ),
+    _ => (
+      _text(context, '试用中', 'Trial'),
+      Theme.of(context).colorScheme.primary,
+    ),
+  };
+}
+
+String _experienceActionTitle(BuildContext context, String action) =>
+    switch (action.toLowerCase()) {
+      'click' => _text(context, '点击', 'Click'),
+      'long_press' => _text(context, '长按', 'Long Press'),
+      'input_text' => _text(context, '文本输入', 'Input Text'),
+      _ => action.isEmpty ? _text(context, '操作', 'Action') : action,
+    };
+
+bool _isBusyError(Object error) {
+  if (error is StateError && error.message.toString() == '任务结束后更新') {
+    return true;
+  }
+  final str = error.toString().toLowerCase();
+  return str.contains('app_experience_busy') ||
+      str.contains('omniflow_busy') ||
+      str.contains('busy') ||
+      str.contains('任务结束后更新');
+}
+
+bool _isConflictError(Object error) {
+  final str = error.toString().toLowerCase();
+  return str.contains('app_experience_revision_conflict') ||
+      str.contains('revision_conflict');
+}
 
 dynamic _parseArgument(String value, String type) => switch (type) {
   'integer' => int.tryParse(value) ?? value,

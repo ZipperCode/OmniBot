@@ -6,7 +6,7 @@ import cn.com.omnimind.assists.HumanTrajectoryLearningResult
 import cn.com.omnimind.assists.HumanTrajectoryLearningSession
 import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.baselib.util.OmniLog
-import cn.com.omnimind.bot.agent.HttpAgentLlmClient
+
 import cn.com.omnimind.bot.manager.buildManualRecordingFinalizedPayload
 import cn.com.omnimind.uikit.loader.ManualRecordingControlOverlay
 import io.flutter.plugin.common.MethodCall
@@ -18,6 +18,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
 
 class OmniFlowToolChannel(context: Context) {
     private val appContext = context.applicationContext
@@ -35,20 +36,44 @@ class OmniFlowToolChannel(context: Context) {
             result.error("OMNIFLOW_TOOL_CALL_INVALID", "name is required", null)
             return true
         }
+        if (name == "learn_app_experiences") {
+            result.error(
+                "OMNIFLOW_TOOL_CALL_REJECTED",
+                "learn_app_experiences is an internal host tool and cannot be called directly",
+                null,
+            )
+            return true
+        }
+        if (name == "list_app_experiences" || name == "set_app_experience_enabled") {
+            if (OmniFlow.isBusy()) {
+                result.success(
+                    mapOf(
+                        "success" to false,
+                        "error_code" to "app_experience_busy",
+                        "message" to "任务执行中，任务结束后更新",
+                    )
+                )
+                return true
+            }
+        }
         val arguments = (payload?.get("arguments") as? Map<*, *>)
             ?.entries
             ?.associate { (key, value) -> key.toString() to value }
             .orEmpty()
         val goal = payload?.get("goal")?.toString()?.trim().orEmpty()
         scope.launch {
-            runCatching {
-                val modelClient = if (OmniFlowPluginRuntime.isEnabled()) {
-                        HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
-                            .asOmniFlowModelClient()
-                    } else {
-                        null
-                    }
-                if (
+            try {
+                val needsModel = (name == "run_gui" || name == "run_function") ||
+                    (name == TOOL_SAVE_FUNCTION && arguments["enhance"] == true)
+                val modelClient = if (OmniFlowPluginRuntime.isEnabled() && needsModel) {
+                    createOmniFlowModelClient(
+                        scope = CoroutineScope(currentCoroutineContext()),
+                        environment = null,
+                    )
+                } else {
+                    null
+                }
+                val rawResponse = if (
                     name == TOOL_SAVE_FUNCTION &&
                     arguments["function"] == null &&
                     arguments["functions"] == null &&
@@ -69,9 +94,15 @@ class OmniFlowToolChannel(context: Context) {
                         modelClient = modelClient,
                     ).payload
                 }
-            }.onSuccess { response ->
+                val response = if (name == "list_app_experiences" && rawResponse["success"] == true) {
+                    enrichExperienceItems(appContext, rawResponse)
+                } else {
+                    rawResponse
+                }
                 withContext(Dispatchers.Main.immediate) { result.success(response) }
-            }.onFailure { error ->
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
                 withContext(Dispatchers.Main.immediate) {
                     result.error(
                         "OMNIFLOW_TOOL_CALL_FAILED",
@@ -187,8 +218,10 @@ class OmniFlowToolChannel(context: Context) {
                     runId = result.runId,
                     agentVisible = true,
                     modelClient = if (OmniFlowPluginRuntime.isEnabled()) {
-                        HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
-                            .asOmniFlowModelClient()
+                        createOmniFlowModelClient(
+                            scope = CoroutineScope(currentCoroutineContext()),
+                            environment = null,
+                        )
                     } else {
                         null
                     },
@@ -212,6 +245,29 @@ class OmniFlowToolChannel(context: Context) {
             runLog = runLog,
             conversion = conversion,
         )
+    }
+
+    internal fun enrichExperienceItems(context: Context, payload: Map<String, Any?>): Map<String, Any?> {
+        val items = payload["items"] as? List<*> ?: return payload
+        val pm = context.packageManager
+        val enrichedItems = items.map { item ->
+            if (item !is Map<*, *>) return@map item
+            val itemMap = item.entries.associate { (k, v) -> k.toString() to v }.toMutableMap()
+            val packageName = itemMap["package_name"]?.toString()?.trim().orEmpty()
+            val label = if (packageName.isNotEmpty()) {
+                try {
+                    val appInfo = pm.getApplicationInfo(packageName, 0)
+                    pm.getApplicationLabel(appInfo)?.toString()?.trim().orEmpty().ifEmpty { "未知应用" }
+                } catch (_: Exception) {
+                    "未知应用"
+                }
+            } else {
+                "未知应用"
+            }
+            itemMap["application_label"] = label
+            itemMap
+        }
+        return payload + mapOf("items" to enrichedItems)
     }
 
     fun clear() {

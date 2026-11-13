@@ -15,12 +15,11 @@ import cn.com.omnimind.bot.agent.tool.handlers.StructuredDeviceActionExecutor
 import cn.com.omnimind.bot.agent.AgentRuntimeContextRepository
 import cn.com.omnimind.bot.agent.AgentAlarmCreateRequest
 import cn.com.omnimind.bot.agent.AgentAlarmToolService
-import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.omniflow.OmniFlow
 import cn.com.omnimind.bot.omniflow.OmniFlowFunctionRegistration
 import cn.com.omnimind.bot.omniflow.OmniFlowPluginRuntime
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
-import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
+import cn.com.omnimind.bot.omniflow.createOmniFlowModelClient
 import cn.com.omnimind.bot.plugin.OmniPluginHost
 import cn.com.omnimind.bot.plugin.official.OmniVlmLiteProvider
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -286,7 +285,6 @@ internal object AndroidDeviceMcpServer {
                 caller = caller,
             )
         }
-        val modelClient = HttpAgentLlmClient(scope).asOmniFlowModelClient()
         val tool = deviceTools.firstOrNull { it.name == name }
             ?: return errorResult(IllegalArgumentException("Unknown MCP tool: $name"))
         return runCatching {
@@ -294,10 +292,18 @@ internal object AndroidDeviceMcpServer {
             if (tool.requiresOmniFlowPlugin) {
                 ensureOmniFlowReady(context)
             }
+            val kotlinArgs = arguments.toKotlinMap()
+            val needsModel = (tool.operation == "run_gui" || tool.operation == "run_function") ||
+                (tool.operation == "save_function" && kotlinArgs["enhance"] == true)
+            val modelClient = if (needsModel) {
+                createOmniFlowModelClient(scope, environment = null)
+            } else {
+                null
+            }
             callOmniFlowTool(
                 context = context,
                 tool = tool,
-                arguments = arguments.toKotlinMap(),
+                arguments = kotlinArgs,
                 modelClient = modelClient,
                 rawPayloadBytes = rawPayloadBytes,
                 caller = caller,
@@ -313,7 +319,7 @@ internal object AndroidDeviceMcpServer {
         scope: CoroutineScope,
         caller: McpDeviceCaller = McpDeviceCaller.Global,
     ): Server {
-        val modelClient = HttpAgentLlmClient(scope).asOmniFlowModelClient()
+
         val toolsToRegister = if (caller is McpDeviceCaller.Acp) {
             deviceTools + systemActionTool
         } else {
@@ -356,10 +362,18 @@ internal object AndroidDeviceMcpServer {
                             if (tool.requiresOmniFlowPlugin) {
                                 ensureOmniFlowReady(context)
                             }
+                            val args = request.params.arguments.orEmpty().toKotlinMap()
+                            val needsModel = (tool.operation == "run_gui" || tool.operation == "run_function") ||
+                                (tool.operation == "save_function" && args["enhance"] == true)
+                            val modelClient = if (needsModel) {
+                                createOmniFlowModelClient(scope, environment = null)
+                            } else {
+                                null
+                            }
                             callOmniFlowTool(
                                 context = context,
                                 tool = tool,
-                                arguments = request.params.arguments.orEmpty().toKotlinMap(),
+                                arguments = args,
                                 modelClient = modelClient,
                                 caller = caller,
                             )
@@ -491,7 +505,7 @@ internal object AndroidDeviceMcpServer {
         context: Context,
         tool: DeviceTool,
         arguments: Map<String, Any?>,
-        modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient,
+        modelClient: cn.com.omnimind.bot.omniflow.OmniFlowModelClient? = null,
         rawPayloadBytes: Int? = null,
         caller: McpDeviceCaller = McpDeviceCaller.Global,
     ): Map<String, Any?> = when (tool.operation) {
@@ -507,7 +521,7 @@ internal object AndroidDeviceMcpServer {
                 context = context,
                 goal = goal,
                 arguments = arguments,
-                modelClient = modelClient,
+                modelClient = requireNotNull(modelClient) { "model_client_required" },
                 caller = caller,
             )
         }
@@ -518,7 +532,7 @@ internal object AndroidDeviceMcpServer {
                 context = context,
                 functionId = functionId,
                 arguments = arguments,
-                modelClient = modelClient,
+                modelClient = requireNotNull(modelClient) { "model_client_required" },
                 caller = caller,
             )
         }

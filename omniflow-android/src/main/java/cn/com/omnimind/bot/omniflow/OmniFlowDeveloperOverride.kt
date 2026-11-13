@@ -2,6 +2,9 @@ package cn.com.omnimind.bot.omniflow
 
 import android.content.Context
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 data class OmniFlowDeveloperOverrideStatus(
@@ -117,8 +120,7 @@ internal class OmniFlowDeveloperOverrideStore(
         File(temporary, ".modified_files").writeText(
             preserved.keys.sorted().joinToString(separator = "\n", postfix = "\n"),
         )
-        root.deleteRecursively()
-        require(temporary.renameTo(root)) { "omniflow_override_install_failed" }
+        replaceDirectory(temporary, root)
     }
 
     private fun modifiedPaths(): Set<String> = modifiedFile.takeIf(File::isFile)
@@ -155,9 +157,95 @@ internal fun normalizedPythonPath(value: String): String {
 }
 
 private fun atomicWrite(target: File, content: String) {
-    val temporary = File(target.parentFile, ".${target.name}.${System.nanoTime()}.tmp")
+    val parent = target.parentFile ?: target.absoluteFile.parentFile ?: File(".")
+    parent.mkdirs()
+    val temporary = File(parent, ".${target.name}.${System.nanoTime()}.tmp")
     temporary.writeText(content)
-    require(temporary.renameTo(target)) { "omniflow_override_atomic_write_failed" }
+    try {
+        try {
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        }
+    } catch (error: Throwable) {
+        throw IllegalArgumentException("omniflow_override_atomic_write_failed", error)
+    } finally {
+        if (temporary.exists()) {
+            temporary.delete()
+        }
+    }
+}
+
+internal fun replaceDirectory(
+    source: File,
+    destination: File,
+    moveDir: (File, File) -> Unit = ::moveDirectory,
+) {
+    val parent = destination.parentFile ?: destination.absoluteFile.parentFile ?: File(".")
+    parent.mkdirs()
+    if (!destination.exists()) {
+        try {
+            moveDir(source, destination)
+        } catch (error: Throwable) {
+            source.deleteRecursively()
+            throw IllegalArgumentException("omniflow_override_install_failed", error)
+        }
+        return
+    }
+
+    val backup = File(parent, "${destination.name}.bak-${System.nanoTime()}")
+    backup.deleteRecursively()
+
+    try {
+        moveDir(destination, backup)
+    } catch (backupError: Throwable) {
+        source.deleteRecursively()
+        throw IllegalArgumentException("omniflow_override_backup_failed", backupError)
+    }
+
+    try {
+        moveDir(source, destination)
+        backup.deleteRecursively()
+    } catch (installError: Throwable) {
+        source.deleteRecursively()
+        val restored = runCatching {
+            if (backup.exists() && !destination.exists()) {
+                moveDir(backup, destination)
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+
+        if (!restored) {
+            throw IllegalStateException("omniflow_override_restore_failed", installError)
+        }
+        throw IllegalArgumentException("omniflow_override_install_failed", installError)
+    }
+}
+
+private fun moveDirectory(source: File, destination: File) {
+    try {
+        Files.move(
+            source.toPath(),
+            destination.toPath(),
+            StandardCopyOption.ATOMIC_MOVE,
+        )
+    } catch (_: AtomicMoveNotSupportedException) {
+        Files.move(
+            source.toPath(),
+            destination.toPath(),
+        )
+    }
 }
 
 internal fun developerOverrideRoot(context: Context): File =

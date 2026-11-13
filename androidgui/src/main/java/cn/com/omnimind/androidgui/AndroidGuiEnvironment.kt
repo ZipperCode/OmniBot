@@ -181,12 +181,23 @@ class AndroidGuiEnvironment internal constructor(
         }
         val observed = observedAndStability.first
         val stabilized = observedAndStability.second
+        val visualSig = if (needScreenshot && observed.screenshotJpeg != null) {
+            AndroidGuiPixelSignature.computeSignature(
+                screenshotJpeg = observed.screenshotJpeg,
+                expectedWidth = observed.displayWidth,
+                expectedHeight = observed.displayHeight,
+            )
+        } else {
+            null
+        }
+        val visualFingerprint = AndroidGuiPixelSignature.visualFingerprint(visualSig)
         val state = State.create(
             packageName = observed.packageName,
             activityName = observed.activityName,
             displayWidth = observed.displayWidth,
             displayHeight = observed.displayHeight,
             xml = observed.xml,
+            visualFingerprint = visualFingerprint,
         )
         val persisted = InternalRunLogStore.persistState(context, state, observed.screenshotJpeg)
 
@@ -418,6 +429,11 @@ class AndroidGuiEnvironment internal constructor(
         displayId: Int,
     ): Pair<AndroidGuiPlatformState, Boolean> {
         var previous = platform.observe(captureScreenshot, displayId)
+        var previousSig = if (captureScreenshot && previous.screenshotJpeg != null) {
+            AndroidGuiPixelSignature.computeSignature(previous.screenshotJpeg, previous.displayWidth, previous.displayHeight)
+        } else {
+            null
+        }
         var current = previous
         var stableChecks = 1
         val deadline = SystemClock.elapsedRealtime() + OBSERVE_STABILIZATION_TIMEOUT_MS
@@ -427,12 +443,18 @@ class AndroidGuiEnvironment internal constructor(
             delay(min(OBSERVE_STABILIZATION_POLL_MS, remaining))
             if (SystemClock.elapsedRealtime() >= deadline) break
             current = platform.observe(captureScreenshot, displayId)
-            stableChecks = if (sameUiState(previous, current)) {
+            val currentSig = if (captureScreenshot && current.screenshotJpeg != null) {
+                AndroidGuiPixelSignature.computeSignature(current.screenshotJpeg, current.displayWidth, current.displayHeight)
+            } else {
+                null
+            }
+            stableChecks = if (sameUiState(previous, current, previousSig, currentSig)) {
                 stableChecks + 1
             } else {
                 1
             }
             previous = current
+            previousSig = currentSig
         }
         return current to (stableChecks >= OBSERVE_STABILIZATION_THRESHOLD)
     }
@@ -440,12 +462,22 @@ class AndroidGuiEnvironment internal constructor(
     private fun sameUiState(
         previous: AndroidGuiPlatformState,
         current: AndroidGuiPlatformState,
-    ): Boolean = previous.packageName == current.packageName &&
-        previous.activityName == current.activityName &&
-        previous.displayWidth == current.displayWidth &&
-        previous.displayHeight == current.displayHeight &&
-        previous.xml == current.xml
-
+        previousSig: AndroidGuiPixelSignature.Signature? = null,
+        currentSig: AndroidGuiPixelSignature.Signature? = null,
+    ): Boolean {
+        val baseSame = previous.packageName == current.packageName &&
+            previous.activityName == current.activityName &&
+            previous.displayWidth == current.displayWidth &&
+            previous.displayHeight == current.displayHeight &&
+            previous.xml == current.xml
+        if (!baseSame) return false
+        if (previous.screenshotJpeg != null || current.screenshotJpeg != null) {
+            val prevSig = previousSig ?: AndroidGuiPixelSignature.computeSignature(previous.screenshotJpeg, previous.displayWidth, previous.displayHeight)
+            val currSig = currentSig ?: AndroidGuiPixelSignature.computeSignature(current.screenshotJpeg, current.displayWidth, current.displayHeight)
+            return AndroidGuiPixelSignature.areVisuallyEqual(prevSig, currSig) == true
+        }
+        return true
+    }
     /** Capture a transient preview without writing a RunLog state or image to disk. */
     suspend fun captureScreenSnapshot(
         displayId: Int = Display.DEFAULT_DISPLAY,
@@ -503,6 +535,66 @@ class AndroidGuiEnvironment internal constructor(
                     )
                 }
             }
+            if (action.tool == OobActionSchema.TOOL_WAIT) {
+                val hasConditionKey = action.args.containsKey(ARG_CONDITION) && action.args[ARG_CONDITION] != null
+                val rawCondition = action.args[ARG_CONDITION]
+                val hasTargetKey = action.args.containsKey(OobActionSchema.ARG_TARGET_DESCRIPTION) && action.args[OobActionSchema.ARG_TARGET_DESCRIPTION] != null
+                val rawTarget = action.args[OobActionSchema.ARG_TARGET_DESCRIPTION] as? String
+
+                if (hasConditionKey) {
+                    if (rawCondition !is String) {
+                        return@withDisplayLock AndroidGuiActionResult(
+                            success = false,
+                            message = "invalid_wait_condition",
+                        )
+                    }
+                    val condition = rawCondition
+                    val rawDuration = action.args[OobActionSchema.ARG_DURATION_MS]
+                    val durationMs = when (rawDuration) {
+                        is Long -> rawDuration
+                        is Int -> rawDuration.toLong()
+                        is Short -> rawDuration.toLong()
+                        is Byte -> rawDuration.toLong()
+                        else -> null
+                    }
+                    if (durationMs == null || durationMs !in 1L..10000L) {
+                        return@withDisplayLock AndroidGuiActionResult(
+                            success = false,
+                            message = "invalid_wait_duration",
+                        )
+                    }
+
+                    // 文字条件必须有非空 target_description，屏幕变化禁止 target_description，非法条件名或组合均返回 invalid_wait_condition
+                    val isValidCondition = when (condition) {
+                        CONDITION_TEXT_PRESENT, CONDITION_TEXT_ABSENT -> !rawTarget.isNullOrBlank()
+                        CONDITION_SCREEN_CHANGED -> !hasTargetKey
+                        else -> false
+                    }
+                    if (!isValidCondition) {
+                        return@withDisplayLock AndroidGuiActionResult(
+                            success = false,
+                            message = "invalid_wait_condition",
+                        )
+                    }
+
+                    // 带条件等待：在当前输入锁/activeJob内执行条件轮询，直接复用 platform.observe，不重入 environment.observe/act
+                    return@withDisplayLock awaitCondition(
+                        condition = condition,
+                        targetDescription = rawTarget.orEmpty(),
+                        durationMs = durationMs,
+                        displayId = displayId,
+                    )
+                } else {
+                    // 无 condition 必须没有 target_description，非法组合返回 invalid_wait_condition，不派发设备动作
+                    if (hasTargetKey) {
+                        return@withDisplayLock AndroidGuiActionResult(
+                            success = false,
+                            message = "invalid_wait_condition",
+                        )
+                    }
+                    // 无 condition 继续走下方的 platform.dispatch(wait) 的协程 delay 与既有 clamp
+                }
+            }
 
             // 在现有 input lock 内核验当前 observed id、display、fresh tree/target 或目标 ROI 像素变化
             val targetDesc = action.args["target_description"] as? String
@@ -519,7 +611,7 @@ class AndroidGuiEnvironment internal constructor(
                 val needsScreenshotForGuard = needsGuardCheck && currentBaseline?.screenshotJpeg != null && isCoordinateAction
 
                 platform.observe(
-                    captureScreenshot = needsScreenshotForGuard,
+                    captureScreenshot = awaitStabilization || needsScreenshotForGuard,
                     displayId = displayId,
                 )
             } else {
@@ -527,6 +619,7 @@ class AndroidGuiEnvironment internal constructor(
             }
 
             var actionToDispatch = canonicalForDisplay(action, displayId)
+            var guardDiagnostics: Map<String, String> = emptyMap()
 
             if (freshObserved != null && needsGuardCheck) {
                 val displaySize = platform.displaySize(displayId)
@@ -548,19 +641,31 @@ class AndroidGuiEnvironment internal constructor(
                     }
                     is GuardResult.Allowed -> {
                         actionToDispatch = canonicalForDisplay(guardResult.action, displayId)
+                        guardDiagnostics = guardResult.diagnostics
                     }
                 }
             }
 
-            val stateBeforeAction = if (
-                awaitStabilization && action.tool != OobActionSchema.TOOL_WAIT
-            ) {
-                freshObserved?.uiFingerprint()
+            val preActionObserved = freshObserved.takeIf { awaitStabilization }
+
+            val hasNodes = preActionObserved?.xml?.let(AndroidGuiTextMatcher::hasUsableVisibleNodes) ?: false
+            val baselineFingerprint = if (hasNodes) preActionObserved?.uiFingerprint() else null
+            val baselineVisualSig = if (preActionObserved != null) {
+                AndroidGuiPixelSignature.computeSignature(
+                    screenshotJpeg = preActionObserved.screenshotJpeg,
+                    expectedWidth = preActionObserved.displayWidth,
+                    expectedHeight = preActionObserved.displayHeight,
+                )
             } else {
                 null
             }
 
-            val result = platform.dispatch(actionToDispatch, displayId = displayId)
+            val dispatchResult = platform.dispatch(actionToDispatch, displayId = displayId)
+            val result = if (guardDiagnostics.isNotEmpty()) {
+                dispatchResult.copy(diagnostics = dispatchResult.diagnostics + guardDiagnostics)
+            } else {
+                dispatchResult
+            }
 
             if (!result.success) return@withDisplayLock result
             if (!awaitStabilization) {
@@ -570,36 +675,105 @@ class AndroidGuiEnvironment internal constructor(
                 return@withDisplayLock result.withStabilization("completed_by_action")
             }
 
-            val stable = withTimeoutOrNull(stateStabilizationTimeoutMs(action.tool)) {
-                var previous = stateBeforeAction
-                var stateChanged = false
+            val stabilizationTimeout = stateStabilizationTimeoutMs(action.tool)
+            val stabilizationResult = withTimeoutOrNull(stabilizationTimeout) {
+                var candidateFingerprint: String? = baselineFingerprint
+                var candidateVisualSig: AndroidGuiPixelSignature.Signature? = baselineVisualSig
+                // 基线计首样本：如果基线有效则起始为 1，但必须经动作后 fresh 观察确认
+                var consecutiveCount = if (baselineFingerprint != null || baselineVisualSig != null) 1 else 0
+                var afterActionObservedAtLeastOnce = false
+
                 while (true) {
                     delay(STATE_STABILIZATION_POLL_MS)
-                    val fingerprint = platform.observe(
-                        captureScreenshot = false,
+                    val currentObs = platform.observe(
+                        captureScreenshot = true,
                         displayId = displayId,
-                    ).uiFingerprint()
-                    if (!stateChanged) {
-                        if (fingerprint != stateBeforeAction) {
-                            stateChanged = true
-                        }
-                    } else if (fingerprint == previous) {
-                        return@withTimeoutOrNull true
+                    )
+                    afterActionObservedAtLeastOnce = true
+
+                    if (currentObs.displayId != displayId) {
+                        candidateFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                        continue
                     }
-                    previous = fingerprint
+
+                    val currentHasNodes = AndroidGuiTextMatcher.hasUsableVisibleNodes(currentObs.xml)
+                    val currentFingerprint = if (currentHasNodes) currentObs.uiFingerprint() else null
+                    val currentSig = AndroidGuiPixelSignature.computeSignature(
+                        screenshotJpeg = currentObs.screenshotJpeg,
+                        expectedWidth = currentObs.displayWidth,
+                        expectedHeight = currentObs.displayHeight,
+                    )
+
+                    // 如果基线具备视觉签名，但采样截图缺失，不能以仅 XML 相同判为假稳定，必须重置候选并等待直至超时
+                    if (baselineVisualSig != null && currentSig == null) {
+                        candidateFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                        continue
+                    }
+
+                    // 必须至少具备当前可见 XML 节点或有效图像签名才具备观测证据；无证据时重置候选不能凭 null == null 判稳
+                    if (currentFingerprint == null && currentSig == null) {
+                        candidateFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                        continue
+                    }
+
+                    val xmlMatchesCandidate = when {
+                        candidateFingerprint != null && currentFingerprint != null -> currentFingerprint == candidateFingerprint
+                        candidateFingerprint == null && currentFingerprint == null -> true
+                        else -> false
+                    }
+
+                    val visualMatchesCandidate = when {
+                        candidateVisualSig != null && currentSig != null ->
+                            AndroidGuiPixelSignature.areVisuallyEqual(currentSig, candidateVisualSig) == true
+                        candidateVisualSig == null && currentSig == null -> true
+                        else -> false
+                    }
+
+                    if (xmlMatchesCandidate && visualMatchesCandidate) {
+                        consecutiveCount++
+                    } else {
+                        candidateFingerprint = currentFingerprint
+                        candidateVisualSig = currentSig
+                        consecutiveCount = 1
+                    }
+
+                    if (consecutiveCount >= 3 && afterActionObservedAtLeastOnce) {
+                        val xmlChanged = if (baselineFingerprint != null && candidateFingerprint != null) {
+                            candidateFingerprint != baselineFingerprint
+                        } else {
+                            baselineFingerprint != candidateFingerprint
+                        }
+                        val visualChanged = if (baselineVisualSig != null && candidateVisualSig != null) {
+                            AndroidGuiPixelSignature.areVisuallyEqual(candidateVisualSig, baselineVisualSig) == false
+                        } else {
+                            false
+                        }
+
+                        return@withTimeoutOrNull if (xmlChanged || visualChanged) {
+                            "stable_changed"
+                        } else {
+                            "stable_unchanged"
+                        }
+                    }
                 }
                 @Suppress("UNREACHABLE_CODE")
-                false
-            } == true
+                "timeout"
+            } ?: "timeout"
 
             result.copy(
                 diagnostics = result.diagnostics + mapOf(
-                    "state_stabilization" to if (stable) {
+                    "state_stabilization" to if (stabilizationResult == "stable_unchanged" || stabilizationResult == "stable_changed") {
                         "host_completed"
                     } else {
                         "runtime_delegated"
                     },
-                    "state_stabilization_result" to if (stable) "stable" else "timeout",
+                    "state_stabilization_result" to stabilizationResult,
                 ),
             )
         } catch (error: CancellationException) {
@@ -612,6 +786,285 @@ class AndroidGuiEnvironment internal constructor(
         } finally {
             DisplayInputCoordinator.unregisterActiveJob(displayId, currentJob)
         }
+    }
+
+    private suspend fun awaitCondition(
+        condition: String,
+        targetDescription: String,
+        durationMs: Long,
+        displayId: Int,
+    ): AndroidGuiActionResult {
+        val startTime = SystemClock.elapsedRealtime()
+        val deadline = startTime + durationMs
+
+        // 初始观察：优先只读 tree，无有效可见节点且为 screen_changed 时才采集截图
+        var initialObservation = platform.observe(
+            captureScreenshot = false,
+            displayId = displayId,
+        )
+        val initialPackageName = initialObservation.packageName
+        val initialActivityName = initialObservation.activityName
+        val initialXml = initialObservation.xml
+        val initialDisplayId = initialObservation.displayId
+
+        if (initialDisplayId != displayId) {
+            val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+            return AndroidGuiActionResult(
+                success = false,
+                message = "wait_context_changed",
+                diagnostics = mapOf(
+                    "wait_condition" to condition,
+                    "condition_met" to "false",
+                    "elapsed_ms" to elapsed.toString(),
+                ),
+            )
+        }
+
+        // text_absent 基线要求：基线必须先看到目标，否则返回 wait_condition_unobservable
+        if (condition == CONDITION_TEXT_ABSENT) {
+            val initiallyPresent = AndroidGuiTextMatcher.checkTextPresence(initialXml, targetDescription)
+            if (initiallyPresent != true) {
+                val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                return AndroidGuiActionResult(
+                    success = false,
+                    message = "wait_condition_unobservable",
+                    diagnostics = mapOf(
+                        "wait_condition" to condition,
+                        "condition_met" to "false",
+                        "elapsed_ms" to elapsed.toString(),
+                    ),
+                )
+            }
+        }
+
+        // text_present 初始即满足检查
+        if (condition == CONDITION_TEXT_PRESENT) {
+            val present = AndroidGuiTextMatcher.checkTextPresence(initialXml, targetDescription)
+            if (present == true) {
+                val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                return AndroidGuiActionResult(
+                    success = true,
+                    message = "wait_condition_met",
+                    diagnostics = mapOf(
+                        "wait_condition" to condition,
+                        "condition_met" to "true",
+                        "elapsed_ms" to elapsed.toString(),
+                    ),
+                )
+            }
+        }
+
+        val initialHasNodes = AndroidGuiTextMatcher.hasUsableVisibleNodes(initialXml)
+        val initialVisualSig = if (condition == CONDITION_SCREEN_CHANGED) {
+            val shotObs = if (initialObservation.screenshotJpeg != null) {
+                initialObservation
+            } else {
+                val captured = platform.observe(
+                    captureScreenshot = true,
+                    displayId = displayId,
+                )
+                if (captured.displayId != displayId || captured.packageName != initialPackageName) {
+                    val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                    return AndroidGuiActionResult(
+                        success = false,
+                        message = "wait_context_changed",
+                        diagnostics = mapOf(
+                            "wait_condition" to condition,
+                            "condition_met" to "false",
+                            "elapsed_ms" to elapsed.toString(),
+                        ),
+                    )
+                }
+                initialObservation = captured
+                captured
+            }
+            AndroidGuiPixelSignature.computeSignature(
+                screenshotJpeg = shotObs.screenshotJpeg,
+                expectedWidth = shotObs.displayWidth,
+                expectedHeight = shotObs.displayHeight,
+            )
+        } else {
+            null
+        }
+
+        var candidateChangeFingerprint: String? = null
+        var candidateVisualSig: AndroidGuiPixelSignature.Signature? = null
+        var consecutiveCount = 0
+        var hadValidTree = initialHasNodes || (condition == CONDITION_SCREEN_CHANGED && initialVisualSig != null)
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
+            if (now >= deadline) {
+                break
+            }
+
+            val sleepTime = min(WAIT_CONDITION_POLL_MS, deadline - now)
+            if (sleepTime > 0) {
+                delay(sleepTime)
+            }
+
+            val obs = platform.observe(
+                captureScreenshot = condition == CONDITION_SCREEN_CHANGED,
+                displayId = displayId,
+            )
+
+            // 切包校验：始终校验 display 与初始包名，切包返回 wait_context_changed
+            if (obs.displayId != displayId || obs.packageName != initialPackageName) {
+                val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                return AndroidGuiActionResult(
+                    success = false,
+                    message = "wait_context_changed",
+                    diagnostics = mapOf(
+                        "wait_condition" to condition,
+                        "condition_met" to "false",
+                        "elapsed_ms" to elapsed.toString(),
+                    ),
+                )
+            }
+
+            when (condition) {
+                CONDITION_TEXT_PRESENT -> {
+                    val present = AndroidGuiTextMatcher.checkTextPresence(obs.xml, targetDescription)
+                    if (present != null) {
+                        hadValidTree = true
+                        if (present) {
+                            val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                            return AndroidGuiActionResult(
+                                success = true,
+                                message = "wait_condition_met",
+                                diagnostics = mapOf(
+                                    "wait_condition" to condition,
+                                    "condition_met" to "true",
+                                    "elapsed_ms" to elapsed.toString(),
+                                ),
+                            )
+                        }
+                    }
+                }
+
+                CONDITION_TEXT_ABSENT -> {
+                    val present = AndroidGuiTextMatcher.checkTextPresence(obs.xml, targetDescription)
+                    if (present != null) {
+                        hadValidTree = true
+                        if (!present) {
+                            val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                            return AndroidGuiActionResult(
+                                success = true,
+                                message = "wait_condition_met",
+                                diagnostics = mapOf(
+                                    "wait_condition" to condition,
+                                    "condition_met" to "true",
+                                    "elapsed_ms" to elapsed.toString(),
+                                ),
+                            )
+                        }
+                    }
+                }
+
+                CONDITION_SCREEN_CHANGED -> {
+                    val currentHasNodes = AndroidGuiTextMatcher.hasUsableVisibleNodes(obs.xml)
+                    val currentSig = if (obs.screenshotJpeg != null) {
+                        AndroidGuiPixelSignature.computeSignature(
+                            screenshotJpeg = obs.screenshotJpeg,
+                            expectedWidth = obs.displayWidth,
+                            expectedHeight = obs.displayHeight,
+                        )
+                    } else {
+                        null
+                    }
+
+                    // 基线存在视觉签名但当前采样截图丢失时，无法确证视觉状态，必须重置候选并继续等待直至超时
+                    if (initialVisualSig != null && currentSig == null) {
+                        candidateChangeFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                        continue
+                    }
+
+                    // 必须具备有效节点或有效图像签名，否则无任何可观测证据，不能据空树判定
+                    val hasObservableEvidence = initialHasNodes || currentHasNodes || initialVisualSig != null || currentSig != null
+                    if (!hasObservableEvidence) {
+                        candidateChangeFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                        continue
+                    }
+                    hadValidTree = true
+
+                    val xmlChanged = (initialHasNodes || currentHasNodes) &&
+                        (obs.activityName != initialActivityName || obs.xml != initialXml)
+                    val visualChanged = initialVisualSig != null && currentSig != null &&
+                        AndroidGuiPixelSignature.areVisuallyEqual(currentSig, initialVisualSig) == false
+
+                    val changedFromBaseline = xmlChanged || visualChanged
+                    if (changedFromBaseline) {
+                        val currentXmlFingerprint = "${obs.activityName}\u0000${obs.xml}"
+
+                        val xmlMatchesCandidate = when {
+                            candidateChangeFingerprint != null -> currentXmlFingerprint == candidateChangeFingerprint
+                            !initialHasNodes && !currentHasNodes -> true
+                            else -> false
+                        }
+
+                        val visualMatchesCandidate = when {
+                            candidateVisualSig != null && currentSig != null ->
+                                AndroidGuiPixelSignature.areVisuallyEqual(currentSig, candidateVisualSig) == true
+                            candidateVisualSig == null && currentSig == null -> true
+                            else -> false
+                        }
+
+                        if (xmlMatchesCandidate && visualMatchesCandidate) {
+                            consecutiveCount++
+                        } else {
+                            candidateChangeFingerprint = currentXmlFingerprint
+                            candidateVisualSig = currentSig
+                            consecutiveCount = 1
+                        }
+
+                        if (consecutiveCount >= 2) {
+                            val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+                            return AndroidGuiActionResult(
+                                success = true,
+                                message = "wait_condition_met",
+                                diagnostics = mapOf(
+                                    "wait_condition" to condition,
+                                    "condition_met" to "true",
+                                    "elapsed_ms" to elapsed.toString(),
+                                ),
+                            )
+                        }
+                    } else {
+                        // 未发生变化或已恢复原基线状态，重置连续候选计数
+                        candidateChangeFingerprint = null
+                        candidateVisualSig = null
+                        consecutiveCount = 0
+                    }
+                }
+            }
+        }
+
+        val elapsed = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
+
+        if (!hadValidTree && condition != CONDITION_SCREEN_CHANGED) {
+            return AndroidGuiActionResult(
+                success = false,
+                message = "wait_condition_unobservable",
+                diagnostics = mapOf(
+                    "wait_condition" to condition,
+                    "condition_met" to "false",
+                    "elapsed_ms" to elapsed.toString(),
+                ),
+            )
+        }
+
+        return AndroidGuiActionResult(
+            success = false,
+            message = "wait_condition_timeout",
+            diagnostics = mapOf(
+                "wait_condition" to condition,
+                "condition_met" to "false",
+                "elapsed_ms" to elapsed.toString(),
+            ),
+        )
     }
 
     private fun AndroidGuiPlatformState.uiFingerprint(): String = buildString {
@@ -684,7 +1137,7 @@ private fun createDefaultOcrEngine(context: Context): AndroidScreenOcrEngine? = 
 private const val ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
     "android.settings.ACCESSIBILITY_DETAILS_SETTINGS"
 internal const val ACCESSIBILITY_READY_TIMEOUT_MS = 15_000L
-private const val STATE_STABILIZATION_POLL_MS = 100L
+private const val STATE_STABILIZATION_POLL_MS = 200L
 private const val STATE_STABILIZATION_TIMEOUT_MS = 1_500L
 private const val OBSERVE_STABILIZATION_THRESHOLD = 3
 private const val OBSERVE_STABILIZATION_POLL_MS = 500L
@@ -697,3 +1150,8 @@ internal fun stateStabilizationTimeoutMs(tool: String): Long =
     } else {
         STATE_STABILIZATION_TIMEOUT_MS
     }
+private const val ARG_CONDITION = "condition"
+private const val CONDITION_TEXT_PRESENT = "text_present"
+private const val CONDITION_TEXT_ABSENT = "text_absent"
+private const val CONDITION_SCREEN_CHANGED = "screen_changed"
+private const val WAIT_CONDITION_POLL_MS = 200L

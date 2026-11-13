@@ -638,6 +638,24 @@ class HttpAgentLlmClient(
                     streamDone.complete(turn)
                     return
                 }
+                parseSuccessfulNonStreamingChatCompletionsTurn(
+                    statusCode = response?.code,
+                    responseBody = responseBody,
+                    routeInfo = routeInfo,
+                    hasAssistantPayload = accumulator.hasAssistantPayload(),
+                )?.let { turn ->
+                    turn.reasoning.takeIf { it.isNotBlank() }?.let { r ->
+                        if (onReasoningUpdate != null) enqueueEmission { onReasoningUpdate.invoke(r) }
+                    }
+                    turn.message.contentText().takeIf { it.isNotEmpty() }?.let { c ->
+                        if (onContentUpdate != null) enqueueEmission { onContentUpdate.invoke(c) }
+                    }
+                    turn.message.toolCalls?.forEach { call ->
+                        if (onToolCallInput != null) enqueueEmission { onToolCallInput.invoke(call) }
+                    }
+                    streamDone.complete(turn)
+                    return
+                }
                 val reason = extractErrorReason(responseBody)
                     ?: sanitizeReason(t?.message)
                     ?: "unknown stream failure"
@@ -749,6 +767,51 @@ class HttpAgentLlmClient(
         )
         enforceReasoningEchoIfRequired(turn, routeInfo)
         return turn
+    }
+
+    private fun parseSuccessfulNonStreamingChatCompletionsTurn(
+        statusCode: Int?,
+        responseBody: String?,
+        routeInfo: HttpController.ChatCompletionRouteInfo,
+        hasAssistantPayload: Boolean,
+    ): ChatCompletionTurn? {
+        if (
+            statusCode == null ||
+            statusCode !in 200..299 ||
+            hasAssistantPayload ||
+            routeInfo.routeTag == ChatGptOAuthProvider.SOURCE_TYPE ||
+            OpenAiWireApi.isResponses(routeInfo.wireApi)
+        ) return null
+        val raw = responseBody?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        if (root.containsKey("error")) return null
+        if (root["object"]?.jsonPrimitive?.contentOrNull != "chat.completion") return null
+        val choices = root["choices"] as? JsonArray ?: return null
+        if (choices.isEmpty() || choices.any { choice ->
+                val item = choice as? JsonObject
+                val message = item?.get("message") as? JsonObject
+                message?.get("role")?.jsonPrimitive?.contentOrNull != "assistant" ||
+                    item["finish_reason"]?.jsonPrimitive?.contentOrNull.isNullOrBlank()
+            }) return null
+        val accumulator = AgentLlmStreamAccumulator(
+            json = json,
+            includeReasoningInAssistantMessage =
+                routeInfo.providerCapabilities.requiresReasoningContentForToolCalls,
+            captureAnthropicContentBlocks =
+                routeInfo.providerCapabilities.requiresAnthropicThinkingReplay,
+            anthropicSourceModel = routeInfo.resolvedModel,
+            captureGeminiParts = routeInfo.protocolType.equals("gemini", ignoreCase = true),
+            geminiSourceModel = routeInfo.resolvedModel,
+        )
+        return runCatching {
+            accumulator.consume(raw)
+            val turn = accumulator.buildTurn().copy(
+                resolvedModel = routeInfo.resolvedModel,
+            )
+            enforceReasoningEchoIfRequired(turn, routeInfo)
+            turn
+        }.getOrNull()
     }
 
     private fun parseResponsesUsage(responseBody: String?): ChatCompletionUsage? {

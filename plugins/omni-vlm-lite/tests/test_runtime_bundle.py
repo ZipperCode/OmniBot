@@ -182,5 +182,39 @@ class RuntimeBundleTest(unittest.TestCase):
         self.assertIn("missing_visual.npy", weight_names)
 
 
+    def test_assemble_bundle_overlays_public_run_log_schema(self) -> None:
+        """组包逻辑必须叠加同目录维护的 omniflow_run_log.v1.json 并纳入 overlay 与 runtime.properties 校验"""
+        import sys
+        import tempfile
+        sys.path.insert(0, str(REPOSITORY_ROOT / "scripts"))
+        from importlib import import_module
+        build_module = import_module("build-omniflow-runtime")
+        base_zip = REPOSITORY_ROOT / "artifacts" / "omniflow-gui-runtime-2.1.8.zip"
+        source_dir = REPOSITORY_ROOT / "plugins" / "omni-vlm-lite" / "runtime-source"
+
+        with tempfile.TemporaryDirectory(prefix="test_schema_overlay_") as tmpdir:
+            tmp_schema_dir = Path(tmpdir)
+            tmp_actions = tmp_schema_dir / "oob_canonical_actions.v1.json"
+            tmp_actions.write_text("{}", encoding="utf-8")
+            tmp_run_log = tmp_schema_dir / "omniflow_run_log.v1.json"
+            unique_content = b'{"unique_overlay_marker": "step1_behavior_regression"}'
+            tmp_run_log.write_bytes(unique_content)
+
+            _, _, _, files, props_text = build_module.assemble_bundle(
+                base_zip_path=base_zip,
+                runtime_source_dir=source_dir,
+                canonical_actions_path=tmp_actions,
+                version="2.1.9",
+            )
+            target_key = "scripts/runtime/python/schemas/oob/omniflow_run_log.v1.json"
+            self.assertEqual(
+                files.get(target_key),
+                unique_content,
+                "assemble_bundle 必须叠加同目录维护的 omniflow_run_log.v1.json 实际内容",
+            )
+            expected_sha = hashlib.sha256(unique_content).hexdigest()
+            self.assertIn(f"schema.omniflow_run_log.v1.json.sha256={expected_sha}", props_text)
+
+
 if __name__ == "__main__":
     unittest.main()

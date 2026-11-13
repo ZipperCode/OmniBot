@@ -33,6 +33,7 @@ import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 import android.util.AttributeSet
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.RoundedCorner
 import android.view.View
@@ -43,6 +44,7 @@ import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -572,6 +574,7 @@ interface ScreenTaskOverlayHostCallbacks {
     fun resizeStage(newWidthPx: Int, newCanvasHeightPx: Int)
     fun requestModeChange(mode: OverlayDisplayMode)
     fun getSavedCanvasHeightDp(): Int = 336
+    fun getExpectedStageWidthPx(): Int = -1
 }
 
 /**
@@ -616,8 +619,8 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val canvasWrapper: FrameLayout
     private val canvasFrameView: VirtualDisplayFrameView
     private val canvasEdgeLightView: ScreenTaskEdgeLightView
-    private val topScrimView: View
 
+    private val topBarLayout: LinearLayout
     private val stageTitleLayout: LinearLayout
     private val stageStatusDot: View
     private val stageTitleView: TextView
@@ -633,7 +636,11 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private val stageDockIconView: ImageView
     private val stageCollapseButton: FrameLayout
     private val stageCollapseIconView: ImageView
-
+    private val sideToolbarScroll: HorizontalScrollView
+    private val stageSideToolbar: LinearLayout
+    private val stageMoreButton: FrameLayout
+    private val stageMoreIconView: ImageView
+    private val stageMoreToolsContainer: LinearLayout
     private val stopButton: FrameLayout
     private val stopIconView: ImageView
     private val stopTextView: TextView
@@ -643,6 +650,8 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
 
     private val takeoverConfirmOverlay: FrameLayout
     private lateinit var takeoverConfirmDescView: TextView
+    private lateinit var takeoverConfirmButton: TextView
+    private lateinit var takeoverCancelButton: TextView
     // 3. 贴边折叠态容器（48dp 侧边入口）
     private val dockedContainer: FrameLayout
     private val dockedIconView: ImageView
@@ -728,66 +737,32 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             visibility = View.GONE
         }
 
-        canvasWrapper = FrameLayout(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(context, 336)
-            )
-            isClickable = true
-            isFocusable = true
-            isLongClickable = false
-            markAsAccessibilityButton(this, "全屏独立观看")
-            setOnClickListener {
-                onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
-            }
-        }
-
-        canvasFrameView = VirtualDisplayFrameView(context).apply {
+        val stageScrollView = ScrollView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            contentDescription = "虚拟屏小窗画面"
-        }
-        canvasEdgeLightView = ScreenTaskEdgeLightView(context).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-        canvasWrapper.addView(canvasFrameView)
-        canvasWrapper.addView(canvasEdgeLightView)
-        canvasFrameView.onFrameDrawn = ::updateCanvasEdgeLightBounds
-        canvasFrameView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
-            if (l != ol || t != ot || r != or || b != ob) {
-                updateCanvasEdgeLightBounds()
-            }
+            isFillViewport = true
         }
 
-        topScrimView = View(context).apply {
+        val stageVerticalLayout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(context, 48),
-                Gravity.TOP
-            )
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(0x88000000.toInt(), Color.TRANSPARENT)
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
-        canvasWrapper.addView(topScrimView)
 
-        val topBarLayout = LinearLayout(context).apply {
+        // 1. 顶栏 (Header 48dp)
+        topBarLayout = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = FrameLayout.LayoutParams(
+            layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(context, 48),
-                Gravity.TOP
+                dp(context, 48)
             ).apply {
-                marginStart = dp(context, 6)
+                marginStart = dp(context, 4)
                 marginEnd = dp(context, 4)
-                topMargin = dp(context, 2)
             }
         }
 
@@ -795,13 +770,13 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(context, 4)
+                marginEnd = 0
             }
             background = GradientDrawable().apply {
                 cornerRadius = dpF(context, 20f)
                 setColor(0xCC12141C.toInt())
             }
-            setPadding(dp(context, 8), dp(context, 4), dp(context, 8), dp(context, 4))
+            setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 4))
             isClickable = true
             isFocusable = true
         }
@@ -841,42 +816,139 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
-
         pipButton = createIconButton("全屏独立观看", 18) {
+            sideToolbarScroll.visibility = View.GONE
+            adaptCanvasHeight()
             onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
         }
         pipIconView = pipButton.getChildAt(0) as ImageView
 
-        takeoverButton = createIconButton("移交主屏选项", 18) {
-            showTakeoverConfirmOverlay()
+        stageMoreButton = createIconButton("展开扩展工具", 18) {
+            val willShow = sideToolbarScroll.visibility != View.VISIBLE
+            sideToolbarScroll.visibility = if (willShow) View.VISIBLE else View.GONE
+            adaptCanvasHeight()
         }
-        takeoverIconView = takeoverButton.getChildAt(0) as ImageView
-        takeoverTextView = TextView(context).apply { visibility = View.GONE; text = "移交主屏" }
-
-        stageDockButton = createIconButton("贴边折叠", 18) {
-            requestModeTransition(OverlayDisplayMode.DOCKED)
-        }
-        stageDockIconView = stageDockButton.getChildAt(0) as ImageView
+        stageMoreIconView = stageMoreButton.getChildAt(0) as ImageView
 
         stageCollapseButton = createIconButton("收起至顶部胶囊", 18) {
             requestModeTransition(OverlayDisplayMode.CAPSULE)
         }
         stageCollapseIconView = stageCollapseButton.getChildAt(0) as ImageView
 
-        stageToolRow.addView(pipButton)
-        stageToolRow.addView(takeoverButton)
-        stageToolRow.addView(stageDockButton)
+        stageToolRow.addView(stageMoreButton)
         stageToolRow.addView(stageCollapseButton)
         topBarLayout.addView(stageToolRow)
-        canvasWrapper.addView(topBarLayout)
+        stageVerticalLayout.addView(topBarLayout)
+
+        // 2. 独立扩展工具行（插在 header 与 preview 之间，高度 48dp，默认收起）
+        sideToolbarScroll = HorizontalScrollView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(context, 48)
+            )
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            visibility = View.GONE
+        }
+
+        stageSideToolbar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(context, 48)
+            ).apply {
+                marginEnd = dp(context, 4)
+            }
+        }
+
+        stageMoreToolsContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(context, 48)
+            ).apply {
+                marginEnd = dp(context, 2)
+            }
+        }
+
+        takeoverButton = createIconButton("移交主屏选项", 18) {
+            sideToolbarScroll.visibility = View.GONE
+            adaptCanvasHeight()
+            showTakeoverConfirmOverlay()
+        }
+        takeoverIconView = takeoverButton.getChildAt(0) as ImageView
+        takeoverTextView = TextView(context).apply { visibility = View.GONE; text = "移交主屏" }
+
+        stageDockButton = createIconButton("贴边折叠", 18) {
+            sideToolbarScroll.visibility = View.GONE
+            adaptCanvasHeight()
+            requestModeTransition(OverlayDisplayMode.DOCKED)
+        }
+        stageDockIconView = stageDockButton.getChildAt(0) as ImageView
+
+        stageMoreToolsContainer.addView(pipButton)
+        stageMoreToolsContainer.addView(takeoverButton)
+        stageMoreToolsContainer.addView(stageDockButton)
+
+        stageSideToolbar.addView(stageMoreToolsContainer)
+        sideToolbarScroll.addView(stageSideToolbar)
+        stageVerticalLayout.addView(sideToolbarScroll)
+
+        // 3. 画面预览区 (Preview 纯 FrameLayout，纯画面按真实 aspect 绘制，不塞浮动工具)
+        canvasWrapper = FrameLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(context, 336)
+            )
+            isClickable = true
+            isFocusable = true
+            isLongClickable = false
+            markAsAccessibilityButton(this, "全屏独立观看")
+            setOnClickListener {
+                onOpenPipCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
+            }
+        }
+
+        canvasFrameView = VirtualDisplayFrameView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            contentDescription = "虚拟屏小窗画面"
+        }
+        canvasEdgeLightView = ScreenTaskEdgeLightView(context).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        canvasWrapper.addView(canvasFrameView)
+        canvasWrapper.addView(canvasEdgeLightView)
+        canvasFrameView.onFrameDrawn = ::updateCanvasEdgeLightBounds
+        canvasFrameView.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || b != ob) {
+                updateCanvasEdgeLightBounds()
+            }
+        }
+        stageVerticalLayout.addView(canvasWrapper)
+
+        // 4. 底栏 (Footer 48dp: stop 与 resize)
+        val footerLayout = FrameLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(context, 48)
+            )
+        }
+
         stopButton = FrameLayout(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM or Gravity.START
+                dp(context, 48),
+                Gravity.START or Gravity.CENTER_VERTICAL
             ).apply {
-                marginStart = dp(context, 8)
-                bottomMargin = dp(context, 8)
+                marginStart = dp(context, 4)
             }
             minimumWidth = dp(context, 48)
             minimumHeight = dp(context, 48)
@@ -914,16 +986,15 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         stopPillInner.addView(stopIconView)
         stopPillInner.addView(stopTextView)
         stopButton.addView(stopPillInner)
-        canvasWrapper.addView(stopButton)
+        footerLayout.addView(stopButton)
 
         resizeHandle = FrameLayout(context).apply {
             val size = dp(context, 48)
             layoutParams = FrameLayout.LayoutParams(
                 size, size,
-                Gravity.BOTTOM or Gravity.END
+                Gravity.END or Gravity.CENTER_VERTICAL
             ).apply {
                 marginEnd = dp(context, 2)
-                bottomMargin = dp(context, 2)
             }
             markAsAccessibilityButton(this, "调整小窗尺寸")
             setOnClickListener { toggleAccessibleResize() }
@@ -933,13 +1004,14 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             layoutParams = FrameLayout.LayoutParams(iconSize, iconSize, Gravity.CENTER)
         }
         resizeHandle.addView(resizeGripIconView)
-        canvasWrapper.addView(resizeHandle)
+        footerLayout.addView(resizeHandle)
+        stageVerticalLayout.addView(footerLayout)
+
+        stageScrollView.addView(stageVerticalLayout)
+        stageContainer.addView(stageScrollView)
 
         takeoverConfirmOverlay = createTakeoverConfirmOverlay()
-        canvasWrapper.addView(takeoverConfirmOverlay)
-
-        stageContainer.addView(canvasWrapper)
-
+        stageContainer.addView(takeoverConfirmOverlay)
         // --- 贴边折叠态 (DOCKED, 48dp 侧边入口) ---
         dockedContainer = FrameLayout(context).apply {
             val size = dp(context, 48)
@@ -1010,64 +1082,62 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             isFocusable = true
         }
 
-        val card = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            val isNight = ScreenTaskTheme.isNight(context)
-            background = GradientDrawable().apply {
-                cornerRadius = dpF(context, 16f)
-                setColor(ScreenTaskTheme.surfacePrimary(isNight))
-                setStroke(dp(context, 1), ScreenTaskTheme.borderSubtle(isNight))
-            }
-            setPadding(dp(context, 16), dp(context, 14), dp(context, 16), dp(context, 14))
+        val scrollView = ScrollView(context).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
+            )
+            isFillViewport = true
+        }
+
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            val isNight = ScreenTaskTheme.isNight(context)
+            background = GradientDrawable().apply {
+                cornerRadius = dpF(context, 12f)
+                setColor(ScreenTaskTheme.surfacePrimary(isNight))
+                setStroke(dp(context, 1), ScreenTaskTheme.borderSubtle(isNight))
+            }
+            setPadding(dp(context, 8), dp(context, 8), dp(context, 8), dp(context, 8))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                marginStart = dp(context, 16)
-                marginEnd = dp(context, 16)
+                marginStart = dp(context, 6)
+                marginEnd = dp(context, 6)
+                topMargin = dp(context, 4)
+                bottomMargin = dp(context, 4)
             }
         }
 
         val titleTv = TextView(context).apply {
             text = "移交主屏操作"
-            textSize = 15f
+            textSize = 13f
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setTextColor(ScreenTaskTheme.textPrimary(ScreenTaskTheme.isNight(context)))
         }
 
         val descTv = TextView(context).apply {
             text = "将停止当前任务，并把后台应用移到主屏由你继续操作。当前前台应用会暂时离开。"
-            textSize = 12f
+            textSize = 11f
             setTextColor(ScreenTaskTheme.textSecondary(ScreenTaskTheme.isNight(context)))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(context, 6)
-                bottomMargin = dp(context, 14)
+                topMargin = dp(context, 4)
+                bottomMargin = dp(context, 6)
             }
         }
         takeoverConfirmDescView = descTv
 
-        val btnRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
+        val btnColumn = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-        }
-
-        val cancelBtn = TextView(context).apply {
-            text = "取消"
-            textSize = 13f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(ScreenTaskTheme.textSecondary(ScreenTaskTheme.isNight(context)))
-            setPadding(dp(context, 12), dp(context, 8), dp(context, 12), dp(context, 8))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { overlay.visibility = View.GONE }
         }
 
         val confirmBtn = TextView(context).apply {
@@ -1076,34 +1146,58 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             val isNight = ScreenTaskTheme.isNight(context)
             setTextColor(ScreenTaskTheme.onAccent(isNight))
+            gravity = Gravity.CENTER
+            minimumHeight = dp(context, 48)
             background = GradientDrawable().apply {
-                cornerRadius = dpF(context, 12f)
+                cornerRadius = dpF(context, 10f)
                 setColor(ScreenTaskTheme.accentPrimary(isNight))
             }
-            setPadding(dp(context, 14), dp(context, 8), dp(context, 14), dp(context, 8))
+            setPadding(dp(context, 8), dp(context, 8), dp(context, 8), dp(context, 8))
             isClickable = true
             isFocusable = true
             markAsAccessibilityButton(this, "确认移交主屏")
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             setOnClickListener {
                 overlay.visibility = View.GONE
                 onTakeoverCallback?.invoke(boundTaskId, boundSessionId, boundTurnId, boundStopToken, boundDisplayId)
             }
         }
+        takeoverConfirmButton = confirmBtn
 
-        btnRow.addView(cancelBtn)
-        val spacer = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(context, 8), 1)
+        val cancelBtn = TextView(context).apply {
+            text = "取消"
+            textSize = 13f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(ScreenTaskTheme.textSecondary(ScreenTaskTheme.isNight(context)))
+            gravity = Gravity.CENTER
+            minimumHeight = dp(context, 48)
+            setPadding(dp(context, 8), dp(context, 8), dp(context, 8), dp(context, 8))
+            isClickable = true
+            isFocusable = true
+            markAsAccessibilityButton(this, "取消")
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(context, 4)
+            }
+            setOnClickListener { overlay.visibility = View.GONE }
         }
-        btnRow.addView(spacer)
-        btnRow.addView(confirmBtn)
+        takeoverCancelButton = cancelBtn
+
+        btnColumn.addView(confirmBtn)
+        btnColumn.addView(cancelBtn)
 
         card.addView(titleTv)
         card.addView(descTv)
-        card.addView(btnRow)
-        overlay.addView(card)
+        card.addView(btnColumn)
+        scrollView.addView(card)
+        overlay.addView(scrollView)
         return overlay
     }
-
     fun showTakeoverConfirmOverlay() {
         val hasActiveTask = boundTaskId.isNotEmpty() && !boundStopToken.isNullOrBlank()
         if (::takeoverConfirmDescView.isInitialized) {
@@ -1396,12 +1490,13 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         var isMultiTouchCancelled = false
         var aspectRatio = 1.27f
 
-        resizeHandle.setOnTouchListener { _, event ->
+        resizeHandle.setOnTouchListener { view, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     startRawX = event.rawX
                     startRawY = event.rawY
-                    startStageWidthPx = stageContainer.width.takeIf { it > 0 } ?: dp(context, 296)
+                    val bounds = ScreenTaskOverlayHost.calculateStageWidthBounds(context, boundDisplayId, boundSessionId, hostCallbacks?.getSafeInsets())
+                    startStageWidthPx = stageContainer.width.takeIf { it > 0 } ?: bounds.defaultWidthPx
                     aspectRatio = getFrameAspectRatio()
                     isResizing = false
                     isMultiTouchCancelled = false
@@ -1422,31 +1517,24 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                         isResizing = true
                     }
                     if (isResizing) {
-                        val dm = resources.displayMetrics
                         val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
-                        val maxWidth = (dm.widthPixels - safeInsets.left - safeInsets.right).coerceAtLeast(1)
-                        val minWidth = minOf(dp(context, 296), maxWidth)
-                        val targetWidth = (startStageWidthPx + deltaX).toInt().coerceIn(minWidth, maxWidth)
+                        val bounds = ScreenTaskOverlayHost.calculateStageWidthBounds(context, boundDisplayId, boundSessionId, safeInsets)
+                        val targetWidth = (startStageWidthPx + deltaX).toInt().coerceIn(bounds.minWidthPx, bounds.maxWidthPx)
 
-                        val targetCanvasWidth = targetWidth.coerceAtLeast(dp(context, 100))
-                        var targetCanvasHeight = (targetCanvasWidth * aspectRatio).toInt()
-
-                        val maxStageHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
-                        val maxCanvasHeight = maxStageHeight.coerceAtLeast(dp(context, 100))
-                        if (targetCanvasHeight > maxCanvasHeight) {
-                            targetCanvasHeight = maxCanvasHeight
-                        }
-
-                        val lp = canvasWrapper.layoutParams
-                        lp.height = targetCanvasHeight
-                        canvasWrapper.layoutParams = lp
-
-                        hostCallbacks?.resizeStage(targetWidth, targetCanvasHeight)
-                        updateCanvasEdgeLightBounds()
+                        applyCanvasSize(targetWidth, (targetWidth * aspectRatio).toInt())
                     }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP -> {
+                    parent.requestDisallowInterceptTouchEvent(false)
+                    if (!isResizing && !isMultiTouchCancelled) {
+                        view.performClick()
+                    }
+                    isResizing = false
+                    isMultiTouchCancelled = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
                     parent.requestDisallowInterceptTouchEvent(false)
                     isResizing = false
                     isMultiTouchCancelled = false
@@ -1492,6 +1580,8 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     fun setTakeoverInProgress(inProgress: Boolean) {
         takeoverButton.isEnabled = !inProgress
         takeoverButton.alpha = if (inProgress) 0.5f else 1.0f
+        stageMoreButton.isEnabled = !inProgress
+        stageMoreButton.alpha = if (inProgress) 0.5f else 1.0f
         stopButton.isEnabled = !inProgress
         stopButton.alpha = if (inProgress) 0.5f else 1.0f
         if (inProgress) {
@@ -1528,6 +1618,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             canvasWrapper.visibility = View.VISIBLE
             takeoverButton.visibility = View.VISIBLE
             pipButton.visibility = View.VISIBLE
+            stageSideToolbar.visibility = View.VISIBLE
             stageTitleView.text = "虚拟屏"
             updateLensEdgeLightBounds()
             updateCanvasEdgeLightBounds()
@@ -1535,6 +1626,8 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
             canvasWrapper.visibility = View.GONE
             takeoverButton.visibility = View.GONE
             pipButton.visibility = View.GONE
+            sideToolbarScroll.visibility = View.GONE
+            stageSideToolbar.visibility = View.GONE
             stageTitleView.text = "屏幕控制"
         }
 
@@ -1550,27 +1643,12 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     private fun toggleAccessibleResize() {
         val dm = resources.displayMetrics
         val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
-        val maxWidth = (dm.widthPixels - safeInsets.left - safeInsets.right).coerceAtLeast(1)
-        val defaultWidth = minOf(dp(context, 296), maxWidth)
-        val expandedWidth = minOf(dp(context, 360), maxWidth)
+        val bounds = ScreenTaskOverlayHost.calculateStageWidthBounds(context, boundDisplayId, boundSessionId, safeInsets)
+        val defaultWidth = bounds.defaultWidthPx
+        val expandedWidth = minOf(dp(context, 360), bounds.maxWidthPx).coerceAtLeast(defaultWidth)
         val currentWidth = stageContainer.width.takeIf { it > 0 } ?: defaultWidth
         val targetWidth = if (currentWidth >= expandedWidth - dp(context, 8)) defaultWidth else expandedWidth
-
-        val targetCanvasWidth = targetWidth.coerceAtLeast(dp(context, 100))
-        val aspectRatio = getFrameAspectRatio()
-        var targetCanvasHeight = (targetCanvasWidth * aspectRatio).toInt()
-        val maxStageHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
-        val maxCanvasHeight = maxStageHeight.coerceAtLeast(dp(context, 100))
-        if (targetCanvasHeight > maxCanvasHeight) {
-            targetCanvasHeight = maxCanvasHeight
-        }
-
-        val lp = canvasWrapper.layoutParams
-        lp.height = targetCanvasHeight
-        canvasWrapper.layoutParams = lp
-
-        hostCallbacks?.resizeStage(targetWidth, targetCanvasHeight)
-        updateCanvasEdgeLightBounds()
+        applyCanvasSize(targetWidth, (targetWidth * getFrameAspectRatio()).toInt())
     }
 
     private fun applyModeFrameActivation() {
@@ -1606,8 +1684,13 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     }
 
     fun requestModeTransition(mode: OverlayDisplayMode) {
+        val callbacks = hostCallbacks
+        if (callbacks != null) {
+            // 宿主是唯一的窗口状态拥有者；避免再沿旧监听器重复切换一次。
+            callbacks.requestModeChange(mode)
+            return
+        }
         setOverlayMode(mode)
-        hostCallbacks?.requestModeChange(mode)
         if (mode == OverlayDisplayMode.EXPANDED) {
             onToggleExpandListener?.invoke(true)
         } else if (mode == OverlayDisplayMode.CAPSULE) {
@@ -1615,7 +1698,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         }
     }
 
-    fun setOverlayMode(mode: OverlayDisplayMode) {
+    fun setOverlayMode(mode: OverlayDisplayMode, targetStageWidthPx: Int = -1) {
         this.currentMode = mode
         when (mode) {
             OverlayDisplayMode.CAPSULE -> {
@@ -1627,7 +1710,7 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
                 pillContainer.visibility = View.GONE
                 stageContainer.visibility = View.VISIBLE
                 dockedContainer.visibility = View.GONE
-                adaptCanvasHeight()
+                adaptCanvasHeight(targetStageWidthPx)
             }
             OverlayDisplayMode.DOCKED -> {
                 pillContainer.visibility = View.GONE
@@ -1638,66 +1721,55 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
         applyModeFrameActivation()
     }
 
-    fun getOverlayMode(): OverlayDisplayMode = currentMode
-
-    fun isExpanded(): Boolean = currentMode == OverlayDisplayMode.EXPANDED
-
-    fun setExpanded(expanded: Boolean) {
-        requestModeTransition(if (expanded) OverlayDisplayMode.EXPANDED else OverlayDisplayMode.CAPSULE)
+    fun adaptCanvasHeight(targetStageWidthPx: Int = -1) {
+        val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
+        val savedHeightDp = hostCallbacks?.getSavedCanvasHeightDp() ?: -1
+        val bounds = ScreenTaskOverlayHost.calculateStageWidthBounds(context, boundDisplayId, boundSessionId, safeInsets)
+        val expectedWidth = if (targetStageWidthPx > 0) {
+            targetStageWidthPx
+        } else {
+            val fromHost = hostCallbacks?.getExpectedStageWidthPx() ?: -1
+            if (fromHost > 0) fromHost else (stageContainer.width.takeIf { it > 0 } ?: bounds.defaultWidthPx)
+        }
+        val targetWidth = expectedWidth.coerceIn(bounds.minWidthPx, bounds.maxWidthPx)
+        val requestedHeight = if (savedHeightDp > 0) {
+            dp(context, savedHeightDp)
+        } else {
+            (targetWidth * getFrameAspectRatio()).toInt()
+        }
+        applyCanvasSize(targetWidth, requestedHeight)
     }
 
-    fun adaptCanvasHeight() {
-        val dm = resources.displayMetrics
+    internal fun getStageChromeHeightPx(): Int =
+        dp(context, if (sideToolbarScroll.visibility == View.VISIBLE) 144 else 96)
+
+    private fun applyCanvasSize(targetWidth: Int, requestedHeight: Int) {
         val safeInsets = hostCallbacks?.getSafeInsets() ?: Rect(dp(context, 8), dp(context, 32), dp(context, 8), dp(context, 24))
-        val maxAvailableHeight = dm.heightPixels - safeInsets.top - safeInsets.bottom
-        val maxCanvasHeight = (maxAvailableHeight - dp(context, 16)).coerceAtLeast(dp(context, 100))
-        val savedHeightDp = hostCallbacks?.getSavedCanvasHeightDp() ?: -1
-
-        val currentStageWidth = stageContainer.width.takeIf { it > 0 } ?: dp(context, 296)
-        val aspectRatio = getFrameAspectRatio()
-
-        val targetCanvasHeight: Int
-        val targetWidth: Int
-
-        if (savedHeightDp > 0) {
-            targetCanvasHeight = minOf(dp(context, savedHeightDp), maxCanvasHeight)
-            targetWidth = currentStageWidth
-        } else {
-            val naturalHeight = (currentStageWidth * aspectRatio).toInt()
-            if (naturalHeight > maxCanvasHeight) {
-                targetCanvasHeight = maxCanvasHeight
-                val adjustedWidth = (maxCanvasHeight / aspectRatio).toInt().coerceAtLeast(1)
-                val maxAllowedWidth = dm.widthPixels - safeInsets.left - safeInsets.right
-                targetWidth = minOf(adjustedWidth, maxAllowedWidth)
-            } else {
-                targetCanvasHeight = naturalHeight
-                targetWidth = currentStageWidth
-            }
-        }
-
-        val lp = canvasWrapper.layoutParams
-        lp.height = targetCanvasHeight
-        canvasWrapper.layoutParams = lp
-        hostCallbacks?.resizeStage(targetWidth, targetCanvasHeight)
+        val availableHeight = (resources.displayMetrics.heightPixels - safeInsets.top - safeInsets.bottom).coerceAtLeast(1)
+        val maxCanvasHeight = (availableHeight - getStageChromeHeightPx()).coerceAtLeast(1)
+        val minCanvasHeight = minOf(dp(context, 12), maxCanvasHeight)
+        val canvasHeight = requestedHeight.coerceIn(minCanvasHeight, maxCanvasHeight)
+        canvasWrapper.layoutParams = canvasWrapper.layoutParams.apply { height = canvasHeight }
+        // 回调只保存画布高度，工具栏不能在每次展开时重复累加。
+        hostCallbacks?.resizeStage(targetWidth, canvasHeight)
+        updateCanvasEdgeLightBounds()
     }
 
     private fun getFrameAspectRatio(): Float {
         val vdId = boundDisplayId
         if (vdId > 0) {
-            val owner = cn.com.omnimind.androidgui.DeviceDisplayManager.activeVirtualDisplayOwner()
-            if (owner == boundSessionId) {
-                val dims = cn.com.omnimind.androidgui.DeviceDisplayManager.getVirtualDisplayDimensions(vdId)
-                if (dims != null && dims.first > 0 && dims.second > 0) {
-                    return dims.second.toFloat() / dims.first.toFloat()
-                }
+            val bgAspect = ScreenTaskOverlayHost.resolveBackgroundAspectRatio(vdId, boundSessionId)
+            if (bgAspect > 0f) {
+                return 1f / bgAspect
             }
         }
         canvasFrameView.getContentRect(tempCanvasRect)
         if (tempCanvasRect.width() > 0f && tempCanvasRect.height() > 0f) {
             return tempCanvasRect.height() / tempCanvasRect.width()
         }
-        return 2.22f
+        return 19.5f / 9f
     }
+
     private fun updateLensEdgeLightBounds() {
         lensFrameView.getContentRect(tempLensRect)
         lensEdgeLightView.setTargetRect(tempLensRect, cornerRadius = dpF(context, 4f))
@@ -1716,7 +1788,23 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
     fun getStopButton(): FrameLayout = stopButton
     fun getTakeoverButton(): FrameLayout = takeoverButton
     fun getTakeoverConfirmOverlay(): FrameLayout = takeoverConfirmOverlay
+    fun getStageMoreButton(): FrameLayout = stageMoreButton
+    fun getStageMoreToolsContainer(): LinearLayout = stageMoreToolsContainer
+    fun getPipButton(): FrameLayout = pipButton
+    fun getStageCollapseButton(): FrameLayout = stageCollapseButton
+    fun getStageDockButton(): FrameLayout = stageDockButton
 
+    fun getSideToolbarScroll(): HorizontalScrollView = sideToolbarScroll
+    fun getTakeoverConfirmButton(): TextView = takeoverConfirmButton
+    fun getTakeoverCancelButton(): TextView = takeoverCancelButton
+
+    fun getOverlayMode(): OverlayDisplayMode = currentMode
+
+    fun isExpanded(): Boolean = currentMode == OverlayDisplayMode.EXPANDED
+
+    fun setExpanded(expanded: Boolean) {
+        requestModeTransition(if (expanded) OverlayDisplayMode.EXPANDED else OverlayDisplayMode.CAPSULE)
+    }
     fun applyTheme() {
         val isNight = ScreenTaskTheme.isNight(context)
         lastThemeNight = isNight
@@ -1754,15 +1842,17 @@ class ScreenTaskCapsuleView @JvmOverloads constructor(
 
         // 悬浮工具条图标与圆形半透背景
         pipIconView.setImageDrawable(IconDrawables.createOpenInFull(Color.WHITE))
+        stageCollapseIconView.setImageDrawable(IconDrawables.createMinus(Color.WHITE))
+        stageMoreIconView.setImageDrawable(IconDrawables.createMore(Color.WHITE))
         takeoverIconView.setImageDrawable(IconDrawables.createHandover(Color.WHITE))
         stageDockIconView.setImageDrawable(IconDrawables.createDock(Color.WHITE))
-        stageCollapseIconView.setImageDrawable(IconDrawables.createMinus(Color.WHITE))
 
         val btnRippleBg = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
         pipButton.background = btnRippleBg
+        stageCollapseButton.background = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
+        stageMoreButton.background = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
         takeoverButton.background = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
         stageDockButton.background = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
-        stageCollapseButton.background = createRippleBackground(0xCC12141C.toInt(), 0x33FFFFFF, dpF(context, 24f))
 
         // 停止胶囊
         stopIconView.setImageDrawable(IconDrawables.createStop(Color.WHITE))
@@ -1848,8 +1938,11 @@ class ScreenTaskResultCardView @JvmOverloads constructor(
     private var currentDragY = 0f
     private val dismissThresholdPx = dpF(context, 72f)
     private var isExiting = false
+    private var isBackDownTracked = false
 
     init {
+        isFocusable = true
+        isFocusableInTouchMode = true
         cardContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             elevation = dpF(context, 6f)
@@ -2088,6 +2181,28 @@ class ScreenTaskResultCardView @JvmOverloads constructor(
             fadeBottomView.visibility = if (canScrollDown) View.VISIBLE else View.GONE
         }
     }
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.repeatCount == 0) {
+                        isBackDownTracked = true
+                    }
+                    return true
+                }
+                KeyEvent.ACTION_UP -> {
+                    val wasTracked = isBackDownTracked
+                    isBackDownTracked = false
+                    if (wasTracked && !event.isCanceled && !isExiting) {
+                        triggerExitWithAction { onStayCallback?.invoke(boundTaskId) }
+                    }
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
 
     fun bindResult(
         taskId: String,
@@ -2575,6 +2690,18 @@ internal object IconDrawables {
             paint.strokeWidth = w * strokeRatio
             val pad = w * 0.24f
             canvas.drawLine(b.left + pad, b.top + h * 0.5f, b.right - pad, b.top + h * 0.5f, paint)
+        }
+    }
+    fun createMore(color: Int): Drawable = object : BasePathDrawable(color, fill = true) {
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            val r = w * 0.08f
+            val cy = b.top + h * 0.5f
+            canvas.drawCircle(b.left + w * 0.25f, cy, r, paint)
+            canvas.drawCircle(b.left + w * 0.50f, cy, r, paint)
+            canvas.drawCircle(b.left + w * 0.75f, cy, r, paint)
         }
     }
 }

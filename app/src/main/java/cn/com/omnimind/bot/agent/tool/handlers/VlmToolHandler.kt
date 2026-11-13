@@ -17,11 +17,10 @@ import cn.com.omnimind.bot.agent.AgentCallback
 import cn.com.omnimind.bot.agent.AgentExecutionEnvironment
 import cn.com.omnimind.bot.agent.AgentToolExecutionHandle
 import cn.com.omnimind.bot.agent.AgentToolRegistry
-import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
 import cn.com.omnimind.bot.omniflow.OmniFlowPluginRuntime
-import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
+import cn.com.omnimind.bot.omniflow.createOmniFlowModelClient
 import cn.com.omnimind.bot.runlog.firstNonBlank
 import cn.com.omnimind.bot.runlog.mapArg
 import cn.com.omnimind.bot.update.AppUpdateManager
@@ -206,10 +205,10 @@ class VlmToolHandler(context: Context) : ToolHandler {
                     displayId = targetDisplayId,
                     hostManagedUi = true,
                 ),
-                modelClient = HttpAgentLlmClient(
+                modelClient = createOmniFlowModelClient(
                     scope = CoroutineScope(currentCoroutineContext()),
-                )
-                    .asOmniFlowModelClient(),
+                    environment = env,
+                ),
                 hooks = OmniVlmPlugin.Hooks(
                     beforeOperation = {
                         helper.ensureRunActive()
@@ -273,12 +272,24 @@ class VlmToolHandler(context: Context) : ToolHandler {
             if (result["success"] != true) {
                 val message = firstNonBlank(result["error_message"], result["error_code"])
                     .ifBlank { "gui_task_failed" }
+                val failureExtras = buildMap<String, Any?> {
+                    sanitizeFinishedEvidence(result["finished_evidence"])?.let {
+                        put("finished_evidence", it)
+                    }
+                    sanitizeCollection(result["collection"])?.let {
+                        put("collection", it)
+                    }
+                    firstNonBlank(result["experience_update_error"])?.let {
+                        put("experience_update_error", it)
+                    }
+                }
                 return@withDisplayLease failedRunResult(
                     runId = resultRunId,
                     goal = goal,
                     doneReason = doneReason,
                     message = message,
                     finalStateId = finalStateId,
+                    extras = failureExtras,
                 )
             }
             val completed = content.ifBlank { "视觉任务已完成" }
@@ -293,18 +304,27 @@ class VlmToolHandler(context: Context) : ToolHandler {
                 finalStateId = finalStateId,
                 finalState = finalStatePayload(finalStateId),
                 stepCount = stepCount,
-                extras = result.filterKeys {
-                    it in setOf(
-                        "source",
-                        "function_id",
-                        "recall_hit",
-                        "recalled_function_id",
-                        "resolved_model",
-                        "auto_registered",
-                        "registered_function_id",
-                        "registration_status",
-                        "registration_error",
-                    )
+                extras = buildMap<String, Any?> {
+                    result.filterKeys {
+                        it in setOf(
+                            "source",
+                            "function_id",
+                            "recall_hit",
+                            "recalled_function_id",
+                            "resolved_model",
+                            "auto_registered",
+                            "registered_function_id",
+                            "registration_status",
+                            "registration_error",
+                            "experience_update_error",
+                        )
+                    }.let(::putAll)
+                    sanitizeFinishedEvidence(result["finished_evidence"])?.let {
+                        put("finished_evidence", it)
+                    }
+                    sanitizeCollection(result["collection"])?.let {
+                        put("collection", it)
+                    }
                 },
             )
             val encoded = helper.encodeLocalizedPayload(payload)
@@ -374,6 +394,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
         doneReason: String,
         message: String,
         finalStateId: String? = null,
+        extras: Map<String, Any?> = emptyMap(),
     ): ToolExecutionResult.ContextResult {
         val localizedMessage = helper.localized(message)
         val payload = buildVlmTaskContextPayload(
@@ -386,7 +407,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
             finalStateId = finalStateId,
             finalState = finalStatePayload(finalStateId),
             stepCount = runStepCount(runId),
-            extras = mapOf("error" to localizedMessage),
+            extras = mapOf("error" to localizedMessage) + extras,
         )
         val encoded = helper.encodeLocalizedPayload(payload)
         return ToolExecutionResult.ContextResult(
@@ -487,5 +508,106 @@ internal fun buildVlmTaskContextPayload(
                 "run_log_id when explaining the failure or deciding whether to retry."
         },
     )
-    putAll(extras.filterValues { it != null })
+    extras.forEach { (key, value) ->
+        if (value == null) return@forEach
+        if (key == "finished_evidence") {
+            sanitizeFinishedEvidence(value)?.let { put("finished_evidence", it) }
+        } else if (key == "collection") {
+            sanitizeCollection(value)?.let { put("collection", it) }
+        } else {
+            put(key, value)
+        }
+    }
 }.filterValues { it != null }
+
+/**
+ * 约束 finished_evidence 仅保留 5 个核心字段与合法枚举值，防止把 expected_text 原文、图片或未识别字段落入外层 Agent 上下文。
+ * status: matched | model_asserted
+ * source: xml | ocr | model
+ */
+internal fun sanitizeFinishedEvidence(raw: Any?): Map<String, Any?>? {
+    val map = raw as? Map<*, *> ?: return null
+    val status = map["status"]?.toString()?.takeIf { it == "matched" || it == "model_asserted" } ?: return null
+    val source = map["source"]?.toString()?.takeIf { it == "xml" || it == "ocr" || it == "model" } ?: return null
+
+    val evidence = linkedMapOf<String, Any?>()
+    (map["observation_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["observation_id"] = it }
+    (map["state_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["state_id"] = it }
+    evidence["status"] = status
+    evidence["source"] = source
+    (map["matched_node_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["matched_node_id"] = it }
+
+    return evidence.takeIf { it.isNotEmpty() }
+}
+
+/**
+ * 约束 collection 仅保留受限字段与合法结构，防止未知字段或过大额外信息污染外层 Agent 上下文。
+ * 字段白名单:
+ * items: [{text, page_index, bounds, source, state_id}]
+ * pages_scanned
+ * truncated
+ * partial
+ * stop_reason
+ * overlap_uncertain
+ * ocr_status
+ */
+internal fun sanitizeCollection(raw: Any?): Map<String, Any?>? {
+    val map = raw as? Map<*, *> ?: return null
+    val sanitized = linkedMapOf<String, Any?>()
+
+    val rawItems = map["items"] as? List<*>
+    if (rawItems != null) {
+        val sanitizedItems = mutableListOf<Map<String, Any?>>()
+        for (item in rawItems) {
+            val itemMap = item as? Map<*, *> ?: continue
+            val text = (itemMap["text"] as? String)?.takeIf(String::isNotEmpty) ?: continue
+            val pageIndex = sanitizeNonNegativeInt(itemMap["page_index"]) ?: continue
+
+            val rawBounds = itemMap["bounds"] as? List<*> ?: continue
+            if (rawBounds.size != 4) continue
+            val b0 = (rawBounds[0] as? Number)?.toDouble() ?: continue
+            val b1 = (rawBounds[1] as? Number)?.toDouble() ?: continue
+            val b2 = (rawBounds[2] as? Number)?.toDouble() ?: continue
+            val b3 = (rawBounds[3] as? Number)?.toDouble() ?: continue
+            if (!b0.isFinite() || !b1.isFinite() || !b2.isFinite() || !b3.isFinite()) continue
+            if (b0 < 0.0 || b1 < 0.0 || b2 > 1000.0 || b3 > 1000.0) continue
+            if (b2 <= b0 || b3 <= b1) continue
+
+            val source = (itemMap["source"] as? String)?.takeIf { it == "xml" || it == "ocr" } ?: continue
+            val stateId = (itemMap["state_id"] as? String)?.takeIf(String::isNotBlank) ?: continue
+
+            sanitizedItems.add(
+                linkedMapOf(
+                    "text" to text,
+                    "page_index" to pageIndex,
+                    "bounds" to listOf(b0, b1, b2, b3),
+                    "source" to source,
+                    "state_id" to stateId,
+                ),
+            )
+        }
+        sanitized["items"] = sanitizedItems
+    } else if (map.containsKey("items")) {
+        sanitized["items"] = emptyList<Map<String, Any?>>()
+    }
+
+    sanitizeNonNegativeInt(map["pages_scanned"])?.let { sanitized["pages_scanned"] = it }
+    (map["truncated"] as? Boolean)?.let { sanitized["truncated"] = it }
+    (map["partial"] as? Boolean)?.let { sanitized["partial"] = it }
+    (map["stop_reason"] as? String)?.takeIf(String::isNotBlank)?.let { sanitized["stop_reason"] = it }
+    (map["overlap_uncertain"] as? Boolean)?.let { sanitized["overlap_uncertain"] = it }
+    (map["ocr_status"] as? String)?.takeIf(String::isNotBlank)?.let { sanitized["ocr_status"] = it }
+
+    if (sanitized.isNotEmpty() && !sanitized.containsKey("items")) {
+        sanitized["items"] = emptyList<Map<String, Any?>>()
+    }
+
+    return sanitized.takeIf { it.isNotEmpty() }
+}
+
+private fun sanitizeNonNegativeInt(raw: Any?): Int? {
+    val d = (raw as? Number)?.toDouble() ?: return null
+    return if (d.isFinite() && d >= 0.0 && d <= Int.MAX_VALUE.toDouble() && d == d.toInt().toDouble()) {
+        d.toInt()
+    } else null
+}

@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.PowerManager
+import android.view.KeyEvent
 import cn.com.omnimind.bot.agent.display.ScreenTaskOverlayHost
 import cn.com.omnimind.bot.agent.display.ScreenTaskTheme
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
@@ -317,5 +318,51 @@ class TaskRuntimeScreenOverlayTest {
                 if (originalMode == null) remove(key) else putString(key, originalMode)
             }.commit()
         }
+    }
+
+    @Test
+    fun `result card back key dispatches onStay exactly once and ignores cancelled or non-back keys`() {
+        val sessionId = "session-back"
+        val turnId = "turn-back"
+        val taskId = "agent-turn:$sessionId:$turnId"
+
+        TaskRuntime.start(context, taskId, sessionId = sessionId, turnId = turnId, conversationId = 30L)
+        TaskRuntime.markScreenTarget(context, sessionId, turnId, displayId = 9)
+
+        TaskRuntime.finish(context, taskId, terminalStatus = "completed", error = null)
+        ShadowLooper.idleMainLooper()
+        assertEquals(taskId, ScreenTaskOverlayHost.getShowingResultTaskId())
+        val card = checkNotNull(ScreenTaskOverlayHost.getResultCardView())
+
+        // 1. 非 Back 按键不被消费吞掉
+        val nonBackDown = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A)
+        assertFalse("非 Back 按键按下不得消费", card.dispatchKeyEvent(nonBackDown))
+        val nonBackUp = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_A)
+        assertFalse("非 Back 按键抬起不得消费", card.dispatchKeyEvent(nonBackUp))
+        assertEquals(taskId, ScreenTaskOverlayHost.getShowingResultTaskId())
+
+        // 2. 无前置 DOWN 的孤立 Back 抬起不得触发退出，且必须消费防穿透
+        val untrackedBackUp = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK)
+        assertTrue("孤立 Back 抬起事件必须消费防穿透", card.dispatchKeyEvent(untrackedBackUp))
+        ShadowLooper.idleMainLooper()
+        assertEquals(taskId, ScreenTaskOverlayHost.getShowingResultTaskId())
+
+        // 3. 被取消的 Back 按键抬起不得触发退出，且必须消费不得泄漏到底层页面
+        val backDown = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK)
+        assertTrue("Back 按键按下必须受理", card.dispatchKeyEvent(backDown))
+        val cancelledBackUp = KeyEvent(0L, 0L, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK, 0, 0, 0, 0, KeyEvent.FLAG_CANCELED)
+        assertTrue("被取消的 Back 抬起事件必须消费", card.dispatchKeyEvent(cancelledBackUp))
+        ShadowLooper.idleMainLooper()
+        assertEquals("被取消的 Back 抬起不得关闭卡片", taskId, ScreenTaskOverlayHost.getShowingResultTaskId())
+        assertNotNull(ScreenTaskOverlayHost.getResultCardView())
+
+        // 4. 正常未取消的完整 Back 按下+抬起序列触发 onStay 且仅安全 dismiss 一次
+        val normalBackDown = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK)
+        assertTrue("正常 Back 按下必须受理且消费", card.dispatchKeyEvent(normalBackDown))
+        val normalBackUp = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK)
+        assertTrue("正常 Back 抬起事件必须消费", card.dispatchKeyEvent(normalBackUp))
+        ShadowLooper.idleMainLooper()
+        assertNull("Back 键触发后结果卡必须完成安全退出", ScreenTaskOverlayHost.getResultCardView())
+        assertNull("Back 键退出后当前任务展示标记必须清空", ScreenTaskOverlayHost.getShowingResultTaskId())
     }
 }

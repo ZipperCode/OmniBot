@@ -17,6 +17,8 @@ internal class ExecutionRegistry {
             Registration(runId, onStop).also { active = it }
         }
 
+    fun hasActive(): Boolean = synchronized(lock) { active != null }
+
     fun stop(runOrTaskId: String? = null): Boolean {
         val normalizedId = runOrTaskId?.trim().orEmpty()
         val callback = synchronized(lock) {

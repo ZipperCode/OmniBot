@@ -114,7 +114,7 @@ def analyze_page_context(
                 attrs.get("content-desc") or attrs.get("contentDescription")
             )
             resource_id = _clean(attrs.get("resource-id") or attrs.get("resourceId"))
-            node_id = _clean(attrs.get("id") or attrs.get("index"))
+            node_id = _clean(attrs.get("id"))
 
             node_clickable = _flag(attrs, "clickable") or _flag(attrs, "checkable")
             node_editable = _flag(attrs, "editable") or class_name.endswith("EditText")

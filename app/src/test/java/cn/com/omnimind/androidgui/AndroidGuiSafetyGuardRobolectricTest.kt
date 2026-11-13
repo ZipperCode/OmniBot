@@ -2,6 +2,11 @@ package cn.com.omnimind.androidgui
 
 import android.app.Application
 import android.graphics.Rect
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import java.io.ByteArrayOutputStream
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.State
 import org.junit.Assert.assertEquals
@@ -695,29 +700,18 @@ class AndroidGuiSafetyGuardRobolectricTest {
         frameSequence: Long? = 10L,
     ): Any {
         val clazz = Class.forName("cn.com.omnimind.androidgui.AndroidGuiPlatformState")
-        val ctor = clazz.declaredConstructors.first { it.parameterCount >= 6 }
+        val ctor = clazz.declaredConstructors.first { it.parameterCount == 8 }
         ctor.isAccessible = true
-        return if (ctor.parameterCount == 8) {
-            ctor.newInstance(
-                "com.test.app",
-                "MainActivity",
-                1080,
-                2400,
-                xml,
-                screenshotJpeg,
-                displayId,
-                frameSequence,
-            )
-        } else {
-            ctor.newInstance(
-                "com.test.app",
-                "MainActivity",
-                1080,
-                2400,
-                xml,
-                screenshotJpeg,
-            )
-        }
+        return ctor.newInstance(
+            "com.test.app",
+            "MainActivity",
+            1080,
+            2400,
+            xml,
+            screenshotJpeg,
+            displayId,
+            frameSequence,
+        )
     }
 
     private fun createFakePlatform(
@@ -974,5 +968,1222 @@ class AndroidGuiSafetyGuardRobolectricTest {
         assertFalse(result.success)
         assertEquals("action_target_ambiguous", result.message)
         assertEquals(0, dispatchCount)
+    }
+
+    private fun createTestBitmap(
+        width: Int = 1080,
+        height: Int = 2400,
+        color: Int = Color.RED,
+        fillScreen: Boolean = true,
+        drawRect: Rect? = null,
+        rectColor: Int = Color.BLUE,
+    ): ByteArray {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        if (fillScreen) {
+            canvas.drawColor(color)
+        }
+        if (drawRect != null) {
+            val paint = Paint().apply { this.color = rectColor }
+            canvas.drawRect(drawRect, paint)
+        }
+        return ByteArrayOutputStream().use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            bitmap.recycle()
+            out.toByteArray()
+        }
+    }
+
+    @Test
+    fun swipeObstructedByMidpointDialogPopupRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        // 基线状态：全屏可滚动容器（列表），无任何弹窗遮挡
+        val baselineXml = """
+            <hierarchy>
+              <node id="scroll_container" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" window-layer="10" visible-to-user="true">
+                <node id="content" class="android.widget.LinearLayout" bounds="[0,0][1080,4800]" visible-to-user="true">
+                  <node id="item1" text="条目1" bounds="[50,200][1030,400]" visible-to-user="true" />
+                  <node id="item2" text="条目2" bounds="[50,2000][1030,2200]" visible-to-user="true" />
+                </node>
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        // 实时状态：中途弹出 Dialog 遮挡滑动轨迹正中央 [100,800][980,1600]
+        // 滑动起点 (540, 1920) 与终点 (540, 480) 均落在弹窗外部，但滑动线段正中穿过高层弹窗！
+        val freshXml = """
+            <hierarchy>
+              <node id="scroll_container" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" window-layer="10" visible-to-user="true">
+                <node id="content" class="android.widget.LinearLayout" bounds="[0,0][1080,4800]" visible-to-user="true">
+                  <node id="item1" text="条目1" bounds="[50,200][1030,400]" visible-to-user="true" />
+                  <node id="item2" text="条目2" bounds="[50,2000][1030,2200]" visible-to-user="true" />
+                </node>
+              </node>
+              <node id="dialog" class="android.app.Dialog" window-id="2" window-layer="20" bounds="[100,800][980,1600]" visible-to-user="true" clickable="true">
+                <node id="dialog_title" text="更新提醒" bounds="[200,900][880,1050]" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        // 滑动从 Y=1920 (800) 滑向 Y=480 (200)，线段与中途出现的弹窗相交，必须拦截并拒绝派发
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse("预期弹窗遮挡时滑动被拒绝，但执行成功", result.success)
+        assertEquals("action_swipe_obstructed", result.message)
+        assertEquals("发生弹窗遮挡时底层派发次数必须为0", 0, dispatchCount)
+    }
+
+    @Test
+    fun swipeObstructedByInteractiveSiblingBlockerRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        // 同一窗口中，具备更高绘序且可交互的兄弟遮挡层（如悬浮横幅）
+        val baselineXml = """
+            <hierarchy>
+              <node id="root" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" window-id="1" visible-to-user="true">
+                <node id="scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" drawing-order="1" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val freshXml = """
+            <hierarchy>
+              <node id="root" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" window-id="1" visible-to-user="true">
+                <node id="scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" drawing-order="1" visible-to-user="true" />
+                <node id="floating_banner" class="android.view.View" bounds="[200,900][880,1500]" window-id="1" drawing-order="2" clickable="true" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 750.0,
+                    "x2" to 500.0,
+                    "y2" to 250.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_swipe_obstructed", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun swipeNotObstructedByNonInteractiveSiblingAllowsAndDispatchesViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        // 非可交互兄弟覆盖物（如纯透明渐变视图），不阻挡滑动触摸手势
+        val baselineXml = """
+            <hierarchy>
+              <node id="root" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" window-id="1" visible-to-user="true">
+                <node id="scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" drawing-order="1" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val freshXml = """
+            <hierarchy>
+              <node id="root" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" window-id="1" visible-to-user="true">
+                <node id="scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" drawing-order="1" visible-to-user="true" />
+                <node id="gradient_shadow" class="android.view.View" bounds="[200,900][880,1500]" window-id="1" drawing-order="2" clickable="false" focusable="false" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 750.0,
+                    "x2" to 500.0,
+                    "y2" to 250.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertTrue("非可交互兄弟节点不应阻挡滑动", result.success)
+        assertEquals(1, dispatchCount)
+    }
+
+    @Test
+    fun swipeNormalScrollableContainerClearPathDispatchesSuccessfullyViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        val scrollXml = """
+            <hierarchy>
+              <node id="scroll_view" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" visible-to-user="true">
+                <node id="item1" text="条目1" bounds="[50,200][1030,400]" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = scrollXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertTrue(result.success)
+        assertEquals(1, dispatchCount)
+    }
+
+
+    @Test
+    fun swipeTargetMissingInFreshRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineXml = """
+            <hierarchy>
+              <node id="container" resource-id="com.test.app:id/main_scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" visible-to-user="true" />
+            </hierarchy>
+        """.trimIndent()
+
+        // fresh 中目标控件丢失（如页面跳转或被清空）
+        val freshXml = """
+            <hierarchy>
+              <node id="empty_root" class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true" />
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "node_resource_id" to "com.test.app:id/main_scroll_list",
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_target_missing", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun swipeTargetAmbiguousInFreshRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineXml = """
+            <hierarchy>
+              <node id="list" resource-id="com.test.app:id/scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" visible-to-user="true" />
+            </hierarchy>
+        """.trimIndent()
+
+        // fresh 中出现两个同名可滚动列表，且起点 (540, 1920) 落在两者中间空白处，无法消歧
+        val freshXml = """
+            <hierarchy>
+              <node id="list1" resource-id="com.test.app:id/scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[0,0][500,2400]" visible-to-user="true" />
+              <node id="list2" resource-id="com.test.app:id/scroll_list" class="android.widget.ScrollView" scrollable="true" bounds="[580,0][1080,2400]" visible-to-user="true" />
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "node_resource_id" to "com.test.app:id/scroll_list",
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_target_ambiguous", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeStartPointRoiChangeRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        // 纯视觉（XML 无节点），基线为红色底图
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        // fresh 截图在起点 (540, 1920) 附近发生剧烈像素变化（绘制大蓝块）
+        val freshScreenshot = createTestBitmap(
+            color = Color.RED,
+            drawRect = Rect(500, 1850, 580, 1950),
+            rectColor = Color.BLUE,
+        )
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = freshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_observation_expired", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeMidpointRoiChangeRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        // 中点为 (540, 1200)，起点与终点均未改变，仅中点发生像素剧烈变化
+        val freshScreenshot = createTestBitmap(
+            color = Color.RED,
+            drawRect = Rect(500, 1150, 580, 1250),
+            rectColor = Color.BLUE,
+        )
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = freshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_observation_expired", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeEndPointRoiChangeRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        // 终点为 (540, 480)，终点附近发生像素变化
+        val freshScreenshot = createTestBitmap(
+            color = Color.RED,
+            drawRect = Rect(500, 430, 580, 530),
+            rectColor = Color.BLUE,
+        )
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = freshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_observation_expired", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeMissingScreenshotRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    // fresh 缺失截图
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = null, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_observation_expired", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeUnchangedIntactScreenshotsDispatchesSuccessfullyViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        val freshScreenshot = createTestBitmap(color = Color.RED)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = freshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertTrue(result.success)
+        assertEquals(1, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeFreshEntityCoveringPathRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        val freshScreenshot = createTestBitmap(color = Color.RED)
+
+        // 纯视觉基线无节点，但在 fresh 中确证出现一个可交互弹窗节点横跨滑动路径
+        val freshXmlWithEntity = """
+            <hierarchy>
+              <node id="popup" class="android.app.Dialog" window-id="2" window-layer="20" bounds="[100,800][980,1600]" visible-to-user="true" clickable="true" />
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXmlWithEntity, screenshotJpeg = freshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("action_swipe_obstructed", result.message)
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun pureVisualSwipeCorruptedScreenshotRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        val baselineScreenshot = createTestBitmap(color = Color.RED)
+        // 损坏的截图字节数组（无法解码为有效 Bitmap）
+        val corruptedFreshScreenshot = byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = baselineScreenshot, displayId = displayId)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = corruptedFreshScreenshot, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse("损坏的截图字节数组不得静默放行", result.success)
+        assertTrue(
+            "损坏截图拒绝原因应属于观测/显示不匹配集合: ${result.message}",
+            result.message in setOf("action_observation_expired", "action_display_mismatch")
+        )
+        assertEquals(0, dispatchCount)
+    }
+
+    @Test
+    fun swipeBaselineResolutionMismatchRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        val baseline = AndroidGuiObservationBaseline(
+            observationId = "obs_res_mismatch",
+            displayId = 0,
+            frameSequence = 1L,
+            stateId = "state_res_mismatch",
+            packageName = "com.test.app",
+            activityName = "MainActivity",
+            displayWidth = 720, // baseline 尺寸与当前屏幕 1080x2400 不一致
+            displayHeight = 1280,
+            xml = "<hierarchy />",
+        )
+
+        val guardResult = AndroidGuiSafetyGuard.prepareGuardedAction(
+            action = Action("swipe", mapOf("x1" to 500.0, "y1" to 800.0, "x2" to 500.0, "y2" to 200.0)),
+            expectedState = null,
+            expectedObservationId = "obs_res_mismatch",
+            baseline = baseline,
+            currentDisplayId = 0,
+            currentDisplaySize = displaySize,
+            freshXml = "<hierarchy />",
+        )
+
+        assertTrue(guardResult is GuardResult.Rejected)
+        val failure = (guardResult as GuardResult.Rejected).failure
+        assertFalse(failure.success)
+        assertEquals("action_display_mismatch", failure.message)
+    }
+
+    @Test
+    fun swipeObstructedByAnonymousMidpointDialogWithoutIdRejectsAndDispatchesZeroViaEnvironmentAct() = runBlocking {
+        var dispatchCount = 0
+        var observeCount = 0
+
+        // 基线状态：全树节点均无 id 属性（空字符串 id）的可滚动容器
+        val baselineXml = """
+            <hierarchy>
+              <node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" window-layer="10" visible-to-user="true">
+                <node class="android.widget.LinearLayout" bounds="[0,0][1080,4800]" visible-to-user="true">
+                  <node text="条目1" bounds="[50,200][1030,400]" visible-to-user="true" />
+                  <node text="条目2" bounds="[50,2000][1030,2200]" visible-to-user="true" />
+                </node>
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        // 实时状态：中途弹出无 id 的高层 Dialog 遮挡滑动轨迹正中央 [100,800][980,1600]
+        val freshXml = """
+            <hierarchy>
+              <node class="android.widget.ScrollView" scrollable="true" bounds="[0,0][1080,2400]" window-id="1" window-layer="10" visible-to-user="true">
+                <node class="android.widget.LinearLayout" bounds="[0,0][1080,4800]" visible-to-user="true">
+                  <node text="条目1" bounds="[50,200][1030,400]" visible-to-user="true" />
+                  <node text="条目2" bounds="[50,2000][1030,2200]" visible-to-user="true" />
+                </node>
+              </node>
+              <node class="android.app.Dialog" window-id="2" window-layer="20" bounds="[100,800][980,1600]" visible-to-user="true" clickable="true">
+                <node text="更新提醒" bounds="[200,900][880,1050]" visible-to-user="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                dispatchCount++
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+
+        val result = env.act(
+            action = Action(
+                "swipe",
+                mapOf(
+                    "x1" to 500.0,
+                    "y1" to 800.0,
+                    "x2" to 500.0,
+                    "y2" to 200.0,
+                )
+            ),
+            expectedObservationId = obs.extra["observation_id"] as? String,
+            awaitStabilization = false,
+        )
+
+        assertFalse("全树无id时中途高层弹窗遮挡必须被拒绝", result.success)
+        assertEquals("action_swipe_obstructed", result.message)
+        assertEquals("无id高层弹窗遮挡时底层派发次数必须为0", 0, dispatchCount)
+    }
+
+    @Test
+    fun actWithConfirmedBaselineTargetPopulatesTargetConfirmedDiagnostics() = runBlocking {
+        val buttonXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/submit_btn" class="android.widget.Button" text="确定" bounds="[100,200][500,400]" visible-to-user="true" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = buttonXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        val result = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "node_resource_id" to "com.example:id/submit_btn",
+                    "target_description" to "确定",
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+
+        assertTrue(result.success)
+        assertEquals("ok", result.message)
+        assertEquals("target_confirmed", result.diagnostics["guard_status"])
+        assertEquals(obsId, result.diagnostics["observation_id"])
+        assertEquals("com.example:id/submit_btn", result.diagnostics["target_resource_id"])
+        assertEquals("android.widget.Button", result.diagnostics["target_class"])
+        assertEquals("host_completed", result.diagnostics["state_stabilization"])
+        assertEquals("runtime_delegated", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun actWhenDispatchFailsPreservesTargetConfirmedDiagnosticsWithoutMarkingSuccess() = runBlocking {
+        val buttonXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/submit_btn" class="android.widget.Button" text="确定" bounds="[100,200][500,400]" visible-to-user="true" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = buttonXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "input_gesture_rejected",
+                    diagnostics = mapOf("reason" to "hardware_busy"),
+                )
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        val result = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "node_resource_id" to "com.example:id/submit_btn",
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+
+        assertFalse(result.success)
+        assertEquals("input_gesture_rejected", result.message)
+        assertEquals("target_confirmed", result.diagnostics["guard_status"])
+        assertEquals(obsId, result.diagnostics["observation_id"])
+        assertEquals("com.example:id/submit_btn", result.diagnostics["target_resource_id"])
+        assertEquals("android.widget.Button", result.diagnostics["target_class"])
+        assertEquals("hardware_busy", result.diagnostics["reason"])
+    }
+
+    @Test
+    fun actWithoutExpectedObservationIdOrTargetCluesDoesNotSetTargetConfirmed() = runBlocking {
+        val buttonXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/submit_btn" class="android.widget.Button" text="确定" bounds="[100,200][500,400]" visible-to-user="true" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = buttonXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        // 无 expectedObservationId
+        val resultNoExpectedObs = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "node_resource_id" to "com.example:id/submit_btn",
+                ),
+            ),
+            expectedObservationId = null,
+            awaitStabilization = false,
+        )
+        assertTrue(resultNoExpectedObs.success)
+        assertNull(resultNoExpectedObs.diagnostics["guard_status"])
+
+        // 纯坐标点击
+        val resultPureCoord = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+        assertTrue(resultPureCoord.success)
+        assertNull(resultPureCoord.diagnostics["guard_status"])
+    }
+
+    @Test
+    fun actWithLongPressAndInputTextPopulatesTargetConfirmed() = runBlocking {
+        val formXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/long_btn" class="android.widget.Button" bounds="[100,200][500,400]" visible-to-user="true" long-clickable="true" />
+                <node id="2" resource-id="com.example:id/input_box" class="android.widget.EditText" bounds="[100,500][800,700]" visible-to-user="true" editable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = formXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        val resultLongPress = env.act(
+            action = Action(
+                tool = "long_press",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "duration_ms" to 800,
+                    "node_resource_id" to "com.example:id/long_btn",
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+        assertTrue(resultLongPress.success)
+        assertEquals("target_confirmed", resultLongPress.diagnostics["guard_status"])
+        assertEquals("com.example:id/long_btn", resultLongPress.diagnostics["target_resource_id"])
+        assertEquals("android.widget.Button", resultLongPress.diagnostics["target_class"])
+
+        val resultInput = env.act(
+            action = Action(
+                tool = "input_text",
+                args = mapOf(
+                    "node_resource_id" to "com.example:id/input_box",
+                    "text" to "confidential_text",
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+        assertTrue(resultInput.success)
+        assertEquals("target_confirmed", resultInput.diagnostics["guard_status"])
+        assertEquals("com.example:id/input_box", resultInput.diagnostics["target_resource_id"])
+        assertEquals("android.widget.EditText", resultInput.diagnostics["target_class"])
+        assertNull(resultInput.diagnostics["text"])
+        assertNull(resultInput.diagnostics["confidential_text"])
+    }
+
+    @Test
+    fun actWithInteractiveAncestorPromotionReflectsOperatingTargetAndRejectsNoIdAncestor() = runBlocking {
+        val buttonWithLabelXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="btn" resource-id="com.example:id/checkout_btn" class="android.widget.Button" bounds="[100,200][500,400]" visible-to-user="true" clickable="true">
+                  <node id="label" resource-id="com.example:id/checkout_label" class="android.widget.TextView" text="去结算" bounds="[150,250][450,350]" visible-to-user="true" />
+                </node>
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val buttonWithoutResIdXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="btn" class="android.widget.Button" bounds="[100,200][500,400]" visible-to-user="true" clickable="true">
+                  <node id="label" resource-id="com.example:id/checkout_label" class="android.widget.TextView" text="去结算" bounds="[150,250][450,350]" visible-to-user="true" />
+                </node>
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        var currentXml = buttonWithLabelXml
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = currentXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs1 = env.observeWithDiagnostics()
+        val obsId1 = obs1.extra["observation_id"] as String
+
+        val resultPromoted = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 300.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "target_description" to "去结算",
+                ),
+            ),
+            expectedObservationId = obsId1,
+            awaitStabilization = false,
+        )
+        assertTrue(resultPromoted.success)
+        assertEquals("target_confirmed", resultPromoted.diagnostics["guard_status"])
+        assertEquals("com.example:id/checkout_btn", resultPromoted.diagnostics["target_resource_id"])
+        assertEquals("android.widget.Button", resultPromoted.diagnostics["target_class"])
+
+        currentXml = buttonWithoutResIdXml
+        val obs2 = env.observeWithDiagnostics()
+        val obsId2 = obs2.extra["observation_id"] as String
+
+        val resultNoIdAncestor = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 300.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "target_description" to "去结算",
+                ),
+            ),
+            expectedObservationId = obsId2,
+            awaitStabilization = false,
+        )
+        assertTrue(resultNoIdAncestor.success)
+        assertNull(resultNoIdAncestor.diagnostics["guard_status"])
+    }
+
+    @Test
+    fun actWithTargetMissingOrInvisibleInFreshRejectsWithoutTargetConfirmed() = runBlocking {
+        val baselineXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/submit_btn" class="android.widget.Button" text="确定" bounds="[100,200][500,400]" visible-to-user="true" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+        val emptyFreshXml = "<hierarchy />"
+        val invisibleFreshXml = """
+            <hierarchy>
+              <node class="android.widget.FrameLayout" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="1" resource-id="com.example:id/submit_btn" class="android.widget.Button" text="确定" bounds="[100,200][500,400]" visible-to-user="false" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        var observeCount = 0
+        var freshXml = emptyFreshXml
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                observeCount++
+                if (observeCount == 1) {
+                    createPlatformState(xml = baselineXml, displayId = displayId)
+                } else {
+                    createPlatformState(xml = freshXml, displayId = displayId)
+                }
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        val resultMissing = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "node_resource_id" to "com.example:id/submit_btn",
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+        assertFalse(resultMissing.success)
+        assertEquals("action_target_missing", resultMissing.message)
+        assertNull(resultMissing.diagnostics["guard_status"])
+
+        observeCount = 0
+        freshXml = invisibleFreshXml
+        val obs2 = env.observeWithDiagnostics()
+        val obsId2 = obs2.extra["observation_id"] as String
+
+        val resultInvisible = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                    "node_resource_id" to "com.example:id/submit_btn",
+                ),
+            ),
+            expectedObservationId = obsId2,
+            awaitStabilization = false,
+        )
+        assertFalse(resultInvisible.success)
+        assertEquals("action_target_invisible", resultInvisible.message)
+        assertNull(resultInvisible.diagnostics["guard_status"])
+    }
+
+    @Test
+    fun actWithClearPointAdjustedRetainsAdjustedCoordsAndSetsTargetConfirmed() = runBlocking {
+        val occludedXml = """
+            <hierarchy>
+              <node id="root" window-id="1" bounds="[0,0][1080,2400]" visible-to-user="true">
+                <node id="target" resource-id="com.app:id/save_btn" class="android.widget.Button" drawing-order="1" text="保存" bounds="[100,200][500,600]" visible-to-user="true" clickable="true" />
+                <node id="banner" drawing-order="2" bounds="[100,200][500,400]" visible-to-user="true" clickable="true" />
+              </node>
+            </hierarchy>
+        """.trimIndent()
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, displayId ->
+                createPlatformState(xml = occludedXml, displayId = displayId)
+            },
+            onDispatch = { _, _ ->
+                AndroidGuiActionResult(true, "ok")
+            },
+        )
+
+        val env = createEnvironment(context, fakePlatform)
+        val obs = env.observeWithDiagnostics()
+        val obsId = obs.extra["observation_id"] as String
+
+        val result = env.act(
+            action = Action(
+                tool = "click",
+                args = mapOf(
+                    "target_description" to "保存",
+                    "x" to 250.0 / 1080.0 * 1000.0,
+                    "y" to 300.0 / 2400.0 * 1000.0,
+                ),
+            ),
+            expectedObservationId = obsId,
+            awaitStabilization = false,
+        )
+
+        assertTrue(result.success)
+        assertNotNull(result.diagnostics["clear_point_adjusted"])
+        assertNotNull(result.diagnostics["original_coords"])
+        assertEquals("target_confirmed", result.diagnostics["guard_status"])
+        assertEquals(obsId, result.diagnostics["observation_id"])
+        assertEquals("com.app:id/save_btn", result.diagnostics["target_resource_id"])
+        assertEquals("android.widget.Button", result.diagnostics["target_class"])
     }
 }

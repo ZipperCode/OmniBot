@@ -408,6 +408,156 @@ class DeviceDisplayManagerTest {
     }
 
     @Test
+    fun `launchActivity resolves single MAIN and LAUNCHER activity without DEFAULT and starts on target display with user`() {
+        val fixturePkg = "cn.com.omnimind.androidgui.test"
+        val fixtureComponent = "cn.com.omnimind.androidgui.test/cn.com.omnimind.androidgui.fixture.TestGuiFixtureActivity"
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { cmd ->
+                if (cmd.contains("package") && cmd.contains("query-activities") && cmd.contains(fixturePkg)) {
+                    Pair(0, "$fixtureComponent\n")
+                } else {
+                    Pair(-1, "")
+                }
+            }
+        )
+
+        val launched = stub.launchActivity(displayId = 42, packageName = fixturePkg)
+        assertTrue("Launches normal app without DEFAULT on target display", launched)
+        assertTrue("Never issues force-stop", stub.executedCommands.none { cmd -> cmd.contains("force-stop") })
+        assertTrue("Never adds CLEAR_TASK", stub.executedCommands.none { cmd -> cmd.any { it.contains("CLEAR_TASK") } })
+
+        assertTrue("Launches via am start targeting display, component, and user", stub.executedCommands.any { cmd ->
+            cmd.contains("/system/bin/am") &&
+                cmd.contains("start") &&
+                cmd.contains("-W") &&
+                cmd.contains("--display") &&
+                cmd.contains("42") &&
+                cmd.contains("-n") &&
+                cmd.contains(fixtureComponent) &&
+                cmd.contains("--user") &&
+                cmd.contains("0")
+        })
+    }
+
+    @Test
+    fun `launchActivity with multiple launcher activities strictly refuses to start`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { _ ->
+                Pair(0, "com.example.multi/com.example.multi.MainActivity\ncom.example.multi/com.example.multi.SecondActivity\n")
+            }
+        )
+
+        val launched = stub.launchActivity(displayId = 42, packageName = "com.example.multi")
+        assertFalse("Refuses to start when multiple launcher candidates exist", launched)
+        assertTrue("Never executes am start on multiple candidates", stub.executedCommands.none { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start")
+        })
+    }
+
+    @Test
+    fun `launchActivity with no resolved launcher activity refuses to start`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { _ ->
+                Pair(0, "")
+            }
+        )
+
+        val launched = stub.launchActivity(displayId = 42, packageName = "com.example.empty")
+        assertFalse("Refuses to start when no launcher activity found", launched)
+        assertTrue("Never executes am start when resolution empty", stub.executedCommands.none { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start")
+        })
+    }
+
+    @Test
+    fun `launchActivity with foreign package in resolution refuses to start`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { _ ->
+                Pair(0, "com.foreign.app/com.foreign.app.MainActivity\n")
+            }
+        )
+
+        val launched = stub.launchActivity(displayId = 42, packageName = "com.target.app")
+        assertFalse("Refuses to start when resolved component belongs to foreign package", launched)
+        assertTrue("Never executes am start on foreign package", stub.executedCommands.none { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start")
+        })
+    }
+
+    @Test
+    fun `launchActivity with malformed package or component strictly fails without command execution`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { _ ->
+                Pair(0, "com.target.app/;rm -rf\n")
+            }
+        )
+
+        // 畸形包名
+        assertFalse("Malformed package name fails", stub.launchActivity(42, "malformed;pkg"))
+        assertFalse("Empty package name fails", stub.launchActivity(42, ""))
+        // 畸形组件名
+        assertFalse("Malformed component name fails", stub.launchActivity(42, "com.target.app"))
+        assertTrue("Never executes am start on malformed input", stub.executedCommands.none { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start")
+        })
+    }
+
+    @Test
+    fun `launchActivity with negative or invalid user refuses to start`() {
+        val stub = FakePrivilegedDisplayServiceStub(initialTasks = emptyList(), overrideUserId = -1)
+
+        val launched = stub.launchActivity(displayId = 42, packageName = "com.example.app")
+        assertFalse("Refuses to start when userId is negative", launched)
+        assertTrue("Never executes am start on invalid user", stub.executedCommands.none { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start")
+        })
+    }
+
+    @Test
+    fun `launchActivity rejects invalid or ambiguous launcher query outputs`() {
+        val invalidOutputs = listOf(
+            "", // 空结果
+            "\n  \n", // 仅空白换行
+            "com.example.app/A\ncom.example.app/B\n", // 多行候选
+            "com.other.app/com.other.app.MainActivity\n", // 跨包 foreign package
+            "com.example.app/\n", // 缺失类名
+            "com.example.app/..\n", // 畸形类名
+            "com.example.app/;touch\n", // 包含 shell 字符
+            "not_a_component\n", // 非组件格式
+        )
+
+        for (output in invalidOutputs) {
+            val stub = FakePrivilegedDisplayServiceStub(
+                initialTasks = emptyList(),
+                commandOutputProvider = { _ -> Pair(0, output) },
+            )
+            val launched = stub.launchActivity(displayId = 42, packageName = "com.example.app")
+            assertFalse("Output '$output' must be rejected", launched)
+            assertTrue("Never executes am start on invalid output '$output'", stub.executedCommands.none { cmd ->
+                cmd.contains("/system/bin/am") && cmd.contains("start")
+            })
+        }
+    }
+
+    @Test
+    fun `launchActivity accepts valid relative class name in query output`() {
+        val stub = FakePrivilegedDisplayServiceStub(
+            initialTasks = emptyList(),
+            commandOutputProvider = { _ -> Pair(0, "com.example.app/.MainActivity\n") },
+        )
+        val launched = stub.launchActivity(displayId = 42, packageName = "com.example.app")
+        assertTrue("Accepts valid relative class name", launched)
+        assertTrue("Launches via am start with relative component", stub.executedCommands.any { cmd ->
+            cmd.contains("/system/bin/am") && cmd.contains("start") && cmd.contains("com.example.app/.MainActivity")
+        })
+    }
+
+    @Test
     fun `moveRootTask validates exact childTaskIds set matching on readback`() {
         val fakeAtmServer = object {
             @Suppress("UNUSED_PARAMETER")
@@ -974,8 +1124,11 @@ private class FakePrivilegedDisplayBridge(
     }
 }
 
-private class FakePrivilegedDisplayServiceStub(
+private open class FakePrivilegedDisplayServiceStub(
     val initialTasks: List<PrivilegedDisplayServiceStub.TaskSnapshot> = emptyList(),
+    val launcherResolver: ((packageName: String, userId: Int) -> String?)? = null,
+    val commandOutputProvider: ((command: List<String>) -> Pair<Int, String>)? = null,
+    val overrideUserId: Int? = null,
 ) : PrivilegedDisplayServiceStub(allowedClientUid = 10000) {
     val executedCommands = mutableListOf<List<String>>()
     val tasksOnDisplays = mutableMapOf<Int, MutableList<PrivilegedDisplayServiceStub.TaskSnapshot>>()
@@ -987,6 +1140,11 @@ private class FakePrivilegedDisplayServiceStub(
     }
 
     override fun isDisplayAllowed(displayId: Int): Boolean = true
+    override fun resolveAppUserId(): Int {
+        if (overrideUserId != null) return overrideUserId
+        return super.resolveAppUserId()
+    }
+
 
     override fun queryRootTasksInternal(displayId: Int): List<PrivilegedDisplayServiceStub.TaskSnapshot> =
         tasksOnDisplays[displayId] ?: emptyList()
@@ -1001,6 +1159,29 @@ private class FakePrivilegedDisplayServiceStub(
             return """{"success":true,"code":"ok","taskId":$taskId,"taskKind":"${task.taskKind}","sourceDisplayId":$sourceDisplayId,"targetDisplayId":$targetDisplayId,"verified":true}"""
         }
         return """{"success":false,"code":"task_not_found","taskId":$taskId,"taskKind":"unknown","sourceDisplayId":$sourceDisplayId,"targetDisplayId":$targetDisplayId,"verified":false}"""
+    }
+
+    override fun resolveLauncherComponent(packageName: String, userId: Int): String? {
+        if (launcherResolver != null) {
+            return launcherResolver.invoke(packageName, userId)
+        }
+        if (commandOutputProvider != null) {
+            return super.resolveLauncherComponent(packageName, userId)
+        }
+        // 既有测试兼容：默认模拟已解析的唯一 MainActivity，确保既有无 mock 测试直通
+        if (packageName.isNotBlank() && userId >= 0 && !packageName.contains(" ")) {
+            return "$packageName/$packageName.MainActivity"
+        }
+        return super.resolveLauncherComponent(packageName, userId)
+    }
+
+    override fun executeRootCommandWithOutput(vararg command: String): Pair<Int, String> {
+        val list = command.toList()
+        executedCommands.add(list)
+        if (commandOutputProvider != null) {
+            return commandOutputProvider.invoke(list)
+        }
+        return super.executeRootCommandWithOutput(*command)
     }
 
     override fun executeRootCommand(vararg command: String): Boolean {

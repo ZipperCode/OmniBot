@@ -160,6 +160,9 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
             val reserve = adaptiveReserve.coerceAtMost((capacity / 2).coerceAtLeast(1))
             return (capacity - reserve).coerceAtLeast(1)
         }
+        internal fun outputBudgetForCapacity(capacity: Int): Int =
+            (capacity - resolveAutoCompactionTrigger(capacity)).coerceAtLeast(1)
+
 
         internal fun resolveEffectiveContextCapacity(
             storedThreshold: Int?,
@@ -276,7 +279,7 @@ Do NOT continue the conversation or answer questions inside it. Do NOT translate
 
     override suspend fun resolveOutputTokenBudget(conversationId: Long?): Int {
         val capacity = resolvePromptTokenThreshold(conversationId)
-        return (capacity - resolveAutoCompactionTrigger(capacity)).coerceAtLeast(1)
+        return outputBudgetForCapacity(capacity)
     }
 
     open override suspend fun compactIfNeeded(

@@ -49,15 +49,20 @@ data class State(
             displayHeight: Int,
             xml: String,
             screenshotPath: String? = null,
+            visualFingerprint: String? = null,
         ): State {
             require(displayWidth > 0 && displayHeight > 0) { "state_display_invalid" }
-            val identity = listOf(
+            val identityElements = mutableListOf(
                 packageName,
                 activityName,
                 xml,
                 displayWidth.toString(),
                 displayHeight.toString(),
-            ).joinToString("\u0000")
+            )
+            visualFingerprint?.trim()?.takeIf(String::isNotEmpty)?.let {
+                identityElements.add(it)
+            }
+            val identity = identityElements.joinToString("\u0000")
             return State(
                 stateId = "state_${sha256(identity).take(20)}",
                 packageName = packageName,

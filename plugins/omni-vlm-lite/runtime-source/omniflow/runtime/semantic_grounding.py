@@ -27,10 +27,16 @@ def resolve_semantic_action(
     observation: Observation,
 ) -> SemanticGroundingResult:
     target = str(action.args.get("target_description") or "").strip()
-    if action.tool not in _SUPPORTED_TOOLS or not target:
+    explicit_node_id = str(action.args.get("node_id") or "").strip() or None
+    explicit_resource_id = str(action.args.get("node_resource_id") or "").strip() or None
+    has_selector = explicit_node_id is not None or explicit_resource_id is not None
+    if action.tool not in _SUPPORTED_TOOLS or (not target and not has_selector):
         return SemanticGroundingResult(action)
 
-    display = observation.extra.get("display") if isinstance(observation.extra, dict) else None
+    raw_extra = observation.extra if isinstance(observation.extra, dict) else {}
+    display = raw_extra.get("display")
+    if not isinstance(display, dict) and isinstance(raw_extra.get("auxiliaries"), dict):
+        display = raw_extra["auxiliaries"].get("display")
     if not isinstance(display, dict):
         return _blocked(action, target, "display_missing", message="屏幕尺寸信息缺失")
     try:
@@ -40,7 +46,6 @@ def resolve_semantic_action(
         return _blocked(action, target, "display_invalid", message="屏幕尺寸参数非法")
     if width <= 0 or height <= 0:
         return _blocked(action, target, "display_invalid", message="屏幕尺寸非正数")
-
     # 1. 尝试解析无障碍 XML；空树或异常时不硬性阻断，保留 OCR 与视觉回退路径
     root: ET.Element | None = None
     xml_text = str(observation.xml or "").strip()
@@ -54,6 +59,98 @@ def resolve_semantic_action(
             xml_diagnostic = f"无障碍XML解析异常({err})，进入OCR与视觉路径"
 
     normalized_target = _normalize(target)
+    parent_by_child = (
+        {child: parent for parent in root.iter() for child in parent}
+        if root is not None
+        else {}
+    )
+
+    # 2. 显式 selector 优先处理：node_id 在本帧唯一；同时给 resource_id 必须同一节点符合；只给 resource_id 时必须唯一。
+    # 缺失返回 target_selector_missing，冲突返回 target_selector_mismatch，多候选沿 target_ambiguous，均不回退坐标。
+    if has_selector:
+        if root is None:
+            return _blocked(action, target, "target_selector_missing", message="无障碍XML不可用，显式选择器未匹配")
+        matched_element: ET.Element | None = None
+        if explicit_node_id is not None:
+            id_matches = [
+                elem for elem in root.iter()
+                if str(elem.attrib.get("id") or "").strip() == explicit_node_id
+            ]
+            if len(id_matches) == 0:
+                return _blocked(action, target, "target_selector_missing", message="未找到指定node_id")
+            if len(id_matches) > 1:
+                return _blocked(action, target, "target_ambiguous", candidate_count=len(id_matches), message="node_id不唯一")
+            candidate = id_matches[0]
+            if explicit_resource_id is not None:
+                cand_res = str(candidate.attrib.get("resource-id") or candidate.attrib.get("resourceId") or "").strip()
+                if cand_res != explicit_resource_id:
+                    return _blocked(action, target, "target_selector_mismatch", message="node_id与resource_id冲突")
+            matched_element = candidate
+        else:
+            res_matches = [
+                elem for elem in root.iter()
+                if str(elem.attrib.get("resource-id") or elem.attrib.get("resourceId") or "").strip() == explicit_resource_id
+            ]
+            if len(res_matches) == 0:
+                return _blocked(action, target, "target_selector_missing", message="未找到指定resource_id")
+            if len(res_matches) > 1:
+                visible_matches = [
+                    elem for elem in res_matches
+                    if str(elem.attrib.get("visible") or "true").strip().casefold() not in {"0", "false"}
+                    and str(elem.attrib.get("displayed") or "true").strip().casefold() not in {"0", "false"}
+                    and str(elem.attrib.get("enabled") or "true").strip().casefold() not in {"0", "false"}
+                ]
+                if len(visible_matches) == 1:
+                    matched_element = visible_matches[0]
+                else:
+                    return _blocked(action, target, "target_ambiguous", candidate_count=len(visible_matches or res_matches), message="resource_id不唯一")
+            else:
+                matched_element = res_matches[0]
+
+        actionable = _nearest_actionable(
+            matched_element,
+            parent_by_child,
+            tool=action.tool,
+        )
+        if actionable is None:
+            return _blocked(action, target, "target_selector_missing", message="选择器节点及其祖先不可操作")
+        bounds = _parse_bounds(actionable.attrib.get("bounds"))
+        if bounds is None:
+            return _blocked(action, target, "target_selector_missing", message="选择器节点无有效区域坐标")
+
+        center_x = (bounds[0] + bounds[2]) / 2.0
+        center_y = (bounds[1] + bounds[3]) / 2.0
+
+        anc_node_id = str(actionable.attrib.get("id") or matched_element.attrib.get("id") or "").strip() or None
+        anc_resource_id = str(
+            actionable.attrib.get("resource-id")
+            or actionable.attrib.get("resourceId")
+            or matched_element.attrib.get("resource-id")
+            or matched_element.attrib.get("resourceId")
+            or ""
+        ).strip() or None
+
+        args = {k: v for k, v in action.args.items() if k != "target_description"}
+        args["x"] = center_x / width * 1000.0
+        args["y"] = center_y / height * 1000.0
+        if anc_node_id:
+            args["node_id"] = anc_node_id
+        if anc_resource_id:
+            args["node_resource_id"] = anc_resource_id
+
+        return SemanticGroundingResult(
+            Action(action.tool, args),
+            {
+                "schema_version": "omniflow.semantic-grounding.v1",
+                "status": "resolved",
+                "target_description": target,
+                "match_source": "explicit_selector",
+                "bounds": list(bounds),
+                "node_id": anc_node_id,
+                "node_resource_id": anc_resource_id,
+            },
+        )
+
 
     # 2. 在无障碍树中进行语义匹配（权威遮挡核验由宿主输入锁执行）
     if root is not None:
@@ -100,7 +197,7 @@ def resolve_semantic_action(
                 "x": center_x / width * 1000.0,
                 "y": center_y / height * 1000.0,
             }
-            node_id = str(actionable.attrib.get("id") or actionable.attrib.get("index") or "").strip()
+            node_id = str(actionable.attrib.get("id") or "").strip()
             resource_id = str(actionable.attrib.get("resource-id") or actionable.attrib.get("resourceId") or "").strip()
             if node_id:
                 args["node_id"] = node_id
@@ -368,9 +465,112 @@ def _blocked(
         detail["message"] = message
     return SemanticGroundingResult(action, detail)
 
+def normalize_text(value: str) -> str:
+    return _normalize(value)
+
+
+def parse_bounds(value: str | None) -> tuple[float, float, float, float] | None:
+    return _parse_bounds(value)
+
+
+def parse_viewport_bounds(
+    value: Any,
+    width: float,
+    height: float,
+) -> tuple[float, float, float, float] | None:
+    return _parse_viewport_bounds(value, width, height)
+
+
+def iter_visible_nodes(root: ET.Element):
+    """遍历可见且非密码的 XML 节点，递归剪枝隐藏祖先与密码子树，且跳过 hierarchy 容器根。"""
+    def _walk(element: ET.Element):
+        attrib = element.attrib
+        is_password = str(attrib.get("password") or "false").strip().casefold() in {"1", "true"}
+        if is_password:
+            return
+        visible = str(attrib.get("visible") or "true").strip().casefold()
+        displayed = str(attrib.get("displayed") or "true").strip().casefold()
+        visible_to_user = str(
+            attrib.get("visible-to-user")
+            or attrib.get("visibleToUser")
+            or "true"
+        ).strip().casefold()
+        if (
+            visible in {"0", "false"}
+            or displayed in {"0", "false"}
+            or visible_to_user in {"0", "false"}
+        ):
+            return
+        if element.tag != "hierarchy":
+            yield element
+        for child in element:
+            yield from _walk(child)
+
+    yield from _walk(root)
+
+
+def match_expected_text_in_observation(
+    observation: Observation,
+    expected_text: str,
+) -> tuple[str, str | None] | None:
+    norm_expected = _normalize(expected_text)
+    if not norm_expected:
+        return None
+
+    xml_str = observation.xml
+    extra = observation.extra if isinstance(observation.extra, dict) else {}
+    display = extra.get("display") if isinstance(extra.get("display"), dict) else {}
+    try:
+        display_w = float(display.get("width") or 1000.0)
+        display_h = float(display.get("height") or 1000.0)
+    except (TypeError, ValueError):
+        display_w, display_h = 1000.0, 1000.0
+
+    if isinstance(xml_str, str) and xml_str.strip():
+        try:
+            root = ET.fromstring(xml_str)
+            for elem in iter_visible_nodes(root):
+                attrib = elem.attrib
+                bounds = _parse_bounds(attrib.get("bounds"))
+                if bounds is not None:
+                    if bounds[2] <= 0 or bounds[0] >= display_w or bounds[3] <= 0 or bounds[1] >= display_h:
+                        continue
+                labels = {
+                    _normalize(attrib.get(name, ""))
+                    for name in ("text", "content-desc", "contentDescription")
+                }
+                if norm_expected in labels:
+                    node_id = str(attrib.get("id") or "").strip() or None
+                    return ("xml", node_id)
+        except ET.ParseError:
+            pass
+
+    ocr_data = extra.get("ocr")
+    if isinstance(ocr_data, dict) and str(ocr_data.get("status") or "").strip().lower() == "ready":
+        items = ocr_data.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                confidence = item.get("confidence")
+                if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                    continue
+                conf_float = float(confidence)
+                if not math.isfinite(conf_float) or conf_float < 0.5:
+                    continue
+                if _normalize(item.get("text") or "") == norm_expected:
+                    return ("ocr", None)
+
+    return None
+
 
 __all__ = [
     "SemanticGroundingResult",
+    "iter_visible_nodes",
+    "match_expected_text_in_observation",
+    "normalize_text",
     "resolve_semantic_action",
+    "parse_bounds",
+    "parse_viewport_bounds",
     "semantic_target_at_point",
 ]

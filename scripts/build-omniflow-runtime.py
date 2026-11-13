@@ -117,12 +117,27 @@ def assemble_bundle(
             files[target_in_zip] = data
             overlay_files[rel] = data
 
-    # 同步规范动作契约。
+    # 特征版本加载器与冻结权重分开维护，不修改底包或 checkpoint。
+    transfer_source_dir = runtime_source_dir.parent / "omnitransfer-source"
+    if transfer_source_dir.is_dir():
+        for p in sorted(transfer_source_dir.rglob("*.py")):
+            rel = p.relative_to(transfer_source_dir).as_posix()
+            target_in_zip = f"scripts/runtime/.runtime/omnitransfer/src/{rel}"
+            data = p.read_bytes()
+            files[target_in_zip] = data
+            overlay_files[f"omnitransfer/{rel}"] = data
+
+    # 同步规范动作契约与公共 RunLog 契约。
     if canonical_actions_path.is_file():
         data = canonical_actions_path.read_bytes()
         files["scripts/runtime/python/schemas/oob/oob_canonical_actions.v1.json"] = data
         overlay_files["schemas/oob/oob_canonical_actions.v1.json"] = data
 
+    public_run_log_path = canonical_actions_path.parent / "omniflow_run_log.v1.json"
+    if public_run_log_path.is_file():
+        data = public_run_log_path.read_bytes()
+        files["scripts/runtime/python/schemas/oob/omniflow_run_log.v1.json"] = data
+        overlay_files["schemas/oob/omniflow_run_log.v1.json"] = data
     # 更新包内组件版本。
     if "component.json" in files:
         comp = json.loads(files["component.json"].decode("utf-8"))
@@ -147,6 +162,11 @@ def assemble_bundle(
         for name in sorted(files.keys()):
             if name.startswith("scripts/runtime/python/omniflow/"):
                 rel = name[len("scripts/runtime/python/") :]
+                h_src.update(rel.encode("utf-8"))
+                h_src.update(b"\0")
+                h_src.update(files[name])
+            elif name.startswith("scripts/runtime/.runtime/omnitransfer/src/") and name.endswith(".py"):
+                rel = "omnitransfer/" + name[len("scripts/runtime/.runtime/omnitransfer/src/") :]
                 h_src.update(rel.encode("utf-8"))
                 h_src.update(b"\0")
                 h_src.update(files[name])

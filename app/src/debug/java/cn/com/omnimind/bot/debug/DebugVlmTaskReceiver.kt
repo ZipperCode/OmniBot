@@ -5,9 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Base64
 import android.util.Log
-import cn.com.omnimind.bot.agent.HttpAgentLlmClient
 import cn.com.omnimind.bot.omniflow.OmniVlmPlugin
-import cn.com.omnimind.bot.omniflow.asOmniFlowModelClient
+import cn.com.omnimind.bot.omniflow.createOmniFlowModelClient
 import com.google.gson.GsonBuilder
 import java.io.File
 import java.util.UUID
@@ -46,8 +45,10 @@ class DebugVlmTaskReceiver : BroadcastReceiver() {
                             display = displayId.toString(),
                             displayId = displayId,
                         ),
-                        modelClient = HttpAgentLlmClient(CoroutineScope(currentCoroutineContext()))
-                            .asOmniFlowModelClient(),
+                        modelClient = createOmniFlowModelClient(
+                            scope = CoroutineScope(currentCoroutineContext()),
+                            environment = null,
+                        ),
                     )
                     val resultRunId = result.payload["run_id"]?.toString()?.trim()
                         ?.takeIf(String::isNotEmpty)

@@ -278,18 +278,21 @@ class OmniAgentExecutor(
                 json = json,
                 modelOverride = modelOverride,
             )
+            val routeInfo: HttpController.ChatCompletionRouteInfo? = runCatching {
+                HttpController.resolveChatCompletionRouteInfo(
+                    modelOrScene = agentModelScene,
+                    explicitApiBase = modelOverride?.apiBase,
+                    explicitApiKey = modelOverride?.apiKey,
+                    explicitCustomHeaders = modelOverride?.customHeaders,
+                    explicitModel = modelOverride?.modelId,
+                    explicitProtocolType = modelOverride?.protocolType,
+                    explicitWireApi = modelOverride?.wireApi,
+                    explicitProviderProfileId = modelOverride?.oauthProfileId,
+                )
+            }.getOrNull()
             val toolImageContinuationPolicy = runCatching {
                 AgentToolImageContinuationPolicyResolver.resolve(
-                    HttpController.resolveChatCompletionRouteInfo(
-                        modelOrScene = agentModelScene,
-                        explicitApiBase = modelOverride?.apiBase,
-                        explicitApiKey = modelOverride?.apiKey,
-                        explicitCustomHeaders = modelOverride?.customHeaders,
-                        explicitModel = modelOverride?.modelId,
-                        explicitProtocolType = modelOverride?.protocolType,
-                        explicitWireApi = modelOverride?.wireApi,
-                        explicitProviderProfileId = modelOverride?.oauthProfileId,
-                    ),
+                    routeInfo,
                     providerProfileId = modelOverride?.providerProfileId,
                 )
             }.getOrDefault(AgentToolImageContinuationPolicy.DEFAULT)
@@ -430,7 +433,8 @@ class OmniAgentExecutor(
                         workspaceMemoryService = memoryService,
                         conversationMode = conversationMode,
                         reasoningEffort = reasoningEffort,
-                        modelProviderProfileId = modelOverride?.providerProfileId,
+                        modelProviderProfileId = modelOverride?.providerProfileId ?: routeInfo?.providerProfileId,
+                        modelId = modelOverride?.modelId ?: routeInfo?.resolvedModel,
                         terminalEnvironment = terminalEnvironment,
                         runControl = runControl,
                         permissionRequester = permissionRequester,

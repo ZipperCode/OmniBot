@@ -30,6 +30,7 @@ interface AgentExecutionEnvironment {
     val conversationMode: String
     val reasoningEffort: String?
     val modelProviderProfileId: String? get() = null
+    val modelId: String? get() = null
     val terminalEnvironment: Map<String, String>
     val runControl: AgentRunControl
 
@@ -60,6 +61,7 @@ data class DefaultAgentExecutionEnvironment(
     override val conversationMode: String,
     override val reasoningEffort: String? = null,
     override val modelProviderProfileId: String? = null,
+    override val modelId: String? = null,
     override val terminalEnvironment: Map<String, String> = emptyMap(),
     override val runControl: AgentRunControl = NoOpAgentRunControl,
     override val permissionRequester: AgentPermissionRequester? = null,

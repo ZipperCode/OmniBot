@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 严格排除网络权限，保证测试夹具完全无网络行为 -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
+
+    <application
+        android:label="GUI验收"
+        android:supportsRtl="true">
+        <activity
+            android:name="cn.com.omnimind.androidgui.fixture.TestGuiFixtureActivity"
+            android:exported="true"
+            android:label="GUI验收"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="cn.com.omnimind.androidgui.fixture.GuiFixtureEvidenceProvider"
+            android:authorities="cn.com.omnimind.androidgui.test.evidence"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+
+        <!-- 移除 onnxruntime 遥测初始化 provider，杜绝任何外部流量 -->
+        <provider
+            android:name="ai.onnxruntime.TelemetryInitializer"
+            tools:node="remove" />
+    </application>
+
+</manifest>

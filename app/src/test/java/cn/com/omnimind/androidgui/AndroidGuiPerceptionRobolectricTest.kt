@@ -7,11 +7,20 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.os.Handler
 import android.view.Display
 import cn.com.omnimind.baselib.runlog.Action
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -22,13 +31,18 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
+import org.robolectric.shadows.ShadowSystemClock
+import java.time.Duration
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.File
 import java.lang.reflect.Proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], application = Application::class, manifest = Config.NONE)
+@Config(sdk = [34], application = Application::class, manifest = Config.NONE, shadows = [AndroidGuiPerceptionRobolectricTest.ShadowA11yServiceForGesture::class])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class AndroidGuiPerceptionRobolectricTest {
 
@@ -55,11 +69,20 @@ class AndroidGuiPerceptionRobolectricTest {
         }
     }
 
-    private fun createTestBitmap(width: Int = 1080, height: Int = 2400): ByteArray {
+    private fun createTestBitmap(
+        width: Int = 1080,
+        height: Int = 2400,
+        color: Int = Color.RED,
+        fillScreen: Boolean = false,
+    ): ByteArray {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        val paint = Paint().apply { color = Color.RED }
-        canvas.drawRect(Rect(100, 500, 400, 600), paint)
+        if (fillScreen) {
+            canvas.drawColor(color)
+        } else {
+            val paint = Paint().apply { this.color = color }
+            canvas.drawRect(Rect(100, 500, 400, 600), paint)
+        }
         return ByteArrayOutputStream().use { out ->
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
             bitmap.recycle()
@@ -74,29 +97,18 @@ class AndroidGuiPerceptionRobolectricTest {
         frameSequence: Long? = 10L,
     ): Any {
         val clazz = Class.forName("cn.com.omnimind.androidgui.AndroidGuiPlatformState")
-        val ctor = clazz.declaredConstructors.first { it.parameterCount >= 6 }
+        val ctor = clazz.declaredConstructors.first { it.parameterCount == 8 }
         ctor.isAccessible = true
-        return if (ctor.parameterCount == 8) {
-            ctor.newInstance(
-                "com.test.app",
-                "MainActivity",
-                1080,
-                2400,
-                xml,
-                screenshotJpeg,
-                displayId,
-                frameSequence,
-            )
-        } else {
-            ctor.newInstance(
-                "com.test.app",
-                "MainActivity",
-                1080,
-                2400,
-                xml,
-                screenshotJpeg,
-            )
-        }
+        return ctor.newInstance(
+            "com.test.app",
+            "MainActivity",
+            1080,
+            2400,
+            xml,
+            screenshotJpeg,
+            displayId,
+            frameSequence,
+        )
     }
 
     private fun createFakePlatform(
@@ -450,4 +462,849 @@ class AndroidGuiPerceptionRobolectricTest {
         assertEquals(540, rect.right)
         assertEquals(1920, rect.bottom)
     }
+
+    private class RecordingDisplayService : IPrivilegedDisplayService {
+        var injectTapCalls = 0
+        var injectSwipeCalls = 0
+        var lastSwipeDurationMs = -1L
+        var lastDisplayId = -1
+        override fun asBinder(): android.os.IBinder = error("not needed")
+        override fun createVirtualDisplay(name: String, width: Int, height: Int, dpi: Int, surface: android.view.Surface, flags: Int): Int = 0
+        override fun releaseVirtualDisplay(displayId: Int) = Unit
+        override fun injectKeyEvent(displayId: Int, keyCode: Int): Boolean = true
+        override fun injectTap(displayId: Int, x: Int, y: Int): Boolean {
+            injectTapCalls++
+            lastDisplayId = displayId
+            return true
+        }
+        override fun injectSwipe(displayId: Int, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean {
+            injectSwipeCalls++
+            lastSwipeDurationMs = durationMs
+            lastDisplayId = displayId
+            return true
+        }
+        override fun launchActivity(displayId: Int, packageName: String): Boolean = true
+        override fun destroy() = Unit
+        override fun getServiceUid(): Int = 2000
+        override fun getRootTasks(displayId: Int): String = "[]"
+        override fun moveRootTask(taskId: Int, sourceDisplayId: Int, targetDisplayId: Int): String = "{}"
+    }
+
+    @Implements(AccessibilityService::class)
+    class ShadowA11yServiceForGesture {
+        companion object {
+            var dispatchGestureCalls = 0
+            var acceptGesture = false
+            var lastCallback: AccessibilityService.GestureResultCallback? = null
+
+            fun reset() {
+                dispatchGestureCalls = 0
+                acceptGesture = false
+                lastCallback = null
+            }
+        }
+
+        @Implementation
+        fun dispatchGesture(
+            gesture: GestureDescription,
+            callback: AccessibilityService.GestureResultCallback?,
+            handler: Handler?,
+        ): Boolean {
+            dispatchGestureCalls++
+            lastCallback = callback
+            return acceptGesture
+        }
+    }
+
+    private fun installTestAssistsService(acceptGesture: Boolean = false) {
+        ShadowA11yServiceForGesture.reset()
+        ShadowA11yServiceForGesture.acceptGesture = acceptGesture
+
+        val assistsClass = Class.forName("cn.com.omnimind.accessibility.service.AssistsService")
+        val serviceInstance = assistsClass.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+
+        val instanceField = runCatching {
+            assistsClass.getDeclaredField("instance")
+        }.getOrElse {
+            val companionClass = Class.forName("cn.com.omnimind.accessibility.service.AssistsService\$Companion")
+            companionClass.getDeclaredField("instance")
+        }.apply { isAccessible = true }
+
+        val connectedField = assistsClass.getDeclaredField("connected").apply { isAccessible = true }
+        connectedField.set(serviceInstance, true)
+
+        if (java.lang.reflect.Modifier.isStatic(instanceField.modifiers)) {
+            instanceField.set(null, serviceInstance)
+        } else {
+            val companionField = assistsClass.getDeclaredField("Companion").apply { isAccessible = true }
+            val companionObj = companionField.get(null)
+            instanceField.set(companionObj, serviceInstance)
+        }
+    }
+
+    private fun uninstallTestAssistsService() {
+        ShadowA11yServiceForGesture.reset()
+        val assistsClass = Class.forName("cn.com.omnimind.accessibility.service.AssistsService")
+        val instanceField = runCatching {
+            assistsClass.getDeclaredField("instance")
+        }.getOrElse {
+            val companionClass = Class.forName("cn.com.omnimind.accessibility.service.AssistsService\$Companion")
+            companionClass.getDeclaredField("instance")
+        }.apply { isAccessible = true }
+
+        if (java.lang.reflect.Modifier.isStatic(instanceField.modifiers)) {
+            instanceField.set(null, null)
+        } else {
+            val companionField = assistsClass.getDeclaredField("Companion").apply { isAccessible = true }
+            val companionObj = companionField.get(null)
+            instanceField.set(companionObj, null)
+        }
+    }
+
+    private fun createAccessibilityPlatform(ctx: Context): Any {
+        val clazz = Class.forName("cn.com.omnimind.androidgui.AccessibilityAndroidGuiPlatform")
+        val ctor = clazz.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }
+        return ctor.newInstance(ctx)
+    }
+
+    private suspend fun invokeAccessibilityDispatch(
+        platform: Any,
+        action: Action,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): AndroidGuiActionResult = suspendCancellableCoroutine { continuation ->
+        val method = platform.javaClass.methods.first { it.name == "dispatch" && it.parameterCount == 3 }.apply {
+            isAccessible = true
+        }
+        val result = try {
+            method.invoke(platform, action, displayId, continuation)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val cause = e.targetException ?: e.cause ?: e
+            if (cause is kotlinx.coroutines.CancellationException) {
+                continuation.cancel(cause)
+            }
+            throw cause
+        }
+        if (result !== kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED && continuation.isActive) {
+            @Suppress("UNCHECKED_CAST")
+            continuation.resume(result as AndroidGuiActionResult)
+        }
+    }
+    @Test
+    fun testLongPressRejectedOnVirtualDisplayFallsBackToInjectSwipePreservingDuration() = runBlocking {
+        installTestAssistsService(acceptGesture = false)
+        val recordingService = RecordingDisplayService()
+        DeviceDisplayManager.privilegedService = recordingService
+        try {
+            val platform = createAccessibilityPlatform(context)
+            val result = invokeAccessibilityDispatch(
+                platform = platform,
+                action = Action(
+                    tool = "long_press",
+                    args = mapOf("x" to 150.0, "y" to 300.0, "duration_ms" to 700L),
+                ),
+                displayId = 2,
+            )
+
+            assertTrue(result.success)
+            assertEquals("gesture_dispatched_via_root", result.message)
+            assertEquals(1, ShadowA11yServiceForGesture.dispatchGestureCalls)
+            assertEquals(0, recordingService.injectTapCalls)
+            assertEquals(1, recordingService.injectSwipeCalls)
+            assertEquals(700L, recordingService.lastSwipeDurationMs)
+            assertEquals(2, recordingService.lastDisplayId)
+        } finally {
+            DeviceDisplayManager.resetForTesting()
+            uninstallTestAssistsService()
+        }
+    }
+
+    @Test
+    fun testClickRejectedOnVirtualDisplayFallsBackToInjectTap() = runBlocking {
+        installTestAssistsService(acceptGesture = false)
+        val recordingService = RecordingDisplayService()
+        DeviceDisplayManager.privilegedService = recordingService
+        try {
+            val platform = createAccessibilityPlatform(context)
+            val result = invokeAccessibilityDispatch(
+                platform = platform,
+                action = Action(
+                    tool = "click",
+                    args = mapOf("x" to 150.0, "y" to 300.0),
+                ),
+                displayId = 2,
+            )
+
+            assertTrue(result.success)
+            assertEquals("gesture_dispatched_via_root", result.message)
+            assertEquals(1, ShadowA11yServiceForGesture.dispatchGestureCalls)
+            assertEquals(1, recordingService.injectTapCalls)
+            assertEquals(0, recordingService.injectSwipeCalls)
+            assertEquals(2, recordingService.lastDisplayId)
+        } finally {
+            DeviceDisplayManager.resetForTesting()
+            uninstallTestAssistsService()
+        }
+    }
+
+    @Test
+    fun testAcceptedGestureDoesNotReplayOnRootWhenTimedOut() = runBlocking {
+        installTestAssistsService(acceptGesture = true)
+        val recordingService = RecordingDisplayService()
+        DeviceDisplayManager.privilegedService = recordingService
+        try {
+            val platform = createAccessibilityPlatform(context)
+            val result = withTimeoutOrNull(50L) {
+                invokeAccessibilityDispatch(
+                    platform = platform,
+                    action = Action(
+                        tool = "long_press",
+                        args = mapOf("x" to 150.0, "y" to 300.0, "duration_ms" to 700L),
+                    ),
+                    displayId = 2,
+                )
+            }
+
+            assertNull(result)
+            assertEquals(1, ShadowA11yServiceForGesture.dispatchGestureCalls)
+            assertEquals(0, recordingService.injectTapCalls)
+            assertEquals(0, recordingService.injectSwipeCalls)
+        } finally {
+            DeviceDisplayManager.resetForTesting()
+            uninstallTestAssistsService()
+        }
+    }
+
+    @Test
+    fun testGestureCancelledBeforeDispatchDoesNotInject() = runBlocking {
+        installTestAssistsService(acceptGesture = false)
+        val recordingService = RecordingDisplayService()
+        DeviceDisplayManager.privilegedService = recordingService
+        try {
+            val platform = createAccessibilityPlatform(context)
+            var caughtCancellation = false
+            val job = launch {
+                coroutineContext.cancel()
+                try {
+                    invokeAccessibilityDispatch(
+                        platform = platform,
+                        action = Action(
+                            tool = "long_press",
+                            args = mapOf("x" to 150.0, "y" to 300.0, "duration_ms" to 700L),
+                        ),
+                        displayId = 2,
+                    )
+                } catch (e: Throwable) {
+                    val actual = if (e is java.lang.reflect.InvocationTargetException) (e.targetException ?: e.cause ?: e) else e
+                    if (actual is kotlinx.coroutines.CancellationException) {
+                        caughtCancellation = true
+                    }
+                    throw actual
+                }
+            }
+            job.join()
+            assertTrue(caughtCancellation || job.isCancelled)
+            assertEquals(0, recordingService.injectTapCalls)
+            assertEquals(0, recordingService.injectSwipeCalls)
+        } finally {
+            DeviceDisplayManager.resetForTesting()
+            uninstallTestAssistsService()
+        }
+    }
+
+    @Test
+    fun testScreenChangedVisualPixelComparisonRequiresTwoConsecutiveObservations() = runBlocking {
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val blueBytes = createTestBitmap(color = Color.BLUE, fillScreen = true)
+
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = "<hierarchy />", screenshotJpeg = redBytes)
+        states += createPlatformState(xml = "<hierarchy />", screenshotJpeg = blueBytes)
+        states += createPlatformState(xml = "<hierarchy />", screenshotJpeg = blueBytes)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = "<hierarchy />", screenshotJpeg = blueBytes)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf("duration_ms" to 2000, "condition" to "screen_changed"),
+            ),
+        )
+
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+        assertEquals("screen_changed", result.diagnostics["wait_condition"])
+        assertEquals("true", result.diagnostics["condition_met"])
+    }
+
+    @Test
+    fun testScreenChangedFailsWhenScreenshotCaptureFailsOnNoNodeTree() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = "<hierarchy />", screenshotJpeg = null)
+        states += createPlatformState(xml = "<hierarchy />", screenshotJpeg = null)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = "<hierarchy />", screenshotJpeg = null)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf("duration_ms" to 300, "condition" to "screen_changed"),
+            ),
+        )
+
+        assertFalse(result.success)
+        assertEquals("wait_condition_timeout", result.message)
+    }
+
+    @Test
+    fun testConditionalWaitTextPresentSucceedsWhenTargetAppears() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = """<hierarchy><node id="1" text="加载中..." bounds="[0,0][100,100]" /></hierarchy>""")
+        states += createPlatformState(xml = """<hierarchy><node id="2" text="确认" bounds="[0,0][100,100]" /></hierarchy>""")
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = """<hierarchy><node id="2" text="确认" bounds="[0,0][100,100]" /></hierarchy>""")
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 2000,
+                    "condition" to "text_present",
+                    "target_description" to "确认",
+                ),
+            ),
+        )
+
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+        assertEquals("text_present", result.diagnostics["wait_condition"])
+        assertEquals("true", result.diagnostics["condition_met"])
+        assertNotNull(result.diagnostics["elapsed_ms"])
+    }
+
+    @Test
+    fun testConditionalWaitTextPresentTimesOutWhenTargetNeverAppears() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = """<hierarchy><node id="1" text="其他内容" bounds="[0,0][100,100]" /></hierarchy>""")
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = """<hierarchy><node id="1" text="其他内容" bounds="[0,0][100,100]" /></hierarchy>""")
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 300,
+                    "condition" to "text_present",
+                    "target_description" to "确认",
+                ),
+            ),
+        )
+
+        assertFalse(result.success)
+        assertEquals("wait_condition_timeout", result.message)
+        assertEquals("text_present", result.diagnostics["wait_condition"])
+        assertEquals("false", result.diagnostics["condition_met"])
+    }
+
+    @Test
+    fun testConditionalWaitTextAbsentSucceedsWhenTargetDisappears() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = """<hierarchy><node id="1" text="加载中" bounds="[0,0][100,100]" /></hierarchy>""")
+        states += createPlatformState(xml = """<hierarchy><node id="2" text="完成" bounds="[0,0][100,100]" /></hierarchy>""")
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = """<hierarchy><node id="2" text="完成" bounds="[0,0][100,100]" /></hierarchy>""")
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 2000,
+                    "condition" to "text_absent",
+                    "target_description" to "加载中",
+                ),
+            ),
+        )
+
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+        assertEquals("text_absent", result.diagnostics["wait_condition"])
+        assertEquals("true", result.diagnostics["condition_met"])
+    }
+
+    @Test
+    fun testConditionalWaitTextAbsentReturnsUnobservableWhenTargetNotInBaseline() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = """<hierarchy><node id="1" text="完成" bounds="[0,0][100,100]" /></hierarchy>""")
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = """<hierarchy><node id="1" text="完成" bounds="[0,0][100,100]" /></hierarchy>""")
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 1000,
+                    "condition" to "text_absent",
+                    "target_description" to "从未出现的加载",
+                ),
+            ),
+        )
+
+        assertFalse(result.success)
+        assertEquals("wait_condition_unobservable", result.message)
+        assertEquals("text_absent", result.diagnostics["wait_condition"])
+        assertEquals("false", result.diagnostics["condition_met"])
+    }
+
+    @Test
+    fun testConditionalWaitTextMatchingNormalizesNfkcWhitespaceAndCasefold() = runBlocking {
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(
+            xml = """
+            <hierarchy>
+              <node id="1" text="ＰＡＳＳＷＯＲＤ" password="true" bounds="[0,0][100,50]" />
+              <node id="2" text="去&#x85;&#xA0;&#x2003;&#x2028;结算 (３)" bounds="[0,50][100,100]" />
+            </hierarchy>
+            """.trimIndent(),
+        )
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.first()
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 1000,
+                    "condition" to "text_present",
+                    "target_description" to "去 结算 (3)",
+                ),
+            ),
+        )
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+
+        val passwordResult = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf(
+                    "duration_ms" to 250,
+                    "condition" to "text_present",
+                    "target_description" to "password",
+                ),
+            ),
+        )
+        assertFalse(passwordResult.success)
+        assertEquals("wait_condition_timeout", passwordResult.message)
+    }
+
+    @Test
+    fun testClickStabilizesAsUnchangedWhenScreenDoesNotChange() = runBlocking {
+        val staticXml = """<hierarchy><node id="1" text="不变的内容" bounds="[0,0][1080,2400]" /></hierarchy>"""
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                createPlatformState(xml = staticXml)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("host_completed", result.diagnostics["state_stabilization"])
+        assertEquals("stable_unchanged", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testClickStabilizesAsChangedWhenScreenChanges() = runBlocking {
+        val beforeXml = """<hierarchy><node id="1" text="加载前" bounds="[0,0][1080,2400]" /></hierarchy>"""
+        val afterXml = """<hierarchy><node id="2" text="加载后" bounds="[0,0][1080,2400]" /></hierarchy>"""
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = beforeXml)
+                } else {
+                    createPlatformState(xml = afterXml)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("host_completed", result.diagnostics["state_stabilization"])
+        assertEquals("stable_changed", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testPureVisualStabilizationOnCanvasScreen() = runBlocking {
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val blueBytes = createTestBitmap(color = Color.BLUE, fillScreen = true)
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = redBytes)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = blueBytes)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("host_completed", result.diagnostics["state_stabilization"])
+        assertEquals("stable_changed", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testPureVisualStabilizationTimesOutWhenScreenshotCaptureFails() = runBlocking {
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = redBytes)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = null)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("runtime_delegated", result.diagnostics["state_stabilization"])
+        assertEquals("timeout", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testPureVisualStabilizationRejectsDifferentDimensions() = runBlocking {
+        val normalBytes = createTestBitmap(width = 1080, height = 2400, color = Color.RED, fillScreen = true)
+        val resizedBytes = createTestBitmap(width = 540, height = 1200, color = Color.RED, fillScreen = true)
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = normalBytes)
+                } else {
+                    createPlatformState(xml = "<hierarchy />", screenshotJpeg = resizedBytes)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("runtime_delegated", result.diagnostics["state_stabilization"])
+        assertEquals("timeout", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testStabilizationTimesOutWhenPostActionDisplayMismatchesTarget() = runBlocking {
+        val staticXml = """<hierarchy><node id="1" text="跨屏测试" bounds="[0,0][1080,2400]" /></hierarchy>"""
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = staticXml, displayId = Display.DEFAULT_DISPLAY)
+                } else {
+                    // 后续观测错误返回了其他 displayId (例如 99)
+                    createPlatformState(xml = staticXml, displayId = 99)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 100, "y" to 200)),
+            displayId = Display.DEFAULT_DISPLAY,
+        )
+
+        assertTrue(result.success)
+        assertEquals("runtime_delegated", result.diagnostics["state_stabilization"])
+        assertEquals("timeout", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testActStabilizationDetectsVisualChangeWithUsableXmlNodesAndMovingPixelsResetStability() = runBlocking {
+        // 同非空 XML，画布区域内部发生像素绘制变化（红 -> 蓝 -> 橙）
+        val canvasXml = """<hierarchy><node id="1" text="Canvas画布" bounds="[0,0][1080,200]" visible-to-user="true" /><node id="2" resource-id="cn.com.omnimind.androidgui.test:id/view_canvas" bounds="[100,500][900,1300]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val blueBytes = createTestBitmap(color = Color.BLUE, fillScreen = true)
+        val orangeBytes = createTestBitmap(color = Color.rgb(255, 165, 0), fillScreen = true)
+
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { captureScreenshot, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                val jpeg = when (observeCalls) {
+                    1 -> redBytes // 动作前基线 (红)
+                    2 -> blueBytes // 动作后首样 (蓝，发生视觉变化)
+                    3 -> orangeBytes // 像素仍在移动/改变 (橙，重置稳定计数)
+                    4 -> orangeBytes // 橙色稳定第 2 次
+                    else -> orangeBytes // 橙色稳定第 3 次及后续
+                }
+                createPlatformState(xml = canvasXml, screenshotJpeg = if (captureScreenshot) jpeg else null)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 540, "y" to 900)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("host_completed", result.diagnostics["state_stabilization"])
+        assertEquals("stable_changed", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testWaitScreenChangedFulfillsWhenVisualPixelsChangeWithUsableXmlNodes() = runBlocking {
+        // 同非空 XML，纯内部像素改变（红 -> 蓝）时，wait screen_changed 仍能确证并成功返回
+        val canvasXml = """<hierarchy><node id="1" text="Canvas场景" bounds="[0,0][1080,200]" visible-to-user="true" /><node id="2" resource-id="cn.com.omnimind.androidgui.test:id/view_canvas" bounds="[100,500][900,1300]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val blueBytes = createTestBitmap(color = Color.BLUE, fillScreen = true)
+
+        val states = ArrayDeque<Any>()
+        states += createPlatformState(xml = canvasXml, screenshotJpeg = redBytes)
+        states += createPlatformState(xml = canvasXml, screenshotJpeg = blueBytes)
+        states += createPlatformState(xml = canvasXml, screenshotJpeg = blueBytes)
+
+        val fakePlatform = createFakePlatform(
+            onObserve = { captureScreenshot, _ ->
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                states.removeFirstOrNull() ?: createPlatformState(xml = canvasXml, screenshotJpeg = blueBytes)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf("duration_ms" to 2000, "condition" to "screen_changed"),
+            ),
+        )
+
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+        assertEquals("screen_changed", result.diagnostics["wait_condition"])
+        assertEquals("true", result.diagnostics["condition_met"])
+    }
+
+    @Test
+    fun testActStabilizationTimesOutWhenScreenshotCaptureFailsGivenBaselineImageAndUsableXml() = runBlocking {
+        // 基线有有效截图与非空 XML，动作后截图采集失败 (null) 时，不能以仅 XML 相同判为假 stable_unchanged，必须超时
+        val canvasXml = """<hierarchy><node id="1" text="Canvas场景" bounds="[0,0][1080,200]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { captureScreenshot, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = canvasXml, screenshotJpeg = if (captureScreenshot) redBytes else null)
+                } else {
+                    createPlatformState(xml = canvasXml, screenshotJpeg = null)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(tool = "click", args = mapOf("x" to 540, "y" to 900)),
+        )
+
+        assertTrue(result.success)
+        assertEquals("runtime_delegated", result.diagnostics["state_stabilization"])
+        assertEquals("timeout", result.diagnostics["state_stabilization_result"])
+    }
+
+    @Test
+    fun testObservePersistsDistinctStatesAndImagesWhenOnlyVisualPixelsChange() = runBlocking {
+        // 同非空 XML，视觉像素绘制不同（红 vs 橙）时，State 身份不同且 InternalRunLogStore 持久化两份不同截图文件，不可覆盖
+        val canvasXml = """<hierarchy><node id="1" text="Canvas画布" bounds="[0,0][1080,200]" visible-to-user="true" /><node id="2" resource-id="cn.com.omnimind.androidgui.test:id/view_canvas" bounds="[100,500][900,1300]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val orangeBytes = createTestBitmap(color = Color.rgb(255, 165, 0), fillScreen = true)
+
+        var currentJpeg = redBytes
+        val fakePlatform = createFakePlatform(
+            onObserve = { _, _ ->
+                createPlatformState(xml = canvasXml, screenshotJpeg = currentJpeg)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val obs1 = env.observeWithDiagnostics(captureScreenshot = true, waitToStabilize = false)
+        currentJpeg = orangeBytes
+        val obs2 = env.observeWithDiagnostics(captureScreenshot = true, waitToStabilize = false)
+
+        assertNotEquals(obs1.state.stateId, obs2.state.stateId)
+        assertNotNull(obs1.state.screenshotPath)
+        assertNotNull(obs2.state.screenshotPath)
+        assertNotEquals(obs1.state.screenshotPath, obs2.state.screenshotPath)
+
+        val file1 = File(obs1.state.screenshotPath!!)
+        val file2 = File(obs2.state.screenshotPath!!)
+        assertTrue(file1.exists())
+        assertTrue(file2.exists())
+        assertFalse(file1.readBytes().contentEquals(file2.readBytes()))
+    }
+
+    @Test
+    fun testWaitScreenChangedTimesOutWhenSampleScreenshotCaptureFailsGivenBaselineImage() = runBlocking {
+        // 基线有有效截图与非空 XML，等待过程中截图采集失败 (null) 时，不能误判为 screen_changed，必须超时
+        val canvasXml = """<hierarchy><node id="1" text="Canvas场景" bounds="[0,0][1080,200]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { captureScreenshot, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                if (observeCalls == 1) {
+                    createPlatformState(xml = canvasXml, screenshotJpeg = if (captureScreenshot) redBytes else null)
+                } else {
+                    createPlatformState(xml = canvasXml, screenshotJpeg = null)
+                }
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf("duration_ms" to 400, "condition" to "screen_changed"),
+            ),
+        )
+
+        assertFalse(result.success)
+        assertEquals("wait_condition_timeout", result.message)
+    }
+
+    @Test
+    fun testWaitScreenChangedResetsStabilityOnMovingPixelsBeforeReachingTwoSamples() = runBlocking {
+        // 同非空 XML，内部像素在变化中持续移动（红 -> 蓝 -> 橙 -> 橙），连续两次相同才满足条件
+        val canvasXml = """<hierarchy><node id="1" text="Canvas场景" bounds="[0,0][1080,200]" visible-to-user="true" /></hierarchy>"""
+        val redBytes = createTestBitmap(color = Color.RED, fillScreen = true)
+        val blueBytes = createTestBitmap(color = Color.BLUE, fillScreen = true)
+        val orangeBytes = createTestBitmap(color = Color.rgb(255, 165, 0), fillScreen = true)
+
+        var observeCalls = 0
+        val fakePlatform = createFakePlatform(
+            onObserve = { captureScreenshot, _ ->
+                observeCalls++
+                ShadowSystemClock.advanceBy(Duration.ofMillis(200))
+                val jpeg = when (observeCalls) {
+                    1 -> redBytes // 基线 (红)
+                    2 -> blueBytes // 首个变化 (蓝，consecutive = 1)
+                    3 -> orangeBytes // 像素在移动 (橙，重置 consecutive = 1)
+                    4 -> orangeBytes // 稳定第 2 次 (橙，consecutive = 2 -> 满足条件)
+                    else -> orangeBytes
+                }
+                createPlatformState(xml = canvasXml, screenshotJpeg = if (captureScreenshot) jpeg else null)
+            },
+            onDispatch = { _, _ -> AndroidGuiActionResult(true, "ok") },
+        )
+        val env = createEnvironment(context, fakePlatform)
+
+        val result = env.act(
+            Action(
+                tool = "wait",
+                args = mapOf("duration_ms" to 2000, "condition" to "screen_changed"),
+            ),
+        )
+
+        assertTrue(result.success)
+        assertEquals("wait_condition_met", result.message)
+        assertEquals("true", result.diagnostics["condition_met"])
+        assertTrue(observeCalls >= 4)
+    }
+
 }

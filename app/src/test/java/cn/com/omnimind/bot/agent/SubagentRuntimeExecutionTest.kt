@@ -20,6 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotEquals
 import org.mockito.Mockito.mock
 import org.junit.Before
 import org.junit.Test
@@ -462,12 +463,99 @@ class SubagentRuntimeExecutionTest {
         assertTrue(mixedException?.message?.contains("broken-default-provider") == true)
     }
 
+    @Test
+    fun `subagent tool execution captures custom child modelId and inherited parent modelId`() = runBlocking {
+        val providerCustom = ModelProviderProfile(
+            id = "prov-custom",
+            name = "Custom Provider",
+            baseUrl = "https://api.custom.invalid/v1",
+            apiKey = "custom-key"
+        )
+        val providers = mapOf("prov-custom" to providerCustom)
+
+        val customProfile = SubagentProfile(
+            id = "custom-worker",
+            displayName = "Custom Worker",
+            systemPrompt = "Custom worker prompt",
+            providerProfileId = "prov-custom",
+            modelId = "custom-child-model"
+        )
+
+        val config = XiaowanSubagentConfig(
+            enabled = true,
+            providerProfileId = null,
+            modelId = null,
+            profiles = listOf(SubagentProfileRegistry.general, customProfile)
+        )
+
+        val toolExecutor = CapturingToolExecutor()
+        val customClient = TwoTurnToolLlmClient()
+        val parentClient = TwoTurnToolLlmClient()
+
+        val catalog = object : AgentToolCatalog {
+            override val toolsForModel: List<cn.com.omnimind.baselib.llm.ChatCompletionTool> = listOf(
+                cn.com.omnimind.baselib.llm.ChatCompletionTool(
+                    type = "function",
+                    function = cn.com.omnimind.baselib.llm.ChatCompletionFunction(
+                        name = "test_tool",
+                        description = "Test tool"
+                    )
+                )
+            )
+            override fun runtimeDescriptor(toolName: String) =
+                AgentToolRegistry.RuntimeToolDescriptor(toolName, toolName, "builtin")
+            override fun validateArguments(toolName: String, arguments: JsonObject) = Unit
+        }
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = parentClient,
+            toolExecutorProvider = { toolExecutor },
+            parentCatalogProvider = { catalog },
+            eventAdapter = AgentEventAdapter(json),
+            model = "scene.dispatch.model",
+            config = config,
+            providerProfileResolver = { providers[it] },
+            subagentLlmClientFactory = { _, _ -> customClient },
+            subagentImagePolicyResolver = { _, _ -> AgentToolImageContinuationPolicy.DEFAULT }
+        )
+
+        val parentEnv = FakeExecutionEnvironment(
+            modelProviderProfileId = "prov-parent",
+            modelId = "parent-model-real"
+        )
+
+        val results = dispatcher.dispatch(
+            parentEnv = parentEnv,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("custom-worker", "task for custom worker"),
+                SubagentDispatcher.SubagentTaskSpec("general", "task for general worker")
+            ),
+            concurrency = 1
+        )
+
+        assertEquals(2, results.size)
+        assertEquals("completed", results[0].status)
+        assertEquals("completed", results[1].status)
+
+        assertEquals(2, toolExecutor.capturedEnvs.size)
+
+        val customEnv = toolExecutor.capturedEnvs[0]
+        assertEquals("prov-custom", customEnv.modelProviderProfileId)
+        assertEquals("custom-child-model", customEnv.modelId)
+
+        val inheritedEnv = toolExecutor.capturedEnvs[1]
+        assertEquals("prov-parent", inheritedEnv.modelProviderProfileId)
+        assertEquals("parent-model-real", inheritedEnv.modelId)
+        assertNotEquals("scene.dispatch.model", inheritedEnv.modelId)
+    }
+
     private class FakeExecutionEnvironment(
         override val runtimeContextRepository: AgentRuntimeContextRepository = mock(AgentRuntimeContextRepository::class.java),
         override val workspaceDescriptor: AgentWorkspaceDescriptor = mock(AgentWorkspaceDescriptor::class.java),
         override val workspaceManager: AgentWorkspaceManager = mock(AgentWorkspaceManager::class.java),
         override val workspaceMemoryService: WorkspaceMemoryService = mock(WorkspaceMemoryService::class.java),
         override val modelProviderProfileId: String = "test-provider",
+        override val modelId: String? = null,
         override val reasoningEffort: String = "medium"
     ) : AgentExecutionEnvironment {
         override val agentRunId: String = "test-run"
@@ -550,5 +638,68 @@ class SubagentRuntimeExecutionTest {
         override suspend fun onComplete(result: AgentResult) = Unit
         override suspend fun onError(error: String) = Unit
         override suspend fun onPermissionRequired(missing: List<String>) = Unit
+    }
+
+    private class CapturingToolExecutor : AgentToolExecutor {
+        val capturedEnvs = mutableListOf<AgentExecutionEnvironment>()
+
+        override suspend fun execute(
+            toolCall: AssistantToolCall,
+            args: JsonObject,
+            runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
+            env: AgentExecutionEnvironment,
+            callback: AgentCallback,
+            toolHandle: AgentToolExecutionHandle
+        ): ToolExecutionResult {
+            capturedEnvs.add(env)
+            return ToolExecutionResult.ContextResult(
+                toolName = toolCall.function.name,
+                summaryText = "ok",
+                previewJson = "{}",
+                rawResultJson = "{}",
+                success = true
+            )
+        }
+    }
+
+    private class TwoTurnToolLlmClient(
+        private val toolName: String = "test_tool"
+    ) : AgentLlmClient {
+        private var turn = 0
+
+        override suspend fun streamTurn(
+            request: ChatCompletionRequest,
+            onReasoningUpdate: (suspend (String) -> Unit)?,
+            onContentUpdate: (suspend (String) -> Unit)?,
+            onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+            allowTransportRetry: Boolean,
+        ): ChatCompletionTurn {
+            turn++
+            return if (turn == 1) {
+                val call = AssistantToolCall(
+                    id = "call-$turn",
+                    type = "function",
+                    function = AssistantToolCallFunction(
+                        name = toolName,
+                        arguments = "{}"
+                    )
+                )
+                onToolCallInput?.invoke(call)
+                ChatCompletionTurn(
+                    message = ChatCompletionMessage(
+                        role = "assistant",
+                        toolCalls = listOf(call)
+                    )
+                )
+            } else {
+                onContentUpdate?.invoke("done")
+                ChatCompletionTurn(
+                    message = ChatCompletionMessage(
+                        role = "assistant",
+                        content = JsonPrimitive("done")
+                    )
+                )
+            }
+        }
     }
 }

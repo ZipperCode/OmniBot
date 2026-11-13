@@ -22,6 +22,7 @@ import kotlinx.coroutines.withTimeout
 
 fun interface OmniFlowPythonHostCall {
     suspend fun call(method: String, payload: Map<String, Any?>): Map<String, Any?>
+    fun onSessionBound(provenance: Map<String, Any?>?) {}
 }
 
 class OmniFlowPythonClient(
@@ -36,6 +37,7 @@ class OmniFlowPythonClient(
         val stdoutJob: Job,
         val stderrJob: Job,
         val stderr: StderrTail,
+        var provenance: Map<String, Any?>? = null,
     )
 
     private class StderrTail {
@@ -55,10 +57,20 @@ class OmniFlowPythonClient(
     }
 
     private val callMutex = Mutex()
+    val isBusy: Boolean
+        get() = callMutex.isLocked
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var session: BridgeSession? = null
     private var closed = false
 
+    val hasLiveSession: Boolean
+        get() = session?.process?.isAlive == true
+
+    fun attachSessionProvenance(provenance: Map<String, Any?>?) {
+        session?.provenance = provenance
+    }
+
+    fun sessionProvenanceForTest(): Map<String, Any?>? = session?.provenance
     suspend fun initialize(): Map<String, Any?> = callMutex.withLock {
         check(!closed) { "omniflow_python_client_closed" }
         val activeSession = ensureSession()
@@ -97,13 +109,20 @@ class OmniFlowPythonClient(
     ): Map<String, Any?> = callMutex.withLock {
         check(!closed) { "omniflow_python_client_closed" }
         val activeSession = ensureSession()
+        val sessionProvenance = activeSession.provenance
+        hostCall?.onSessionBound(sessionProvenance)
         try {
             val requestId = requestIdFactory()
             writeRequest(activeSession.writer, requestId, operation, payload)
             val response = suspend {
                 readResponse(activeSession, requestId, hostCall)
             }
-            if (timeoutMs == null) response() else withTimeout(timeoutMs) { response() }
+            val rawResult = if (timeoutMs == null) response() else withTimeout(timeoutMs) { response() }
+            if (sessionProvenance != null) {
+                rawResult + mapOf("runtime_provenance" to sessionProvenance)
+            } else {
+                rawResult - "runtime_provenance"
+            }
         } catch (error: Throwable) {
             if (
                 error is CancellationException ||
@@ -122,6 +141,7 @@ class OmniFlowPythonClient(
         val activeSession = session ?: return@withLock
         clearSession(activeSession)
     }
+
 
     private suspend fun ensureSession(): BridgeSession {
         session?.takeIf { it.process.isAlive }?.let { return it }
@@ -248,6 +268,7 @@ class OmniFlowPythonClient(
     }
 
     private fun clearSession(activeSession: BridgeSession) {
+        activeSession.provenance = null
         if (session === activeSession) session = null
         if (activeSession.process.isAlive) {
             runCatching { activeSession.process.destroyForcibly() }
@@ -352,13 +373,46 @@ class OmniFlowPythonClient(
                 shellSitePackagesPath,
                 "$shellOmniTransferRoot/src",
             ).joinToString(":")
+            val bootstrapPy = """
+            import sys, runpy, importlib.machinery, importlib.abc, hashlib, marshal
+            from pathlib import Path
+            _C = {}
+            sys._omniflow_loaded_modules = _C
+            class _L(importlib.machinery.SourceFileLoader):
+                def get_code(self, fn):
+                    p = self.get_filename(fn)
+                    if p.endswith(('.pyc', '.pyo')):
+                        try:
+                            import importlib.util
+                            p = importlib.util.source_from_cache(p)
+                        except Exception:
+                            p = p[:-1]
+                    b = Path(p).read_bytes()
+                    co = compile(b, p, 'exec')
+                    name = fn[len('omniflow.'):] if fn.startswith('omniflow.') else fn
+                    _C[name] = {'source_sha256': hashlib.sha256(b).hexdigest(), 'code_sha256': hashlib.sha256(marshal.dumps(co)).hexdigest()}
+                    return co
+            class _F(importlib.abc.MetaPathFinder):
+                def find_spec(self, fn, path, target=None):
+                    if not fn.startswith('omniflow'):
+                        return None
+                    s = importlib.machinery.PathFinder.find_spec(fn, path, target)
+                    if s and s.origin and s.origin.endswith(('.py', '.pyc', '.pyo')):
+                        orig = s.origin[:-1] if s.origin.endswith(('.pyc', '.pyo')) else s.origin
+                        s.loader = _L(fn, orig)
+                        return s
+                    return None
+            sys.meta_path.insert(0, _F())
+            sys.argv = ['omniflow.bridge'] + sys.argv[1:]
+            runpy.run_module('omniflow.bridge', run_name='__main__', alter_sys=True)
+            """.trimIndent()
             return """
             export PYTHONPATH='$pythonPath'
             export OMNITRANSFER_ROOT='$shellOmniTransferRoot'
             export OMNITRANSFER_MATCHER_CHECKPOINT='$shellOmniTransferCheckpointPath'
             python_bin="${'$'}(command -v python3 || true)"
             if [ -z "${'$'}python_bin" ]; then echo 'omniflow_python_not_installed' >&2; exit 127; fi
-            exec "${'$'}python_bin" -u -m omniflow.bridge --store /workspace/.omnibot/omniflow/omniflow.json
+            exec "${'$'}python_bin" -u -c "$bootstrapPy" --store /workspace/.omnibot/omniflow/omniflow.json
             """.trimIndent()
         }
 

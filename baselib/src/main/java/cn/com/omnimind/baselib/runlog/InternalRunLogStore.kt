@@ -598,7 +598,11 @@ object InternalRunLogStore {
             copyPixelCoordinate("y", "height")
         }
         when (actionType) {
-            "click", "long_press" -> copyPoint()
+            "click" -> copyPoint()
+            "long_press" -> {
+                copyPoint()
+                copy("duration_ms")
+            }
             "input_text" -> {
                 copy("text")
                 copyPoint()
@@ -617,7 +621,7 @@ object InternalRunLogStore {
                 }
             }
             "status" -> args[OobActionSchema.ARG_CONTENT]?.let { payload["goal_status"] = it }
-            "wait" -> copy("duration_ms")
+            "wait" -> copy("duration_ms", "condition", "target_description")
         }
         return payload
     }

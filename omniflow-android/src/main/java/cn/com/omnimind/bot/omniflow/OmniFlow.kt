@@ -10,6 +10,7 @@ import cn.com.omnimind.androidgui.AndroidGuiEnvironment
 import cn.com.omnimind.androidgui.AndroidGuiObservationRegion
 import cn.com.omnimind.androidgui.DeviceDisplayManager
 import cn.com.omnimind.androidgui.DisplayInputCoordinator
+import cn.com.omnimind.baselib.llm.ReasoningEffort
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.InternalRunLogStore
 import cn.com.omnimind.baselib.runlog.OobActionSchema
@@ -35,6 +36,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 internal data class ExecutionRequest(
     val id: String,
@@ -130,6 +133,7 @@ object OmniFlow {
         require(request.id.isNotBlank()) { "run_id_required" }
         val appContext = context.applicationContext
         val runFinished = AtomicBoolean(false)
+        var dispatcher: OmniFlowDeviceDispatcher? = null
         InternalRunLogStore.beginRun(
             context = appContext,
             runId = request.id,
@@ -215,6 +219,7 @@ object OmniFlow {
                                     hooks.onProgress(progress, extras)
                                 },
                             )
+                            dispatcher = host
                             val operation = async(start = CoroutineStart.LAZY) { host.execute() }
                             executionJob = operation
                             when {
@@ -250,7 +255,7 @@ object OmniFlow {
                 }
             }
         } catch (error: CancellationException) {
-            finishCancelledRun(appContext, request, runFinished, error)
+            finishCancelledRun(appContext, request, runFinished, error, dispatcher?.currentRuntimeProvenance())
             throw error
         }
     }
@@ -325,6 +330,8 @@ object OmniFlow {
 
     fun stop(runOrTaskId: String? = null): Boolean = executions.stop(runOrTaskId)
 
+    fun isBusy(): Boolean = executions.hasActive() || executionMutex.isLocked || OmniFlowPythonRuntime.isBusy
+
     private fun ensureRunning(stopped: AtomicBoolean, hooks: Hooks) {
         if (stopped.get() || hooks.stopRequested()) {
             throw CancellationException("OmniFlow execution stopped")
@@ -347,6 +354,8 @@ object OmniFlow {
         "get_run_log",
         "get_run_log_state",
         "save_function",
+        "list_app_experiences",
+        "set_app_experience_enabled",
     )
 }
 
@@ -413,12 +422,20 @@ class OmniFlowDeviceDispatcher internal constructor(
             onReasoningUpdate = { thinking ->
                 onProgress(thinking, progressPayload(mapOf("thinking" to thinking)))
             },
-            maxRejectedActionRetries = (request?.toolCall?.arguments
-                ?.get("max_rejected_action_retries") as? Number)?.toInt(),
         )
     }
     private val modelMetrics = ModelRunLogMetrics()
-    private val hostCall = OmniFlowPythonHostCall(::callDevice)
+    private var boundRuntimeProvenance: Map<String, Any?>? = null
+    internal fun currentRuntimeProvenance(): Map<String, Any?>? = boundRuntimeProvenance
+
+    private val hostCall = object : OmniFlowPythonHostCall {
+        override suspend fun call(method: String, payload: Map<String, Any?>): Map<String, Any?> =
+            callDevice(method, payload)
+
+        override fun onSessionBound(provenance: Map<String, Any?>?) {
+            boundRuntimeProvenance = provenance
+        }
+    }
     private val externalRunWriters = ConcurrentHashMap<String, RunLogWriter>()
 
     var currentStateId: String? = null
@@ -429,6 +446,8 @@ class OmniFlowDeviceDispatcher internal constructor(
     private var currentObservationExtra: Map<String, Any?> = emptyMap()
 
     private var previousActionTool: String? = null
+    private var privateLearningRunId: String? = null
+    private var privateLearningAllowedStateIds: Set<String> = emptySet()
 
     suspend fun call(
         operation: String,
@@ -463,7 +482,9 @@ class OmniFlowDeviceDispatcher internal constructor(
                 "android_gui_run_id_mismatch"
             }
             finishRun(result)
-            applyPostRunActions(result)
+            val registered = applyPostRunActions(result)
+            val updated = updateAppExperiences(registered)
+            updated
         } catch (error: ManualCompletionRequested) {
             throw error
         } catch (error: AndroidGuiDisplayOffException) {
@@ -473,7 +494,11 @@ class OmniFlowDeviceDispatcher internal constructor(
             finishRun(cancelledFailure(activeRun.cancelledDoneReason, error))
             throw error
         } catch (error: Exception) {
-            failure(activeRun, error).also(::finishRun)
+            val failureResult = failure(activeRun, error)
+            finishRun(failureResult)
+            val registered = applyPostRunActions(failureResult)
+            val updated = updateAppExperiences(registered)
+            updated
         } finally {
             currentObservationExtra = emptyMap()
             environment.close()
@@ -482,12 +507,16 @@ class OmniFlowDeviceDispatcher internal constructor(
 
     fun finishManualCompletion(): Map<String, Any?> {
         val activeRun = requireNotNull(request) { "run_not_configured" }
-        return manualCompletionResult(
+        return (manualCompletionResult(
             runId = activeRun.id,
             startedAtMs = activeRun.startedAtMs,
             source = activeRun.source,
             functionId = activeRun.toolCall.name,
-        ).also(::finishRun)
+        ) + if (boundRuntimeProvenance != null) {
+            mapOf("runtime_provenance" to boundRuntimeProvenance)
+        } else {
+            emptyMap()
+        }).also(::finishRun)
     }
 
     suspend fun callDevice(
@@ -611,15 +640,30 @@ class OmniFlowDeviceDispatcher internal constructor(
         }
     }
 
-    private fun getRunLog(payload: Map<String, Any?>): Map<String, Any?> {
+    private suspend fun getRunLog(payload: Map<String, Any?>): Map<String, Any?> {
         val requestedRunId = firstText(payload["run_id"])
         require(requestedRunId.isNotEmpty()) { "run_id_required" }
+        if (privateLearningRunId != null) {
+            beforeOperation()
+            require(requestedRunId == privateLearningRunId) { "unauthorized_run_id_for_learning" }
+            require(request?.id == privateLearningRunId) { "unauthorized_request_for_learning" }
+            require(runFinished.get()) { "run_not_finished_for_learning" }
+            val record = InternalRunLogStore.getRun(appContext, privateLearningRunId!!)
+            require(record != null && record.finishedAtMs != null) { "run_log_not_sealed_for_learning" }
+        }
         return InternalRunLogStore.timelinePayload(appContext, requestedRunId)
     }
 
-    private fun getState(payload: Map<String, Any?>): Map<String, Any?> {
+    private suspend fun getState(payload: Map<String, Any?>): Map<String, Any?> {
         val stateId = firstText(payload["state_id"])
         require(stateId.isNotEmpty()) { "state_id_required" }
+        if (privateLearningRunId != null) {
+            beforeOperation()
+            require(runFinished.get()) { "run_not_finished_for_learning" }
+            require(stateId in privateLearningAllowedStateIds) { "unauthorized_state_id_for_learning:$stateId" }
+            val record = InternalRunLogStore.getRun(appContext, privateLearningRunId!!)
+            require(record != null && record.finishedAtMs != null) { "run_log_not_sealed_for_learning" }
+        }
         val state = InternalRunLogStore.statePayload(appContext, stateId)
             .also { require(it.isNotEmpty()) { "state_not_found:$stateId" } }
         return State.fromMap(state).asHostMap(includeImage = true)
@@ -746,6 +790,9 @@ class OmniFlowDeviceDispatcher internal constructor(
         val resultFinalStateId = firstText(mapValue(result["final_state"])["state_id"])
         val diagnostics = buildMap<String, Any?> {
             plannerRunLogDiagnostics(result)?.let(::putAll)
+            sanitizeFinishedEvidence(result["finished_evidence"])?.let { put("finished_evidence", it) }
+            val rawProvenance = result["runtime_provenance"] ?: boundRuntimeProvenance
+            sanitizeRuntimeProvenance(rawProvenance)?.let { put("runtime_provenance", it) }
             putAll(modelMetrics.diagnostics())
         }
         diagnostics.takeIf(Map<String, Any?>::isNotEmpty)?.let {
@@ -778,46 +825,102 @@ class OmniFlowDeviceDispatcher internal constructor(
         if (actions.isEmpty()) return result
         var merged = result - "post_run_actions"
         actions.forEach { rawAction ->
+            currentCoroutineContext().ensureActive()
             val action = rawAction.entries.associate { (key, value) -> key.toString() to value }
             val name = firstText(action["name"])
             if (name != "save_function") return@forEach
             val arguments = mapValue(action["arguments"])
-            val registration = runCatching {
-                call(
+            val registration = try {
+                currentCoroutineContext().ensureActive()
+                beforeOperation()
+                currentCoroutineContext().ensureActive()
+                val conversion = call(
                     "tools/call",
                     mapOf(
                         "name" to name,
                         "arguments" to arguments,
                     ),
                 )
-            }.fold(
-                onSuccess = { conversion ->
-                    linkedMapOf<String, Any?>(
-                        "auto_registered" to (
-                            conversion["success"] == true &&
-                                conversion["registered"] == true
-                            ),
-                        "registered_function_id" to conversion["function_id"],
-                        "registration_status" to conversion["status"],
-                        "registration_error" to firstText(
-                            conversion["error_message"],
-                            conversion["error_code"],
-                            conversion["error"],
-                        ).takeIf(String::isNotEmpty),
-                    ).filterValues { it != null }
-                },
-                onFailure = { error ->
-                    mapOf(
-                        "auto_registered" to false,
-                        "registration_error" to error.message.orEmpty().ifBlank {
-                            error.javaClass.simpleName
-                        },
-                    )
-                },
-            )
+                linkedMapOf<String, Any?>(
+                    "auto_registered" to (
+                        conversion["success"] == true &&
+                            conversion["registered"] == true
+                        ),
+                    "registered_function_id" to conversion["function_id"],
+                    "registration_status" to conversion["status"],
+                    "registration_error" to firstText(
+                        conversion["error_message"],
+                        conversion["error_code"],
+                        conversion["error"],
+                    ).takeIf(String::isNotEmpty),
+                ).filterValues { it != null }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                mapOf(
+                    "auto_registered" to false,
+                    "registration_error" to error.message.orEmpty().ifBlank {
+                        error.javaClass.simpleName
+                    },
+                )
+            }
             merged += registration
         }
         return merged
+    }
+
+    private suspend fun updateAppExperiences(
+        result: Map<String, Any?>,
+    ): Map<String, Any?> {
+        val activeRun = request ?: return result
+        currentCoroutineContext().ensureActive()
+        if (!runFinished.get()) return result
+
+        val runLog = InternalRunLogStore.getRun(appContext, activeRun.id)
+        if (runLog == null || runLog.finishedAtMs == null) {
+            return result
+        }
+
+        privateLearningRunId = activeRun.id
+        privateLearningAllowedStateIds = buildSet {
+            runLog.finalStateId?.takeIf(String::isNotBlank)?.let(::add)
+            runLog.steps.forEach { step ->
+                (step["before_state_id"]?.toString())?.takeIf(String::isNotBlank)?.let(::add)
+                (step["after_state_id"]?.toString())?.takeIf(String::isNotBlank)?.let(::add)
+            }
+        }
+        return try {
+            currentCoroutineContext().ensureActive()
+            beforeOperation()
+            currentCoroutineContext().ensureActive()
+            val learnResponse = call(
+                operation = "tools/call",
+                payload = mapOf(
+                    "name" to "learn_app_experiences",
+                    "arguments" to mapOf("run_id" to activeRun.id),
+                ),
+            )
+            if (learnResponse["success"] != true) {
+                val errorCode = firstText(
+                    learnResponse["error_code"],
+                    learnResponse["error"],
+                ).ifEmpty { "experience_update_failed" }
+                result + mapOf("experience_update_error" to sanitizeErrorCode(errorCode))
+            } else {
+                result
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            val raw = when (error) {
+                is OmniFlowPythonException -> error.code
+                else -> error.message?.takeIf(String::isNotEmpty) ?: error.javaClass.simpleName
+            }
+            result + mapOf("experience_update_error" to sanitizeErrorCode(raw))
+        } finally {
+            privateLearningRunId = null
+            privateLearningAllowedStateIds = emptySet()
+        }
     }
 
     private fun failure(activeRun: ExecutionRequest, error: Exception): Map<String, Any?> {
@@ -835,15 +938,18 @@ class OmniFlowDeviceDispatcher internal constructor(
             "error_code" to if (stopped) activeRun.stoppedErrorCode else activeRun.failedErrorCode,
             "error_message" to error.message.orEmpty().ifBlank { error.javaClass.simpleName },
             "done_reason" to if (stopped) activeRun.cancelledDoneReason else "error",
+            "runtime_provenance" to boundRuntimeProvenance,
         ).filterValues { it != null }
     }
 
     private fun cancelledFailure(doneReason: String, error: Exception): Map<String, Any?> =
-        mapOf(
-            "success" to false,
-            "done_reason" to doneReason,
-            "error_message" to error.message.orEmpty().ifBlank { error.javaClass.simpleName },
-        )
+        buildMap {
+            put("success", false)
+            put("done_reason", doneReason)
+            put("error_message", error.message.orEmpty().ifBlank { error.javaClass.simpleName })
+            boundRuntimeProvenance?.let { put("runtime_provenance", it) }
+        }
+
 }
 
 private fun finishCancelledRun(
@@ -851,8 +957,16 @@ private fun finishCancelledRun(
     request: ExecutionRequest,
     runFinished: AtomicBoolean,
     error: CancellationException,
+    runtimeProvenance: Map<String, Any?>? = null,
 ) {
     if (!runFinished.compareAndSet(false, true)) return
+    sanitizeRuntimeProvenance(runtimeProvenance)?.let {
+        InternalRunLogStore.updateDiagnostics(
+            context = context,
+            runId = request.id,
+            diagnostics = mapOf("runtime_provenance" to it),
+        )
+    }
     InternalRunLogStore.finishRun(
         context = context,
         runId = request.id,
@@ -978,17 +1092,21 @@ internal class ModelRunLogMetrics {
         val requestedModel: String,
         val resolvedModel: String,
         val usage: Map<String, Any?>,
+        val executionConfig: Map<String, Any?>?,
     )
 
     private val calls = mutableListOf<Call>()
 
     fun recordSuccess(result: Map<String, Any?>, durationMs: Long) {
+        val rawConfig = result["execution_config"] as? Map<*, *>
+        val safeConfig = sanitizeModelExecutionConfig(rawConfig)
         calls += Call(
             durationMs = durationMs.coerceAtLeast(0L),
             success = true,
             requestedModel = firstText(result["requested_model"]),
             resolvedModel = firstText(result["resolved_model"]),
             usage = mapValue(result["usage"]),
+            executionConfig = safeConfig,
         )
     }
 
@@ -999,6 +1117,7 @@ internal class ModelRunLogMetrics {
             requestedModel = "",
             resolvedModel = "",
             usage = emptyMap(),
+            executionConfig = null,
         )
     }
 
@@ -1019,6 +1138,19 @@ internal class ModelRunLogMetrics {
             if (resolvedModels.size == 1) tokenUsage["resolved_model"] = resolvedModels.single()
         }
         if (requestedModels.size == 1) tokenUsage["model"] = requestedModels.single()
+
+        val successfulCalls = calls.filter { it.success }
+        val firstConfig = successfulCalls.firstOrNull()?.executionConfig
+        val consistentExecutionConfig: Map<String, Any?>? = if (
+            successfulCalls.isNotEmpty() &&
+            firstConfig != null &&
+            successfulCalls.all { it.executionConfig != null && it.executionConfig == firstConfig }
+        ) {
+            firstConfig
+        } else {
+            null
+        }
+
         return linkedMapOf(
             "model_duration_ms" to calls.sumOf(Call::durationMs),
             "token_usage" to tokenUsage,
@@ -1030,12 +1162,13 @@ internal class ModelRunLogMetrics {
                     "requested_model" to call.requestedModel.takeIf(String::isNotEmpty),
                     "resolved_model" to call.resolvedModel.takeIf(String::isNotEmpty),
                     "token_usage" to call.usage.takeIf(Map<String, Any?>::isNotEmpty),
+                    "execution_config" to call.executionConfig,
                 ).filterValues { it != null }
             },
             "resolved_models" to resolvedModels.takeIf(List<String>::isNotEmpty),
+            "model_execution_config" to consistentExecutionConfig,
         ).filterValues { it != null }
     }
-
     private fun sumUsage(key: String): Long? {
         val values = calls.mapNotNull { call ->
             when (val value = call.usage[key]) {
@@ -1057,4 +1190,202 @@ internal fun plannerRunLogDiagnostics(
     firstText(result["function_id"])
         .takeIf(String::isNotEmpty)
         ?.let { put("function_id", it) }
+    sanitizeFinishedEvidence(
+        result["finished_evidence"] ?: mapValue(result["planner_diagnostics"])["finished_evidence"]
+    )?.let { put("finished_evidence", it) }
 }.takeIf(Map<String, Any?>::isNotEmpty)
+
+/**
+ * 约束 finished_evidence 仅保留 5 个核心字段与合法枚举值，防止把 expected_text 原文、图片或未识别字段落入封存日志。
+ * status: matched | model_asserted
+ * source: xml | ocr | model
+ */
+internal fun sanitizeFinishedEvidence(raw: Any?): Map<String, Any?>? {
+    val map = raw as? Map<*, *> ?: return null
+    val status = map["status"]?.toString()?.takeIf { it == "matched" || it == "model_asserted" } ?: return null
+    val source = map["source"]?.toString()?.takeIf { it == "xml" || it == "ocr" || it == "model" } ?: return null
+
+    val evidence = linkedMapOf<String, Any?>()
+    (map["observation_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["observation_id"] = it }
+    (map["state_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["state_id"] = it }
+    evidence["status"] = status
+    evidence["source"] = source
+    (map["matched_node_id"]?.toString())?.takeIf(String::isNotBlank)?.let { evidence["matched_node_id"] = it }
+
+    return evidence.takeIf { it.isNotEmpty() }
+}
+
+internal fun sanitizeErrorCode(raw: String?): String {
+    if (raw.isNullOrBlank()) return "experience_update_failed"
+    val trimmed = raw.trim()
+    val match = Regex("^[a-z0-9_]{1,64}$").matchEntire(trimmed)
+    if (match != null) return trimmed
+    return "experience_update_failed"
+}
+
+private fun safePositiveInt(raw: Any?, max: Int? = null): Int? {
+    val value = when (raw) {
+        is Int -> raw
+        is Long -> if (raw in 1..Int.MAX_VALUE) raw.toInt() else null
+        is Number -> {
+            val doubleVal = raw.toDouble()
+            if (doubleVal.isFinite() && doubleVal == kotlin.math.floor(doubleVal) && doubleVal in 1.0..Int.MAX_VALUE.toDouble()) {
+                doubleVal.toInt()
+            } else null
+        }
+        else -> null
+    } ?: return null
+    if (value <= 0) return null
+    if (max != null && value > max) return null
+    return value
+}
+
+internal fun sanitizeModelExecutionConfig(raw: Any?): Map<String, Any?>? {
+    val map = raw as? Map<*, *> ?: return null
+    val schemaVersion = map["schema_version"]?.toString()?.takeIf {
+        it == OmniFlowModelExecutionConfig.SCHEMA_VERSION
+    } ?: return null
+    val providerProfileSha256 = map["provider_profile_sha256"]?.toString()?.takeIf {
+        it.matches(Regex("^[a-f0-9]{64}$"))
+    } ?: return null
+    val resolvedModel = map["resolved_model"]?.toString()?.trim()?.takeIf { model ->
+        model.length in 1..256 &&
+            !model.contains("://") &&
+            model.none { c -> c.isISOControl() || c.isWhitespace() }
+    } ?: return null
+    val routeSource = map["route_source"]?.toString()?.takeIf {
+        it == OmniFlowModelExecutionConfig.ROUTE_GUI_BINDING ||
+            it == OmniFlowModelExecutionConfig.ROUTE_CONVERSATION ||
+            it == OmniFlowModelExecutionConfig.ROUTE_SHARED_SCENE
+    } ?: return null
+    val contextCapacity = safePositiveInt(map["context_capacity"], max = 10_000_000) ?: return null
+    val outputBudget = safePositiveInt(map["output_budget"], max = contextCapacity) ?: return null
+    val rawOmitted = (map["omitted_fields"] as? List<*>)
+        ?.mapNotNull { it?.toString() }
+        ?.filter { it in OmniFlowModelExecutionConfig.KNOWN_NULLABLE_FIELDS }
+        ?.toSet()
+        ?: emptySet()
+
+    val rawMaxCompletion = map["max_completion_tokens"]
+    val maxCompletionTokens = safePositiveInt(rawMaxCompletion, max = outputBudget)
+
+    val rawMaxTokens = map["max_tokens"]
+    val maxTokens = safePositiveInt(rawMaxTokens, max = outputBudget)
+
+    val rawReasoningEffort = map["reasoning_effort"]
+    val reasoningEffort = rawReasoningEffort?.toString()?.let {
+        ReasoningEffort.normalize(it)
+    }
+
+    val rawEnableThinking = map["enable_thinking"]
+    val enableThinking = rawEnableThinking as? Boolean
+
+    val rawThinkingType = map["thinking_type"]
+    val thinkingType = rawThinkingType?.toString()?.takeIf { it == "enabled" || it == "disabled" }
+
+    val rawReasoningSupported = map["reasoning_supported"]
+    val reasoningSupported = rawReasoningSupported as? Boolean
+
+    val rawReasoningCanDisable = map["reasoning_can_disable"]
+    val reasoningCanDisable = rawReasoningCanDisable as? Boolean
+
+    val rawSupportedLevels = map["supported_reasoning_levels"]
+    val supportedLevels = (rawSupportedLevels as? List<*>)
+        ?.mapNotNull { item -> item?.toString()?.let { ReasoningEffort.normalize(it) } }
+        ?.distinct()
+        ?.takeIf { it.isNotEmpty() }
+
+    val rawDefaultLevel = map["default_reasoning_level"]
+    val defaultReasoningLevel = rawDefaultLevel?.toString()?.let {
+        ReasoningEffort.normalize(it)
+    }
+
+    val sanitizedOmittedFields = buildList {
+        if (maxCompletionTokens == null && rawMaxCompletion == null && "max_completion_tokens" in rawOmitted) add("max_completion_tokens")
+        if (maxTokens == null && rawMaxTokens == null && "max_tokens" in rawOmitted) add("max_tokens")
+        if (reasoningEffort == null && rawReasoningEffort == null && "reasoning_effort" in rawOmitted) add("reasoning_effort")
+        if (enableThinking == null && rawEnableThinking == null && "enable_thinking" in rawOmitted) add("enable_thinking")
+        if (thinkingType == null && rawThinkingType == null && "thinking_type" in rawOmitted) add("thinking_type")
+        if (reasoningSupported == null && rawReasoningSupported == null && "reasoning_supported" in rawOmitted) add("reasoning_supported")
+        if (reasoningCanDisable == null && rawReasoningCanDisable == null && "reasoning_can_disable" in rawOmitted) add("reasoning_can_disable")
+        if (supportedLevels == null && rawSupportedLevels == null && "supported_reasoning_levels" in rawOmitted) add("supported_reasoning_levels")
+        if (defaultReasoningLevel == null && rawDefaultLevel == null && "default_reasoning_level" in rawOmitted) add("default_reasoning_level")
+    }
+
+    val config = linkedMapOf<String, Any?>()
+    config["schema_version"] = schemaVersion
+    config["provider_profile_sha256"] = providerProfileSha256
+    config["resolved_model"] = resolvedModel
+    config["route_source"] = routeSource
+    config["context_capacity"] = contextCapacity
+    config["output_budget"] = outputBudget
+    config["max_completion_tokens"] = maxCompletionTokens
+    config["max_tokens"] = maxTokens
+    config["reasoning_effort"] = reasoningEffort
+    config["enable_thinking"] = enableThinking
+    config["thinking_type"] = thinkingType
+    config["reasoning_supported"] = reasoningSupported
+    config["reasoning_can_disable"] = reasoningCanDisable
+    config["supported_reasoning_levels"] = supportedLevels
+    config["default_reasoning_level"] = defaultReasoningLevel
+    config["omitted_fields"] = sanitizedOmittedFields
+
+    return config.filterValues { it != null }
+}
+internal fun sanitizeRuntimeProvenance(raw: Any?): Map<String, Any?>? {
+    val map = raw as? Map<*, *> ?: return null
+    val schemaVersion = map["schema_version"]?.toString()?.takeIf {
+        it == "omniflow.runtime-provenance.v1"
+    } ?: return null
+    val runtimeVersion = map["runtime_version"]?.toString()?.takeIf(String::isNotBlank) ?: return null
+    val protocolVersion = map["protocol_version"]?.toString()?.takeIf(String::isNotBlank) ?: return null
+    val source = map["source"]?.toString()?.takeIf {
+        it == "packaged" || it == "installed" || it == "developer_override"
+    } ?: return null
+    val manifestSourceSha256 = map["manifest_source_sha256"]?.toString()?.takeIf {
+        it.matches(Regex("^[a-f0-9]{64}$"))
+    } ?: return null
+    val contractSha256 = map["contract_sha256"]?.toString()?.takeIf {
+        it.matches(Regex("^[a-f0-9]{64}$"))
+    } ?: return null
+
+    val allowedModules = setOf(
+        "bridge",
+        "runtime.engine",
+        "vlm.planner",
+        "core.schemas",
+        "runtime.app_experience",
+        "runtime.screen_collection",
+        "runlog",
+    )
+    val loadedModulesRaw = map["loaded_modules"] as? Map<*, *> ?: return null
+    val sanitizedLoadedModules = loadedModulesRaw.mapNotNull { (modKey, modVal) ->
+        val modName = modKey?.toString() ?: return@mapNotNull null
+        if (modName !in allowedModules) return@mapNotNull null
+        val modMap = modVal as? Map<*, *> ?: return@mapNotNull null
+        val status = modMap["status"]?.toString()
+        if (status == "missing") {
+            return@mapNotNull modName to mapOf("status" to "missing")
+        }
+        val sourceSha256 = modMap["source_sha256"]?.toString()?.takeIf {
+            it.matches(Regex("^[a-f0-9]{64}$"))
+        } ?: return@mapNotNull null
+        val codeSha256 = modMap["code_sha256"]?.toString()?.takeIf {
+            it.matches(Regex("^[a-f0-9]{64}$"))
+        } ?: return@mapNotNull null
+        modName to linkedMapOf(
+            "source_sha256" to sourceSha256,
+            "code_sha256" to codeSha256,
+        )
+    }.toMap()
+
+    return linkedMapOf(
+        "schema_version" to schemaVersion,
+        "runtime_version" to runtimeVersion,
+        "protocol_version" to protocolVersion,
+        "source" to source,
+        "manifest_source_sha256" to manifestSourceSha256,
+        "contract_sha256" to contractSha256,
+        "loaded_modules" to sanitizedLoadedModules,
+    )
+}

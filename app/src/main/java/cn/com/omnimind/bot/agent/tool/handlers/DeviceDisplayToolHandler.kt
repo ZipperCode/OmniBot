@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -830,14 +831,92 @@ class DeviceDisplayToolHandler(
         displayId: Int,
         leaseOwnerId: String,
     ): ToolExecutionResult {
-        val duration = args["duration_ms"]?.jsonPrimitive?.longOrNull ?: 1000L
+        val hasConditionKey = args.containsKey(OobActionSchema.ARG_CONDITION)
+        val hasTargetKey = args.containsKey(OobActionSchema.ARG_TARGET_DESCRIPTION)
+
+        val condition = if (hasConditionKey) {
+            val elem = args[OobActionSchema.ARG_CONDITION]
+            if (elem == null || elem is JsonNull || elem !is JsonPrimitive || !elem.isString) {
+                return errorResult("invalid_wait_condition")
+            }
+            elem.content
+        } else {
+            null
+        }
+
+        val targetDescription = if (hasTargetKey) {
+            val elem = args[OobActionSchema.ARG_TARGET_DESCRIPTION]
+            if (elem == null || elem is JsonNull || elem !is JsonPrimitive || !elem.isString) {
+                return errorResult("invalid_wait_condition")
+            }
+            elem.content
+        } else {
+            null
+        }
+
+        val hasDurationKey = args.containsKey(OobActionSchema.ARG_DURATION_MS)
+        val duration: Long = if (hasDurationKey) {
+            val elem = args[OobActionSchema.ARG_DURATION_MS]
+            if (elem == null || elem is JsonNull || elem !is JsonPrimitive || elem.isString) {
+                return errorResult("invalid_wait_duration")
+            }
+            if (elem.content.contains('.')) {
+                return errorResult("invalid_wait_duration")
+            }
+            val parsed = elem.longOrNull
+                ?: return errorResult("invalid_wait_duration")
+            parsed
+        } else {
+            if (condition != null) {
+                return errorResult("invalid_wait_duration")
+            } else {
+                1000L
+            }
+        }
+
+        if (condition != null) {
+            if (duration !in 1L..10000L) {
+                return errorResult("invalid_wait_duration")
+            }
+        } else {
+            if (duration < 0L) {
+                return errorResult("invalid_wait_duration")
+            }
+        }
+
+        val actArgs = mutableMapOf<String, Any?>(
+            OobActionSchema.ARG_DURATION_MS to duration,
+        )
+        if (condition != null) {
+            actArgs[OobActionSchema.ARG_CONDITION] = condition
+        }
+        if (targetDescription != null) {
+            actArgs[OobActionSchema.ARG_TARGET_DESCRIPTION] = targetDescription
+        }
         val result = environment.act(
-            action = Action(OobActionSchema.TOOL_WAIT, mapOf(OobActionSchema.ARG_DURATION_MS to duration)),
+            action = Action(OobActionSchema.TOOL_WAIT, actArgs),
             awaitStabilization = false,
             displayId = displayId,
             leaseOwnerId = leaseOwnerId,
         )
-        return successResult("等待完成 (${duration}ms) [显示屏 $displayId]", mapOf("duration_ms" to duration, "display_id" to displayId))
+        return if (result.success) {
+            val data = mutableMapOf<String, Any?>(
+                "duration_ms" to duration,
+                "display_id" to displayId,
+            )
+            actArgs[OobActionSchema.ARG_CONDITION]?.let { data["condition"] = it }
+            actArgs[OobActionSchema.ARG_TARGET_DESCRIPTION]?.let { data["target_description"] = it }
+            data.putAll(result.diagnostics)
+            val condition = actArgs[OobActionSchema.ARG_CONDITION]
+            val summary = if (condition != null) {
+                "等待条件满足: $condition (${duration}ms) [显示屏 $displayId]"
+            } else {
+                "等待完成 (${duration}ms) [显示屏 $displayId]"
+            }
+            successResult(summary, data)
+        } else {
+            errorResult(result.message, result.diagnostics)
+        }
     }
 
     private fun successResult(
@@ -935,6 +1014,15 @@ class DeviceDisplayToolHandler(
                         putJsonObject("duration_ms") {
                             put("type", "integer")
                             put("description", "手势持续时间（毫秒）")
+                        }
+                        putJsonObject("condition") {
+                            put("type", "string")
+                            put("description", "可选等待条件：'text_present'（等待目标文本出现）、'text_absent'（等待目标文本消失）或 'screen_changed'（等待界面发生变化）。仅 action=wait。")
+                            put("enum", buildJsonArray {
+                                add(JsonPrimitive("text_present"))
+                                add(JsonPrimitive("text_absent"))
+                                add(JsonPrimitive("screen_changed"))
+                            })
                         }
                         putJsonObject("text") {
                             put("type", "string")

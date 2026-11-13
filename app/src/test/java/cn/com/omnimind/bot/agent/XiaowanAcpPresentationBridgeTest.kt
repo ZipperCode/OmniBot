@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -1076,5 +1077,151 @@ class XiaowanAcpPresentationBridgeTest {
         assertEquals("call_shared", rawOut1["modelToolCallId"]?.jsonPrimitive?.content)
         assertEquals("call_shared", rawOut2["modelToolCallId"]?.jsonPrimitive?.content)
         assertEquals("call_shared-round-2", rawOut3["modelToolCallId"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `official ACP consumer retains actual tool name and progress action from rawOutput across input start and progress`() = runBlocking {
+        for (toolName in listOf("vlm_task", "save_function")) {
+            val updates = mutableListOf<SessionUpdate>()
+            val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-1", "turn-1") { updates += it }
+
+            val callId = "call-$toolName-1"
+            val rawArgs = if (toolName == "vlm_task") {
+                """{"action":"wait","duration_ms":10000}"""
+            } else {
+                """{"run_id":"gui-run-1","enhance":true}"""
+            }
+            val toolCall = cn.com.omnimind.bot.agent.AssistantToolCall(
+                id = callId,
+                function = cn.com.omnimind.bot.agent.AssistantToolCallFunction(toolName, rawArgs),
+            )
+
+            // 1. onToolCallInput emits initial ToolCall with PENDING
+            bridge.onToolCallInput(toolCall, "builtin")
+            val inputUpdate = updates.last() as SessionUpdate.ToolCall
+            assertEquals(callId, inputUpdate.toolCallId.value)
+            assertEquals(ToolCallStatus.PENDING, inputUpdate.status)
+            assertEquals(JsonPrimitive(rawArgs), inputUpdate.rawInput)
+            assertFalse((inputUpdate.rawInput as? JsonObject)?.containsKey("toolName") ?: false)
+
+            val inputRawOutput = inputUpdate.rawOutput as? JsonObject
+            assertNotNull("input rawOutput must be present", inputRawOutput)
+            assertEquals(toolName, inputRawOutput?.get("toolName")?.jsonPrimitive?.content)
+
+            val inputNotification = inputUpdate.toAcpSessionNotification("sess-1")
+            assertNotNull(inputNotification)
+            val inputConsumedRawOutput = inputNotification!!.update["rawOutput"] as? Map<*, *>
+            assertEquals(toolName, inputConsumedRawOutput?.get("toolName"))
+            assertEquals(callId, inputNotification.update["toolCallId"])
+
+            // 2. onToolCallStart emits ToolCallUpdate with IN_PROGRESS
+            val parsedArgs = Json.parseToJsonElement(rawArgs).jsonObject
+            bridge.onToolCallStart(callId, toolName, parsedArgs, "builtin")
+            val startUpdate = updates.last() as SessionUpdate.ToolCallUpdate
+            assertEquals(callId, startUpdate.toolCallId.value)
+            assertEquals(ToolCallStatus.IN_PROGRESS, startUpdate.status)
+            assertEquals(parsedArgs, startUpdate.rawInput)
+            assertFalse((startUpdate.rawInput as? JsonObject)?.containsKey("toolName") ?: false)
+
+            val startRawOutput = startUpdate.rawOutput as? JsonObject
+            assertNotNull("start rawOutput must be present", startRawOutput)
+            assertEquals(toolName, startRawOutput?.get("toolName")?.jsonPrimitive?.content)
+
+            val startNotification = startUpdate.toAcpSessionNotification("sess-1")
+            assertNotNull(startNotification)
+            val startConsumedRawOutput = startNotification!!.update["rawOutput"] as? Map<*, *>
+            assertEquals(toolName, startConsumedRawOutput?.get("toolName"))
+            assertEquals(callId, startNotification.update["toolCallId"])
+
+            // 3. onToolCallProgress emits ToolCallUpdate with progress content, action in extras, and preserves actual toolName
+            val progressExtras = if (toolName == "vlm_task") {
+                mapOf(
+                    "run_id" to "gui-run-1",
+                    "display_id" to 47,
+                    "action" to mapOf("tool" to "wait", "args" to mapOf("duration_ms" to 10000)),
+                    "toolName" to "unauthorized_override",
+                )
+            } else {
+                mapOf(
+                    "run_id" to "gui-run-1",
+                    "action" to mapOf("step" to "extract_form_function"),
+                    "toolName" to "unauthorized_override",
+                )
+            }
+            bridge.onToolCallProgress(callId, toolName, "waiting condition", progressExtras)
+            val progressUpdate = updates.last() as SessionUpdate.ToolCallUpdate
+            assertEquals(callId, progressUpdate.toolCallId.value)
+            assertEquals(ToolCallStatus.IN_PROGRESS, progressUpdate.status)
+            assertTrue(progressUpdate.rawInput == null || progressUpdate.rawInput == kotlinx.serialization.json.JsonNull)
+
+            val progressRawOutput = progressUpdate.rawOutput as? JsonObject
+            assertNotNull("progress rawOutput must be present", progressRawOutput)
+            // Known tool name must not be overwritten by progress extras
+            assertEquals(toolName, progressRawOutput?.get("toolName")?.jsonPrimitive?.content)
+            assertEquals("gui-run-1", progressRawOutput?.get("run_id")?.jsonPrimitive?.content)
+            assertNotNull(progressRawOutput?.get("action"))
+
+            val progressNotification = progressUpdate.toAcpSessionNotification("sess-1")
+            assertNotNull(progressNotification)
+            val progressConsumedRawOutput = progressNotification!!.update["rawOutput"] as? Map<*, *>
+            assertEquals(toolName, progressConsumedRawOutput?.get("toolName"))
+            assertEquals(callId, progressNotification.update["toolCallId"])
+            assertNotNull(progressConsumedRawOutput?.get("action"))
+        }
+    }
+
+    @Test
+    fun `direct tool start without prior input emits rawOutput carrying actual toolName`() = runBlocking {
+        for (toolName in listOf("vlm_task", "save_function")) {
+            val updates = mutableListOf<SessionUpdate>()
+            val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-1", "turn-1") { updates += it }
+            val callId = "call-direct-$toolName"
+            val args = JsonObject(mapOf("run_id" to JsonPrimitive("gui-run-direct")))
+
+            bridge.onToolCallStart(callId, toolName, args, "builtin")
+            val startUpdate = updates.last() as SessionUpdate.ToolCall
+            assertEquals(callId, startUpdate.toolCallId.value)
+            assertEquals(ToolCallStatus.IN_PROGRESS, startUpdate.status)
+            assertEquals(args, startUpdate.rawInput)
+
+            val rawOutput = startUpdate.rawOutput as? JsonObject
+            assertNotNull("direct start rawOutput must be present", rawOutput)
+            assertEquals(toolName, rawOutput?.get("toolName")?.jsonPrimitive?.content)
+
+            val notification = startUpdate.toAcpSessionNotification("sess-1")
+            assertNotNull(notification)
+            val consumedRawOutput = notification!!.update["rawOutput"] as? Map<*, *>
+            assertEquals(toolName, consumedRawOutput?.get("toolName"))
+            assertEquals(callId, notification.update["toolCallId"])
+        }
+    }
+
+    @Test
+    fun `streaming tool input chunks preserve actual toolName in rawOutput`() = runBlocking {
+        val updates = mutableListOf<SessionUpdate>()
+        val bridge = XiaowanAcpEventBridge(acpEventBridgeTestContext(), "sess-1", "turn-1") { updates += it }
+        val callId = "call-stream-vlm"
+        val chunk1 = cn.com.omnimind.bot.agent.AssistantToolCall(
+            id = callId,
+            function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("vlm_task", "{\"prompt\":\"w"),
+        )
+        val chunk2 = cn.com.omnimind.bot.agent.AssistantToolCall(
+            id = callId,
+            function = cn.com.omnimind.bot.agent.AssistantToolCallFunction("vlm_task", "{\"prompt\":\"wait\"}"),
+        )
+
+        bridge.onToolCallInput(chunk1, "builtin")
+        val update1 = updates.last() as SessionUpdate.ToolCall
+        assertEquals(callId, update1.toolCallId.value)
+        val rawOut1 = update1.rawOutput as? JsonObject
+        assertNotNull("chunk1 rawOutput must be present", rawOut1)
+        assertEquals("vlm_task", rawOut1?.get("toolName")?.jsonPrimitive?.content)
+
+        bridge.onToolCallInput(chunk2, "builtin")
+        val update2 = updates.last() as SessionUpdate.ToolCallUpdate
+        assertEquals(callId, update2.toolCallId.value)
+        val rawOut2 = update2.rawOutput as? JsonObject
+        assertNotNull("chunk2 rawOutput must be present", rawOut2)
+        assertEquals("vlm_task", rawOut2?.get("toolName")?.jsonPrimitive?.content)
     }
 }

@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -218,6 +219,7 @@ internal class AccessibilityAndroidGuiPlatform(
                 y1 = number(action, OobActionSchema.ARG_Y),
                 durationMs = CLICK_GESTURE_DURATION_MS,
                 displayId = displayId,
+                isTap = true,
             )
 
             OobActionSchema.TOOL_LONG_PRESS -> gesture(
@@ -226,6 +228,7 @@ internal class AccessibilityAndroidGuiPlatform(
                 y1 = number(action, OobActionSchema.ARG_Y),
                 durationMs = long(action, OobActionSchema.ARG_DURATION_MS, 800L),
                 displayId = displayId,
+                isTap = false,
             )
 
             OobActionSchema.TOOL_SWIPE -> gesture(
@@ -236,6 +239,7 @@ internal class AccessibilityAndroidGuiPlatform(
                 y2 = number(action, OobActionSchema.ARG_Y2),
                 durationMs = long(action, OobActionSchema.ARG_DURATION_MS, 300L),
                 displayId = displayId,
+                isTap = false,
             )
 
             OobActionSchema.TOOL_INPUT_TEXT -> inputText(action, displayId)
@@ -458,7 +462,11 @@ internal class AccessibilityAndroidGuiPlatform(
         y2: Float = y1,
         durationMs: Long,
         displayId: Int = Display.DEFAULT_DISPLAY,
+        isTap: Boolean,
     ): AndroidGuiActionResult = suspendCancellableCoroutine { continuation ->
+        // 派发前确保调用协程仍处于活跃状态
+        continuation.context.ensureActive()
+
         val path = Path().apply {
             moveTo(x1, y1)
             if (x1 != x2 || y1 != y2) lineTo(x2, y2)
@@ -486,19 +494,23 @@ internal class AccessibilityAndroidGuiPlatform(
             },
             null,
         )
+        // 被无障碍服务拒绝且协程仍处于活跃状态时，回退到虚拟屏底层注入；若手势已受理随后超时则不重放
         if (!accepted && continuation.isActive) {
+            continuation.context.ensureActive()
             if (displayId != Display.DEFAULT_DISPLAY) {
-                val injected = if (x1 == x2 && y1 == y2) {
+                val injected = if (isTap) {
                     DeviceDisplayManager.injectTap(displayId, x1.toInt(), y1.toInt())
                 } else {
                     DeviceDisplayManager.injectSwipe(displayId, x1.toInt(), y1.toInt(), x2.toInt(), y2.toInt(), durationMs)
                 }
-                continuation.resume(
-                    AndroidGuiActionResult(
-                        injected,
-                        if (injected) "gesture_dispatched_via_root" else "gesture_rejected",
-                    ),
-                )
+                if (continuation.isActive) {
+                    continuation.resume(
+                        AndroidGuiActionResult(
+                            injected,
+                            if (injected) "gesture_dispatched_via_root" else "gesture_rejected",
+                        ),
+                    )
+                }
             } else {
                 continuation.resume(AndroidGuiActionResult(false, "gesture_rejected"))
             }

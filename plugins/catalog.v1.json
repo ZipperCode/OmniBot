@@ -9,7 +9,7 @@
       "description": "Android GUI automation powered by the OmniFlow VLM runtime.",
       "publisher": "OmniMind",
       "kind": "runtime_bundle",
-      "downloadSizeBytes": 2945562,
+      "downloadSizeBytes": 2974125,
       "required": true,
       "installByDefault": true,
       "capabilities": [
@@ -26,9 +26,9 @@
       "runtimeSkill": {
         "id": "omniflow-gui-runtime",
         "packagedArchivePath": "runtime-components/omniflow-gui-runtime-2.1.9.zip",
-        "packagedArchiveSha256": "57a035d474460f8a933ca827bfab9ea9c56b7eb37c1e4d3686c8fb2b4186efcd",
+        "packagedArchiveSha256": "62e1ababd81a6247d22381b7e9b491bec30d532af747bd56bb77f7adf0f6b81e",
         "installTimeoutSeconds": 900,
-        "prebuiltRuntimeSha256": "57a035d474460f8a933ca827bfab9ea9c56b7eb37c1e4d3686c8fb2b4186efcd"
+        "prebuiltRuntimeSha256": "62e1ababd81a6247d22381b7e9b491bec30d532af747bd56bb77f7adf0f6b81e"
       },
       "presentation": {
         "description": {

@@ -100,6 +100,7 @@ class SubagentDispatcher(
         val contextCompactorFactory: (() -> AgentContextCompactionController?)?,
         val reasoningEffort: String?,
         val modelProviderProfileId: String?,
+        val modelId: String?,
     )
     internal data class EffectiveModelRoute(
         val providerProfileId: String? = null,
@@ -162,6 +163,7 @@ class SubagentDispatcher(
             contextCompactorFactory = childCompactor,
             reasoningEffort = reasoningEffort,
             modelProviderProfileId = providerId,
+            modelId = modelId,
         )
     }
 
@@ -218,6 +220,7 @@ class SubagentDispatcher(
                         contextCompactorFactory = childCompactor,
                         reasoningEffort = reasoningEffort,
                         modelProviderProfileId = parentEnv.modelProviderProfileId,
+                        modelId = parentEnv.modelId,
                     )
                 }
             }
@@ -342,6 +345,7 @@ class SubagentDispatcher(
                 conversationMode = parentEnv.conversationMode,
                 reasoningEffort = modelContext.reasoningEffort,
                 modelProviderProfileId = modelContext.modelProviderProfileId,
+                modelId = modelContext.modelId,
                 terminalEnvironment = parentEnv.terminalEnvironment,
                 runControl = NoOpAgentRunControl,
                 permissionRequester = mappedPermissionRequester,

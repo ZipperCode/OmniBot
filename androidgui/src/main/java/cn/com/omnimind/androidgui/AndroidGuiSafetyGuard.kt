@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Rect
 import cn.com.omnimind.baselib.runlog.Action
 import cn.com.omnimind.baselib.runlog.State
+import cn.com.omnimind.baselib.runlog.OobActionSchema
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.StringReader
@@ -418,6 +419,18 @@ object AndroidGuiSafetyGuard {
                 )
             )
         }
+        if (baseline != null && (baseline.displayWidth != currentDisplaySize.first || baseline.displayHeight != currentDisplaySize.second)) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_display_mismatch",
+                    diagnostics = mapOf(
+                        "baseline_resolution" to "${baseline.displayWidth}x${baseline.displayHeight}",
+                        "current_resolution" to "${currentDisplaySize.first}x${currentDisplaySize.second}",
+                    ),
+                )
+            )
+        }
 
         // 2. 观测身份核验（旧快照拒绝）
         if (expectedObservationId != null) {
@@ -482,10 +495,28 @@ object AndroidGuiSafetyGuard {
 
         val freshRoots = parseHierarchy(freshXml)
         val freshNodes = flattenNodes(freshRoots)
-        val baselineNodes = if (!baseline?.xml.isNullOrBlank()) {
-            flattenNodes(parseHierarchy(baseline!!.xml))
+        val baselineRoots = if (!baseline?.xml.isNullOrBlank()) {
+            parseHierarchy(baseline!!.xml)
         } else {
             emptyList()
+        }
+        val baselineNodes = if (baselineRoots.isNotEmpty()) {
+            flattenNodes(baselineRoots)
+        } else {
+            emptyList()
+        }
+
+        if (action.tool == OobActionSchema.TOOL_SWIPE) {
+            return checkSwipePath(
+                action = action,
+                baseline = baseline,
+                currentDisplaySize = currentDisplaySize,
+                baselineNodes = baselineNodes,
+                baselineRoots = baselineRoots,
+                freshNodes = freshNodes,
+                freshRoots = freshRoots,
+                freshScreenshotJpeg = freshScreenshotJpeg,
+            )
         }
 
         val targetDesc = action.args["target_description"] as? String
@@ -646,6 +677,33 @@ object AndroidGuiSafetyGuard {
                         )
                     }
 
+                    val isLearnableAction = action.tool == OobActionSchema.TOOL_CLICK ||
+                        action.tool == OobActionSchema.TOOL_LONG_PRESS ||
+                        action.tool == OobActionSchema.TOOL_INPUT_TEXT
+
+                    val hasVerifiedFreshObservation = !expectedObservationId.isNullOrBlank() &&
+                        baseline != null &&
+                        baseline.observationId == expectedObservationId
+                    val confirmedObservationId = if (hasVerifiedFreshObservation) expectedObservationId else null
+                    val targetResId = bestTarget.resourceId?.takeIf { it.isNotBlank() }
+                    val targetClass = bestTarget.className?.takeIf { it.isNotBlank() }
+
+                    val confirmedDiagnostics = if (
+                        isLearnableAction &&
+                        confirmedObservationId != null &&
+                        targetResId != null &&
+                        targetClass != null
+                    ) {
+                        mapOf(
+                            "guard_status" to "target_confirmed",
+                            "observation_id" to confirmedObservationId,
+                            "target_resource_id" to targetResId,
+                            "target_class" to targetClass,
+                        )
+                    } else {
+                        emptyMap()
+                    }
+
                     // 若原点击点被遮挡，但目标存在确证净空点，重定位 Action 坐标至净空点派发
                     if (occlusion.type == OcclusionType.PARTIAL && occlusion.clearPoint != null && occlusion.clearPoint != clickPx) {
                         val clearPx = occlusion.clearPoint
@@ -654,17 +712,21 @@ object AndroidGuiSafetyGuard {
                         val adjustedAction = action.copy(
                             args = action.args + mapOf("x" to adjustedX, "y" to adjustedY),
                         )
+                        val adjustedDiagnostics = mapOf(
+                            "clear_point_adjusted" to "[${clearPx.first},${clearPx.second}]",
+                            "original_coords" to (clickPx?.let { "[${it.first},${it.second}]" } ?: "none"),
+                        )
                         return GuardResult.Allowed(
                             action = adjustedAction,
                             adjustedCoordinate = clearPx,
-                            diagnostics = mapOf(
-                                "clear_point_adjusted" to "[${clearPx.first},${clearPx.second}]",
-                                "original_coords" to (clickPx?.let { "[${it.first},${it.second}]" } ?: "none"),
-                            ),
+                            diagnostics = adjustedDiagnostics + confirmedDiagnostics,
                         )
                     }
 
-                    return GuardResult.Allowed(action = action)
+                    return GuardResult.Allowed(
+                        action = action,
+                        diagnostics = confirmedDiagnostics,
+                    )
                 }
                 is BaselineTargetLookup.NoCandidate -> {
                     // 若调用方传入了明确控件 nodeId，但在 baseline 找不到，必须严格拒绝，绝不当成视觉/OCR目标
@@ -1028,36 +1090,63 @@ object AndroidGuiSafetyGuard {
         val width = right - left
         val height = bottom - top
         if (width <= 0 || height <= 0) return@runCatching false
-
         val baselineBitmap = BitmapFactory.decodeByteArray(baselineBytes, 0, baselineBytes.size) ?: return@runCatching false
         val freshBitmap = BitmapFactory.decodeByteArray(freshBytes, 0, freshBytes.size) ?: return@runCatching false
 
         try {
-            val basePixels = IntArray(width * height)
-            val freshPixels = IntArray(width * height)
-
-            baselineBitmap.getPixels(basePixels, 0, width, left, top, width, height)
-            freshBitmap.getPixels(freshPixels, 0, width, left, top, width, height)
-
-            var diffCount = 0
-            val total = width * height
-            for (i in 0 until total) {
-                val p1 = basePixels[i]
-                val p2 = freshPixels[i]
-                val rDiff = abs(((p1 shr 16) and 0xFF) - ((p2 shr 16) and 0xFF))
-                val gDiff = abs(((p1 shr 8) and 0xFF) - ((p2 shr 8) and 0xFF))
-                val bDiff = abs((p1 and 0xFF) - (p2 and 0xFF))
-                if (rDiff + gDiff + bDiff > 45) {
-                    diffCount++
-                }
-            }
-            val diffRatio = diffCount.toDouble() / total.toDouble()
-            diffRatio > 0.4
+            checkRoiPixelShiftOnBitmaps(
+                baselineBitmap = baselineBitmap,
+                freshBitmap = freshBitmap,
+                centerX = centerX,
+                centerY = centerY,
+                displayWidth = displayWidth,
+                displayHeight = displayHeight,
+                roiRadius = roiRadius,
+            )
         } finally {
             baselineBitmap.recycle()
             freshBitmap.recycle()
         }
     }.getOrDefault(false)
+
+    private fun checkRoiPixelShiftOnBitmaps(
+        baselineBitmap: Bitmap,
+        freshBitmap: Bitmap,
+        centerX: Int,
+        centerY: Int,
+        displayWidth: Int,
+        displayHeight: Int,
+        roiRadius: Int = 16,
+    ): Boolean {
+        val left = (centerX - roiRadius).coerceIn(0, displayWidth - 1)
+        val top = (centerY - roiRadius).coerceIn(0, displayHeight - 1)
+        val right = (centerX + roiRadius).coerceIn(left + 1, displayWidth)
+        val bottom = (centerY + roiRadius).coerceIn(top + 1, displayHeight)
+        val width = right - left
+        val height = bottom - top
+        if (width <= 0 || height <= 0) return false
+
+        val basePixels = IntArray(width * height)
+        val freshPixels = IntArray(width * height)
+
+        baselineBitmap.getPixels(basePixels, 0, width, left, top, width, height)
+        freshBitmap.getPixels(freshPixels, 0, width, left, top, width, height)
+
+        var diffCount = 0
+        val total = width * height
+        for (i in 0 until total) {
+            val p1 = basePixels[i]
+            val p2 = freshPixels[i]
+            val rDiff = abs(((p1 shr 16) and 0xFF) - ((p2 shr 16) and 0xFF))
+            val gDiff = abs(((p1 shr 8) and 0xFF) - ((p2 shr 8) and 0xFF))
+            val bDiff = abs((p1 and 0xFF) - (p2 and 0xFF))
+            if (rDiff + gDiff + bDiff > 45) {
+                diffCount++
+            }
+        }
+        val diffRatio = diffCount.toDouble() / total.toDouble()
+        return diffRatio > 0.4
+    }
 
     private fun parseBounds(value: String): Rect {
         val match = BOUNDS_REGEX.matchEntire(value.trim()) ?: return Rect()
@@ -1068,5 +1157,613 @@ object AndroidGuiSafetyGuard {
             right.toIntOrNull() ?: 0,
             bottom.toIntOrNull() ?: 0,
         )
+    }
+
+    private data class SwipeCoordinates(
+        val startX: Double,
+        val startY: Double,
+        val endX: Double,
+        val endY: Double,
+    )
+
+    private fun decodeSwipeCoordinates(action: Action): SwipeCoordinates? {
+        val rawX1 = (action.args["x1"] as? Number)?.toDouble()
+        val rawY1 = (action.args["y1"] as? Number)?.toDouble()
+        val rawX2 = (action.args["x2"] as? Number)?.toDouble()
+        val rawY2 = (action.args["y2"] as? Number)?.toDouble()
+
+        val startX = rawX1 ?: (action.args["x"] as? Number)?.toDouble()
+        val startY = rawY1 ?: (action.args["y"] as? Number)?.toDouble()
+        val endX = rawX2
+        val endY = rawY2
+
+        if (startX != null && startY != null) {
+            if (endX != null && endY != null) {
+                return SwipeCoordinates(startX, startY, endX, endY)
+            }
+            val distance = (action.args["distance"] as? Number)?.toDouble() ?: 300.0
+            val dir = action.args["direction"]?.toString()?.trim()?.lowercase()
+            return when (dir) {
+                "up" -> SwipeCoordinates(startX, startY, startX, (startY - distance).coerceIn(0.0, 1000.0))
+                "down" -> SwipeCoordinates(startX, startY, startX, (startY + distance).coerceIn(0.0, 1000.0))
+                "left" -> SwipeCoordinates(startX, startY, (startX - distance).coerceIn(0.0, 1000.0), startY)
+                "right" -> SwipeCoordinates(startX, startY, (startX + distance).coerceIn(0.0, 1000.0), startY)
+                else -> null
+            }
+        }
+        return null
+    }
+
+    private fun checkSwipePath(
+        action: Action,
+        baseline: AndroidGuiObservationBaseline?,
+        currentDisplaySize: Pair<Int, Int>,
+        baselineNodes: List<AndroidGuiNode>,
+        baselineRoots: List<AndroidGuiNode>,
+        freshNodes: List<AndroidGuiNode>,
+        freshRoots: List<AndroidGuiNode>,
+        freshScreenshotJpeg: ByteArray?,
+    ): GuardResult {
+        if (currentDisplaySize.first <= 0 || currentDisplaySize.second <= 0) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_observation_expired",
+                    diagnostics = mapOf("reason" to "invalid_display_size"),
+                )
+            )
+        }
+
+        val coords = decodeSwipeCoordinates(action)
+            ?: return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_coordinate_invalid",
+                    diagnostics = mapOf("reason" to "missing_or_invalid_swipe_coordinates"),
+                )
+            )
+
+        if (!coords.startX.isFinite() || !coords.startY.isFinite() ||
+            !coords.endX.isFinite() || !coords.endY.isFinite()
+        ) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_coordinate_invalid",
+                    diagnostics = mapOf("reason" to "non_finite_swipe_coordinates"),
+                )
+            )
+        }
+
+        if (coords.startX !in 0.0..1000.0 || coords.startY !in 0.0..1000.0 ||
+            coords.endX !in 0.0..1000.0 || coords.endY !in 0.0..1000.0
+        ) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "canonical_action_arg_range_invalid",
+                    diagnostics = mapOf("reason" to "swipe_coordinates_out_of_range"),
+                )
+            )
+        }
+
+        val startPx = Pair(
+            (coords.startX / 1000.0 * currentDisplaySize.first).toInt(),
+            (coords.startY / 1000.0 * currentDisplaySize.second).toInt(),
+        )
+        val endPx = Pair(
+            (coords.endX / 1000.0 * currentDisplaySize.first).toInt(),
+            (coords.endY / 1000.0 * currentDisplaySize.second).toInt(),
+        )
+        val midPx = Pair(
+            (startPx.first + endPx.first) / 2,
+            (startPx.second + endPx.second) / 2,
+        )
+
+        val isPureVisual = baselineNodes.isEmpty()
+        if (isPureVisual) {
+            if (baseline?.screenshotJpeg == null || baseline.screenshotJpeg.isEmpty()) {
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_observation_expired",
+                        diagnostics = mapOf("reason" to "missing_baseline_screenshot_for_pure_visual_swipe"),
+                    )
+                )
+            }
+            if (freshScreenshotJpeg == null || freshScreenshotJpeg.isEmpty()) {
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_observation_expired",
+                        diagnostics = mapOf("reason" to "missing_fresh_screenshot_for_roi_check"),
+                    )
+                )
+            }
+
+            val baselineBitmap = BitmapFactory.decodeByteArray(baseline.screenshotJpeg, 0, baseline.screenshotJpeg.size)
+                ?: return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_observation_expired",
+                        diagnostics = mapOf("reason" to "corrupted_baseline_screenshot"),
+                    )
+                )
+
+            val freshBitmap = BitmapFactory.decodeByteArray(freshScreenshotJpeg, 0, freshScreenshotJpeg.size)
+            if (freshBitmap == null) {
+                baselineBitmap.recycle()
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_observation_expired",
+                        diagnostics = mapOf("reason" to "corrupted_fresh_screenshot"),
+                    )
+                )
+            }
+
+            if (baselineBitmap.width != currentDisplaySize.first || baselineBitmap.height != currentDisplaySize.second ||
+                freshBitmap.width != currentDisplaySize.first || freshBitmap.height != currentDisplaySize.second
+            ) {
+                baselineBitmap.recycle()
+                freshBitmap.recycle()
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_display_mismatch",
+                        diagnostics = mapOf(
+                            "baseline_bitmap_size" to "${baselineBitmap.width}x${baselineBitmap.height}",
+                            "fresh_bitmap_size" to "${freshBitmap.width}x${freshBitmap.height}",
+                            "current_display_size" to "${currentDisplaySize.first}x${currentDisplaySize.second}",
+                        ),
+                    )
+                )
+            }
+
+            try {
+                // fresh 窗口可确证的高层实体覆盖路径即拒绝
+                val freshCoveringEntities = freshNodes.filter { node ->
+                    node.visibleToUser && !node.bounds.isEmpty &&
+                        (node.isInteractive || !node.text.isNullOrBlank() ||
+                            node.className?.contains("Dialog", ignoreCase = true) == true ||
+                            node.className?.contains("PopupWindow", ignoreCase = true) == true ||
+                            (node.windowLayer != null && node.windowLayer > 0))
+                }
+                for (entity in freshCoveringEntities) {
+                    if (lineIntersectsRect(startPx, endPx, entity.bounds)) {
+                        return GuardResult.Rejected(
+                            AndroidGuiActionResult(
+                                success = false,
+                                message = "action_swipe_obstructed",
+                                diagnostics = mapOf(
+                                    "reason" to "swipe_path_obstructed_by_fresh_entity",
+                                    "blocker_id" to entity.id,
+                                    "blocker_bounds" to entity.bounds.toString(),
+                                ),
+                            )
+                        )
+                    }
+                }
+
+                // 复用 checkRoiPixelShiftOnBitmaps 分别核验起点、中点、终点；任一点变动拒绝
+                val startChanged = checkRoiPixelShiftOnBitmaps(
+                    baselineBitmap = baselineBitmap,
+                    freshBitmap = freshBitmap,
+                    centerX = startPx.first,
+                    centerY = startPx.second,
+                    displayWidth = currentDisplaySize.first,
+                    displayHeight = currentDisplaySize.second,
+                )
+                if (startChanged) {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_observation_expired",
+                            diagnostics = mapOf("reason" to "start_point_roi_pixel_changed"),
+                        )
+                    )
+                }
+
+                val midChanged = checkRoiPixelShiftOnBitmaps(
+                    baselineBitmap = baselineBitmap,
+                    freshBitmap = freshBitmap,
+                    centerX = midPx.first,
+                    centerY = midPx.second,
+                    displayWidth = currentDisplaySize.first,
+                    displayHeight = currentDisplaySize.second,
+                )
+                if (midChanged) {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_observation_expired",
+                            diagnostics = mapOf("reason" to "mid_point_roi_pixel_changed"),
+                        )
+                    )
+                }
+
+                val endChanged = checkRoiPixelShiftOnBitmaps(
+                    baselineBitmap = baselineBitmap,
+                    freshBitmap = freshBitmap,
+                    centerX = endPx.first,
+                    centerY = endPx.second,
+                    displayWidth = currentDisplaySize.first,
+                    displayHeight = currentDisplaySize.second,
+                )
+                if (endChanged) {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_observation_expired",
+                            diagnostics = mapOf("reason" to "end_point_roi_pixel_changed"),
+                        )
+                    )
+                }
+            } finally {
+                baselineBitmap.recycle()
+                freshBitmap.recycle()
+            }
+
+            return GuardResult.Allowed(action = action)
+        }
+
+        // 有 XML 结构分支
+        val targetDesc = action.args["target_description"] as? String
+        val nodeId = action.args["node_id"]?.toString()
+        val resId = action.args["node_resource_id"] as? String
+        val hasTargetClues = !targetDesc.isNullOrBlank() || !nodeId.isNullOrBlank() || !resId.isNullOrBlank()
+
+        if (hasTargetClues) {
+            val lookup = lookupBaselineTarget(
+                nodes = baselineNodes,
+                nodeId = nodeId,
+                resId = resId,
+                desc = targetDesc,
+                clickPx = startPx,
+            )
+            when (lookup) {
+                is BaselineTargetLookup.ExplicitIdentityMismatch -> {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_target_missing",
+                            diagnostics = mapOf("reason" to lookup.reason, "target" to (targetDesc ?: resId ?: nodeId ?: "")),
+                        )
+                    )
+                }
+                is BaselineTargetLookup.Ambiguous -> {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_target_ambiguous",
+                            diagnostics = mapOf("match_count" to lookup.count.toString(), "target" to (targetDesc ?: resId ?: nodeId ?: "")),
+                        )
+                    )
+                }
+                is BaselineTargetLookup.NoCandidate -> {
+                    return GuardResult.Rejected(
+                        AndroidGuiActionResult(
+                            success = false,
+                            message = "action_target_missing",
+                            diagnostics = mapOf("reason" to "target_not_found_in_baseline", "target" to (targetDesc ?: resId ?: nodeId ?: "")),
+                        )
+                    )
+                }
+                is BaselineTargetLookup.Found -> {
+                    val baselineTargetNode = lookup.node
+                    val freshTargetCandidates = freshNodes.filter { freshNode ->
+                        isActualSemanticMatch(
+                            freshNode = freshNode,
+                            baselineTarget = baselineTargetNode,
+                            baselineHasText = !baselineTargetNode.text.isNullOrBlank(),
+                            baselineHasDesc = !baselineTargetNode.contentDesc.isNullOrBlank(),
+                            baselineHasRes = !baselineTargetNode.resourceId.isNullOrBlank(),
+                            targetDesc = targetDesc,
+                            resId = resId,
+                        )
+                    }
+                    if (freshTargetCandidates.isEmpty()) {
+                        return GuardResult.Rejected(
+                            AndroidGuiActionResult(
+                                success = false,
+                                message = "action_target_missing",
+                                diagnostics = mapOf("target" to (targetDesc ?: resId ?: nodeId ?: "")),
+                            )
+                        )
+                    }
+                    if (freshTargetCandidates.size > 1) {
+                        val containing = freshTargetCandidates.filter { it.bounds.contains(startPx.first, startPx.second) }
+                        if (containing.size != 1) {
+                            return GuardResult.Rejected(
+                                AndroidGuiActionResult(
+                                    success = false,
+                                    message = "action_target_ambiguous",
+                                    diagnostics = mapOf("match_count" to freshTargetCandidates.size.toString(), "target" to (targetDesc ?: resId ?: nodeId ?: "")),
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 选择 baseline 包含起点的最小 scrollable 祖先（无则所在窗口根）
+        val containingNodes = baselineNodes.filter { it.visibleToUser && it.bounds.contains(startPx.first, startPx.second) }
+        val scrollableCandidates = containingNodes.filter { it.scrollable }
+        val baselineContainer: AndroidGuiNode = if (scrollableCandidates.isNotEmpty()) {
+            scrollableCandidates.minByOrNull { it.bounds.width() * it.bounds.height() }!!
+        } else if (containingNodes.isNotEmpty()) {
+            val containingRoots = containingNodes.map { node ->
+                var root = node
+                while (root.parent != null) {
+                    root = root.parent!!
+                }
+                root
+            }.distinctBy { it.windowId to (if (it.id.isNotEmpty()) it.id else System.identityHashCode(it).toString()) }
+
+            if (containingRoots.size == 1) {
+                containingRoots[0]
+            } else {
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_target_ambiguous",
+                        diagnostics = mapOf("reason" to "multiple_baseline_roots_contain_start_point", "count" to containingRoots.size.toString()),
+                    )
+                )
+            }
+        } else {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_missing",
+                    diagnostics = mapOf("reason" to "start_point_outside_all_baseline_nodes"),
+                )
+            )
+        }
+
+        val baselineHasText = !baselineContainer.text.isNullOrBlank()
+        val baselineHasDesc = !baselineContainer.contentDesc.isNullOrBlank()
+        val baselineHasRes = !baselineContainer.resourceId.isNullOrBlank()
+
+        val matchedFreshContainers = if (baselineHasRes || baselineHasText || baselineHasDesc) {
+            freshNodes.filter { freshNode ->
+                isActualSemanticMatch(
+                    freshNode = freshNode,
+                    baselineTarget = baselineContainer,
+                    baselineHasText = baselineHasText,
+                    baselineHasDesc = baselineHasDesc,
+                    baselineHasRes = baselineHasRes,
+                    targetDesc = targetDesc,
+                    resId = resId ?: baselineContainer.resourceId,
+                ) && (!baselineContainer.scrollable || freshNode.scrollable)
+            }
+        } else if (baselineContainer.scrollable) {
+            freshNodes.filter { freshNode ->
+                freshNode.scrollable &&
+                    (baselineContainer.className == null || freshNode.className == baselineContainer.className)
+            }
+        } else {
+            freshRoots.filter { freshRoot ->
+                freshRoot.windowId == baselineContainer.windowId &&
+                    (baselineContainer.className == null || freshRoot.className == baselineContainer.className)
+            }
+        }
+
+        if (matchedFreshContainers.isEmpty()) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_missing",
+                    diagnostics = mapOf("target" to (targetDesc ?: baselineContainer.resourceId ?: baselineContainer.id)),
+                )
+            )
+        }
+
+        val freshContainer = if (matchedFreshContainers.size == 1) {
+            matchedFreshContainers[0]
+        } else {
+            val containing = matchedFreshContainers.filter { it.bounds.contains(startPx.first, startPx.second) }
+            if (containing.size == 1) {
+                containing[0]
+            } else {
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_target_ambiguous",
+                        diagnostics = mapOf("match_count" to matchedFreshContainers.size.toString()),
+                    )
+                )
+            }
+        }
+
+        if (!freshContainer.visibleToUser) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_invisible",
+                    diagnostics = mapOf("target_id" to freshContainer.id),
+                )
+            )
+        }
+        if (!freshContainer.enabled) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_disabled",
+                    diagnostics = mapOf("target_id" to freshContainer.id),
+                )
+            )
+        }
+        val viewport = Rect(0, 0, currentDisplaySize.first, currentDisplaySize.second)
+        if (!Rect.intersects(freshContainer.bounds, viewport)) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_out_of_viewport",
+                    diagnostics = mapOf("target_id" to freshContainer.id),
+                )
+            )
+        }
+        if (!freshContainer.bounds.contains(startPx.first, startPx.second)) {
+            return GuardResult.Rejected(
+                AndroidGuiActionResult(
+                    success = false,
+                    message = "action_target_moved",
+                    diagnostics = mapOf(
+                        "reason" to "start_point_outside_target_bounds",
+                        "start_point" to "${startPx.first},${startPx.second}",
+                        "target_bounds" to freshContainer.bounds.toString(),
+                    ),
+                )
+            )
+        }
+
+        val blockers = collectSwipeBlockers(freshContainer, freshNodes, currentDisplaySize)
+        for ((occludingNode, blockerRect) in blockers) {
+            if (lineIntersectsRect(startPx, endPx, blockerRect)) {
+                return GuardResult.Rejected(
+                    AndroidGuiActionResult(
+                        success = false,
+                        message = "action_swipe_obstructed",
+                        diagnostics = mapOf(
+                            "reason" to "swipe_path_obstructed_by_blocker",
+                            "blocker_id" to occludingNode.id,
+                            "blocker_bounds" to occludingNode.bounds.toString(),
+                            "swipe_start" to "${startPx.first},${startPx.second}",
+                            "swipe_end" to "${endPx.first},${endPx.second}",
+                        ),
+                    )
+                )
+            }
+        }
+
+        return GuardResult.Allowed(action = action)
+    }
+
+    private fun collectSwipeBlockers(
+        targetNode: AndroidGuiNode,
+        allNodes: List<AndroidGuiNode>,
+        displaySize: Pair<Int, Int>,
+    ): List<Pair<AndroidGuiNode, Rect>> {
+        val viewport = Rect(0, 0, displaySize.first, displaySize.second)
+        val blockers = mutableListOf<Pair<AndroidGuiNode, Rect>>()
+        val targetLayer = targetNode.windowLayer ?: 0
+
+        val targetAncestorsAndSelf = mutableListOf<AndroidGuiNode>()
+        var curr: AndroidGuiNode? = targetNode
+        while (curr != null) {
+            targetAncestorsAndSelf.add(curr)
+            curr = curr.parent
+        }
+
+        for (candidate in allNodes) {
+            val isSameTarget = candidate === targetNode ||
+                (candidate.id.isNotEmpty() && candidate.id == targetNode.id && candidate.windowId == targetNode.windowId)
+            if (isSameTarget) continue
+
+            val isTargetAncestor = targetAncestorsAndSelf.any { ancestor ->
+                ancestor === candidate ||
+                    (ancestor.id.isNotEmpty() && ancestor.id == candidate.id && ancestor.windowId == candidate.windowId)
+            }
+            if (isTargetAncestor) continue
+
+            if (isAncestor(ancestor = targetNode, descendant = candidate)) continue
+            if (!candidate.visibleToUser || candidate.bounds.isEmpty) continue
+
+            // 规则 1：同窗口同级（sibling）且绘制顺序明确更高；必须自身可交互才认作触摸遮挡
+            val isSiblingTouchBlocker = targetAncestorsAndSelf.any { ancestor ->
+                candidate.windowId == ancestor.windowId &&
+                    candidate.parent != null &&
+                    ancestor.parent != null &&
+                    (candidate.parent === ancestor.parent || (candidate.parent?.id?.isNotEmpty() == true && candidate.parent?.id == ancestor.parent?.id)) &&
+                    candidate.drawingOrder != null &&
+                    ancestor.drawingOrder != null &&
+                    candidate.drawingOrder > ancestor.drawingOrder &&
+                    candidate.isInteractive
+            }
+
+            // 规则 2：更高窗口层，且自身非透明占位、具备交互能力或具备非全屏实体内容
+            val isHigherWindowBlocker = candidate.windowLayer != null &&
+                candidate.windowLayer > targetLayer &&
+                (candidate.isInteractive || candidate.bounds.width() < displaySize.first || candidate.bounds.height() < displaySize.second || !candidate.text.isNullOrBlank())
+
+            // 附加 Dialog/PopupWindow 判定（只要跨窗口且为弹窗类型或具备弹窗类名）
+            val isDialogWindowBlocker = candidate.windowId != targetNode.windowId &&
+                (candidate.className?.contains("Dialog", ignoreCase = true) == true ||
+                    candidate.className?.contains("PopupWindow", ignoreCase = true) == true) &&
+                (candidate.isInteractive || candidate.bounds.width() < displaySize.first || candidate.bounds.height() < displaySize.second || !candidate.text.isNullOrBlank())
+
+            if (!isSiblingTouchBlocker && !isHigherWindowBlocker && !isDialogWindowBlocker) {
+                continue
+            }
+
+            val intersect = Rect()
+            if (intersect.setIntersect(candidate.bounds, viewport) && !intersect.isEmpty) {
+                blockers.add(candidate to intersect)
+            }
+        }
+        return blockers
+    }
+
+    private fun lineIntersectsRect(p1: Pair<Int, Int>, p2: Pair<Int, Int>, rect: Rect): Boolean {
+        if (rect.isEmpty) return false
+        if (p1.first in rect.left..rect.right && p1.second in rect.top..rect.bottom) return true
+        if (p2.first in rect.left..rect.right && p2.second in rect.top..rect.bottom) return true
+
+        val segMinX = minOf(p1.first, p2.first)
+        val segMaxX = maxOf(p1.first, p2.first)
+        val segMinY = minOf(p1.second, p2.second)
+        val segMaxY = maxOf(p1.second, p2.second)
+
+        if (segMaxX < rect.left || segMinX > rect.right || segMaxY < rect.top || segMinY > rect.bottom) {
+            return false
+        }
+
+        val rL = rect.left.toDouble()
+        val rR = rect.right.toDouble()
+        val rT = rect.top.toDouble()
+        val rB = rect.bottom.toDouble()
+
+        val x1 = p1.first.toDouble()
+        val y1 = p1.second.toDouble()
+        val x2 = p2.first.toDouble()
+        val y2 = p2.second.toDouble()
+
+        if (segmentsIntersect(x1, y1, x2, y2, rL, rT, rR, rT)) return true
+        if (segmentsIntersect(x1, y1, x2, y2, rR, rT, rR, rB)) return true
+        if (segmentsIntersect(x1, y1, x2, y2, rR, rB, rL, rB)) return true
+        if (segmentsIntersect(x1, y1, x2, y2, rL, rB, rL, rT)) return true
+
+        return false
+    }
+
+    private fun segmentsIntersect(
+        x1: Double, y1: Double, x2: Double, y2: Double,
+        x3: Double, y3: Double, x4: Double, y4: Double,
+    ): Boolean {
+        fun ccw(ax: Double, ay: Double, bx: Double, by: Double, cx: Double, cy: Double): Double {
+            return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        }
+        val d1 = ccw(x3, y3, x4, y4, x1, y1)
+        val d2 = ccw(x3, y3, x4, y4, x2, y2)
+        val d3 = ccw(x1, y1, x2, y2, x3, y3)
+        val d4 = ccw(x1, y1, x2, y2, x4, y4)
+
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+        ) {
+            return true
+        }
+        fun onSegment(px: Double, py: Double, qx: Double, qy: Double, rx: Double, ry: Double): Boolean {
+            return qx >= minOf(px, rx) - 1e-7 && qx <= maxOf(px, rx) + 1e-7 &&
+                qy >= minOf(py, ry) - 1e-7 && qy <= maxOf(py, ry) + 1e-7
+        }
+        if (abs(d1) < 1e-7 && onSegment(x3, y3, x1, y1, x4, y4)) return true
+        if (abs(d2) < 1e-7 && onSegment(x3, y3, x2, y2, x4, y4)) return true
+        if (abs(d3) < 1e-7 && onSegment(x1, y1, x3, y3, x2, y2)) return true
+        if (abs(d4) < 1e-7 && onSegment(x1, y1, x4, y4, x2, y2)) return true
+
+        return false
     }
 }

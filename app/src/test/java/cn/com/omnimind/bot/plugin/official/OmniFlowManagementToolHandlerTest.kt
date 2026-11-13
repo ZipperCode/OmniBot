@@ -3,6 +3,7 @@ package cn.com.omnimind.bot.plugin.official
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import cn.com.omnimind.baselib.runlog.CanonicalRunLogRecord
+import cn.com.omnimind.bot.agent.ToolExecutionResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -86,5 +87,84 @@ class OmniFlowManagementToolHandlerTest {
             "confirm",
             clear.parameters["required"]?.toString()?.trim('[', ']', '"'),
         )
+    }
+
+    @Test
+    fun `save_function failure payload with nested RUN_LOG_COMPILE_FAILED maps to ToolExecutionResult Error preserving code and message`() {
+        val payload = mapOf<String, Any?>(
+            "success" to false,
+            "function_id" to "",
+            "function" to null,
+            "error" to mapOf(
+                "code" to "RUN_LOG_COMPILE_FAILED",
+                "message" to "RunLog has no replayable steps",
+            ),
+        )
+
+        val result = omniFlowManagementErrorResult(OmniFlowManagementTools.SAVE_FUNCTION, payload)
+
+        assertEquals(OmniFlowManagementTools.SAVE_FUNCTION, result.toolName)
+        assertEquals("RUN_LOG_COMPILE_FAILED: RunLog has no replayable steps", result.message)
+    }
+
+    @Test
+    fun `save_function failure payload with custom compile message preserves real error detail`() {
+        val payload = mapOf<String, Any?>(
+            "success" to false,
+            "function_id" to "",
+            "function" to null,
+            "error" to mapOf(
+                "code" to "RUN_LOG_COMPILE_FAILED",
+                "message" to "syntax error: step 2 action requires coordinate",
+            ),
+        )
+
+        val result = omniFlowManagementErrorResult(OmniFlowManagementTools.SAVE_FUNCTION, payload)
+
+        assertEquals(OmniFlowManagementTools.SAVE_FUNCTION, result.toolName)
+        assertEquals("RUN_LOG_COMPILE_FAILED: syntax error: step 2 action requires coordinate", result.message)
+    }
+
+    @Test
+    fun `top-level legacy error_message and error_code take priority over nested or string errors`() {
+        val payload = mapOf<String, Any?>(
+            "success" to false,
+            "error_message" to "RunLog not found: gui-123",
+            "error_code" to "RUN_LOG_NOT_FOUND",
+            "error" to mapOf("code" to "IGNORED", "message" to "ignored"),
+        )
+
+        val result = omniFlowManagementErrorResult(OmniFlowManagementTools.SAVE_FUNCTION, payload)
+
+        assertEquals(OmniFlowManagementTools.SAVE_FUNCTION, result.toolName)
+        assertEquals("RunLog not found: gui-123", result.message)
+    }
+
+    @Test
+    fun `top-level legacy error_code is used when error_message is missing`() {
+        val payload = mapOf<String, Any?>(
+            "success" to false,
+            "error_code" to "app_experience_busy",
+        )
+
+        val result = omniFlowManagementErrorResult("list_app_experiences", payload)
+
+        assertEquals("list_app_experiences", result.toolName)
+        assertEquals("app_experience_busy", result.message)
+    }
+
+    @Test
+    fun `string error payload falls back to string and empty payload falls back to default error`() {
+        val strResult = omniFlowManagementErrorResult(
+            OmniFlowManagementTools.SAVE_FUNCTION,
+            mapOf("success" to false, "error" to "bridge disconnected"),
+        )
+        assertEquals("bridge disconnected", strResult.message)
+
+        val emptyResult = omniFlowManagementErrorResult(
+            OmniFlowManagementTools.SAVE_FUNCTION,
+            mapOf("success" to false),
+        )
+        assertEquals("OmniFlow management tool failed", emptyResult.message)
     }
 }

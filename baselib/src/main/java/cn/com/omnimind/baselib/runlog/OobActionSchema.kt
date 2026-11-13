@@ -16,6 +16,7 @@ object OobActionSchema {
     const val TOOL_OPEN_APP = "open_app"
     const val TOOL_PRESS_KEY = "press_key"
     const val TOOL_WAIT = "wait"
+    const val TOOL_COLLECT_SCREEN = "collect_screen"
     const val TOOL_GET_STATE = "get_state"
     const val TOOL_FINISHED = "finished"
     const val TOOL_INFO = "info"
@@ -45,6 +46,11 @@ object OobActionSchema {
     const val ARG_OPTIONS = "options"
     const val ARG_PROMPT = "prompt"
     const val ARG_OCR = "ocr"
+    const val ARG_CONDITION = "condition"
+    const val ARG_OBSERVATION_ID = "observation_id"
+    const val ARG_EXPECTED_TEXT = "expected_text"
+    const val ARG_MAX_PAGES = "max_pages"
+    const val ARG_MAX_ITEMS = "max_items"
 
     enum class Type {
         STRING,
@@ -435,20 +441,158 @@ ArgSpec(
             kind = Kind.ACTION,
             uiLabel = LocalizedText(zhCn = "等待", enUs = "Wait"),
             description = LocalizedText(zhCn = "等待页面加载、动画或外部状态变化。", enUs = "Wait for page loading, animation, or external state changes."),
-            promptGuide = LocalizedText(zhCn = "- wait(duration_ms): 只在页面明确处于加载、动画或等待外部状态变化时使用。", enUs = "- wait(duration_ms): Use only when the page is clearly loading, animating, or waiting for an external state change."),
+            promptGuide = LocalizedText(
+                zhCn = "- wait(duration_ms, condition?, target_description?): 等待页面加载或条件满足；duration_ms 毫秒，condition 可选 text_present、text_absent、screen_changed，文字条件必须附带 target_description。",
+                enUs = "- wait(duration_ms, condition?, target_description?): Wait for page loading or conditions; duration_ms in milliseconds, condition optionally text_present, text_absent, screen_changed, text conditions require target_description.",
+            ),
             argsTemplate = emptyMap(),
             args = listOf(
-ArgSpec(
+                ArgSpec(
                     name = "duration_ms",
                     type = Type.INTEGER,
                     required = true,
                     description = LocalizedText(zhCn = "等待时长，单位毫秒。", enUs = "Wait duration in milliseconds."),
                     minimum = 0,
                 ),
+                ArgSpec(
+                    name = ARG_CONDITION,
+                    type = Type.STRING,
+                    persisted = true,
+                    description = LocalizedText(
+                        zhCn = "可选等待条件；可为 text_present、text_absent 或 screen_changed。",
+                        enUs = "Optional wait condition; can be text_present, text_absent, or screen_changed.",
+                    ),
+                    enumValues = listOf("text_present", "text_absent", "screen_changed"),
+                ),
+                ArgSpec(
+                    name = ARG_TARGET_DESCRIPTION,
+                    type = Type.STRING,
+                    persisted = true,
+                    description = LocalizedText(
+                        zhCn = "可选。当 condition 为 text_present 或 text_absent 时，指定要等待出现或消失的目标文本描述。",
+                        enUs = "Optional target text description to wait for appearance or disappearance when condition is text_present or text_absent.",
+                    ),
+                ),
             ),
-            modelVisible = false,
+            modelVisible = true,
             replayable = true,
             editorVisible = true,
+            recordable = false,
+            coordinateAction = false,
+            pointTargetAction = false,
+            routeAction = false,
+        ),
+        ToolSpec(
+            name = TOOL_COLLECT_SCREEN,
+            kind = Kind.ACTION,
+            uiLabel = LocalizedText(zhCn = "多屏采集", enUs = "Collect screen"),
+            description = LocalizedText(
+                zhCn = "在指定区域内按方向连续滚动并采集多屏文本内容。",
+                enUs = "Scroll continuously in a specified region along a direction to collect multi-page text content.",
+            ),
+            promptGuide = LocalizedText(
+                zhCn = "- collect_screen(direction, x1, y1, x2, y2, max_pages?, max_items?, ocr?): 在指定区域内沿 direction（down 阅读后页/up 阅读前页）滚动采集多屏文本；区域坐标全屏 0..1000，max_pages 默认 5（1..20），max_items 默认 100（1..200），ocr 可选端侧识别。",
+                enUs = "- collect_screen(direction, x1, y1, x2, y2, max_pages?, max_items?, ocr?): Scroll in region along direction (down for next pages/up for previous pages) to collect multi-page text; coordinates in 0..1000, max_pages default 5 (1..20), max_items default 100 (1..200), ocr optional on-device recognition.",
+            ),
+            argsTemplate = emptyMap(),
+            args = listOf(
+                ArgSpec(
+                    name = ARG_DIRECTION,
+                    type = Type.STRING,
+                    required = true,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "滚动阅读方向；down 为向后阅读（手指向上滑），up 为向前阅读（手指向下滑）。",
+                        enUs = "Scroll reading direction; down reads forward/later content (fingers scroll up), up reads backward/earlier content (fingers scroll down).",
+                    ),
+                    enumValues = listOf("down", "up"),
+                ),
+                ArgSpec(
+                    name = ARG_X1,
+                    type = Type.NUMBER,
+                    required = true,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "采集区域左边缘的全屏 0..1000 相对坐标。",
+                        enUs = "Left edge of collection region in full-screen 0..1000 relative coordinates.",
+                    ),
+                    minimum = 0,
+                    maximum = 1000,
+                ),
+                ArgSpec(
+                    name = ARG_Y1,
+                    type = Type.NUMBER,
+                    required = true,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "采集区域上边缘的全屏 0..1000 相对坐标。",
+                        enUs = "Top edge of collection region in full-screen 0..1000 relative coordinates.",
+                    ),
+                    minimum = 0,
+                    maximum = 1000,
+                ),
+                ArgSpec(
+                    name = ARG_X2,
+                    type = Type.NUMBER,
+                    required = true,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "采集区域右边缘的全屏 0..1000 相对坐标。",
+                        enUs = "Right edge of collection region in full-screen 0..1000 relative coordinates.",
+                    ),
+                    minimum = 0,
+                    maximum = 1000,
+                ),
+                ArgSpec(
+                    name = ARG_Y2,
+                    type = Type.NUMBER,
+                    required = true,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "采集区域下边缘的全屏 0..1000 相对坐标。",
+                        enUs = "Bottom edge of collection region in full-screen 0..1000 relative coordinates.",
+                    ),
+                    minimum = 0,
+                    maximum = 1000,
+                ),
+                ArgSpec(
+                    name = ARG_MAX_PAGES,
+                    type = Type.INTEGER,
+                    required = false,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "最多扫描页数，默认 5，范围 1..20。",
+                        enUs = "Maximum pages to scan, default 5, range 1..20.",
+                    ),
+                    minimum = 1,
+                    maximum = 20,
+                ),
+                ArgSpec(
+                    name = ARG_MAX_ITEMS,
+                    type = Type.INTEGER,
+                    required = false,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "最多收集文本条目数，默认 100，范围 1..200。",
+                        enUs = "Maximum items to collect, default 100, range 1..200.",
+                    ),
+                    minimum = 1,
+                    maximum = 200,
+                ),
+                ArgSpec(
+                    name = ARG_OCR,
+                    type = Type.BOOLEAN,
+                    required = false,
+                    persisted = false,
+                    description = LocalizedText(
+                        zhCn = "是否启用端侧 OCR 辅助提取未暴露无障碍文本的项，默认 false。",
+                        enUs = "Whether to enable on-device OCR to assist extracting items without accessibility text, default false.",
+                    ),
+                ),
+            ),
+            modelVisible = true,
+            replayable = false,
+            editorVisible = false,
             recordable = false,
             coordinateAction = false,
             pointTargetAction = false,
@@ -507,13 +651,25 @@ ArgSpec(
             kind = Kind.DECISION,
             uiLabel = LocalizedText(zhCn = "完成", enUs = "Finished"),
             description = LocalizedText(zhCn = "仅当当前页面或上一轮工具结果直接证明用户目标已经完成时结束。", enUs = "End only when the current page or previous tool result directly proves the user's goal is complete."),
-            promptGuide = LocalizedText(zhCn = "- finished(content?): 仅在当前页面或上一轮工具结果直接证明目标完成时调用；不确定就继续执行下一步。", enUs = "- finished(content?): Call only when the current page or previous tool result directly proves completion; if uncertain, continue with the next action."),
+            promptGuide = LocalizedText(zhCn = "- finished(content?, observation_id?, expected_text?): 仅在当前页面或上一轮工具结果直接证明目标完成时调用；不确定就继续执行下一步。", enUs = "- finished(content?, observation_id?, expected_text?): Call only when the current page or previous tool result directly proves completion; if uncertain, continue with the next action."),
             argsTemplate = mapOf("content" to "Done"),
             args = listOf(
-ArgSpec(
+                ArgSpec(
                     name = "content",
                     type = Type.STRING,
                     description = LocalizedText(zhCn = "给用户的最终完成说明，可为空。", enUs = "Final completion note for the user. May be empty."),
+                ),
+                ArgSpec(
+                    name = "observation_id",
+                    type = Type.STRING,
+                    persisted = false,
+                    description = LocalizedText(zhCn = "当前页面观测 ID，用于防止在过期页面误完成。", enUs = "Current page observation ID, preventing completion on expired observations."),
+                ),
+                ArgSpec(
+                    name = "expected_text",
+                    type = Type.STRING,
+                    persisted = false,
+                    description = LocalizedText(zhCn = "当前观测中应匹配的文字；匹配仅证明文字出现。", enUs = "Text to match in the current observation; matching only proves text presence."),
                 ),
             ),
             modelVisible = true,

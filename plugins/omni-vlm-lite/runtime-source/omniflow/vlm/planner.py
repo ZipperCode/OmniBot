@@ -100,15 +100,11 @@ def build_model_turn_request(
     return {
         "model": str(model),
         "messages": messages,
-        "max_completion_tokens": 512,
-        "temperature": 0,
         "stream": True,
         "stream_options": {"include_usage": True},
         "tools": tools,
         "tool_choice": "required",
         "parallel_tool_calls": False,
-        "reasoning_effort": "none",
-        "enable_thinking": False,
     }
 
 def parse_model_turn_response(
@@ -210,19 +206,26 @@ def parse_model_turn_response(
         if tool in function_catalog:
             validate_arguments(function_catalog[tool].input_schema, arguments)
         else:
-            arguments, adapter_metadata = adapt_tool_arguments(
-                tool=tool,
-                arguments=arguments,
-                requested_model=requested_model,
-                resolved_model=resolved_model,
-                display=display,
-            )
-            canonical = canonicalize_action(
-                {"tool": tool, "args": arguments},
-                persisted_only=False,
-                allow_non_action=True,
-            )
-            arguments = dict(canonical["args"])
+            try:
+                arguments, adapter_metadata = adapt_tool_arguments(
+                    tool=tool,
+                    arguments=arguments,
+                    requested_model=requested_model,
+                    resolved_model=resolved_model,
+                    display=display,
+                )
+                canonical = canonicalize_action(
+                    {"tool": tool, "args": arguments},
+                    persisted_only=False,
+                    allow_non_action=True,
+                )
+                arguments = dict(canonical["args"])
+            except ValueError:
+                if tool == "collect_screen":
+                    # 保留原 call 身份让 engine 统一进行 invalid_collect_screen_arguments 校验与零动作结果反馈
+                    arguments = rejected_arguments
+                else:
+                    raise
     except ValueError as error:
         raise ModelToolCallError(
             str(error),
@@ -277,14 +280,21 @@ def _turn_text(
     state: dict[str, Any],
 ) -> str:
     display = state.get("display") if isinstance(state.get("display"), dict) else {}
+    raw_extra = state.get("extra")
+    obs_id = ""
+    if isinstance(raw_extra, dict):
+        obs_id = str(raw_extra.get("observation_id") or "").strip()
+    screen_desc = (
+        "Current screen: "
+        f"package={state.get('package_name') or '-'}, "
+        f"activity={state.get('activity_name') or '-'}, "
+        f"display={display.get('width') or '?'}x{display.get('height') or '?'}"
+    )
+    if obs_id:
+        screen_desc += f", observation_id={obs_id}"
     lines = [
         f"Task: {goal}",
-        (
-            "Current screen: "
-            f"package={state.get('package_name') or '-'}, "
-            f"activity={state.get('activity_name') or '-'}, "
-            f"display={display.get('width') or '?'}x{display.get('height') or '?'}"
-        ),
+        screen_desc,
     ]
     if not state.get("package_name") or str(state.get("package_name")).strip() in {"-", "None"}:
         lines.append(
@@ -328,9 +338,9 @@ def _turn_text(
                             f"region=({args['x1']},{args['y1']},{args['x2']},{args['y2']})"
                         )
                     args_str = ", ".join(parts)
-                    if raw_extra.get("read_stalled"):
+                    if raw_extra.get("observation_stalled"):
                         lines.append(
-                            f"Previous action: get_state({args_str}) succeeded，但当前屏幕无新变化或感知证据。请勿重复调用相同只读操作，请使用 open_app 启动应用或执行交互操作。"
+                            f"Previous action: get_state({args_str}) succeeded，但当前屏幕无新变化或感知证据。请勿重复调用相同只读操作，可尝试有界 wait 等待异步加载或使用 open_app 启动应用/执行交互操作。"
                         )
                     else:
                         lines.append(
@@ -358,6 +368,28 @@ def _turn_text(
                         f"High-resolution crop region {idx + 1}: bounds={rbounds} in full-screen 0..1000 normalized coordinates. "
                         "NOTE: All action coordinates (x, y, x1, y1, x2, y2) MUST use full-screen normalized 0..1000 coordinates, NOT local crop coordinates."
                     )
+        app_experiences = raw_extra.get("app_experiences")
+        if isinstance(app_experiences, list) and app_experiences:
+            for exp in app_experiences:
+                if not isinstance(exp, dict):
+                    continue
+                rule = exp.get("rule") if isinstance(exp.get("rule"), dict) else exp
+                raw_target_id = str(rule.get("target_resource_id") or "").strip()
+                if not raw_target_id:
+                    continue
+                target_id = json.dumps(raw_target_id, ensure_ascii=False).strip('"')
+                action = str(rule.get("action") or "").strip()
+                action_label = {
+                    "click": "点击",
+                    "long_press": "长按",
+                    "input_text": "输入文本",
+                }.get(action, action)
+                raw_after_act = str(rule.get("after_activity") or "").strip()
+                after_act = json.dumps(raw_after_act, ensure_ascii=False).strip('"') if raw_after_act else ""
+                if after_act:
+                    lines.append(f"当前页面参考：控件{target_id}可用于{action_label}，曾到达{after_act}；以当前状态和目标为准")
+                else:
+                    lines.append(f"当前页面参考：控件{target_id}可用于{action_label}；以当前状态和目标为准")
     return "\n".join(lines)
 
 
@@ -487,6 +519,128 @@ class VLMPlanner:
         self._pending_selected_tool_call: ToolCall | None = None
         self._committed_tool_messages: list[dict[str, Any]] = []
 
+    def commit_pending_result(self, observation: Observation) -> None:
+        """纯提交上一轮未决工具调用的执行结果到历史消息，不请求模型。若无 pending 则为 no-op。"""
+        if (
+            self._pending_provider_tool_calls is None
+            or self._pending_selected_tool_call is None
+        ):
+            return
+
+        pending_calls = self._pending_provider_tool_calls
+        selected_call = self._pending_selected_tool_call
+        first_provider_call = pending_calls[0]
+        call_tool_name = selected_call.name
+        call_args = selected_call.arguments
+        extra = (
+            observation.extra if isinstance(observation.extra, dict) else {}
+        )
+        prev_act = extra.get("previous_action")
+        prev_res = extra.get("previous_action_result")
+        prev_err = extra.get("previous_action_error")
+
+        first_res_dict: dict[str, Any] | None = None
+
+        if (
+            isinstance(prev_act, dict)
+            and prev_act.get("tool") == call_tool_name
+            and prev_act.get("args") == call_args
+            and prev_res in {"succeeded", "failed"}
+        ):
+            success = (prev_res == "succeeded" and not prev_err)
+            first_res_dict = {
+                "success": success,
+                "tool": call_tool_name,
+                "package_name": observation.package_name,
+                "activity_name": observation.activity_name,
+            }
+            if call_tool_name == "collect_screen":
+                collection_data = extra.get("collection")
+                if isinstance(collection_data, dict):
+                    first_res_dict["collection"] = collection_data
+            if call_tool_name == "get_state":
+                ocr_data = extra.get("ocr")
+                if isinstance(ocr_data, dict):
+                    first_res_dict["ocr"] = {
+                        "status": ocr_data.get("status", "unavailable"),
+                        "count": (
+                            len(ocr_data.get("items") or ())
+                            if isinstance(ocr_data.get("items"), list)
+                            else 0
+                        ),
+                    }
+                else:
+                    first_res_dict["ocr"] = {"status": "not_requested"}
+                regions = extra.get("visual_regions")
+                if isinstance(regions, list) and regions:
+                    first_res_dict["visual_regions"] = [
+                        {"bounds": r.get("bounds")}
+                        for r in regions
+                        if isinstance(r, dict) and "bounds" in r
+                    ]
+                if extra.get("observation_stalled"):
+                    first_res_dict["progress"] = False
+                    first_res_dict["screen_changed"] = False
+            if call_tool_name == "wait":
+                wait_diag = extra.get("wait_diagnostics")
+                if isinstance(wait_diag, dict):
+                    first_res_dict.update(wait_diag)
+                if extra.get("observation_stalled"):
+                    first_res_dict["progress"] = False
+                    first_res_dict["screen_changed"] = False
+                    first_res_dict["suggestion"] = "等待无新变化或条件未产生新进展，可尝试更换操作路径或执行交互操作"
+            if prev_err:
+                first_res_dict["error"] = prev_err
+
+        if first_res_dict is None:
+            self._pending_provider_tool_calls = None
+            self._pending_selected_tool_call = None
+            raise RuntimeError(
+                f"action_execution_unconfirmed:{call_tool_name}"
+            )
+
+        # 确证成功，组装标准 assistant 消息（含本轮全部 tool_calls）以及每个 id 对应的 tool 结果消息
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [dict(c) for c in pending_calls],
+        }
+        self._committed_tool_messages.append(assistant_message)
+
+        first_call_id = str(first_provider_call.get("id") or "").strip()
+        self._committed_tool_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": first_call_id,
+                "content": json.dumps(first_res_dict, ensure_ascii=False),
+            }
+        )
+
+        for tail_call in pending_calls[1:]:
+            tail_id = str(tail_call.get("id") or "").strip()
+            tail_fn = (
+                tail_call.get("function")
+                if isinstance(tail_call.get("function"), dict)
+                else {}
+            )
+            tail_tool_name = str(tail_fn.get("name") or "").strip()
+            tail_res = {
+                "success": False,
+                "executed": False,
+                "error": "not_executed_observation_refresh_required",
+                "tool": tail_tool_name,
+            }
+            self._committed_tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tail_id,
+                    "content": json.dumps(tail_res, ensure_ascii=False),
+                }
+            )
+
+        self._pending_provider_tool_calls = None
+        self._pending_selected_tool_call = None
+
     async def one_step_tool_call(
         self,
         goal: str,
@@ -497,113 +651,8 @@ class VLMPlanner:
         state = _planner_state(observation)
         self._turn_index += 1
 
-        # 若存在上一轮模型的工具调用，根据当前 observation 中的确证结果进行 commit
-        if (
-            self._pending_provider_tool_calls is not None
-            and self._pending_selected_tool_call is not None
-        ):
-            pending_calls = self._pending_provider_tool_calls
-            selected_call = self._pending_selected_tool_call
-            first_provider_call = pending_calls[0]
-            call_tool_name = selected_call.name
-            call_args = selected_call.arguments
-            extra = (
-                observation.extra if isinstance(observation.extra, dict) else {}
-            )
-            prev_act = extra.get("previous_action")
-            prev_res = extra.get("previous_action_result")
-            prev_err = extra.get("previous_action_error")
-
-            first_res_dict: dict[str, Any] | None = None
-
-            if (
-                isinstance(prev_act, dict)
-                and prev_act.get("tool") == call_tool_name
-                and prev_act.get("args") == call_args
-                and prev_res in {"succeeded", "failed"}
-            ):
-                success = (prev_res == "succeeded" and not prev_err)
-                first_res_dict = {
-                    "success": success,
-                    "tool": call_tool_name,
-                    "package_name": observation.package_name,
-                    "activity_name": observation.activity_name,
-                }
-                if call_tool_name == "get_state":
-                    ocr_data = extra.get("ocr")
-                    if isinstance(ocr_data, dict):
-                        first_res_dict["ocr"] = {
-                            "status": ocr_data.get("status", "unavailable"),
-                            "count": (
-                                len(ocr_data.get("items") or ())
-                                if isinstance(ocr_data.get("items"), list)
-                                else 0
-                            ),
-                        }
-                    else:
-                        first_res_dict["ocr"] = {"status": "not_requested"}
-                    regions = extra.get("visual_regions")
-                    if isinstance(regions, list) and regions:
-                        first_res_dict["visual_regions"] = [
-                            {"bounds": r.get("bounds")}
-                            for r in regions
-                            if isinstance(r, dict) and "bounds" in r
-                        ]
-                    if extra.get("read_stalled"):
-                        first_res_dict["progress"] = False
-                        first_res_dict["screen_changed"] = False
-                if prev_err:
-                    first_res_dict["error"] = prev_err
-
-            if first_res_dict is None:
-                self._pending_provider_tool_calls = None
-                self._pending_selected_tool_call = None
-                raise RuntimeError(
-                    f"action_execution_unconfirmed:{call_tool_name}"
-                )
-
-            # 确证成功，组装标准 assistant 消息（含本轮全部 tool_calls）以及每个 id 对应的 tool 结果消息
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [dict(c) for c in pending_calls],
-            }
-            self._committed_tool_messages.append(assistant_message)
-
-            first_call_id = str(first_provider_call.get("id") or "").strip()
-            self._committed_tool_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": first_call_id,
-                    "content": json.dumps(first_res_dict, ensure_ascii=False),
-                }
-            )
-
-            for tail_call in pending_calls[1:]:
-                tail_id = str(tail_call.get("id") or "").strip()
-                tail_fn = (
-                    tail_call.get("function")
-                    if isinstance(tail_call.get("function"), dict)
-                    else {}
-                )
-                tail_tool_name = str(tail_fn.get("name") or "").strip()
-                tail_res = {
-                    "success": False,
-                    "executed": False,
-                    "error": "not_executed_observation_refresh_required",
-                    "tool": tail_tool_name,
-                }
-                self._committed_tool_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tail_id,
-                        "content": json.dumps(tail_res, ensure_ascii=False),
-                    }
-                )
-
-            self._pending_provider_tool_calls = None
-            self._pending_selected_tool_call = None
-
+        # 若存在上一轮模型的工具调用，进行纯提交
+        self.commit_pending_result(observation)
         request = build_model_turn_request(
             goal=str(goal),
             model=self.model,
@@ -633,6 +682,17 @@ class VLMPlanner:
         except Exception:
             self._usage.record_failure()
             raise
+        # 历史保留真实来源观测与工具配对；旧图片不进入后续请求。
+        self._committed_tool_messages.append(
+            {
+                "role": "user",
+                "content": [
+                    dict(part)
+                    for part in request["messages"][-1]["content"]
+                    if part.get("type") == "text"
+                ],
+            }
+        )
         self._metadata = metadata
         self._pending_provider_tool_calls = list(
             metadata.get("provider_tool_calls") or ()
@@ -737,6 +797,7 @@ _COORDINATE_PAIRS = {
     "input_text": (("x", "y"),),
     "swipe": (("x1", "y1"), ("x2", "y2")),
     "get_state": (("x1", "y1"), ("x2", "y2")),
+    "collect_screen": (("x1", "y1"), ("x2", "y2")),
 }
 _MISSING = object()
 
@@ -819,7 +880,7 @@ def _adapt_raw_pixel_coordinates(
     if all(float(arguments[field]) <= dimensions[field] for field in fields):
         raw_fields = {field: arguments[field] for field in fields}
     converted_fields, metadata = screen_pixel_args_to_canonical(
-        tool=tool,
+        tool="swipe" if tool in {"swipe", "get_state", "collect_screen"} else tool,
         args=raw_fields,
         display=display,
     )

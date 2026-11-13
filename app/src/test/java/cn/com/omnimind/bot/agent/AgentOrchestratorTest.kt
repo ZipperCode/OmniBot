@@ -2,6 +2,7 @@ package cn.com.omnimind.bot.agent
 
 import cn.com.omnimind.baselib.llm.ChatCompletionUsage
 import cn.com.omnimind.bot.agent.runtime.acpEventBridgeTestContext
+import cn.com.omnimind.bot.agent.runtime.StandardAgentRunControl
 import cn.com.omnimind.baselib.llm.contentText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -1688,6 +1689,161 @@ class AgentOrchestratorTest {
     }
 
     @Test
+    fun stopAllWithSuspendingStopActionDuringTurnCancellationYieldsErrorInsteadOfSuccess() = runBlocking {
+        val toolStarted = CompletableDeferred<Unit>()
+        val stopActionExecuted = CompletableDeferred<Unit>()
+        val turnJob = Job()
+
+        val runControl = StandardAgentRunControl()
+        val env = FakeExecutionEnvironment(
+            userMessage = "执行任务",
+            runControl = runControl,
+            turnJob = turnJob,
+        )
+
+        val toolExecutor = object : AgentToolExecutor {
+            val executedCalls = mutableListOf<String>()
+            override suspend fun execute(
+                toolCall: AssistantToolCall,
+                args: JsonObject,
+                runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
+                env: AgentExecutionEnvironment,
+                callback: AgentCallback,
+                toolHandle: AgentToolExecutionHandle
+            ): ToolExecutionResult {
+                executedCalls += toolCall.function.name
+                toolHandle.bindStopAction {
+                    delay(20)
+                    stopActionExecuted.complete(Unit)
+                }
+                toolStarted.complete(Unit)
+                awaitCancellation()
+            }
+            override suspend fun dispose() = Unit
+        }
+
+        val llmClient = FakeLlmClient(
+            turns = listOf(
+                assistantTurn(
+                    toolCalls = listOf(
+                        toolCall(name = "vlm_task", arguments = """{"goal":"点击按钮"}""")
+                    )
+                ),
+                assistantTurn(content = "后续回复")
+            )
+        )
+
+        val orchestrator = AgentOrchestrator(
+            llmClient = llmClient,
+            toolRegistry = FakeToolCatalog(availableToolNames = setOf("vlm_task")),
+            toolRouter = toolExecutor,
+            eventAdapter = AgentEventAdapter(eventJson),
+            model = "test-model"
+        )
+
+        val callback = RecordingCallback()
+        val runner = async {
+            orchestrator.run(
+                AgentOrchestrator.Input(
+                    callback = callback,
+                    initialMessages = initialMessages("点击按钮"),
+                    executionEnv = env
+                )
+            )
+        }
+
+        toolStarted.await()
+
+        // 模拟真实 session.cancel 行为：先给 turnJob 发送取消信号，再执行 runControl.stopAll()
+        turnJob.cancel()
+        runControl.stopAll()
+
+        val result = runner.await()
+
+        assertTrue("整 Turn 取消不能返回 Success 或 END_TURN", result is AgentResult.Error)
+        assertEquals("Agent execution cancelled", (result as AgentResult.Error).message)
+        assertTrue(result.exception is CancellationException)
+        stopActionExecuted.await()
+        assertTrue("stopAction 必须被正常执行完毕", stopActionExecuted.isCompleted)
+        assertEquals(listOf("vlm_task"), toolExecutor.executedCalls)
+        assertEquals(1, llmClient.requests.size)
+        assertTrue("取消态下不能产生用户可见输出", callback.finalChatMessages().isEmpty())
+    }
+
+    @Test
+    fun independentToolStopWhileTurnIsActiveConvertsToInterrupted() = runBlocking {
+        val toolStarted = CompletableDeferred<Unit>()
+        val turnJob = Job()
+
+        val runControl = StandardAgentRunControl()
+        val env = FakeExecutionEnvironment(
+            userMessage = "执行任务",
+            runControl = runControl,
+            turnJob = turnJob,
+        )
+
+        val toolExecutor = object : AgentToolExecutor {
+            val executedCalls = mutableListOf<String>()
+            override suspend fun execute(
+                toolCall: AssistantToolCall,
+                args: JsonObject,
+                runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
+                env: AgentExecutionEnvironment,
+                callback: AgentCallback,
+                toolHandle: AgentToolExecutionHandle
+            ): ToolExecutionResult {
+                executedCalls += toolCall.function.name
+                toolStarted.complete(Unit)
+                awaitCancellation()
+            }
+            override suspend fun dispose() = Unit
+        }
+
+        val llmClient = FakeLlmClient(
+            turns = listOf(
+                assistantTurn(
+                    toolCalls = listOf(
+                        toolCall(name = "vlm_task", arguments = """{"goal":"打开蓝牙"}""")
+                    )
+                ),
+                assistantTurn(content = "不应执行后续")
+            )
+        )
+
+        val orchestrator = AgentOrchestrator(
+            llmClient = llmClient,
+            toolRegistry = FakeToolCatalog(availableToolNames = setOf("vlm_task")),
+            toolRouter = toolExecutor,
+            eventAdapter = AgentEventAdapter(eventJson),
+            model = "test-model"
+        )
+
+        val callback = RecordingCallback()
+        val runner = async {
+            orchestrator.run(
+                AgentOrchestrator.Input(
+                    callback = callback,
+                    initialMessages = initialMessages("打开蓝牙"),
+                    executionEnv = env
+                )
+            )
+        }
+
+        toolStarted.await()
+
+        // 独立停止工具：turnJob 仍然存活
+        assertTrue(turnJob.isActive)
+        runControl.stopAll()
+
+        val result = runner.await()
+
+        assertTrue("独立工具停止时 parent 仍活着，应保留 Interrupted 转 Success 语义", result is AgentResult.Success)
+        assertTrue((result as AgentResult.Success).hasUserVisibleOutput)
+        assertEquals(listOf("vlm_task"), toolExecutor.executedCalls)
+        assertEquals(1, llmClient.requests.size)
+    }
+
+    @Test
     fun toolHandleIsCreatedBeforeToolStartCallbackBindsCardId() = runBlocking {
         val llmClient = FakeLlmClient(
             turns = listOf(
@@ -2842,6 +2998,7 @@ class AgentOrchestratorTest {
         override val reasoningEffort: String? = null,
         override val runControl: AgentRunControl = NoOpAgentRunControl,
         override val resolvedSkills: List<ResolvedSkillContext> = emptyList(),
+        override val turnJob: Job? = null,
     ) : AgentExecutionEnvironment {
         override val agentRunId: String = "test-run"
         override val runtimeContextRepository: AgentRuntimeContextRepository

@@ -1,6 +1,7 @@
 package cn.com.omnimind.bot.runlog
 
 import cn.com.omnimind.baselib.runlog.CanonicalRunLogRecord
+import cn.com.omnimind.baselib.runlog.OobActionSchema
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -99,6 +100,99 @@ class RunLogReusableFunctionCompilerTest {
         assertEquals(120.0, (args["x"] as Number).toDouble(), 0.0)
         assertEquals(240.0, (args["y"] as Number).toDouble(), 0.0)
     }
+
+    @Test
+    fun preservesConditionalWaitAndLongPressDurationInCompiledFunction() {
+        val record = CanonicalRunLogRecord(
+            goal = "长按与等待测试",
+            status = "succeeded",
+            success = true,
+            steps = listOf(
+                step(
+                    index = 0,
+                    beforeStateId = "state-0",
+                    tool = "long_press",
+                    args = mapOf(
+                        "x" to 150.0,
+                        "y" to 300.0,
+                        "duration_ms" to 700L,
+                        "target_description" to "目标按钮",
+                    ),
+                ),
+                step(
+                    index = 1,
+                    beforeStateId = "state-1",
+                    tool = "wait",
+                    args = mapOf(
+                        "duration_ms" to 2500L,
+                        "condition" to "text_present",
+                        "target_description" to "去结算",
+                    ),
+                ),
+            ),
+            diagnostics = mapOf("done_reason" to "finished"),
+        )
+
+        val function = RunLogReusableFunctionCompiler.compile(record)
+        val steps = function["steps"] as List<*>
+        assertEquals(2, steps.size)
+
+        val longPressStep = steps[0] as Map<*, *>
+        val longPressAction = longPressStep["action"] as Map<*, *>
+        val longPressArgs = longPressAction["args"] as Map<*, *>
+        assertEquals(700L, (longPressArgs["duration_ms"] as Number).toLong())
+        assertFalse("long_press 的 target_description 属于非持久字段，不得存入 Function", longPressArgs.containsKey("target_description"))
+
+        val waitStep = steps[1] as Map<*, *>
+        val waitAction = waitStep["action"] as Map<*, *>
+        val waitArgs = waitAction["args"] as Map<*, *>
+        assertEquals(2500L, (waitArgs["duration_ms"] as Number).toLong())
+        assertEquals("text_present", waitArgs["condition"])
+        assertEquals("去结算", waitArgs["target_description"])
+    }
+
+    @Test
+    fun collectScreenActionIsExcludedFromCompiledReusableFunction() {
+        val record = CanonicalRunLogRecord(
+            runId = "collect-run",
+            goal = "采集列表并点击查看详情",
+            status = "succeeded",
+            success = true,
+            steps = listOf(
+                step(
+                    index = 0,
+                    beforeStateId = "state-0",
+                    tool = OobActionSchema.TOOL_COLLECT_SCREEN,
+                    args = mapOf(
+                        OobActionSchema.ARG_DIRECTION to "down",
+                        OobActionSchema.ARG_X1 to 100.0,
+                        OobActionSchema.ARG_Y1 to 150.0,
+                        OobActionSchema.ARG_X2 to 900.0,
+                        OobActionSchema.ARG_Y2 to 850.0,
+                        OobActionSchema.ARG_MAX_PAGES to 3,
+                        OobActionSchema.ARG_MAX_ITEMS to 50,
+                    ),
+                ),
+                step(
+                    index = 1,
+                    beforeStateId = "state-1",
+                    tool = OobActionSchema.TOOL_CLICK,
+                    args = mapOf(
+                        OobActionSchema.ARG_X to 500.0,
+                        OobActionSchema.ARG_Y to 600.0,
+                    ),
+                ),
+            ),
+            diagnostics = mapOf("done_reason" to "finished"),
+        )
+
+        val function = RunLogReusableFunctionCompiler.compile(record)
+        val steps = function["steps"] as List<*>
+        assertEquals("非 replayable 的 collect_screen 必须从复用指令中剔除", 1, steps.size)
+        val remainingAction = (steps[0] as Map<*, *>)["action"] as Map<*, *>
+        assertEquals(OobActionSchema.TOOL_CLICK, remainingAction["tool"])
+    }
+
 
     private fun step(
         index: Int,

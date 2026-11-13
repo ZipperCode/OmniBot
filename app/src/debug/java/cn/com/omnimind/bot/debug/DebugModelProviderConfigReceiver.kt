@@ -31,6 +31,7 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
                 val result = runCatching {
                     when (operation) {
                         OPERATION_QUERY -> queryState()
+                        OPERATION_QUERY_BINDINGS -> queryBindings(intent)
                         "verify_bound_provider" -> verifyBoundProvider(intent)
                         OPERATION_CONFIGURE -> configure(appContext, intent)
                         OPERATION_BIND_EXISTING -> bindExisting(intent)
@@ -46,7 +47,13 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
                 }
                 val json = gson.toJson(result)
                 File(appContext.filesDir, RESULT_FILE).writeText(json)
-                OmniLog.i(TAG, json)
+                // 针对只读绑定查询与恢复绑定，仅记录安全摘要，绝不打印任何 Provider URL、密钥或敏感凭据
+                if (operation in setOf(OPERATION_QUERY_BINDINGS, OPERATION_BIND_EXISTING)) {
+                    val count = (result["sceneBindings"] as? List<*>)?.size ?: 0
+                    OmniLog.i(TAG, "operation=$operation success=${result["success"]} bindings_count=$count")
+                } else {
+                    OmniLog.i(TAG, "operation=$operation success=${result["success"]}")
+                }
             } finally {
                 pendingResult.finish()
             }
@@ -109,30 +116,73 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
     }
 
     /**
-     * Debug-only device verification helper. It changes only the scene binding
-     * and never reads or accepts a credential, so a real Provider already saved
-     * on the device can be used without copying its API key into adb history.
+     * 安全绑定/精准恢复场景模型配置。
+     * 仅修改 SceneModelBindingStore，返回纯 ID 绑定结果，不调用 queryState()，
+     * 不返回或泄露任何 profiles、baseUrl 或凭据，亦不修改 Provider 结构或 SceneOperationConfig。
      */
     private fun bindExisting(intent: Intent?): Map<String, Any?> {
-        val profileId = intent.stringExtra("profileId", "profile_id")
+        val profileId = intent.stringExtra(
+            "profileId", "profile_id", "providerProfileId", "provider_profile_id"
+        )
         val modelId = intent.stringExtra("modelId", "model_id")
-        val sceneIds = parseSceneIds(intent.stringExtra("sceneIds", "scene_ids"))
+        val sceneIds = parseSceneIds(
+            intent.stringExtra("sceneIds", "scene_ids", "sceneId", "scene_id")
+        )
         require(profileId.isNotBlank()) { "profileId is empty" }
         require(modelId.isNotBlank()) { "modelId is empty" }
         val profile = ModelProviderConfigStore.getProfile(profileId)
             ?: error("provider is not configured: $profileId")
         require(profile.isConfigured()) { "provider is not configured: $profileId" }
-        sceneIds.forEach { sceneId ->
+
+        val boundEntries = sceneIds.map { sceneId ->
             SceneModelBindingStore.saveBinding(
                 sceneId = sceneId,
                 providerProfileId = profileId,
                 modelId = modelId,
             )
+            linkedMapOf(
+                "sceneId" to sceneId,
+                "providerProfileId" to profileId,
+                "modelId" to modelId,
+            )
         }
-        return queryState() + mapOf(
+
+        return linkedMapOf(
+            "success" to true,
             "boundExistingProfileId" to profileId,
             "boundExistingModelId" to modelId,
             "boundExistingSceneIds" to sceneIds,
+            "sceneBindings" to boundEntries,
+        )
+    }
+
+    /**
+     * 安全只读查询场景模型绑定关系（sceneId, providerProfileId, modelId）。
+     * 不调用 queryState()，不读取或打印任何 Provider 配置、BaseUrl 或凭据。
+     * 支持通过 `sceneIds` 或 `sceneId` 传入白名单（例如 "scene.vlm.operation.primary"）进行精准过滤。
+     */
+    private fun queryBindings(intent: Intent?): Map<String, Any?> {
+        val rawSceneIds = intent.stringExtra("sceneIds", "scene_ids", "sceneId", "scene_id")
+        val requestedSceneIds = if (rawSceneIds.isNotBlank()) {
+            rawSceneIds
+                .split(',', ';', '\n')
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .toSet()
+        } else {
+            emptySet()
+        }
+
+        val allBindings = SceneModelBindingStore.getBindingEntries()
+        val filteredBindings = if (requestedSceneIds.isNotEmpty()) {
+            allBindings.filter { it.sceneId in requestedSceneIds }
+        } else {
+            allBindings
+        }
+
+        return linkedMapOf(
+            "success" to true,
+            "sceneBindings" to filteredBindings.map { it.toPayload() },
         )
     }
 
@@ -223,6 +273,7 @@ class DebugModelProviderConfigReceiver : BroadcastReceiver() {
         private const val OPERATION_CONFIGURE = "configure"
         private const val OPERATION_BIND_EXISTING = "bind_existing"
         private const val OPERATION_QUERY = "query"
+        private const val OPERATION_QUERY_BINDINGS = "query_bindings"
         private const val DEFAULT_PROFILE_ID = "debug-runtime-provider"
         private const val DEFAULT_PROFILE_NAME = "OmniMind GPT 5.6 (Debug)"
         private const val FLUTTER_PREFERENCES = "FlutterSharedPreferences"
