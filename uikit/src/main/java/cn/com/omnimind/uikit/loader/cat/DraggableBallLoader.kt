@@ -107,17 +107,27 @@ class DraggableBallLoader(
         imageView.setOnClickListener {
             val action = completionAction
             if (action == null) {
-                imageView.play(
-                    PetAnimationAction.WAVING,
-                    loop = false,
-                    fallback = PetAnimationAction.IDLE
-                )
+                if (openApp()) {
+                    DraggableBallInstance.dismissForAppOpen(this)
+                }
                 return@setOnClickListener
             }
-            collapseNotChangeState()
+            DraggableBallInstance.dismissForAppOpen(this)
             action()
         }
         installDragHandler()
+    }
+
+    private fun openApp(): Boolean {
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        if (intent == null) {
+            OmniLog.e(TAG, "未找到应用启动入口")
+            return false
+        }
+        return runCatching {
+            context.startActivity(intent)
+            true
+        }.onFailure { OmniLog.e(TAG, "打开应用失败", it) }.getOrDefault(false)
     }
 
     fun loadBall() {

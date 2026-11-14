@@ -84,6 +84,8 @@ Then open the scenario model settings:
 
 The app usually initializes the Alpine environment automatically on startup, and you can also manage that environment from the same settings area.
 
+Use **Show Pet** from the top-right `…` menu on the home page to display the floating pet; select **Hide Pet** to dismiss it. The pet is dismissed when you return to the app, including by tapping the pet or opening the app from its icon. Use **Show Pet** in the menu to bring it back. When a task-return hint is active, tapping the pet returns to that task's conversation and dismisses the pet.
+
 <h2 id="use-cases">Use Cases</h2>
 
 ### Personal context

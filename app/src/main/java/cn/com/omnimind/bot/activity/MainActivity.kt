@@ -24,6 +24,7 @@ import cn.com.omnimind.bot.ui.platformview.EmbeddedTerminalPlatformViewFactory
 import cn.com.omnimind.bot.update.AppUpdateManager
 import cn.com.omnimind.bot.util.SchemeUtil
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
+import cn.com.omnimind.uikit.loader.cat.DraggableBallInstance
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import kotlinx.coroutines.Dispatchers
@@ -168,6 +169,7 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.onActivityResumed(this)
+        DraggableBallInstance.dismissForAppForeground()
         EmbeddedTerminalInstallService.refresh(applicationContext)
         AppUpdateManager.requestSilentCheckIfDue(this)
         lifecycleScope.launch(Dispatchers.IO) {

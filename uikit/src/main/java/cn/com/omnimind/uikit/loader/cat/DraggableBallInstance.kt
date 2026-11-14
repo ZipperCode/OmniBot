@@ -54,6 +54,26 @@ object DraggableBallInstance {
         overlay = null
     }
 
+    fun dismissForAppOpen(instance: DraggableBallLoader) {
+        instance.destroy()
+        if (overlay === instance) overlay = null
+        appContext?.getSharedPreferences("OmnibotSettings", Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putBoolean("pet_overlay_visible", false)
+            ?.apply()
+    }
+
+    fun dismissForAppForeground() {
+        val instance = overlay ?: return
+        if (!instance.isAttachedToWindow) return
+        instance.destroy()
+        overlay = null
+        appContext?.getSharedPreferences("OmnibotSettings", Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putBoolean("pet_overlay_visible", false)
+            ?.apply()
+    }
+
     fun hideForExternalActivity(): Boolean {
         return overlay?.hideForExternalActivity() ?: false
     }
