@@ -67,9 +67,16 @@ import cn.com.omnimind.bot.agent.AgentRuntimeContextRepository
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.bot.agent.conversation.OutboxMutation
+import cn.com.omnimind.bot.agent.conversation.OutboxException
 import cn.com.omnimind.bot.agent.LiveAgentBrowserSessionManager
 import cn.com.omnimind.bot.agent.SkillIndexEntry
 import cn.com.omnimind.bot.agent.SkillIndexService
+import cn.com.omnimind.bot.agent.SkillAssetManagementException
+import cn.com.omnimind.bot.agent.manageAssets
+import cn.com.omnimind.bot.agent.workspace.WorkspaceChangeException
+import cn.com.omnimind.bot.agent.workspace.WorkspaceChangeService
+import cn.com.omnimind.bot.agent.workspace.manageChanges
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import cn.com.omnimind.bot.agent.WorkspaceMemoryRollupScheduler
 import cn.com.omnimind.bot.agent.WorkspaceMemoryService
@@ -2736,6 +2743,76 @@ class AssistsCoreManager(private val context: Context) {
     }
 
 
+    fun agentSkillAssets(call: MethodCall, result: MethodChannel.Result) {
+        val operation = when (call.method) {
+            "agentSkillSuggestionList" -> "list"
+            "agentSkillSuggestionSave" -> "save"
+            "agentSkillSuggestionApprove" -> "approve"
+            "agentSkillSuggestionReject" -> "reject"
+            "agentSkillSuggestionRegenerate" -> "regenerate"
+            "agentSkillSuggestionsSetEnabled" -> "set_enabled"
+            "agentSkillFeedback" -> "feedback"
+            "agentSkillRestoreRevision" -> "restore"
+            else -> {
+                result.notImplemented()
+                return
+            }
+        }
+        val arguments = (call.arguments as? Map<*, *>)?.entries
+            ?.associate { it.key.toString() to it.value }.orEmpty()
+        mainJob.launch {
+            try {
+                val payload = withContext(Dispatchers.IO) {
+                    if (!WorkspaceStorageAccess.isGranted(context)) {
+                        throw SkillAssetManagementException(
+                            "WORKSPACE_STORAGE_PERMISSION_REQUIRED", WorkspaceStorageAccess.REQUIRED_PERMISSION_NAME,
+                        )
+                    }
+                    AgentRuntimeManager.getInstance(context).skillSuggestionService.manageAssets(operation, arguments)
+                }
+                withContext(Dispatchers.Main) { result.success(payload) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: SkillAssetManagementException) {
+                withContext(Dispatchers.Main) { result.error(error.code, error.message, null) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) { result.error("skill_asset_invalid", "技能资产读取或保存失败", null) }
+            }
+        }
+    }
+
+    fun workspaceChanges(call: MethodCall, result: MethodChannel.Result) {
+        val operation = when (call.method) {
+            "workspaceChangesList" -> "list"
+            "workspaceChangesListByWorkspace" -> "list_by_workspace"
+            "workspaceChangePreview" -> "preview"
+            "workspaceChangeRestore" -> "restore"
+            "workspaceChangeDiscard" -> "discard"
+            else -> {
+                result.notImplemented()
+                return
+            }
+        }
+        val arguments = (call.arguments as? Map<*, *>)?.entries
+            ?.associate { it.key.toString() to it.value }.orEmpty()
+        mainJob.launch {
+            try {
+                val payload = withContext(Dispatchers.IO) {
+                    WorkspaceChangeService.getInstance(context).manageChanges(context, operation, arguments)
+                }
+                withContext(Dispatchers.Main) { result.success(payload) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: WorkspaceChangeException) {
+                withContext(Dispatchers.Main) { result.error(error.errorCode, error.message, error.snapshot) }
+            } catch (error: Exception) {
+                withContext(Dispatchers.Main) {
+                    result.error("workspace_change_unavailable", "变更记录读取或操作失败", null)
+                }
+            }
+        }
+    }
+
     fun agentSkillList(call: MethodCall, result: MethodChannel.Result) {
         mainJob.launch {
             try {
@@ -2794,7 +2871,10 @@ class AssistsCoreManager(private val context: Context) {
             "hasEvals" to entry.hasEvals,
             "enabled" to entry.enabled,
             "source" to entry.source,
-            "installed" to entry.installed
+            "installed" to entry.installed,
+            "verificationStatus" to entry.verificationStatus,
+            "revisionId" to entry.revisionId,
+            "previousRevisionId" to entry.previousRevisionId
         )
     }
 
@@ -3264,6 +3344,7 @@ class AssistsCoreManager(private val context: Context) {
                     messages = messages,
                     allowHistoryRemoval = call.argument<Boolean>("allowHistoryRemoval") == true,
                     removedMessageIds = call.argument<List<String>>("removedMessageIds"),
+                    settledPromptReceipt = call.argument<Map<String, Any?>>("settledPromptReceipt"),
                 )
                 withContext(Dispatchers.Main) {
                     result.success("SUCCESS")
@@ -3276,6 +3357,86 @@ class AssistsCoreManager(private val context: Context) {
             }
         }
     }
+    fun conversationOutboxImportAttachments(call: MethodCall, result: MethodChannel.Result) {
+        val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
+        val attachments = call.argument<List<Map<String, Any?>>>("attachments") ?: emptyList()
+        workJob.launch {
+            try {
+                val imported = conversationDomainService.importOutboxAttachments(conversationId, attachments)
+                withContext(Dispatchers.Main) {
+                    result.success(mapOf("attachments" to imported))
+                }
+            } catch (error: OutboxException) {
+                withContext(Dispatchers.Main) {
+                    result.error(error.errorCode, error.message, null)
+                }
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    result.error("outbox_attachment_unavailable", "附件导入失败，请重新选择", null)
+                }
+            }
+        }
+    }
+
+    fun conversationOutboxList(call: MethodCall, result: MethodChannel.Result) {
+        val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
+        if (conversationId <= 0L) {
+            result.error("INVALID_ARGUMENTS", "conversationId is invalid", null)
+            return
+        }
+        workJob.launch {
+            try {
+                val runtime = AgentRuntimeManager.getInstance(context)
+                val snapshot = runtime.conversationOutboxService.list(conversationId)
+                withContext(Dispatchers.Main) {
+                    result.success(snapshot.toMap())
+                }
+            } catch (e: Exception) {
+                OmniLog.e(TAG, "获取对话待发箱失败: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    result.error("OUTBOX_ERROR", e.message, null)
+                }
+            }
+        }
+    }
+
+    fun conversationOutboxMutate(call: MethodCall, result: MethodChannel.Result) {
+        val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L
+        val operation = call.argument<String>("operation")?.trim().orEmpty()
+        val requestMap = call.argument<Map<String, Any?>>("request")
+            ?: (call.arguments as? Map<String, Any?>) ?: emptyMap()
+        if (conversationId <= 0L || operation.isEmpty()) {
+            result.error("INVALID_ARGUMENTS", "conversationId or operation is invalid", null)
+            return
+        }
+        val mutation = OutboxMutation(
+            id = requestMap["id"] as? String,
+            expectedRevision = (requestMap["expectedRevision"] as? Number)?.toLong(),
+            payload = (requestMap["payload"] as? Map<String, Any?>)
+                ?: (requestMap["promptSession"] as? Map<String, Any?>),
+            expectedSessionId = requestMap["expectedSessionId"] as? String,
+            expectedTurnId = requestMap["expectedTurnId"] as? String
+        )
+        workJob.launch {
+            try {
+                val runtime = AgentRuntimeManager.getInstance(context)
+                val snapshot = runtime.conversationOutboxService.mutate(conversationId, operation, mutation)
+                withContext(Dispatchers.Main) {
+                    result.success(snapshot.toMap())
+                }
+            } catch (e: OutboxException) {
+                withContext(Dispatchers.Main) {
+                    result.error(e.errorCode, e.message, e.snapshot?.toMap())
+                }
+            } catch (e: Exception) {
+                OmniLog.e(TAG, "待发箱变更失败: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    result.error("OUTBOX_ERROR", e.message, null)
+                }
+            }
+        }
+    }
+
 
     fun upsertConversationUiCard(call: MethodCall, result: MethodChannel.Result) {
         val conversationId = call.argument<Number>("conversationId")?.toLong() ?: 0L

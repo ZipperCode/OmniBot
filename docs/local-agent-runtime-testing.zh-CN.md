@@ -209,3 +209,29 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 - 本轮安装 APK SHA256 为 `58e1dfa2d2be128cfd0282359091c7a52052807bd104d5fd06a2eb2745c094b3`，与本机构建产物一致。已恢复默认子代理模型跟随主 Agent、角色无专用模型、思考档位 `low`；保留验收对话，未删除用户历史，未改 Provider 或长期记忆。
 - 以上功能验收来自真实 Android 应用流程，不以单元测试、HTTP 200 或卡片存在代替；其他 Agent、全部 ROM 与发布全量门禁未做真机验收。
 
+## 待发箱、受管文件与技能资产旅程
+
+设备验收复用 `scripts/verify-agent-user-journey.mjs`，四份中文场景位于
+`scripts/fixtures/agent-user-journeys/`：`outbox-and-result.zh.json`、
+`workspace-change-review.zh.json`、`skill-suggestion-review.zh.json` 和
+`lsposed-evidence.zh.json`。使用独立的空闲小万对话、空草稿和已有可用模型；
+实体机必须显式设置 `OOB_ALLOW_PHYSICAL_DEVICE=1`。每次证据目录放仓库外，
+场景会生成唯一标记，不通过旧回复、写数据库或伪造工具结果满足断言。
+
+```bash
+OOB_ALLOW_PHYSICAL_DEVICE=1 node scripts/verify-agent-user-journey.mjs "$DEVICE_SERIAL" scripts/fixtures/agent-user-journeys/outbox-and-result.zh.json "$EVIDENCE_DIR/outbox"
+OOB_ALLOW_PHYSICAL_DEVICE=1 node scripts/verify-agent-user-journey.mjs "$DEVICE_SERIAL" scripts/fixtures/agent-user-journeys/workspace-change-review.zh.json "$EVIDENCE_DIR/workspace"
+OOB_ALLOW_PHYSICAL_DEVICE=1 node scripts/verify-agent-user-journey.mjs "$DEVICE_SERIAL" scripts/fixtures/agent-user-journeys/skill-suggestion-review.zh.json "$EVIDENCE_DIR/skill"
+OOB_ALLOW_PHYSICAL_DEVICE=1 node scripts/verify-agent-user-journey.mjs "$DEVICE_SERIAL" scripts/fixtures/agent-user-journeys/lsposed-evidence.zh.json "$EVIDENCE_DIR/lsposed"
+```
+
+- 待发箱应覆盖 A 运行中排队 B/C、独立编辑 B、确认移除 C、正式完成后仅投递 B 一次以及结果预览返回。修改使用整箱 `OutboxSnapshot.revision`，不能拿未变动条目的旧版本代替；确认期间箱内容变化仍须拒绝旧操作，不自动重试。
+- 自然出队与 Web 入口共用宿主历史投影；最终消息必须保存所属 `sessionId`、`turnId` 及官方请求终态。答复文字出现、待发数归零或工具退出成功都不能替代正式完成和历史提交屏障。
+- 受管恢复应先证明冲突拒绝且外部修改保留，再证明另一干净变更经预览与明确确认后恢复实际字节或本次新建文件不存在。不能通过短暂 Toast 代替文件状态。
+- 技能应先有合格任务正式完成，再有后台资产状态；审核前不进入技能索引。审核试用后，须由独立任务实际读取该版本并正式完成，才允许反馈。应用私有目录可能经 `/data/user/0` 与 `/data/data` 别名访问，资产根应使用同一 canonical 边界，后代链接与越界仍拒绝。
+- LSPosed 场景缺少专用 `cn.com.omnimind.validation.*` 靶标时必须前置失败且零部署；安装配置、框架加载日志与真实目标业务效果分别记证。没有靶标或部署授权时不得把其余回归通过写成 Hook 功能验收通过。
+
+每份 `result.json` 单独保留通过、失败步骤及安全错误类别。实体机历史核对只使用受保护 Debug receiver 的本次唯一合成标记导出，不复制用户整库、不读取凭据；发布构建与全部 ROM 覆盖仍是独立门禁。
+
+Web 管理接口另需设备现有本机服务已开启。该服务监听局域网，不能为了测试擅自开启或复制访问 Token；未开启时 ADB 端口转发可能直接断开，不能视为 HTTP 验证通过。服务具备前提后，用回环客户端分别记录未认证拒绝与已授权请求的实际结果；Web 源码、类型检查和构建不替代该接口验收。
+

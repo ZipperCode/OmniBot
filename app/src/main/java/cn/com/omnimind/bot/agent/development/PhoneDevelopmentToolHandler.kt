@@ -156,7 +156,7 @@ class PhoneDevelopmentToolHandler(
             return AgentCapabilityToolDefinition(
                 name = PRIMARY_TOOL_NAME,
                 displayName = "手机开发动作 (Phone Development)",
-                description = "在手机本地执行 LSPosed 模块开发、编译构建、目标 APK 逆向分析、运行时探测与部署重载闭环。",
+                description = "在手机本地执行 LSPosed 模块开发、编译构建、目标 APK 逆向分析、运行时探测与部署重载闭环。注意：模块部署成功与框架加载证据仅证明框架注入，不代表业务功能已生效；必须在目标应用中观察到真实业务行为证据后方可报告功能成功。",
                 parameters = schema,
                 toolType = "action"
             )
@@ -732,12 +732,13 @@ class PhoneDevelopmentToolHandler(
             "targetReloaded" to deployResult.targetReloaded,
             "configVerified" to deployResult.configVerified,
             "hookVerified" to deployResult.hookVerified,
+            "frameworkEvidenceObserved" to deployResult.hookVerified,
             "message" to deployResult.message
         )
 
         return ToolExecutionResult.ContextResult(
             toolName = action,
-            summaryText = if (deployResult.success) "LSPosed 模块部署成功：$targetPackage" else "部署失败：${deployResult.message}",
+            summaryText = if (deployResult.success) deployResult.message else "部署失败：${deployResult.message}",
             previewJson = helper.encodeLocalizedPayload(payload),
             rawResultJson = helper.encodeLocalizedPayload(payload),
             success = deployResult.success

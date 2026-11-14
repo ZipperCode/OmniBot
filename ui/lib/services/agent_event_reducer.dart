@@ -3129,17 +3129,6 @@ class AgentEventReducer {
       return delta;
     }
     if (hasLiveCache) {
-      // Some ACP Agents emit committed assistant message blocks rather than
-      // token deltas. A reconnect/retry can deliver the same committed block
-      // again, or a provider can send a cumulative block for the same
-      // messageId. Keep the live stream idempotent without changing the ACP
-      // envelope or inventing a second event protocol.
-      if (delta == existingText) {
-        return null;
-      }
-      if (delta.startsWith(existingText)) {
-        return delta.substring(existingText.length);
-      }
       runtime.agentReplayDeltaOffsets.remove(entryId);
       return delta;
     }
@@ -4349,7 +4338,7 @@ class AgentEventReducer {
       if (cardData == null ||
           (cardData['type'] != 'agent_tool_summary' &&
               cardData['type'] != kAgentRequestCardType) ||
-          !_cardBelongsToTask(cardData!, normalizedTaskId)) {
+          !_cardBelongsToTask(cardData, normalizedTaskId)) {
         continue;
       }
       final cardToolCallId = _string(cardData['toolCallId'])?.trim();
@@ -5640,7 +5629,7 @@ Map<String, dynamic> _projectAcpToolCall(
     'toolCallId': update['toolCallId'],
     if (sessionId != null) 'sessionId': sessionId,
     if (turnId != null) 'turnId': turnId,
-    if (projectedType != null) 'type': projectedType,
+    'type': projectedType,
     'title': update['title'],
     if (update['title'] != null) 'toolTitle': update['title'],
     'status': update['status'],

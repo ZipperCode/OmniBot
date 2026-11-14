@@ -1,14 +1,6 @@
 part of 'chat_page.dart';
 
 mixin _ChatPageBrowserMixin on _ChatPageStateBase {
-  static const double _kBrowserOverlayMinWidth = 280;
-  static const double _kBrowserOverlayMinHeight = 240;
-  static const double _kBrowserOverlayMaxWidthFactor = 0.92;
-  static const double _kBrowserOverlayMaxHeightFactor = 0.78;
-  static const double _kBrowserOverlayHorizontalMargin = 16;
-  static const double _kBrowserOverlayTopMargin = 64;
-  static const double _kBrowserOverlayBottomMargin = 16;
-
   @override
   String _browserSnapshotSignature(ChatBrowserSessionSnapshot? snapshot) {
     if (snapshot == null) {
@@ -69,18 +61,15 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
     final expectedWorkspaceId = chatConversationWorkspaceId(
       _modeState(browserMode).currentConversationId,
     );
-    final snapshot = await AgentBrowserSessionService.getSnapshot();
+    final snapshot = await AgentBrowserSessionService.getSnapshot(
+      workspaceId: expectedWorkspaceId,
+    );
     if (!mounted) {
       return;
     }
     final resolved = snapshot?.matchesWorkspace(expectedWorkspaceId) == true
         ? snapshot
         : null;
-    final previousSignature = _browserSnapshotSignature(
-      _liveBrowserSessionSnapshot,
-    );
-    final nextSignature = _browserSnapshotSignature(resolved);
-
     if (syncRuntime) {
       final runtime = _runtimeForMode(browserMode);
       if (runtime != null) {
@@ -97,19 +86,11 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
       return;
     }
 
-    final shouldHideOverlay = resolved == null || !resolved.available;
     if (!mounted) {
       return;
     }
     setState(() {
       _liveBrowserSessionSnapshot = resolved;
-      if (previousSignature != nextSignature) {
-        _browserOverlayViewSeed += 1;
-      }
-      if (shouldHideOverlay) {
-        _isBrowserOverlayVisible = false;
-        _isBrowserOverlayInitialized = false;
-      }
     });
   }
 
@@ -140,20 +121,8 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
       _liveBrowserSessionSnapshot = resolved;
       return;
     }
-    final previousSignature = _browserSnapshotSignature(
-      _liveBrowserSessionSnapshot,
-    );
-    final nextSignature = _browserSnapshotSignature(resolved);
-    final shouldHideOverlay = resolved == null || !resolved.available;
     setState(() {
       _liveBrowserSessionSnapshot = resolved;
-      if (previousSignature != nextSignature) {
-        _browserOverlayViewSeed += 1;
-      }
-      if (shouldHideOverlay) {
-        _isBrowserOverlayVisible = false;
-        _isBrowserOverlayInitialized = false;
-      }
     });
   }
 
@@ -179,9 +148,6 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
     }
     setState(() {
       _setChatIslandDisplayLayerForMode(_activeConversationMode, layer);
-      if (layer != ChatIslandDisplayLayer.tools) {
-        _isBrowserOverlayVisible = false;
-      }
     });
   }
 
@@ -217,8 +183,15 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
       showToast('当前平台暂不支持浏览器工具视图', type: ToastType.warning);
       return;
     }
+    // Conversation switches bump this generation. An open that started on one
+    // conversation must never land on another — even within the same chat
+    // mode — and the permission sheet awaits long enough for the user to
+    // switch, so guard every resume point, not just the mode check.
+    final conversationGeneration = _conversationTargetRequestId;
     await _refreshLiveBrowserSessionSnapshot(syncRuntime: true);
-    if (!mounted || browserMode != _activeConversationMode) {
+    if (!mounted ||
+        browserMode != _activeConversationMode ||
+        conversationGeneration != _conversationTargetRequestId) {
       return;
     }
     final snapshot = _resolvedBrowserSessionSnapshot;
@@ -226,287 +199,46 @@ mixin _ChatPageBrowserMixin on _ChatPageStateBase {
       showToast('当前会话还没有可用的浏览器会话', type: ToastType.warning);
       return;
     }
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _setChatIslandDisplayLayerForMode(
-        browserMode,
-        ChatIslandDisplayLayer.tools,
-      );
-      _isBrowserOverlayVisible = true;
-      _browserOverlayViewSeed += 1;
-    });
-  }
-
-  @override
-  void _hideBrowserOverlay() {
-    if (!_isBrowserOverlayVisible && !_isBrowserOverlayInitialized) {
-      return;
-    }
-    setState(() {
-      _isBrowserOverlayVisible = false;
-      _isBrowserOverlayInitialized = false;
-    });
-  }
-
-  Size _overlayMaxSize(BoxConstraints constraints) {
-    final maxWidth = (constraints.maxWidth * _kBrowserOverlayMaxWidthFactor)
-        .clamp(_kBrowserOverlayMinWidth, constraints.maxWidth)
-        .toDouble();
-    final maxHeight = (constraints.maxHeight * _kBrowserOverlayMaxHeightFactor)
-        .clamp(_kBrowserOverlayMinHeight, constraints.maxHeight)
-        .toDouble();
-    return Size(maxWidth, maxHeight);
-  }
-
-  Size _clampBrowserOverlaySize(Size size, BoxConstraints constraints) {
-    final maxSize = _overlayMaxSize(constraints);
-    return Size(
-      size.width.clamp(_kBrowserOverlayMinWidth, maxSize.width).toDouble(),
-      size.height.clamp(_kBrowserOverlayMinHeight, maxSize.height).toDouble(),
-    );
-  }
-
-  Offset _clampBrowserOverlayOffset(
-    Offset offset,
-    Size size,
-    BoxConstraints constraints,
-  ) {
-    final maxLeft =
-        (constraints.maxWidth - size.width - _kBrowserOverlayHorizontalMargin)
-            .clamp(_kBrowserOverlayHorizontalMargin, double.infinity)
-            .toDouble();
-    final maxTop =
-        (constraints.maxHeight - size.height - _kBrowserOverlayBottomMargin)
-            .clamp(_kBrowserOverlayTopMargin, double.infinity)
-            .toDouble();
-    return Offset(
-      offset.dx.clamp(_kBrowserOverlayHorizontalMargin, maxLeft).toDouble(),
-      offset.dy.clamp(_kBrowserOverlayTopMargin, maxTop).toDouble(),
-    );
-  }
-
-  @override
-  void _ensureBrowserOverlayGeometry(BoxConstraints constraints) {
-    final targetSize = _clampBrowserOverlaySize(
-      _browserOverlaySize,
-      constraints,
-    );
-    final defaultOffset = Offset(
-      (constraints.maxWidth -
-              targetSize.width -
-              _kBrowserOverlayHorizontalMargin)
-          .clamp(_kBrowserOverlayHorizontalMargin, double.infinity)
-          .toDouble(),
-      _kBrowserOverlayTopMargin,
-    );
-    _browserOverlaySize = targetSize;
-    _browserOverlayOffset = _clampBrowserOverlayOffset(
-      _isBrowserOverlayInitialized ? _browserOverlayOffset : defaultOffset,
-      targetSize,
-      constraints,
-    );
-    _isBrowserOverlayInitialized = true;
-  }
-
-  @override
-  void _moveBrowserOverlay(Offset delta, BoxConstraints constraints) {
-    setState(() {
-      _ensureBrowserOverlayGeometry(constraints);
-      _browserOverlayOffset = _clampBrowserOverlayOffset(
-        _browserOverlayOffset + delta,
-        _browserOverlaySize,
-        constraints,
-      );
-    });
-  }
-
-  @override
-  void _resizeBrowserOverlayFromLeft(Offset delta, BoxConstraints constraints) {
-    setState(() {
-      _ensureBrowserOverlayGeometry(constraints);
-      final currentRight = _browserOverlayOffset.dx + _browserOverlaySize.width;
-      final maxSize = _overlayMaxSize(constraints);
-      final nextHeight = _clampBrowserOverlaySize(
-        Size(_browserOverlaySize.width, _browserOverlaySize.height + delta.dy),
-        constraints,
-      ).height;
-      var nextLeft = (_browserOverlayOffset.dx + delta.dx).clamp(
-        _kBrowserOverlayHorizontalMargin,
-        currentRight - _kBrowserOverlayMinWidth,
-      );
-      var nextWidth = currentRight - nextLeft;
-      if (nextWidth > maxSize.width) {
-        nextWidth = maxSize.width;
-        nextLeft = currentRight - nextWidth;
+    final workspaceId = snapshot.workspaceId;
+    try {
+      // 浏览器页面由系统级悬浮窗宿主承载；此入口与 Agent 创建会话时
+      // 自动弹出的悬浮球走同一个原生宿主，不存在第二个 WebView 宿主。
+      final permitted = await AgentBrowserSessionService.isOverlayPermitted();
+      if (!mounted || conversationGeneration != _conversationTargetRequestId) {
+        return;
       }
-      _browserOverlaySize = Size(nextWidth.toDouble(), nextHeight);
-      _browserOverlayOffset = _clampBrowserOverlayOffset(
-        Offset(nextLeft.toDouble(), _browserOverlayOffset.dy),
-        _browserOverlaySize,
-        constraints,
+      if (!permitted) {
+        // 缺少悬浮窗权限时给出可操作的授权入口，而不是静默失败。
+        final proceed = await AgentBrowserOverlayPermissionSheet.show(
+          context,
+        );
+        if (!mounted ||
+            !proceed ||
+            conversationGeneration != _conversationTargetRequestId) {
+          return;
+        }
+      }
+      final result = await AgentBrowserSessionService.openOverlayHost(
+        workspaceId,
       );
-    });
-  }
-
-  @override
-  void _resizeBrowserOverlayFromRight(
-    Offset delta,
-    BoxConstraints constraints,
-  ) {
-    setState(() {
-      _ensureBrowserOverlayGeometry(constraints);
-      final resized = _clampBrowserOverlaySize(
-        Size(
-          _browserOverlaySize.width + delta.dx,
-          _browserOverlaySize.height + delta.dy,
-        ),
-        constraints,
-      );
-      _browserOverlaySize = resized;
-      _browserOverlayOffset = _clampBrowserOverlayOffset(
-        _browserOverlayOffset,
-        resized,
-        constraints,
-      );
-    });
-  }
-
-  @override
-  Rect _browserOverlayBounds(BoxConstraints constraints) {
-    final size = _clampBrowserOverlaySize(_browserOverlaySize, constraints);
-    final offset = _clampBrowserOverlayOffset(
-      _isBrowserOverlayInitialized
-          ? _browserOverlayOffset
-          : Offset(
-              (constraints.maxWidth -
-                      size.width -
-                      _kBrowserOverlayHorizontalMargin)
-                  .clamp(_kBrowserOverlayHorizontalMargin, double.infinity)
-                  .toDouble(),
-              _kBrowserOverlayTopMargin,
-            ),
-      size,
-      constraints,
-    );
-    return Rect.fromLTWH(offset.dx, offset.dy, size.width, size.height);
-  }
-
-  @override
-  Widget _buildBrowserOverlay(BoxConstraints constraints) {
-    if (_normalSurfaceVisibility <= 0.001) {
-      return const SizedBox.shrink();
+      if (!mounted || conversationGeneration != _conversationTargetRequestId) {
+        return;
+      }
+      if (result?['opened'] != true) {
+        final reason = result?['reason']?.toString();
+        showToast(
+          reason != null && reason.isNotEmpty
+              ? '打开浏览器失败: $reason'
+              : '打开浏览器失败',
+          type: ToastType.error,
+        );
+      }
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      showToast('打开浏览器失败: $error', type: ToastType.error);
     }
-    final snapshot = _resolvedBrowserSessionSnapshot;
-    if (snapshot == null || !snapshot.available) {
-      return const SizedBox.shrink();
-    }
-    if (!_isBrowserOverlayVisible) {
-      return Positioned(
-        right: 18,
-        top: 88,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            key: const ValueKey<String>('browser-search-floating-ball'),
-            borderRadius: BorderRadius.circular(28),
-            onTap: () {
-              setState(() {
-                _setChatIslandDisplayLayerForMode(
-                  _activeConversationMode,
-                  ChatIslandDisplayLayer.tools,
-                );
-                _isBrowserOverlayVisible = true;
-                _browserOverlayViewSeed += 1;
-              });
-            },
-            child: Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primary,
-                shape: BoxShape.circle,
-                boxShadow: const <BoxShadow>[
-                  BoxShadow(
-                    color: Color(0x33000000),
-                    blurRadius: 12,
-                    offset: Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Icon(
-                Icons.language,
-                color: Theme.of(context).colorScheme.onPrimary,
-                size: 24,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    if (!_isBrowserOverlayInitialized) {
-      _ensureBrowserOverlayGeometry(constraints);
-    }
-    final bounds = _browserOverlayBounds(constraints);
-    return Positioned(
-      left: bounds.left,
-      top: bounds.top,
-      width: bounds.width,
-      height: bounds.height,
-      child: IgnorePointer(
-        ignoring: _normalSurfaceVisibility < 0.999,
-        child: Opacity(
-          opacity: Curves.easeOutCubic.transform(_normalSurfaceVisibility),
-          child: Transform.translate(
-            offset: Offset(-_surfacePageProgress * constraints.maxWidth, 0),
-            child: KeyedSubtree(
-              key: ValueKey(
-                'agent-browser-overlay-${snapshot.workspaceId}-$_browserOverlayViewSeed',
-              ),
-              child: ChatBrowserOverlay(
-                key: _browserOverlayKey,
-                snapshot: snapshot,
-                onSnapshotChanged: (next) {
-                  if (!mounted) return;
-                  final browserMode = next == null
-                      ? _activeConversationMode
-                      : _browserModeForWorkspace(next.workspaceId);
-                  if (browserMode == null) return;
-                  final expectedWorkspaceId = chatConversationWorkspaceId(
-                    _modeState(browserMode).currentConversationId,
-                  );
-                  final resolved =
-                      next?.matchesWorkspace(expectedWorkspaceId) == true
-                      ? next
-                      : null;
-                  final runtime = _runtimeForMode(browserMode);
-                  if (runtime != null) {
-                    runtime.browserSessionSnapshot = resolved;
-                  } else {
-                    _modeState(browserMode).browserSessionSnapshot = resolved;
-                  }
-                  if (browserMode != _activeConversationMode) return;
-                  setState(() {
-                    _liveBrowserSessionSnapshot = resolved;
-                    if (resolved == null || !resolved.available) {
-                      _isBrowserOverlayVisible = false;
-                      _isBrowserOverlayInitialized = false;
-                    }
-                  });
-                },
-                onClose: _hideBrowserOverlay,
-                onDragDelta: (delta) => _moveBrowserOverlay(delta, constraints),
-                onResizeLeftDelta: (delta) =>
-                    _resizeBrowserOverlayFromLeft(delta, constraints),
-                onResizeRightDelta: (delta) =>
-                    _resizeBrowserOverlayFromRight(delta, constraints),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   ChatPageMode? _browserModeForWorkspace(String workspaceId) {

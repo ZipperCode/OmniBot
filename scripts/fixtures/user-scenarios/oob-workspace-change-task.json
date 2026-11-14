@@ -1,0 +1,3 @@
+{
+  "prompt": "Use file_write to create managed-change-{{MARKER}}.txt in workspace with content INITIAL_MANAGED_RECORD_{{MARKER}}."
+}

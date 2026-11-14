@@ -89,5 +89,50 @@ void main() {
         ChatComposerPrimaryAction.addAttachment,
       );
     });
+
+    test('routes processing action to queue when payload present and cancel when empty', () {
+      final machine = ChatComposerStateMachine(hasText: false, hasFocus: true);
+
+      // Processing and empty payload => cancel
+      expect(
+        machine.value.primaryAction(
+          isProcessing: true,
+          hasAttachments: false,
+          hasExternalPayload: false,
+        ),
+        ChatComposerPrimaryAction.cancel,
+      );
+
+      // Processing with text => queue
+      expect(
+        machine.value.primaryAction(
+          isProcessing: true,
+          hasAttachments: false,
+          hasExternalPayload: false,
+          hasTextOverride: true,
+        ),
+        ChatComposerPrimaryAction.queue,
+      );
+
+      // Processing with attachments => queue
+      expect(
+        machine.value.primaryAction(
+          isProcessing: true,
+          hasAttachments: true,
+          hasExternalPayload: false,
+        ),
+        ChatComposerPrimaryAction.queue,
+      );
+
+      // Processing with external payload => queue
+      expect(
+        machine.value.primaryAction(
+          isProcessing: true,
+          hasAttachments: false,
+          hasExternalPayload: true,
+        ),
+        ChatComposerPrimaryAction.queue,
+      );
+    });
   });
 }

@@ -23,6 +23,9 @@ import cn.com.omnimind.assists.controller.http.HttpController
 import cn.com.omnimind.bot.BuildConfig
 import cn.com.omnimind.bot.agent.AgentConversationModePolicy
 import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
+import cn.com.omnimind.bot.agent.conversation.ConversationOutboxService
+import cn.com.omnimind.bot.webchat.ConversationDomainService
+import cn.com.omnimind.bot.webchat.WebAgentRunBridge
 import cn.com.omnimind.bot.agent.AgentAttachmentPromptSupport
 import cn.com.omnimind.bot.agent.AgentImageAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
@@ -30,6 +33,11 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler
 import cn.com.omnimind.bot.agent.XiaowanSubagentConfigStore
+import cn.com.omnimind.bot.agent.SkillSuggestionService
+import cn.com.omnimind.bot.agent.SkillLifecycleStore
+import cn.com.omnimind.bot.agent.SkillIndexService
+import cn.com.omnimind.bot.agent.TurnToolExecutionSummary
+import cn.com.omnimind.bot.agent.AgentConversationHistorySupport
 import cn.com.omnimind.bot.mcp.McpServerManager
 import cn.com.omnimind.bot.terminal.EmbeddedTerminalSetupManager
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
@@ -46,6 +54,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -170,12 +179,37 @@ class AgentRuntimeManager private constructor(
      * in this registry for the lifetime of the connected bridge.
      */
     private val sessionConversationIds = ConcurrentHashMap<String, Long>()
+    private val turnAdmittedUserMessageIds = ConcurrentHashMap<String, String>()
     private val historyRepository = AgentConversationHistoryRepository(appContext)
     private val remoteConfigStore = CodexRemoteBridgeConfigStore(appContext)
     private val acpAgentProfileStore = AcpAgentProfileStore(appContext)
     internal val xiaowanSubagentConfigStore by lazy {
         XiaowanSubagentConfigStore(appContext)
     }
+    val conversationOutboxService: ConversationOutboxService by lazy {
+        ConversationOutboxService(
+            context = appContext,
+            scope = scope,
+            agentRuntimeManager = this,
+            conversationDomainService = ConversationDomainService(appContext)
+        )
+    }
+    val skillSuggestionService: SkillSuggestionService by lazy {
+        SkillSuggestionService(
+            context = appContext,
+            workspaceManager = AgentWorkspaceManager(appContext),
+            lifecycleStore = SkillLifecycleStore.getInstance(appContext),
+            skillIndexService = SkillIndexService(appContext, AgentWorkspaceManager(appContext))
+        )
+    }
+
+    internal val conversationRunBridge by lazy {
+        WebAgentRunBridge(appContext, this)
+    }
+
+    internal suspend fun executeOutboxPrompt(arguments: Map<String, Any?>): Any? =
+        conversationRunBridge.startOutboxRun(arguments)
+
     private val managedAgentUpdates = ManagedAgentUpdates(
         probe = { profiles, distributionId ->
             check(TerminalDistribution.selected().id == distributionId &&
@@ -272,7 +306,19 @@ class AgentRuntimeManager private constructor(
         },
         serverRequestOwners = pendingAcpServerRequests,
         turnOwnership = AcpTurnOwnershipRegistry(turnOwnershipStore, agentId),
-        onMessage = ::handleServerMessage
+        onMessage = ::handleServerMessage,
+        onPromptAdmitted = { sessionId, turnId, requestId, conversationId, userMessageId, providerProfileId, modelId, credentialDigest ->
+            onPromptAdmitted(
+                sessionId = sessionId,
+                turnId = turnId,
+                requestId = requestId,
+                conversationId = conversationId,
+                userMessageId = userMessageId,
+                providerProfileId = providerProfileId,
+                modelId = modelId,
+                credentialDigest = credentialDigest
+            )
+        }
     )
 
     private fun localRuntimeFor(agentId: String): LocalAcpRuntime {
@@ -315,39 +361,92 @@ class AgentRuntimeManager private constructor(
      * bridge, and future Harness adapters all enter here once a turn id is
      * known, so Android background survival is not coupled to any Agent loop.
      */
-    private fun admitRemoteTurn(
+    private suspend fun admitRemoteTurn(
         threadId: String,
         turnId: String,
         requestId: String? = null,
+        userMessageId: String? = null,
     ) {
-        when (val reservation = remoteTurnOwnership.adopt(threadId, turnId, requestId)) {
-            is AcpTurnReservation.Started -> Unit
-            is AcpTurnReservation.InFlight -> if (reservation.record.turnId == turnId) {
-                requestId?.let {
-                    remoteTurnOwnership.attachRequestId(threadId, turnId, it)
+        val reservation = remoteTurnOwnership.adopt(threadId, turnId, requestId)
+        val conversationId = conversationIdForSession(threadId)
+            ?: bindingRepository.getBindingByThreadId(threadId)?.conversationId
+
+        when (reservation) {
+            is AcpTurnReservation.Started -> {
+                try {
                     AcpTaskTerminalJournal.recordAdmission(
                         context = appContext,
                         agentId = REMOTE_CODEX_AGENT_ID,
                         sessionId = threadId,
                         turnId = turnId,
-                        requestId = it,
+                        requestId = requestId,
                     )
+                } catch (error: Throwable) {
+                    remoteTurnOwnership.finish(threadId, turnId, status = "error", error = error.message)
+                    throw error
                 }
-                return
+                TaskRuntimeSettings.onTaskStarted(appContext)
+                onPromptAdmitted(
+                    sessionId = threadId,
+                    turnId = turnId,
+                    requestId = requestId,
+                    conversationId = conversationId,
+                    userMessageId = userMessageId
+                )
+                val started = TaskRuntime.start(
+                    context = appContext,
+                    taskId = agentTurnRuntimeId(threadId, turnId),
+                    conversationId = conversationId,
+                    sessionId = threadId,
+                    turnId = turnId,
+                    title = "Codex 远程任务",
+                    statusText = "执行中..."
+                )
+                if (!started) {
+                    Log.w("AgentRuntimeManager", "Unable to acquire foreground runtime for turn=$turnId")
+                }
             }
-            is AcpTurnReservation.Completed -> return
-            is AcpTurnReservation.Busy -> {
+            is AcpTurnReservation.InFlight -> {
                 if (reservation.record.turnId == turnId) {
-                    requestId?.let {
-                        remoteTurnOwnership.attachRequestId(threadId, turnId, it)
+                    if (requestId != null) {
+                        remoteTurnOwnership.attachRequestId(threadId, turnId, requestId)
                         AcpTaskTerminalJournal.recordAdmission(
                             context = appContext,
                             agentId = REMOTE_CODEX_AGENT_ID,
                             sessionId = threadId,
                             turnId = turnId,
-                            requestId = it,
+                            requestId = requestId,
                         )
                     }
+                    onPromptAdmitted(
+                        sessionId = threadId,
+                        turnId = turnId,
+                        requestId = requestId ?: reservation.record.requestId,
+                        conversationId = conversationId,
+                        userMessageId = userMessageId
+                    )
+                    return
+                }
+            }
+            is AcpTurnReservation.Busy -> {
+                if (reservation.record.turnId == turnId) {
+                    if (requestId != null) {
+                        remoteTurnOwnership.attachRequestId(threadId, turnId, requestId)
+                        AcpTaskTerminalJournal.recordAdmission(
+                            context = appContext,
+                            agentId = REMOTE_CODEX_AGENT_ID,
+                            sessionId = threadId,
+                            turnId = turnId,
+                            requestId = requestId,
+                        )
+                    }
+                    onPromptAdmitted(
+                        sessionId = threadId,
+                        turnId = turnId,
+                        requestId = requestId ?: reservation.record.requestId,
+                        conversationId = conversationId,
+                        userMessageId = userMessageId
+                    )
                     return
                 }
                 throw IllegalStateException(
@@ -355,27 +454,7 @@ class AgentRuntimeManager private constructor(
                         reservation.record.turnId + ", cannot adopt $turnId."
                 )
             }
-        }
-        AcpTaskTerminalJournal.recordAdmission(
-            context = appContext,
-            agentId = REMOTE_CODEX_AGENT_ID,
-            sessionId = threadId,
-            turnId = turnId,
-            requestId = requestId,
-        )
-        TaskRuntimeSettings.onTaskStarted(appContext)
-        val conversationId = conversationIdForSession(threadId)
-        val started = TaskRuntime.start(
-            context = appContext,
-            taskId = agentTurnRuntimeId(threadId, turnId),
-            conversationId = conversationId,
-            sessionId = threadId,
-            turnId = turnId,
-            title = "Codex 远程任务",
-            statusText = "执行中..."
-        )
-        if (!started) {
-            Log.w("AgentRuntimeManager", "Unable to acquire foreground runtime for turn=$turnId")
+            is AcpTurnReservation.Completed -> return
         }
     }
 
@@ -1105,10 +1184,15 @@ class AgentRuntimeManager private constructor(
         var terminalStatus = "completed"
         return try {
             turnMutex.withLock {
-                admitRemoteTurn(sessionId, turnId, requestId)
-                promptJob?.let { execution.attachPromptJob(it) }
-                remotePromptExecutions[sessionId] = execution
-                admitted = true
+                try {
+                    admitRemoteTurn(sessionId, turnId, requestId, args.stringValue("userMessageId"))
+                } finally {
+                    if (remoteTurnOwnership.activeTurnId(sessionId) == turnId) {
+                        admitted = true
+                        promptJob?.let { execution.attachPromptJob(it) }
+                        remotePromptExecutions[sessionId] = execution
+                    }
+                }
             }
             val prompt = resolveInput(args, sessionId).map { block ->
                 LinkedHashMap<String, Any?>().apply {
@@ -1172,16 +1256,34 @@ class AgentRuntimeManager private constructor(
             }
         }
     }
+    private fun lookupAdmittedTurnRecord(agentId: String, sessionId: String?, requestId: String): AcpTurnRecord? {
+        if (requestId.isBlank()) return null
+        if (!sessionId.isNullOrBlank()) {
+            if (agentId == REMOTE_CODEX_AGENT_ID) {
+                remoteTurnOwnership.requestRecord(sessionId, requestId)?.let { return it }
+            } else {
+                localAcpRuntimes[agentId]?.turnOwnership?.requestRecord(sessionId, requestId)?.let { return it }
+            }
+        }
+        val records = if (agentId == REMOTE_CODEX_AGENT_ID) {
+            remoteTurnOwnership.activeRecords()
+        } else {
+            localAcpRuntimes[agentId]?.turnOwnership?.activeRecords().orEmpty()
+        }
+        return records.firstOrNull { it.requestId == requestId }
+    }
+
     private fun lookupAdmittedTurnId(agentId: String, sessionId: String?, requestId: String): String? {
-        if (sessionId.isNullOrBlank() || requestId.isBlank()) return null
-        if (agentId == REMOTE_CODEX_AGENT_ID) {
-            remoteTurnOwnership.requestRecord(sessionId, requestId)?.turnId?.let { return it }
+        val record = lookupAdmittedTurnRecord(agentId, sessionId, requestId)
+        if (record != null) return record.turnId
+        if (!sessionId.isNullOrBlank() && requestId.isNotBlank()) {
+            when (val journal = AcpTaskTerminalJournal.findByRequestId(appContext, agentId, sessionId, requestId)) {
+                is AcpTerminalLookupResult.TerminalFound -> return journal.entry.turnId
+                is AcpTerminalLookupResult.AdmittedInFlight -> return journal.entry.turnId
+                else -> Unit
+            }
         }
-        return when (val journal = AcpTaskTerminalJournal.findByRequestId(appContext, agentId, sessionId, requestId)) {
-            is AcpTerminalLookupResult.TerminalFound -> journal.entry.turnId
-            is AcpTerminalLookupResult.AdmittedInFlight -> journal.entry.turnId
-            else -> null
-        }
+        return null
     }
 
     private suspend fun executePromptWithResponseProjection(
@@ -1208,11 +1310,17 @@ class AgentRuntimeManager private constructor(
             }
         } catch (error: Throwable) {
             val rawError = error
-            val admittedTurnId = lookupAdmittedTurnId(identity.agentId, requestSessionId, hostRequestId)
+            val admittedRecord = lookupAdmittedTurnRecord(identity.agentId, requestSessionId, hostRequestId)
+            var resolvedSessionId = requestSessionId
+                ?: admittedRecord?.sessionId
+                ?: identity.conversationId?.let { bindingRepository.getBindingByConversationId(it)?.threadId }
+                ?: identity.conversationId?.let { DatabaseHelper.getAgentSessionBindingByConversationId(it)?.threadId }
+            val admittedTurnId = admittedRecord?.turnId
+                ?: lookupAdmittedTurnId(identity.agentId, resolvedSessionId, hostRequestId)
             val resolvedConversationId = identity.conversationId
-                ?: requestSessionId?.let { conversationIdForSession(it) }
-                ?: requestSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
-            val resolvedSessionId = requestSessionId
+                ?: resolvedSessionId?.let { conversationIdForSession(it) }
+                ?: resolvedSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
+                ?: resolvedSessionId?.let { DatabaseHelper.getAgentSessionBindingByThreadId(it)?.conversationId }
             val failureKind = AgentRuntimeErrorSupport.failureKind(rawError)
             val safeDetail = AgentRuntimeErrorSupport.userFacingMessage(rawError)
                 ?: AgentRuntimeErrorSupport.safeDiagnosticMessage(rawError)
@@ -1251,6 +1359,17 @@ class AgentRuntimeManager private constructor(
                         )
                     ).filterValues { it != null }
                 )
+                if (resolvedConversationId != null && resolvedConversationId > 0L && resolvedSessionId != null) {
+                    val settledStopReason = if (rawError is CancellationException) "cancelled" else "error"
+                    conversationOutboxService.onPromptSettled(
+                        conversationId = resolvedConversationId,
+                        sessionId = resolvedSessionId,
+                        turnId = admittedTurnId,
+                        requestId = hostRequestId,
+                        stopReason = settledStopReason,
+                        error = rawError
+                    )
+                }
             }
             throw rawError
         }
@@ -1275,16 +1394,22 @@ class AgentRuntimeManager private constructor(
                 // 受理中或无官方终态信号不发送假终态
                 return rawResult
             }
-            val resolvedSessionId = resultMap.stringValue("sessionId")
+            val admittedRecord = lookupAdmittedTurnRecord(identity.agentId, requestSessionId, hostRequestId)
+            var resolvedSessionId = resultMap.stringValue("sessionId")
                 ?: resultMap.stringValue("threadId")
                 ?: requestSessionId
+                ?: admittedRecord?.sessionId
+                ?: identity.conversationId?.let { bindingRepository.getBindingByConversationId(it)?.threadId }
+                ?: identity.conversationId?.let { DatabaseHelper.getAgentSessionBindingByConversationId(it)?.threadId }
             val resolvedTurnId = resultMap.stringValue("turnId")
                 ?: resultMap.stringValue("promptId")
+                ?: admittedRecord?.turnId
                 ?: lookupAdmittedTurnId(identity.agentId, resolvedSessionId, hostRequestId)
             val resolvedConversationId = (resultMap["conversationId"] as? Number)?.toLong()
                 ?: identity.conversationId
                 ?: resolvedSessionId?.let { conversationIdForSession(it) }
                 ?: resolvedSessionId?.let { bindingRepository.getBindingByThreadId(it)?.conversationId }
+                ?: resolvedSessionId?.let { DatabaseHelper.getAgentSessionBindingByThreadId(it)?.conversationId }
             val profile = if (identity.agentId == REMOTE_CODEX_AGENT_ID) null else runCatching { acpAgentProfileStore.requireProfile(identity.agentId) }.getOrNull()
             val agentName = profile?.name ?: when (identity.agentId) {
                 REMOTE_CODEX_AGENT_ID -> "Codex Remote"
@@ -1310,10 +1435,282 @@ class AgentRuntimeManager private constructor(
                     )
                 ).filterValues { it != null }
             )
+            if (resolvedConversationId != null && resolvedConversationId > 0L && resolvedSessionId != null && resolvedTurnId != null) {
+                val stopReason = resultMap.stringValue("stopReason")
+                    ?: when (status) {
+                        "end_turn" -> "end_turn"
+                        "cancelled" -> "cancelled"
+                        else -> status
+                    }
+                val errorMsg = resultMap.stringValue("error")
+                val throwable = if (errorMsg != null) RuntimeException(errorMsg) else null
+                conversationOutboxService.onPromptSettled(
+                    conversationId = resolvedConversationId,
+                    sessionId = resolvedSessionId,
+                    turnId = resolvedTurnId,
+                    requestId = hostRequestId,
+                    stopReason = stopReason,
+                    error = throwable
+                )
+            }
         }
 
         return rawResult
     }
+
+    internal suspend fun onHistoryCommitted(
+        conversationId: Long,
+        sessionId: String,
+        turnId: String,
+        requestId: String
+    ): Boolean {
+        val committed = conversationOutboxService.onHistoryCommitted(
+            conversationId = conversationId,
+            sessionId = sessionId,
+            turnId = turnId,
+            requestId = requestId
+        )
+        if (committed) {
+            scope.launch {
+                triggerSkillSuggestionOnHistoryCommitted(conversationId, sessionId, turnId, requestId)
+            }
+        }
+        return committed
+    }
+
+    private suspend fun triggerSkillSuggestionOnHistoryCommitted(
+        conversationId: Long,
+        sessionId: String,
+        turnId: String,
+        requestId: String
+    ) {
+        if (requestId.isBlank()) {
+            return
+        }
+        val ownerAgentId = sessionId.let(acpAgentProfileStore::agentIdForSession)
+            ?: conversationId.let(acpAgentProfileStore::agentIdForConversation)
+        if (ownerAgentId.isNullOrBlank()) {
+            return
+        }
+
+        // 查验 AcpTaskTerminalJournal 官方终端记录
+        val journalLookup = AcpTaskTerminalJournal.find(appContext, ownerAgentId, sessionId, turnId)
+        val journalEntry = (journalLookup as? AcpTerminalLookupResult.TerminalFound)?.entry
+        if (journalEntry == null ||
+            journalEntry.terminalStatus != "end_turn" ||
+            journalEntry.terminalError != null ||
+            journalEntry.requestId.isNullOrBlank() ||
+            journalEntry.requestId != requestId
+        ) {
+            return
+        }
+
+        try {
+            // 经官方终态与 receipt 双重核验通过，标记该 Turn 内所有 skills_read 为已完成
+            skillSuggestionService.lifecycleStore.markTurnUsageCompleted(conversationId, sessionId, turnId)
+
+            // 仅小万 Agent 具备技能提炼能力（仅支持规范 XIAOWAN_AGENT_ID）
+            if (ownerAgentId != AcpAgentProfileStore.XIAOWAN_AGENT_ID) {
+                return
+            }
+
+            val messages = historyRepository.listConversationMessages(conversationId, "agent")
+            val turnMessages = messages.filter { msg ->
+                val content = msg["content"] as? Map<*, *>
+                val streamMeta = (msg["streamMeta"] ?: content?.get("streamMeta")) as? Map<*, *>
+                val cardData = (content?.get("cardData") ?: msg["cardData"]) as? Map<*, *>
+                val msgTurnId = (msg["turnId"] ?: streamMeta?.get("turnId") ?: cardData?.get("turnId"))?.toString()?.trim()
+                val msgSessionId = (msg["sessionId"] ?: streamMeta?.get("sessionId") ?: cardData?.get("sessionId"))?.toString()?.trim()
+                val sessionMatches = sessionId.isBlank() || msgSessionId.isNullOrEmpty() || msgSessionId == sessionId
+                val turnMatches = msgTurnId == turnId
+                sessionMatches && turnMatches
+            }
+
+            val toolSummaries = turnMessages.mapNotNull { msg ->
+                val payload = AgentConversationHistorySupport.restoreToolPayloadFromUiMessage(msg) ?: return@mapNotNull null
+                val rawToolName = payload["toolName"]?.toString()?.trim().orEmpty()
+                if (rawToolName.isBlank()) {
+                    return@mapNotNull null
+                }
+                val toolName = rawToolName
+                val statusStr = payload["status"]?.toString()?.trim().orEmpty()
+                val isPermRejected = statusStr == "permission_rejected" ||
+                    payload["permissionRejected"] == true ||
+                    payload["isPermissionRejected"] == true ||
+                    payload["interruptedBy"] == "permission_rejected" ||
+                    payload["interruptionReason"] == "permission_rejected"
+
+                val isExplicitSuccess = statusStr == AgentConversationHistoryRepository.STATUS_SUCCESS &&
+                    payload["success"] != false &&
+                    !isPermRejected
+                val rawArgs = payload["argsJson"] ?: payload["args"] ?: payload["arguments"]
+                val paramKeys = when (rawArgs) {
+                    is Map<*, *> -> rawArgs.keys.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }.toSet()
+                    is String -> {
+                        if (rawArgs.isNotBlank()) {
+                            runCatching {
+                                val parsed = JsonParser.parseString(rawArgs)
+                                if (parsed.isJsonObject) {
+                                    parsed.asJsonObject.keySet().mapNotNull { it?.trim()?.takeIf(String::isNotEmpty) }.toSet()
+                                } else {
+                                    emptySet()
+                                }
+                            }.getOrElse { emptySet() }
+                        } else emptySet()
+                    }
+                    else -> emptySet()
+                }
+
+                TurnToolExecutionSummary(
+                    toolName = toolName,
+                    success = isExplicitSuccess,
+                    parameterKeys = paramKeys,
+                    permissionRejected = isPermRejected
+                )
+            }
+
+            // 准入与待发记录界定的稳定用户消息 ID
+            val stableUserMessageId = turnAdmittedUserMessageIds[requestId]
+                ?: turnAdmittedUserMessageIds["$sessionId:$turnId"]
+                ?: runCatching {
+                    DatabaseHelper.getConversationOutboxDao().getByRequestId(requestId)?.userMessageId
+                }.getOrNull()
+
+            // 准确查找匹配当前 Turn/Request 的用户消息，禁止依据时间或位置盲猜
+            val userMsg = if (!stableUserMessageId.isNullOrBlank()) {
+                messages.firstOrNull { msg ->
+                    val userVal = (msg["user"] as? Number)?.toInt()
+                    val isUser = userVal == 1 || msg["role"] == "user"
+                    if (!isUser) return@firstOrNull false
+                    val msgId = msg["id"]?.toString()?.trim()
+                    val contentId = (msg["content"] as? Map<*, *>)?.get("id")?.toString()?.trim()
+                    val matchesId = msgId == stableUserMessageId || contentId == stableUserMessageId
+                    if (!matchesId) return@firstOrNull false
+                    val content = msg["content"] as? Map<*, *>
+                    val streamMeta = (msg["streamMeta"] ?: content?.get("streamMeta")) as? Map<*, *>
+                    val cardData = (content?.get("cardData") ?: msg["cardData"]) as? Map<*, *>
+                    val msgTurnId = (msg["turnId"] ?: streamMeta?.get("turnId") ?: cardData?.get("turnId"))?.toString()?.trim()
+                    val msgSessionId = (msg["sessionId"] ?: streamMeta?.get("sessionId") ?: cardData?.get("sessionId"))?.toString()?.trim()
+                    val turnConflict = !msgTurnId.isNullOrEmpty() && msgTurnId != turnId
+                    val sessionConflict = !msgSessionId.isNullOrEmpty() && sessionId.isNotBlank() && msgSessionId != sessionId
+                    !turnConflict && !sessionConflict
+                }
+            } else {
+                val candidateUserMsgs = turnMessages.filter { msg ->
+                    val userVal = (msg["user"] as? Number)?.toInt()
+                    userVal == 1 || msg["role"] == "user"
+                }
+                if (candidateUserMsgs.size == 1) candidateUserMsgs.first() else null
+            }
+
+            val userContent = extractVisibleUserPrompt(userMsg)
+            val assistantContent = historyRepository.findExactTurnAssistantMessage(conversationId, sessionId, turnId)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+
+            // 缺少用户可见任务文本或最终有效答复时，安全跳过候选提炼，禁止发送局部编造或空源数据
+            if (userContent.isNullOrBlank() || assistantContent.isNullOrBlank()) {
+                return
+            }
+
+            skillSuggestionService.onSettledAndHistoryCommitted(
+                conversationId = conversationId,
+                sessionId = sessionId,
+                turnId = turnId,
+                agentId = ownerAgentId,
+                stopReason = "end_turn",
+                error = null,
+                toolCalls = toolSummaries,
+                userVisiblePrompt = userContent,
+                userVisibleAnswer = assistantContent
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("AgentRuntimeManager", "技能建议资产处理异常 (隔离于主流程): ${e.javaClass.simpleName}")
+        } finally {
+            if (requestId.isNotBlank()) {
+                turnAdmittedUserMessageIds.remove(requestId)
+            }
+            if (sessionId.isNotBlank() && turnId.isNotBlank()) {
+                turnAdmittedUserMessageIds.remove("$sessionId:$turnId")
+            }
+        }
+    }
+
+    private fun extractVisibleUserPrompt(userMsg: Map<*, *>?): String? {
+        if (userMsg == null) return null
+        val content = userMsg["content"]
+        val candidateText = when (content) {
+            is Map<*, *> -> {
+                val textObj = content["text"]
+                when (textObj) {
+                    is String -> textObj
+                    is CharSequence -> textObj.toString()
+                    else -> null
+                }
+            }
+            is String -> {
+                if (content.startsWith("{") && content.endsWith("}")) {
+                    runCatching {
+                        val parsed = JsonParser.parseString(content)
+                        if (parsed.isJsonObject) {
+                            val textElem = parsed.asJsonObject.get("text")
+                            if (textElem != null && !textElem.isJsonNull && textElem.isJsonPrimitive) {
+                                textElem.asString
+                            } else null
+                        } else null
+                    }.getOrNull()
+                } else {
+                    content
+                }
+            }
+            else -> {
+                val directText = userMsg["text"]
+                if (directText is String) directText else null
+            }
+        }
+        return candidateText?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    internal suspend fun onPromptAdmitted(
+        sessionId: String,
+        turnId: String,
+        requestId: String?,
+        conversationId: Long?,
+        userMessageId: String?,
+        providerProfileId: String? = null,
+        modelId: String? = null,
+        credentialDigest: String? = null
+    ) {
+        if (!userMessageId.isNullOrBlank()) {
+            if (!requestId.isNullOrBlank()) {
+                turnAdmittedUserMessageIds[requestId] = userMessageId
+            }
+            if (sessionId.isNotBlank() && turnId.isNotBlank()) {
+                turnAdmittedUserMessageIds["$sessionId:$turnId"] = userMessageId
+            }
+        }
+        conversationOutboxService.onPromptAdmitted(
+            sessionId = sessionId,
+            turnId = turnId,
+            requestId = requestId,
+            conversationId = conversationId,
+            userMessageId = userMessageId
+        )
+        if (!providerProfileId.isNullOrBlank()) {
+            skillSuggestionService.onPromptAdmitted(
+                sessionId = sessionId,
+                turnId = turnId,
+                requestId = requestId,
+                conversationId = conversationId,
+                providerProfileId = providerProfileId,
+                modelId = modelId,
+                credentialDigest = credentialDigest
+            )
+        }
+    }
+
 
     private suspend fun cancelRemoteAcpSession(
         args: Map<String, Any?>

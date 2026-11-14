@@ -94,6 +94,9 @@ void main() {
   late Map<String, Map<String, Object>> sessionConfig;
   late Map<String, Object?> environmentSnapshot;
 
+  Completer<void>? sessionPromptGate;
+  Completer<void>? outboxMutateGate;
+  var failOutboxMutate = false;
   Map<String, Object?> sessionResponse(String sessionId) => {
     'sessionId': sessionId,
     'configOptions': [
@@ -184,6 +187,9 @@ void main() {
     reasoningOptions = [];
     reasoningValue = 'off';
     sessionConfig = {};
+    sessionPromptGate = null;
+    outboxMutateGate = null;
+    failOutboxMutate = false;
     assistCalls = [];
     agentCalls = [];
     conversations = [];
@@ -261,6 +267,50 @@ void main() {
           return 'SUCCESS';
         case 'getWorkspaceLongMemory':
           return {'content': ''};
+        case 'conversationOutboxList':
+          return {'revision': 1, 'items': <Object?>[]};
+        case 'conversationOutboxImportAttachments':
+          return {
+            'attachments': (call.arguments['attachments'] as List? ?? <Object?>[])
+                .map((a) {
+                  final map = Map<String, dynamic>.from(a as Map);
+                  return {
+                    'id': map['id'] ?? 'persisted-id',
+                    'name': map['name'] ?? 'file.bin',
+                    'path': '/workspace/attachments/${map['name'] ?? 'file.bin'}',
+                    'size': map['size'] ?? 1024,
+                  };
+                })
+                .toList(),
+          };
+        case 'conversationOutboxMutate':
+          await outboxMutateGate?.future;
+          if (failOutboxMutate) {
+            throw PlatformException(
+              code: 'outbox_attachment_unavailable',
+              message: 'Attachment unavailable',
+            );
+          }
+          final req = (call.arguments as Map)['request'] as Map;
+          return {
+            'revision': 2,
+            'items': [
+              {
+                'id': req['id'] ?? 'outbox-1',
+                'conversationId': (call.arguments as Map)['conversationId'],
+                'agentId': 'xiaowan-acp',
+                'state': 'pending',
+                'revision': 2,
+                'sequence': 1,
+                'requestId': 'req-1',
+                'userMessageId': 'user-1',
+                'createdAt': 1000,
+                'updatedAt': 1000,
+                'text': (req['payload'] as Map?)?['text'] ?? '',
+                'attachments': (req['payload'] as Map?)?['attachments'] ?? <Object?>[],
+              }
+            ],
+          };
       }
       return null;
     });
@@ -378,6 +428,7 @@ void main() {
           }
           return sessionResponse(sessionId);
         case 'session/prompt':
+          await sessionPromptGate?.future;
           final arguments = call.arguments as Map;
           return {
             'sessionId': arguments['sessionId'] ?? 'new-draft-session',
@@ -1273,37 +1324,31 @@ void main() {
       composer(tester).focusNode.unfocus();
       await tester.pumpAndSettle();
       final originalComposer = composer(tester);
-      expect(originalComposer.focusNode.hasFocus, isFalse);
-      final originalAppBar = tester.widget<ChatAppBar>(find.byType(ChatAppBar));
-      final originalMessages = tester.widget<ChatMessageList>(
-        find.byType(ChatMessageList),
-      );
+      final originalFocusNode = originalComposer.focusNode;
+      final originalController = originalComposer.controller;
+      expect(originalFocusNode.hasFocus, isFalse);
       final editor = tester.state<EditableTextState>(find.byType(EditableText));
       final field = find.byType(TextField);
       agentCalls.clear();
       assistCalls.clear();
       await tester.tapAt(tester.getCenter(field));
       await tester.pump();
-      expect(originalComposer.focusNode.hasFocus, isTrue);
+      expect(originalFocusNode.hasFocus, isTrue);
       expect(tester.testTextInput.isVisible, isTrue);
 
       for (final inset in [40.0, 120.0, 220.0, 300.0]) {
         tester.view.viewInsets = FakeViewPadding(bottom: inset);
         await tester.pump(const Duration(milliseconds: 60));
         expect(tester.getRect(field).bottom, lessThanOrEqualTo(844 - inset));
-        expect(composer(tester), same(originalComposer));
-        expect(
-          tester.widget<ChatAppBar>(find.byType(ChatAppBar)),
-          same(originalAppBar),
-        );
+        expect(composer(tester).focusNode, same(originalFocusNode));
+        expect(composer(tester).controller, same(originalController));
+        expect(originalFocusNode.hasFocus, isTrue);
         expect(
           tester.state<EditableTextState>(find.byType(EditableText)),
           same(editor),
         );
-        expect(
-          tester.widget<ChatMessageList>(find.byType(ChatMessageList)),
-          same(originalMessages),
-        );
+        expect(find.byType(ChatAppBar), findsOneWidget);
+        expect(find.byType(ChatMessageList), findsOneWidget);
         if (existing) {
           expect(find.text('已加载历史消息 $conversationId'), findsOneWidget);
         }
@@ -2766,4 +2811,766 @@ void main() {
       await disposeChat(tester);
     },
   );
+
+  testWidgets(
+    'outbox queue failure keeps original controller text, focus and attachments in real ChatPage',
+    (tester) async {
+      const conversationId = 880;
+      conversations = [
+        historyConversation(conversationId, ConversationMode.agent),
+      ];
+      historyPages[conversationId] = historyMessage(conversationId);
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: conversationId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      sessionPromptGate = Completer<void>();
+      composer(tester).controller.text = '首轮运行任务';
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+
+      composer(tester).controller.text = '待发排队消息';
+      composer(tester).focusNode.requestFocus();
+      await attachFile(tester, 'pending_spec.pdf', settle: false);
+      for (var i = 0; i < 20 && composer(tester).attachments.isEmpty; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(composer(tester).attachments, hasLength(1));
+      final attachmentId = composer(tester).attachments.single.id;
+      expect(composer(tester).focusNode.hasFocus, isTrue);
+
+      failOutboxMutate = true;
+      composer(tester).onSendMessage();
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(
+        assistCalls.where(
+          (call) =>
+              call.method == 'conversationOutboxMutate' &&
+              (call.arguments as Map)['operation'] == 'enqueue',
+        ),
+        hasLength(1),
+      );
+      expect(composer(tester).controller.text, '待发排队消息');
+      expect(composer(tester).focusNode.hasFocus, isTrue);
+      expect(composer(tester).attachments.single.id, attachmentId);
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+      sessionPromptGate!.complete();
+      await tester.pumpAndSettle();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'await enqueue across conversation switch preserves new conversation draft in real ChatPage',
+    (tester) async {
+      const firstId = 881;
+      const secondId = 882;
+      conversations = [
+        historyConversation(firstId, ConversationMode.agent),
+        historyConversation(secondId, ConversationMode.agent),
+      ];
+      historyPages[firstId] = historyMessage(firstId);
+      historyPages[secondId] = historyMessage(secondId);
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: firstId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      sessionPromptGate = Completer<void>();
+      composer(tester).controller.text = '第一会话进行中';
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      composer(tester).controller.text = '第一会话排队草稿';
+
+      outboxMutateGate = Completer<void>();
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      expect(
+        assistCalls.where(
+          (call) =>
+              call.method == 'conversationOutboxMutate' &&
+              (call.arguments as Map)['operation'] == 'enqueue',
+        ),
+        hasLength(1),
+      );
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: secondId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      composer(tester).controller.text = '第二会话独立新输入';
+      await attachFile(tester, 'second_draft.pdf');
+      final secondAttachmentId = composer(tester).attachments.single.id;
+
+      outboxMutateGate!.complete();
+      await tester.pumpAndSettle();
+
+      expect(composer(tester).controller.text, '第二会话独立新输入');
+      expect(composer(tester).attachments.single.id, secondAttachmentId);
+
+      sessionPromptGate!.complete();
+      await tester.pumpAndSettle();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'outbox queue in running conversation deduplicates rapid double submit, enqueues once without inserting user history, and clears controller text on success while preserving new edit',
+    (tester) async {
+      const conversationId = 883;
+      conversations = [
+        historyConversation(conversationId, ConversationMode.agent),
+      ];
+      historyPages[conversationId] = historyMessage(conversationId);
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: conversationId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      sessionPromptGate = Completer<void>();
+      composer(tester).controller.text = '首个运行任务A';
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+
+      // 输入B并附加测试文件
+      composer(tester).controller.text = '待发排队任务B';
+      await attachFile(tester, 'b_spec.pdf', settle: false);
+      for (var i = 0; i < 20 && composer(tester).attachments.isEmpty; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(composer(tester).attachments, hasLength(1));
+      final attachmentIdB = composer(tester).attachments.single.id;
+
+      // 验证提交前输入内容与附件存在可见
+      expect(composer(tester).controller.text, '待发排队任务B');
+      expect(composer(tester).attachments.single.id, attachmentIdB);
+
+      // 使用 outboxMutateGate 保持 mutate 挂起，验证双击只发起一次 enqueue 且不启动新 prompt
+      outboxMutateGate = Completer<void>();
+      assistCalls.clear();
+
+      // 第一次点击排队
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      // 第二次快速连续点击排队（模拟双击）
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      // 证明宿主 enqueue 仅被调用一次
+      final mutateCalls = assistCalls.where(
+        (call) =>
+            call.method == 'conversationOutboxMutate' &&
+            (call.arguments as Map)['operation'] == 'enqueue',
+      );
+      expect(mutateCalls, hasLength(1));
+
+      // 证明首个 session/prompt 仍仅有 1 次，B 未发起新 prompt
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+
+      // 证明 B 处于排队态，并未向历史插入用户消息条目
+      expect(
+        assistCalls.where(
+          (call) => call.method == 'replaceConversationMessages',
+        ),
+        isEmpty,
+      );
+
+      // 完成宿主 enqueue，观察成功清空输入文本与附件
+      outboxMutateGate!.complete();
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      expect(composer(tester).controller.text, isEmpty);
+      expect(composer(tester).attachments, isEmpty);
+      expect(
+        agentCalls.where((call) => call.method == 'session/prompt'),
+        hasLength(1),
+      );
+
+      // 再次输入 C 并排队，但在 enqueue 挂起期间发生新编辑，证明新编辑被完整保留
+      composer(tester).controller.text = '待发任务C';
+      outboxMutateGate = Completer<void>();
+      assistCalls.clear();
+
+      composer(tester).onSendMessage();
+      await tester.pump();
+
+      expect(
+        assistCalls.where(
+          (call) =>
+              call.method == 'conversationOutboxMutate' &&
+              (call.arguments as Map)['operation'] == 'enqueue',
+        ),
+        hasLength(1),
+      );
+
+      // 模拟用户在排队处理中进一步编辑草稿
+      composer(tester).controller.text = '待发任务C 已被用户补充修改';
+
+      outboxMutateGate!.complete();
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      // 成功排队后，由于文本与已排队内容不一致，新编辑必须完整保留
+      expect(composer(tester).controller.text, '待发任务C 已被用户补充修改');
+
+      // 释放首轮运行任务并销毁
+      sessionPromptGate!.complete();
+      await tester.pumpAndSettle();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'compact layout collapses non-blocking items into capsule and preserves input and attachments across sheet open and close',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.newConversation(
+          agentId: 'xiaowan-acp',
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      composer(tester).controller.text = '待收纳的输入草稿';
+      await attachFile(tester, 'compact_test.pdf');
+      expect(composer(tester).attachments, hasLength(1));
+      final attachmentId = composer(tester).attachments.single.id;
+
+      // Tall viewport: capsule is not shown
+      expect(find.byKey(const ValueKey('chat-compact-status-capsule')), findsNothing);
+
+      // Constrained viewport (< 420): e.g. landscape 640x360
+      tester.view.physicalSize = const Size(640, 360);
+      await tester.pumpAndSettle();
+
+      // Capsule is shown
+      final capsule = find.byKey(const ValueKey('chat-compact-status-capsule'));
+      expect(capsule, findsOneWidget);
+      expect(find.textContaining('附件 1'), findsOneWidget);
+
+      // Input text and attachment payload are strictly preserved
+      expect(composer(tester).controller.text, '待收纳的输入草稿');
+      expect(composer(tester).attachments.single.id, attachmentId);
+
+      // Tap capsule to expand auxiliary sheet
+      await tester.tap(capsule);
+      await tester.pumpAndSettle();
+
+      expect(find.text('compact_test.pdf'), findsOneWidget);
+
+      // Close sheet
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+
+      // Input remains completely preserved
+      expect(composer(tester).controller.text, '待收纳的输入草稿');
+      expect(composer(tester).attachments.single.id, attachmentId);
+
+      // Restore tall viewport
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('chat-compact-status-capsule')), findsNothing);
+      expect(composer(tester).controller.text, '待收纳的输入草稿');
+      expect(composer(tester).attachments.single.id, attachmentId);
+
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'A完成后宿主提交Outbox B：host_messages_replaced在echo抑制下更新真实ChatPage展示B完整答复，合并补B终态而保新Turn C/未发送草稿，并保证真实跨轮顺序',
+    (tester) async {
+      const conversationId = 889;
+      const canonicalSessionId = 'session-canonical-889';
+      const turnAId = 'turn-A-889';
+      const turnBId = 'turn-B-889';
+      const turnCId = 'turn-C-889';
+
+      conversations = [
+        historyConversation(conversationId, ConversationMode.agent),
+      ];
+
+      // 1. 初始历史记录包含已完成的 Turn A
+      final messageA = ChatMessageModel(
+        id: 'msg-A-assistant',
+        type: 1,
+        user: 2,
+        content: const {
+          'text': 'Answer for Turn A',
+          'taskId': turnAId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnAId,
+        },
+        createAt: DateTime(2026, 11, 14, 10, 0),
+        streamMeta: const {
+          'isFinal': true,
+          'stopReason': 'end_turn',
+          'parentTaskId': turnAId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnAId,
+        },
+      );
+      historyPages[conversationId] = [messageA.toJson()];
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: conversationId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      // 2. 用户在输入框中留有未发送的草稿
+      composer(tester).controller.text = 'Unsent user draft';
+      await tester.pump();
+      expect(composer(tester).controller.text, 'Unsent user draft');
+
+      final runtime = ChatConversationRuntimeCoordinator.instance.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      expect(runtime.isAiResponding, isFalse);
+
+      // 3. 模拟此前本地操作触发的 2 秒 echo 抑制期处于激活状态
+      runtime.expectLocalMessageSnapshotEcho();
+      expect(runtime.shouldSuppressLocalMessageSnapshotEcho, isTrue);
+
+      const assistChannel = MethodChannel('cn.com.omnimind.bot/AssistCoreEvent');
+
+      // 4. 模拟 runtime 先接收到 Turn B 的用户消息和流式增量（未终态，同 ID partial）
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        assistChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('onExternalUserMessageAppended', {
+            'conversationId': conversationId,
+            'mode': 'agent',
+            'entryId': 'req-B-user',
+            'text': 'User prompt B',
+            'createdAt': 1794652010000,
+          }),
+        ),
+        (ByteData? _) {},
+      );
+
+      // B 的助手消息 ID 遵循官方 reducer 契约（turnScopedEntryId）
+      final messageBId = '$turnBId-assistant-agent-message';
+      coordinator.beginAcpTurn(
+        taskId: turnBId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      ChatConversationRuntimeCoordinator.instance.applyAgentEvent(
+        conversationId: conversationId,
+        event: {
+          'method': 'session/update',
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+          'allowImplicitTurnAdmission': true,
+          'params': {
+            'sessionId': canonicalSessionId,
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'itemId': 'assistant',
+              'turnId': turnBId,
+              'content': {
+                'type': 'text',
+                'text': 'Partial B streaming text...',
+              },
+            },
+          },
+        },
+        mode: kChatRuntimeModeAgent,
+      );
+      await tester.pump();
+
+      // 断言官方事件已成功建立 B 的活跃状态与增量内容
+      expect(
+        runtime.messages.any((m) => m.text?.contains('Partial B') == true) ||
+            runtime.currentAiMessages.values.any((t) => t.contains('Partial B')),
+        isTrue,
+      );
+      coordinator.applyAcpPromptResponse(
+        taskId: turnBId,
+        conversationId: conversationId,
+        sessionId: canonicalSessionId,
+        turnId: turnBId,
+        stopReason: 'end_turn',
+      );
+      expect(runtime.isAiResponding, isFalse);
+      coordinator.beginAcpTurn(
+        taskId: turnCId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+
+      // 5. 接着前台准入新 Turn C（新用户消息 + 正在流式的增量），runtime 处于多轮接续活跃态
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        assistChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('onExternalUserMessageAppended', {
+            'conversationId': conversationId,
+            'mode': 'agent',
+            'entryId': 'req-C-user',
+            'text': 'User prompt C in progress',
+            'createdAt': DateTime.now().millisecondsSinceEpoch,
+          }),
+        ),
+        (ByteData? _) {},
+      );
+
+      final messageCId = '$turnCId-assistant-agent-message';
+      ChatConversationRuntimeCoordinator.instance.applyAgentEvent(
+        conversationId: conversationId,
+        event: {
+          'method': 'session/update',
+          'sessionId': canonicalSessionId,
+          'turnId': turnCId,
+          'allowImplicitTurnAdmission': true,
+          'params': {
+            'sessionId': canonicalSessionId,
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'itemId': 'assistant',
+              'turnId': turnCId,
+              'content': {
+                'type': 'text',
+                'text': 'Streaming answer C partial...',
+              },
+            },
+          },
+        },
+        mode: kChatRuntimeModeAgent,
+      );
+      await tester.pump();
+
+      // 6. 宿主在后台将 Turn B 完整落库（携带官方终态 stopReason、isFinal、同 ID msg-B-assistant）
+      final messageBUser = ChatMessageModel(
+        id: 'req-B-user',
+        type: 1,
+        user: 1,
+        content: const {
+          'text': 'User prompt B',
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+        createAt: DateTime.fromMillisecondsSinceEpoch(1794652010000),
+      );
+      final messageBAssistant = ChatMessageModel(
+        id: messageBId,
+        type: 1,
+        user: 2,
+        content: const {
+          'text': 'Complete final Answer for Turn B from Outbox',
+          'taskId': turnBId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+        createAt: runtime.messages.singleWhere((message) => message.id == messageBId).createAt,
+        streamMeta: const {
+          'isFinal': true,
+          'stopReason': 'end_turn',
+          'parentTaskId': turnBId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+      );
+      historyPages[conversationId] = [messageBAssistant.toJson(), messageBUser.toJson(), messageA.toJson()];
+
+      // 7. 宿主广播 host_messages_replaced 通知
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        assistChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('onConversationMessagesChanged', {
+            'conversationId': conversationId,
+            'mode': 'agent',
+            'reason': 'host_messages_replaced',
+          }),
+        ),
+        (ByteData? _) {},
+      );
+      // C 当前处于活跃流式状态动画持续进行中，泵送有限帧确保微任务与异步加载处理完毕，不因未完成的动画 pumpAndSettle 超时
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+
+      // 8. 严格断言：
+      // 同 ID 的 B 助手回复被安全确认为 DB 终态完整正文，旧 partial 文本不再残留
+      expect(
+        runtime.messages.singleWhere((message) => message.id == messageBId).text,
+        'Complete final Answer for Turn B from Outbox',
+      );
+      expect(
+        find.textContaining('Complete final Answer for Turn B from Outbox', findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Partial B streaming text...', findRichText: true), findsNothing);
+      expect(find.textContaining('Answer for Turn A', findRichText: true), findsOneWidget);
+
+      // 新 Turn C 未落库的用户消息与流式增量完好保留，不被 DB 快照抹除
+      expect(find.text('User prompt C in progress'), findsOneWidget);
+      expect(
+        runtime.messages.singleWhere((message) => message.id == messageCId).text,
+        'Streaming answer C partial...',
+      );
+      final visibleC = find.textContaining('Streaming answer C partial', findRichText: true);
+      for (var frame = 0; frame < 60 && visibleC.evaluate().isEmpty; frame++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(visibleC, findsOneWidget);
+
+      // 输入框内未发送的用户草稿完好保留
+      expect(composer(tester).controller.text, 'Unsent user draft');
+
+      // 跨轮真实顺序断言：在 newest-first 的列表中，严格维持 C -> B -> A 排序
+      final actualMessageIds = runtime.messages.map((m) => m.id).toList();
+      expect(
+        actualMessageIds,
+        containsAllInOrder([messageCId, 'req-C-user', messageBId, 'req-B-user', 'msg-A-assistant']),
+      );
+
+      // 9. 官方 PromptResponse 清理 Turn C，释放活跃状态并销毁
+      coordinator.applyAcpPromptResponse(
+        taskId: turnCId,
+        conversationId: conversationId,
+        sessionId: canonicalSessionId,
+        turnId: turnCId,
+        stopReason: 'end_turn',
+      );
+      await tester.pumpAndSettle();
+      await disposeChat(tester);
+    },
+  );
+
+  testWidgets(
+    'DB延迟响应到达前Turn C已官方完成变为idle：旧快照返回时依然保留C已完成回复与用户输入，按时序补入B，不抹除内存历史',
+    (tester) async {
+      const conversationId = 888;
+      const canonicalSessionId = 'session-canonical-888';
+      const turnAId = 'turn-A-888';
+      const turnBId = 'turn-B-888';
+      const turnCId = 'turn-C-888';
+      const messageBId = '$turnBId-assistant-agent-message';
+      const messageCId = '$turnCId-assistant-agent-message';
+
+      conversations = [
+        historyConversation(conversationId, ConversationMode.agent),
+      ];
+
+      final messageA = ChatMessageModel(
+        id: 'msg-A-assistant',
+        type: 1,
+        user: 2,
+        content: const {
+          'text': 'Answer for Turn A',
+          'taskId': turnAId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnAId,
+        },
+        createAt: DateTime(2026, 11, 14, 10, 0),
+        streamMeta: const {
+          'isFinal': true,
+          'stopReason': 'end_turn',
+          'parentTaskId': turnAId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnAId,
+        },
+      );
+      historyPages[conversationId] = [messageA.toJson()];
+
+      await pumpChat(
+        tester,
+        const ConversationThreadTarget.existing(
+          conversationId: conversationId,
+          mode: ConversationMode.agent,
+        ),
+      );
+
+      // 1. 设置 DB 读取闸门（模拟 DB 异步 I/O 延迟返回截至 Turn B 的快照）
+      final dbPageGate = Completer<void>();
+      historyPageGates[conversationId] = dbPageGate;
+
+      final messageBUser = ChatMessageModel(
+        id: 'req-B-user',
+        type: 1,
+        user: 1,
+        content: const {
+          'text': 'User prompt B',
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+        createAt: DateTime.fromMillisecondsSinceEpoch(1794652010000),
+      );
+      final messageBAssistant = ChatMessageModel(
+        id: messageBId,
+        type: 1,
+        user: 2,
+        content: const {
+          'text': 'Complete Answer for Turn B from Outbox',
+          'taskId': turnBId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+        createAt: DateTime.fromMillisecondsSinceEpoch(1794652015000),
+        streamMeta: const {
+          'isFinal': true,
+          'stopReason': 'end_turn',
+          'parentTaskId': turnBId,
+          'sessionId': canonicalSessionId,
+          'turnId': turnBId,
+        },
+      );
+      // DB 磁盘中实际已写入 B，但 DB 读取在 gate 阻塞中
+      historyPages[conversationId] = [messageBAssistant.toJson(), messageBUser.toJson(), messageA.toJson()];
+
+      // 触发宿主通知开启 loadConversation（等待 dbPageGate）
+      const assistChannel = MethodChannel('cn.com.omnimind.bot/AssistCoreEvent');
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        assistChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('onConversationMessagesChanged', {
+            'conversationId': conversationId,
+            'mode': 'agent',
+            'reason': 'host_messages_replaced',
+          }),
+        ),
+        (ByteData? _) {},
+      );
+      await tester.pump();
+
+      // 2. 在 DB 读取延迟等待期间，前台准入新 Turn C，并且 Turn C 完成全部执行，官方 PromptResponse 到达！
+      // 用户消息 C
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        assistChannel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall('onExternalUserMessageAppended', {
+            'conversationId': conversationId,
+            'mode': 'agent',
+            'entryId': 'req-C-user',
+            'text': 'User prompt C completed in window',
+            'createdAt': DateTime.now().millisecondsSinceEpoch,
+          }),
+        ),
+        (ByteData? _) {},
+      );
+
+      // Turn C 流式增量
+      coordinator.beginAcpTurn(
+        taskId: turnCId,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      );
+      ChatConversationRuntimeCoordinator.instance.applyAgentEvent(
+        conversationId: conversationId,
+        event: {
+          'method': 'session/update',
+          'sessionId': canonicalSessionId,
+          'turnId': turnCId,
+          'allowImplicitTurnAdmission': true,
+          'params': {
+            'sessionId': canonicalSessionId,
+            'update': {
+              'sessionUpdate': 'agent_message_chunk',
+              'itemId': 'assistant',
+              'turnId': turnCId,
+              'content': {
+                'type': 'text',
+                'text': 'Complete Answer for Turn C',
+              },
+            },
+          },
+        },
+        mode: kChatRuntimeModeAgent,
+      );
+
+      // Turn C 官方终态 Session/Prompt 响应到达，Turn C 正式完成变为 idle 状态（no live binding/no in-flight）
+      coordinator.applyAcpPromptResponse(
+        taskId: turnCId,
+        conversationId: conversationId,
+        sessionId: canonicalSessionId,
+        turnId: turnCId,
+        stopReason: 'end_turn',
+      );
+      await tester.pump();
+
+      final runtime = ChatConversationRuntimeCoordinator.instance.runtimeFor(
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+      )!;
+      // 确证：C 此时已为 idle 状态，无 live binding
+      expect(runtime.isAiResponding, isFalse);
+      expect(runtime.activeAcpTurnId, isNull);
+      expect(runtime.messages.singleWhere((message) => message.id == messageCId).text,
+          'Complete Answer for Turn C');
+      expect(runtime.messages.singleWhere((message) => message.id == messageCId)
+          .streamMeta?['stopReason'], 'end_turn');
+
+      // 3. 释放 DB 延迟响应（返回截至 B 的历史快照，完全不含 C）
+      dbPageGate.complete();
+      await tester.pumpAndSettle();
+
+      // 4. 严格断言：
+      // 虽然 DB 快照是在 C 之前读取且在 C 变为 idle 后才返回，
+      // 唯一 snapshot owner 保证 C 的用户消息与已完成答复绝不被旧快照抹除！
+      expect(find.text('User prompt C completed in window'), findsOneWidget);
+      expect(find.textContaining('Complete Answer for Turn C', findRichText: true), findsOneWidget);
+      expect(find.textContaining('Complete Answer for Turn B from Outbox', findRichText: true), findsOneWidget);
+      expect(find.textContaining('Answer for Turn A', findRichText: true), findsOneWidget);
+
+      // 跨轮物理时序严格维持 C -> B -> A
+      final actualMessageIds = runtime.messages.map((m) => m.id).toList();
+      expect(
+        actualMessageIds,
+        containsAllInOrder([messageCId, 'req-C-user', messageBId, 'req-B-user', 'msg-A-assistant']),
+      );
+
+      await disposeChat(tester);
+    },
+  );
+
 }

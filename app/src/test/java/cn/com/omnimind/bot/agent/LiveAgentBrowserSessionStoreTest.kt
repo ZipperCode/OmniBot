@@ -50,6 +50,22 @@ class LiveAgentBrowserSessionStoreTest {
     }
 
     @Test
+    fun `workspace lookup never falls back to another active conversation`() {
+        val store = LiveAgentBrowserSessionStore<FakeSession>()
+        val first = store.acquire("conversation_1") { FakeSession("conversation_1") }
+        val second = store.acquire("conversation_2") { FakeSession("conversation_2") }
+
+        store.get("conversation_1")!!.pageTitle = "First page edited"
+
+        assertEquals("First page edited", first.pageTitle)
+        assertEquals("Initial", second.pageTitle)
+        assertEquals(null, store.get("conversation_missing"))
+        store.clear()
+        assertEquals(null, store.get("conversation_1"))
+        assertEquals(null, store.get("conversation_2"))
+    }
+
+    @Test
     fun `reusing same live session preserves existing tab state`() {
         val store = LiveAgentBrowserSessionStore<FakeSession>()
 

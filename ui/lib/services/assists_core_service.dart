@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:ui/services/agent_tool_call_parser.dart';
 import 'package:ui/services/agent_message_kinds.dart';
+import 'package:ui/models/conversation_outbox.dart';
 
 // 卡片推送
 typedef CardPushCallback<T> = void Function(Map<String, dynamic> cardData);
@@ -215,6 +216,12 @@ class AssistsMessageService {
   static final StreamController<Map<String, dynamic>>
   _browserSessionSnapshotChangedController =
       StreamController<Map<String, dynamic>>.broadcast();
+  static final StreamController<Map<String, dynamic>>
+  _conversationOutboxChangedController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  static final StreamController<Map<String, dynamic>>
+  _skillAssetsChangedController =
+      StreamController<Map<String, dynamic>>.broadcast();
   // IM/WeChat/Telegram 等外部入口直推的用户消息：
   // 原生侧在写库后立刻 invokeMethod 发过来，runtime 直接插入气泡，
   // 不依赖 messagesChanged + DB reload 的事件链。
@@ -227,6 +234,10 @@ class AssistsMessageService {
       _conversationMessagesChangedController.stream;
   static Stream<Map<String, dynamic>> get browserSessionSnapshotChangedStream =>
       _browserSessionSnapshotChangedController.stream;
+  static Stream<Map<String, dynamic>> get conversationOutboxChangedStream =>
+      _conversationOutboxChangedController.stream;
+  static Stream<Map<String, dynamic>> get skillAssetsChangedStream =>
+      _skillAssetsChangedController.stream;
 
   static void initialize() {
     assistCore.setMethodCallHandler(_handleMethod);
@@ -270,6 +281,20 @@ class AssistsMessageService {
           break;
         case 'onBrowserSessionSnapshotUpdated':
           _browserSessionSnapshotChangedController.add(
+            Map<String, dynamic>.from(
+              (call.arguments as Map?) ?? const <String, dynamic>{},
+            ),
+          );
+          break;
+        case 'conversation_outbox_changed':
+          _conversationOutboxChangedController.add(
+            Map<String, dynamic>.from(
+              (call.arguments as Map?) ?? const <String, dynamic>{},
+            ),
+          );
+          break;
+        case 'skill_assets_changed':
+          _skillAssetsChangedController.add(
             Map<String, dynamic>.from(
               (call.arguments as Map?) ?? const <String, dynamic>{},
             ),
@@ -845,6 +870,244 @@ class AssistsMessageService {
     } on PlatformException catch (e) {
       print('重新打开ChatBot失败: ${e.message}');
       return false;
+    }
+  }
+
+  static Future<Map<String, dynamic>> _invokeSkillAsset(
+    String method,
+    Map<String, dynamic> arguments,
+  ) async {
+    final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
+      method,
+      arguments,
+    );
+    if (result == null) {
+      throw PlatformException(code: 'skill_asset_invalid', message: '技能资产返回为空');
+    }
+    return Map<String, dynamic>.from(result);
+  }
+
+  static Future<Map<String, dynamic>> listAgentSkillSuggestions({
+    int? conversationId,
+    String? turnId,
+    String? skillId,
+    int offset = 0,
+    int limit = 20,
+  }) => _invokeSkillAsset('agentSkillSuggestionList', {
+    if (conversationId != null) 'conversationId': conversationId,
+    if (turnId != null) 'turnId': turnId,
+    if (skillId != null) 'skillId': skillId,
+    'offset': offset,
+    'limit': limit,
+  });
+
+  static Future<Map<String, dynamic>> saveAgentSkillSuggestion({
+    required String candidateId,
+    required int expectedRevision,
+    required String name,
+    required String description,
+    required String bodyMarkdown,
+  }) => _invokeSkillAsset('agentSkillSuggestionSave', {
+    'candidateId': candidateId,
+    'expectedRevision': expectedRevision,
+    'name': name,
+    'description': description,
+    'bodyMarkdown': bodyMarkdown,
+  });
+
+  static Future<Map<String, dynamic>> approveAgentSkillSuggestion({
+    required String candidateId,
+    required int expectedRevision,
+    required String targetSkillId,
+    String? expectedCurrentContentHash,
+  }) => _invokeSkillAsset('agentSkillSuggestionApprove', {
+    'candidateId': candidateId,
+    'expectedRevision': expectedRevision,
+    'targetSkillId': targetSkillId,
+    'expectedCurrentContentHash': expectedCurrentContentHash,
+  });
+
+  static Future<Map<String, dynamic>> rejectAgentSkillSuggestion({
+    required String candidateId,
+    required int expectedRevision,
+  }) => _invokeSkillAsset('agentSkillSuggestionReject', {
+    'candidateId': candidateId,
+    'expectedRevision': expectedRevision,
+  });
+
+  static Future<Map<String, dynamic>> regenerateAgentSkillSuggestion({
+    required String candidateId,
+    required int expectedRevision,
+  }) => _invokeSkillAsset('agentSkillSuggestionRegenerate', {
+    'candidateId': candidateId,
+    'expectedRevision': expectedRevision,
+  });
+
+  static Future<Map<String, dynamic>> setAgentSkillSuggestionsEnabled({
+    required bool enabled,
+  }) => _invokeSkillAsset('agentSkillSuggestionsSetEnabled', {'enabled': enabled});
+
+  static Future<Map<String, dynamic>> submitAgentSkillFeedback({
+    required String skillId,
+    required String revisionId,
+    required int conversationId,
+    required String sessionId,
+    required String turnId,
+    required int expectedRevision,
+    required String action,
+  }) => _invokeSkillAsset('agentSkillFeedback', {
+    'skillId': skillId,
+    'revisionId': revisionId,
+    'conversationId': conversationId,
+    'sessionId': sessionId,
+    'turnId': turnId,
+    'expectedRevision': expectedRevision,
+    'action': action,
+  });
+
+  static Future<Map<String, dynamic>> restoreAgentSkillRevision({
+    required String skillId,
+    required String revisionId,
+    required int expectedRevision,
+    required String expectedCurrentContentHash,
+  }) => _invokeSkillAsset('agentSkillRestoreRevision', {
+    'skillId': skillId,
+    'revisionId': revisionId,
+    'expectedRevision': expectedRevision,
+    'expectedCurrentContentHash': expectedCurrentContentHash,
+  });
+
+  static Future<Map<String, dynamic>> _invokeWorkspaceChange(
+    String method,
+    Map<String, dynamic> arguments,
+  ) async {
+    final result = await assistCore.invokeMethod<Map<dynamic, dynamic>>(
+      method,
+      arguments,
+    );
+    if (result == null) {
+      throw PlatformException(
+        code: 'workspace_change_unavailable',
+        message: '变更记录返回为空',
+      );
+    }
+    return Map<String, dynamic>.from(result);
+  }
+
+  static Future<Map<String, dynamic>> workspaceChangesList({
+    required int conversationId,
+    String? turnId,
+  }) => _invokeWorkspaceChange('workspaceChangesList', {
+    'conversationId': conversationId,
+    if (turnId != null) 'turnId': turnId,
+  });
+
+  static Future<Map<String, dynamic>> workspaceChangesListByWorkspace({
+    required String workspaceId,
+    int offset = 0,
+    int limit = 20,
+  }) => _invokeWorkspaceChange('workspaceChangesListByWorkspace', {
+    'workspaceId': workspaceId,
+    'offset': offset,
+    'limit': limit,
+  });
+
+  static Future<Map<String, dynamic>> workspaceChangePreview({
+    required String changeId,
+    int? conversationId,
+    String? workspaceId,
+  }) => _invokeWorkspaceChange('workspaceChangePreview', {
+    'changeId': changeId,
+    if (conversationId != null) 'conversationId': conversationId,
+    if (workspaceId != null) 'workspaceId': workspaceId,
+  });
+
+  static Future<Map<String, dynamic>> workspaceChangeRestore({
+    required String changeId,
+    required int expectedRevision,
+    required Map<String, String?> expectedAfterHashes,
+    int? conversationId,
+    String? workspaceId,
+  }) => _invokeWorkspaceChange('workspaceChangeRestore', {
+    'changeId': changeId,
+    'expectedRevision': expectedRevision,
+    'expectedAfterHashes': expectedAfterHashes,
+    if (conversationId != null) 'conversationId': conversationId,
+    if (workspaceId != null) 'workspaceId': workspaceId,
+  });
+
+  static Future<Map<String, dynamic>> workspaceChangeDiscard({
+    required String changeId,
+    required int expectedRevision,
+    int? conversationId,
+    String? workspaceId,
+  }) => _invokeWorkspaceChange('workspaceChangeDiscard', {
+    'changeId': changeId,
+    'expectedRevision': expectedRevision,
+    if (conversationId != null) 'conversationId': conversationId,
+    if (workspaceId != null) 'workspaceId': workspaceId,
+  });
+
+  /// 把所选附件导入既有持久附件目录，待发箱只保存引用。
+  static Future<List<Map<String, dynamic>>> conversationOutboxImportAttachments({
+    required int conversationId,
+    required List<Map<String, dynamic>> attachments,
+  }) async {
+    if (attachments.isEmpty) return const [];
+    try {
+      final result = await assistCore.invokeMethod<dynamic>(
+        'conversationOutboxImportAttachments',
+        {'conversationId': conversationId, 'attachments': attachments},
+      );
+      if (result is! Map || result['attachments'] is! List) {
+        throw const OutboxMutationException(
+          code: 'outbox_attachment_unavailable',
+          message: '附件导入失败，请重新选择',
+        );
+      }
+      return (result['attachments'] as List)
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    } on PlatformException catch (error) {
+      throw OutboxMutationException.fromPlatformException(error);
+    }
+  }
+
+  /// 获取指定对话的待发箱快照
+  static Future<OutboxSnapshot> conversationOutboxList(
+    int conversationId,
+  ) async {
+    final result = await assistCore.invokeMethod<dynamic>(
+      'conversationOutboxList',
+      {'conversationId': conversationId},
+    );
+    if (result is Map) {
+      return OutboxSnapshot.fromJson(Map<String, dynamic>.from(result));
+    }
+    return OutboxSnapshot.empty;
+  }
+
+  /// 变更指定对话的待发箱（enqueue|update|remove|resume|stop_and_send）
+  static Future<OutboxSnapshot> conversationOutboxMutate({
+    required int conversationId,
+    required String operation,
+    required OutboxMutation request,
+  }) async {
+    try {
+      final result = await assistCore.invokeMethod<dynamic>(
+        'conversationOutboxMutate',
+        {
+          'conversationId': conversationId,
+          'operation': operation,
+          'request': request.toJson(),
+        },
+      );
+      if (result is Map) {
+        return OutboxSnapshot.fromJson(Map<String, dynamic>.from(result));
+      }
+      return OutboxSnapshot.empty;
+    } on PlatformException catch (e) {
+      throw OutboxMutationException.fromPlatformException(e);
     }
   }
 }

@@ -1,8 +1,8 @@
-import importlib.util, json, sqlite3, unittest
+import importlib.util, json, sqlite3, sys, unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 spec=importlib.util.spec_from_file_location('outcome',Path(__file__).with_name('assert-agent-turn-outcome.py'))
 outcome=importlib.util.module_from_spec(spec); spec.loader.exec_module(outcome)
-
 class TurnOutcomeTest(unittest.TestCase):
     def setUp(self):
         self.db=sqlite3.connect(':memory:')
@@ -180,5 +180,110 @@ class TurnOutcomeTest(unittest.TestCase):
         self.add('assistant_message',{'streamMeta':{'sessionId':'s','turnId':'t','stopReason':'cancelled'}})
         with self.assertRaisesRegex(AssertionError,'actionable request'):
             outcome.verify(self.db,'OOB_NEW','cancelled')
+    def test_new_scenario_categories_accepted_with_full_prompt_and_reply_suffix(self):
+        for marker in [
+            'OOB_OUTBOX_A_1788953461021',
+            'OOB_WORKSPACE_CHANGE_1788953461021',
+            'OOB_SKILL_ELIGIBLE_1788953461021',
+            'OOB_LSPOSED_EVAL_1788953461021',
+        ]:
+            with self.subTest(marker=marker):
+                self.db.execute('DELETE FROM agent_conversation_entries')
+                self.add('user_message', {'content': {'text': f'Execute journey task. End your final reply with {marker}_DONE.'}})
+                self.add('assistant_message', {'content': {'text': f'Task executed.\n**{marker}_DONE**'}, 'streamMeta': {'sessionId': 's', 'turnId': 't', 'stopReason': 'end_turn'}})
+                self.assertTrue(outcome.verify(self.db, marker, 'done')['passed'])
+
+    def test_new_scenario_requires_canonical_completion(self):
+        marker = 'OOB_OUTBOX_A_1788953461021'
+        self.add('user_message', {'content': {'text': f'Execute task. End your final reply with {marker}_DONE.'}})
+        self.add('assistant_message', {'content': {'text': f'{marker}_DONE'}, 'streamMeta': {'sessionId': 's', 'turnId': 't'}})
+        with self.assertRaisesRegex(AssertionError, 'Missing canonical completion'):
+            outcome.verify(self.db, marker, 'done')
+
+    def test_duplicate_user_admission_rejected_for_new_scenarios(self):
+        marker = 'OOB_OUTBOX_A_1788953461021'
+        self.add('user_message', {'content': {'text': f'Task 1. End your final reply with {marker}_DONE.'}})
+        self.add('user_message', {'content': {'text': f'Task 2. End your final reply with {marker}_DONE.'}})
+        self.add('assistant_message', {'content': {'text': f'{marker}_DONE'}, 'streamMeta': {'sessionId': 's', 'turnId': 't', 'stopReason': 'end_turn'}})
+        with self.assertRaisesRegex(AssertionError, 'User admission missing or duplicated'):
+            outcome.verify(self.db, marker, 'done')
+
+    def test_direct_rows_verification_accepts_synthetic_turn(self):
+        marker = 'OOB_OUTBOX_B_1788953461021'
+        rows = [
+            {
+                'entryType': 'assistant_message',
+                'payloadJson': json.dumps({
+                    'content': {'text': f'Completed.\n`{marker}_DONE`'},
+                    'streamMeta': {'sessionId': 's', 'turnId': 't', 'stopReason': 'end_turn'}
+                })
+            }
+        ]
+        res = outcome.verify(rows, marker, 'done')
+        self.assertTrue(res['passed'])
+        self.assertEqual(res['entries'], 1)
+
+    def test_direct_rows_missing_turn_identity_rejected(self):
+        marker = 'OOB_OUTBOX_B_1788953461021'
+        rows = [
+            {
+                'entryType': 'assistant_message',
+                'payloadJson': json.dumps({
+                    'content': {'text': f'{marker}_DONE'},
+                    'streamMeta': {'sessionId': '', 'turnId': ''}
+                })
+            }
+        ]
+        with self.assertRaisesRegex(AssertionError, 'Missing or mixed turn identity'):
+            outcome.verify(rows, marker, 'done')
+
+    def test_physical_export_requires_numeric_suffix(self):
+        with self.assertRaisesRegex(AssertionError, 'numeric suffix'):
+            outcome.export_turn_rows('physical-device-1', 'OOB_OUTBOX_A')
+    def test_export_turn_rows_success_and_cleanup(self):
+        from unittest.mock import patch, MagicMock
+        cleaned = []
+        def fake_run(cmd, *args, **kwargs):
+            res = MagicMock()
+            res.returncode = 0
+            if 'am' in cmd and 'broadcast' in cmd:
+                res.stdout = 'Broadcast completed'
+            elif 'cat' in cmd:
+                res.stdout = json.dumps({
+                    'schema_version': outcome.SCHEMA_VERSION,
+                    'nonce': cmd[-1].replace('cache/oob-checkpoint-', '').replace('.json', ''),
+                    'status': 'completed',
+                    'success': True,
+                    'rows': [{'entryType': 'assistant_message', 'payloadJson': '{"text":"done"}'}]
+                }).encode('utf-8')
+            elif 'rm' in cmd:
+                cleaned.extend(cmd[7:])
+            return res
+
+        with patch('subprocess.run', side_effect=fake_run):
+            rows = outcome.export_turn_rows('physical-device-1', 'OOB_OUTBOX_A_1788953461021')
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['entryType'], 'assistant_message')
+            self.assertTrue(any('.lock' in f for f in cleaned))
+            self.assertTrue(any('.json' in f for f in cleaned))
+
+    def test_export_turn_rows_missing_admission_raises_assertion_error(self):
+        from unittest.mock import patch, MagicMock
+        def fake_run(cmd, *args, **kwargs):
+            res = MagicMock()
+            res.returncode = 0
+            if 'cat' in cmd:
+                res.stdout = json.dumps({
+                    'schema_version': outcome.SCHEMA_VERSION,
+                    'nonce': cmd[-1].replace('cache/oob-checkpoint-', '').replace('.json', ''),
+                    'status': 'failed',
+                    'success': False,
+                    'error': 'user_admission_missing'
+                }).encode('utf-8')
+            return res
+
+        with patch('subprocess.run', side_effect=fake_run):
+            with self.assertRaisesRegex(AssertionError, 'User admission missing or duplicated'):
+                outcome.export_turn_rows('physical-device-1', 'OOB_OUTBOX_A_1788953461021')
 
 if __name__=='__main__': unittest.main()

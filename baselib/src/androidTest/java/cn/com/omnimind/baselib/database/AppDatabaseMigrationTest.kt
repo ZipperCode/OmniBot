@@ -125,6 +125,78 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate19To20_createsOutboxAndWorkspaceChangeTables() = runBlocking {
+        createVersion19Database()
+
+        val database = openMigratedDatabase()
+        try {
+            val outboxDao = database.conversationOutboxDao()
+            val outboxEntry = ConversationOutboxEntry(
+                id = "outbox-test-1",
+                conversationId = 1L,
+                agentId = "xiaowan",
+                payloadJson = "{}",
+                state = ConversationOutboxEntry.STATE_PENDING,
+                revision = 1L,
+                sequence = 1L,
+                requestId = "req-test-1",
+                userMessageId = "msg-test-1",
+                createdAt = 1000L,
+                updatedAt = 1000L
+            )
+            outboxDao.insert(outboxEntry)
+            val fetchedOutbox = outboxDao.getById("outbox-test-1")
+            assertNotNull(fetchedOutbox)
+            assertEquals("outbox-test-1", fetchedOutbox?.id)
+            assertEquals(1L, fetchedOutbox?.conversationId)
+            assertEquals("xiaowan", fetchedOutbox?.agentId)
+
+            val metaDao = database.conversationOutboxMetaDao()
+            val meta = metaDao.getOrCreate(1L)
+            assertEquals(0L, meta.revision)
+            assertEquals(1L, meta.nextSequence)
+
+            val alloc = metaDao.allocateSequence(1L, expectedRevision = 0L)
+            assertNotNull(alloc)
+            assertEquals(1L, alloc?.allocatedSequence)
+            assertEquals(1L, alloc?.newRevision)
+
+            val workspaceDao = database.workspaceChangeDao()
+            val change = WorkspaceChangeEntry(
+                changeId = "change-test-1",
+                conversationId = 1L,
+                sessionId = "session-1",
+                turnId = "turn-1",
+                toolCallId = "call-1",
+                workspaceRoot = "/workspace/test",
+                operation = WorkspaceChangeEntry.OPERATION_WRITE,
+                sourceRelativePath = "test.txt",
+                targetRelativePath = null,
+                beforeSha256 = null,
+                afterSha256 = "hash123",
+                beforeExists = false,
+                afterExists = true,
+                snapshotStatus = WorkspaceChangeEntry.SNAPSHOT_STATUS_READY,
+                revision = 1L,
+                createdAt = 1000L,
+                beforeManifestJson = "{}",
+                afterManifestJson = "{}",
+                restoreJournalJson = "{}",
+                snapshotBytes = 128L,
+                unavailableReason = null
+            )
+            workspaceDao.insert(change)
+            val fetchedChange = workspaceDao.getById("change-test-1")
+            assertNotNull(fetchedChange)
+            assertEquals("change-test-1", fetchedChange?.changeId)
+            assertEquals("/workspace/test", fetchedChange?.workspaceRoot)
+            assertEquals(128L, fetchedChange?.snapshotBytes)
+        } finally {
+            database.close()
+        }
+    }
+
     private fun openMigratedDatabase(): AppDatabase {
         return Room.databaseBuilder(testContext, AppDatabase::class.java, TEST_DB_NAME)
             .allowMainThreadQueries()
@@ -409,6 +481,59 @@ class AppDatabaseMigrationTest {
                 ) VALUES
                     (1, 7, 1, 'legacy-local-model', 21, 8, 3, 5, 2, 1234),
                     (2, 8, 0, 'cloud-model', 34, 13, 5, 8, 3, 2345)
+                """.trimIndent()
+            )
+        } finally {
+            database.close()
+        }
+    }
+
+    private fun createVersion19Database() {
+        val database = openLegacyDatabase(version = 19)
+        try {
+            createCommonPreConversationTables(database)
+            createVersion13ConversationTables(database)
+            database.execSQL(
+                "ALTER TABLE conversations ADD COLUMN isPinned INTEGER NOT NULL DEFAULT 0"
+            )
+            database.execSQL(
+                "ALTER TABLE conversations ADD COLUMN parentConversationId INTEGER"
+            )
+            database.execSQL(
+                "ALTER TABLE conversations ADD COLUMN parentConversationMode TEXT"
+            )
+            database.execSQL(
+                "ALTER TABLE conversations ADD COLUMN scheduledTaskId TEXT"
+            )
+            database.execSQL("DROP TABLE IF EXISTS execution_records")
+            database.execSQL("DROP TABLE IF EXISTS study_records")
+            database.execSQL("DROP TABLE IF EXISTS favorite_records")
+            database.execSQL("DROP TABLE IF EXISTS cache_suggestion")
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `token_usage_records` (
+                    `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    `conversationId` INTEGER NOT NULL,
+                    `model` TEXT NOT NULL DEFAULT '',
+                    `promptTokens` INTEGER NOT NULL DEFAULT 0,
+                    `completionTokens` INTEGER NOT NULL DEFAULT 0,
+                    `reasoningTokens` INTEGER NOT NULL DEFAULT 0,
+                    `textTokens` INTEGER NOT NULL DEFAULT 0,
+                    `cachedTokens` INTEGER NOT NULL DEFAULT 0,
+                    `cacheCreationTokens` INTEGER NOT NULL DEFAULT 0,
+                    `createdAt` INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                INSERT INTO conversations
+                (id, title, mode, isArchived, isPinned, parentConversationId, parentConversationMode,
+                 scheduledTaskId, summary, contextSummary, contextSummaryCutoffEntryDbId,
+                 contextSummaryUpdatedAt, status, lastMessage, messageCount, latestPromptTokens,
+                 promptTokenThreshold, latestPromptTokensUpdatedAt, createdAt, updatedAt)
+                VALUES
+                (1, 'Test Seed', 'normal', 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, NULL, 0, 0, 128000, 0, 1000, 1000)
                 """.trimIndent()
             )
         } finally {

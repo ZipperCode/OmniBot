@@ -155,8 +155,7 @@ class WebConversationCreationTest {
                 )
             ).reasoningDelta
         )
-        assertEquals(
-            "completed",
+        assertNull(
             parseWebAgentEvent(
                 mapOf("method" to "turn/completed")
             ).terminalKind
@@ -198,6 +197,196 @@ class WebConversationCreationTest {
         assertEquals("tool-1-agent-file", tool?.entryId)
         assertEquals("success", tool?.status)
     }
+    @Test
+    fun `official ACP session prompt result and error are mapped to web terminal updates`() {
+        val completedEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-1",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "completed",
+                        "stopReason" to "end_turn",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("completed", completedEvent.terminalKind)
+
+        val cancelledEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-2",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "cancelled",
+                        "stopReason" to "cancelled"
+                    )
+                )
+            )
+        )
+        assertEquals("cancelled", cancelledEvent.terminalKind)
+
+        val maxTokensEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-3",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "completed",
+                        "stopReason" to "max_tokens"
+                    )
+                )
+            )
+        )
+        assertEquals("max_tokens", maxTokensEvent.terminalKind)
+
+        val refusalEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-4",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "stopReason" to "refusal"
+                    )
+                )
+            )
+        )
+        assertEquals("refusal", refusalEvent.terminalKind)
+
+        val errorEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-5",
+                "message" to mapOf(
+                    "error" to mapOf(
+                        "code" to -32603,
+                        "message" to "模型调用失败"
+                    )
+                )
+            )
+        )
+        assertEquals("error", errorEvent.terminalKind)
+        assertEquals("模型调用失败", errorEvent.errorMessage)
+
+        // P2 regression: {status: error, completed: true} without error message must be error, never success
+        val statusErrorEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-6",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "error",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("error", statusErrorEvent.terminalKind)
+
+        // P2 regression: status-only max_tokens and refusal without stopReason must never upgrade to completed
+        val statusMaxTokensEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-7",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "max_tokens",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("max_tokens", statusMaxTokensEvent.terminalKind)
+
+        val statusRefusalEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-8",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "refusal",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("refusal", statusRefusalEvent.terminalKind)
+
+        // P1 regression: max_turn_requests must map to max_turn_requests interruption, never completed
+        val maxTurnRequestsEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-max-req",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "completed",
+                        "stopReason" to "max_turn_requests",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("max_turn_requests", maxTurnRequestsEvent.terminalKind)
+
+        // P2 regression: unknown reasons must not upgrade to success
+        val unknownStatusEvent = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-terminal-9",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "unknown_interrupted_code",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertNull(unknownStatusEvent.terminalKind)
+    }
+
+    @Test
+    fun `legacy terminal notification before official session prompt response remains projection only`() {
+        val legacyTurnCompleted = parseWebAgentEvent(
+            mapOf(
+                "method" to "turn_completed",
+                "turnId" to "turn-legacy-ordering",
+                "threadId" to "thread-1"
+            )
+        )
+        assertNull(legacyTurnCompleted.terminalKind)
+
+        val codexTaskComplete = parseWebAgentEvent(
+            mapOf(
+                "method" to "codex_event",
+                "turnId" to "turn-legacy-ordering",
+                "params" to mapOf(
+                    "msg" to mapOf(
+                        "type" to "task_complete"
+                    )
+                )
+            )
+        )
+        assertNull(codexTaskComplete.terminalKind)
+
+        val officialPromptResponse = parseWebAgentEvent(
+            mapOf(
+                "method" to "session/prompt",
+                "turnId" to "turn-legacy-ordering",
+                "message" to mapOf(
+                    "result" to mapOf(
+                        "status" to "completed",
+                        "stopReason" to "end_turn",
+                        "completed" to true
+                    )
+                )
+            )
+        )
+        assertEquals("completed", officialPromptResponse.terminalKind)
+    }
+
+
 
     @Test
     fun `web agent runs explicitly request full access`() {

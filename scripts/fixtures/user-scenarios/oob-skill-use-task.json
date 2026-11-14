@@ -1,0 +1,3 @@
+{
+  "prompt": "Use skills_read to read custom skill oob-candidate-helper-skill-{{RUN_ID}}, and inspect workspace state according to its instructions."
+}

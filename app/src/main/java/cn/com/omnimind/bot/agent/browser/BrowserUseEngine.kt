@@ -1082,7 +1082,9 @@ class BrowserUseEngine(
     }
 
     private fun publishSnapshotUpdate() {
-        FlutterChatSyncBridge.dispatchBrowserSnapshotUpdated(liveSessionSnapshot())
+        val snapshot = liveSessionSnapshot()
+        FlutterChatSyncBridge.dispatchBrowserSnapshotUpdated(snapshot)
+        LiveAgentBrowserSessionManager.dispatchSnapshot(snapshot)
     }
 
     private suspend fun hostNavigate(

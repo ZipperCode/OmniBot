@@ -52,8 +52,14 @@ class SubagentToolHandler(
                 parseTaskSpec(element, defaultProfileId)
             }
             require(specs.isNotEmpty()) { "tasks 不能为空" }
+            val requestedConcurrency = if (args.containsKey("concurrency")) {
+                args["concurrency"]?.jsonPrimitive?.intOrNull
+                    ?: throw IllegalArgumentException("concurrency 必须在 1..4 之间")
+            } else {
+                null
+            }
             val concurrency = resolveSubagentConcurrency(
-                requested = args["concurrency"]?.jsonPrimitive?.intOrNull,
+                requested = requestedConcurrency,
                 taskCount = specs.size,
             )
             val mergeInstruction = args["mergeInstruction"]?.jsonPrimitive?.contentOrNull?.trim()
@@ -177,8 +183,8 @@ class SubagentToolHandler(
 internal fun resolveSubagentConcurrency(requested: Int?, taskCount: Int): Int {
     require(taskCount > 0) { "tasks 不能为空" }
     if (requested != null) {
-        require(requested > 0) { "concurrency 必须大于 0" }
-        return requested
+        require(requested in 1..4) { "concurrency 必须在 1..4 之间" }
+        return minOf(taskCount, requested)
     }
-    return taskCount
+    return minOf(taskCount, 2)
 }

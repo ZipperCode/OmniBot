@@ -178,6 +178,7 @@ class ChatInputArea extends StatefulWidget {
   final FutureOr<void> Function(AgentPermissionMode)?
   onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
+  final bool showAttachments;
 
   const ChatInputArea({
     super.key,
@@ -219,6 +220,7 @@ class ChatInputArea extends StatefulWidget {
     this.agentPermissionModes = AgentPermissionMode.values,
     this.onAgentPermissionModeChanged,
     this.useIndependentSendButton = true,
+    this.showAttachments = true,
   });
 
   @override
@@ -276,6 +278,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
   late Widget _terminalSvg;
   late Widget _sendSvg;
   late Widget _pauseSvg;
+  late Widget _queueSvg;
   late Widget _addSvg;
   late Widget _commandSvg;
 
@@ -298,6 +301,7 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
     _terminalSvg = const SizedBox.shrink();
     _sendSvg = const SizedBox.shrink();
     _pauseSvg = const SizedBox.shrink();
+    _queueSvg = const SizedBox.shrink();
     _addSvg = const SizedBox.shrink();
     _commandSvg = const SizedBox.shrink();
     _composerFlowController = AnimationController(
@@ -339,6 +343,29 @@ abstract class _ChatInputAreaStateBase extends State<ChatInputArea>
             'assets/home/send_icon.svg',
             width: 24,
             height: 24,
+          );
+    _queueSvg = context.isDarkTheme
+        ? _buildDarkActionButtonIcon(
+            size: 24,
+            backgroundColor: Color.lerp(
+              palette.surfaceElevated,
+              palette.accentPrimary,
+              0.34,
+            )!,
+            foreground: Icon(
+              LucideIcons.listPlus,
+              size: 15,
+              color: palette.pageBackground,
+            ),
+          )
+        : _buildDarkActionButtonIcon(
+            size: 24,
+            backgroundColor: palette.accentPrimary,
+            foreground: Icon(
+              LucideIcons.listPlus,
+              size: 15,
+              color: palette.pageBackground,
+            ),
           );
     _pauseSvg = context.isDarkTheme
         ? _buildDarkActionButtonIcon(

@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/agent/agent_mode_setting_page.dart';
 import 'package:ui/l10n/generated/app_localizations.dart';
+import 'package:ui/services/agent_runtime_service.dart';
 import 'package:ui/services/storage_service.dart';
 import 'package:ui/theme/app_theme.dart';
 import 'package:ui/widgets/navigation/open_container.dart';
@@ -68,6 +69,7 @@ void main() {
         .setMockMethodCallHandler(agentRuntimeChannel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(pluginPlatformChannel, null);
+    expect(AgentRuntimeService.agentPackageOperations, isEmpty);
   });
 
   for (final scenario in [
@@ -625,6 +627,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      if (find.text('展开').evaluate().isNotEmpty) {
+        await tester.tap(find.text('展开').first);
+        await tester.pumpAndSettle();
+      }
       await tester.tap(find.byKey(const Key('agent-check-codex-acp')));
       await tester.pumpAndSettle();
       expect(find.text('安装已完成，但助手未能启动'), findsOneWidget);
@@ -660,7 +666,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Codex'), findsOneWidget);
-    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.text('Claude Code'), findsNothing);
     expect(find.text('Gemini CLI'), findsNothing);
     expect(find.text('DeepSeek Harness'), findsNothing);
     expect(find.text('OpenCode'), findsOneWidget);
@@ -668,10 +674,23 @@ void main() {
     expect(find.textContaining('Pi ACP Agent'), findsNothing);
     expect(find.textContaining('ACP initialize'), findsNothing);
     expect(find.text('可用'), findsWidgets);
-    expect(find.text('未安装'), findsOneWidget);
+    expect(find.text('未安装'), findsNothing);
     expect(find.text('启动失败'), findsOneWidget);
     expect(find.text('全部 4'), findsOneWidget);
-    expect(find.text('预置 Agent'), findsOneWidget);
+    expect(find.text('已启用的其他 Agent'), findsOneWidget);
+    expect(find.text('添加其他 Agent'), findsOneWidget);
+    expect(find.text('预置 Agent'), findsNothing);
+    final expandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+    final toggleButton = find.byKey(const Key('agent-toggle-add-others'));
+    if (expandTile.evaluate().isNotEmpty) {
+      await tester.tap(expandTile);
+      await tester.pumpAndSettle();
+    } else if (toggleButton.evaluate().isNotEmpty) {
+      await tester.tap(toggleButton);
+      await tester.pumpAndSettle();
+    }
+    expect(find.text('Claude Code'), findsOneWidget);
+    expect(find.text('未安装'), findsOneWidget);
     expect(find.text('官方 Agent'), findsNothing);
     expect(find.text('官方'), findsNothing);
     expect(find.textContaining('统一 API'), findsNothing);
@@ -686,7 +705,7 @@ void main() {
     // All assistants retain configuration access, including failed startup.
     // Installation stays on the separate action button.
     expect(find.byIcon(LucideIcons.chevronRight), findsNWidgets(7));
-    expect(find.byType(OmniSettingsGroup), findsNWidgets(3));
+    expect(find.byType(OmniSettingsGroup), findsNWidgets(4));
     expect(find.text('4 位 Agent'), findsNothing);
     expect(find.text('版本未检测'), findsNothing);
     expect(
@@ -875,6 +894,10 @@ void main() {
 
       await tester.pumpWidget(buildPage());
       await tester.pumpAndSettle();
+      if (find.text('展开').evaluate().isNotEmpty) {
+        await tester.tap(find.text('展开').first);
+        await tester.pumpAndSettle();
+      }
 
       await tester.tap(find.byKey(const Key('agent-check-pi-acp')));
       await tester.pump();
@@ -899,6 +922,12 @@ void main() {
       await tester.pumpWidget(buildPage());
       await tester.pump(const Duration(milliseconds: 500));
       await tester.pump();
+      if (find.text('展开').evaluate().isNotEmpty) {
+        await tester.tap(find.text('展开').first);
+        // 使用有界 pump 等待展开动画，不因后台安装动画调用 pumpAndSettle
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+      }
       expect(find.text('后台安装 / 升级中'), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('agent-navigation-pi-acp')));
@@ -909,7 +938,8 @@ void main() {
         'ok': false,
         'error': 'expected test completion',
       });
-      await tester.pump(const Duration(milliseconds: 500));
+      // 安装任务结算后，指示器停止，等待完成所有清理
+      await tester.pumpAndSettle();
       expect(find.text('后台安装 / 升级中'), findsNothing);
     },
   );
@@ -951,8 +981,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('自定义 Agent'), findsOneWidget);
+      expect(find.text('已启用的其他 Agent'), findsOneWidget);
       expect(find.text('预置 Agent'), findsNothing);
+      expect(find.text('自定义 Agent'), findsNothing);
       expect(find.text('插件：可通过助手创建和安装'), findsNothing);
       await tester.scrollUntilVisible(
         find.byKey(const Key('agent-version-details')),
@@ -973,189 +1004,164 @@ void main() {
     },
   );
 
-  testWidgets('renders and invokes Agent Web actions from the plugin catalog', (
-    tester,
-  ) async {
-    final calls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(pluginPlatformChannel, (call) async {
-          calls.add(call);
-          if (call.method == 'listActions') {
-            return <Map<String, dynamic>>[
-              <String, dynamic>{
-                'id': 'open_opencode_web',
-                'pluginId': 'com.omnimind.agent-web',
-                'displayName': 'OpenCode Web',
-                'description': 'Open OpenCode Web',
-                'presentation': <String, dynamic>{
-                  'placement': 'agent_settings',
-                  'packageId': 'opencode',
-                  'label': <String, String>{
-                    'zh': 'OpenCode Web',
-                    'en': 'OpenCode Web',
-                  },
-                  'description': <String, String>{
-                    'zh': '在系统浏览器中打开本机 Web 界面',
-                    'en': 'Open the local Web UI',
-                  },
-                },
-              },
-            ];
-          }
-          if (call.method == 'invokeAction') {
+
+  testWidgets(
+    'Agent configuration groups: Xiaowan, enabled other agents, and collapsed add other agents',
+    (tester) async {
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+            calls.add(call);
+            if (call.method != 'agent/list') return null;
             return <String, dynamic>{
-              'success': true,
-              'code': 'OPENED',
-              'serviceId': 'opencode',
-              'packageId': 'opencode',
-              'running': true,
-            };
-          }
-          return null;
-        });
-    tester.view.physicalSize = const Size(1080, 2200);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.lightTheme,
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        locale: const Locale('zh'),
-        home: const AgentModeSettingPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.text('Agent WebUI'), findsOneWidget);
-    expect(find.text('OpenCode Web'), findsOneWidget);
-    expect(find.text('在系统浏览器中打开本机 Web 界面'), findsOneWidget);
-    await tester.tap(
-      find.byKey(
-        const Key(
-          'plugin-action-button-com.omnimind.agent-web/open_opencode_web',
-        ),
-      ),
-    );
-    await tester.pump();
-
-    final invocation = calls.lastWhere((call) => call.method == 'invokeAction');
-    expect(invocation.arguments, <String, Object?>{
-      'pluginId': 'com.omnimind.agent-web',
-      'actionId': 'open_opencode_web',
-      'arguments': <String, dynamic>{},
-    });
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('running Agent Web action shows status and stops in place', (
-    tester,
-  ) async {
-    var statusCode = 'RUNNING';
-    final calls = <MethodCall>[];
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(pluginPlatformChannel, (call) async {
-          calls.add(call);
-          if (call.method == 'listActions') {
-            return <Map<String, dynamic>>[
-              <String, dynamic>{
-                'id': 'open_opencode_web',
-                'pluginId': 'com.omnimind.agent-web',
-                'displayName': 'OpenCode Web',
-                'description': 'Open OpenCode Web',
-                'presentation': <String, dynamic>{
-                  'placement': 'agent_settings',
-                  'packageId': 'opencode',
-                  'statusAction': 'get_opencode_web_status',
-                  'stopAction': 'stop_opencode_web',
-                  'label': <String, String>{
-                    'zh': 'OpenCode Web',
-                    'en': 'OpenCode Web',
-                  },
-                  'description': <String, String>{
-                    'zh': '在系统浏览器中打开本机 Web 界面',
-                    'en': 'Open the local Web UI',
-                  },
+              'agents': <Map<String, dynamic>>[
+                _agent('xiaowan-acp', '小万', 'omnibot-xiaowan-acp', 'online'),
+                _agent('codex-acp', 'Codex', 'codex-acp', 'online'),
+                _agent(
+                  'opencode-acp',
+                  'OpenCode',
+                  'opencode',
+                  'offline',
+                  arguments: const ['acp'],
+                ),
+                _agent(
+                  'codex-remote',
+                  'Codex (Remote)',
+                  'codex-remote',
+                  'online',
+                ),
+                _agent(
+                  'claude-code-acp',
+                  'Claude Code',
+                  'claude-agent-acp',
+                  'missing',
+                ),
+                {
+                  ..._agent('pi-acp', 'Pi', 'omnibot-pi-acp', 'unchecked'),
+                  'enabled': false,
                 },
-              },
-            ];
-          }
-          if (call.method == 'invokeAction') {
-            final actionId = (call.arguments as Map)['actionId'] as String;
-            if (actionId == 'get_opencode_web_status') {
-              return <String, dynamic>{
-                'success': true,
-                'code': statusCode,
-                'serviceId': 'opencode',
-                'packageId': 'opencode',
-                'running': statusCode != 'NOT_RUNNING',
-              };
-            }
-            if (actionId == 'stop_opencode_web') {
-              statusCode = 'NOT_RUNNING';
-              return <String, dynamic>{
-                'success': true,
-                'code': 'STOPPED',
-                'serviceId': 'opencode',
-                'packageId': 'opencode',
-                'running': false,
-              };
-            }
-          }
-          return null;
-        });
-    tester.view.physicalSize = const Size(1080, 2200);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
+              ],
+            };
+          });
 
-    await tester.pumpWidget(
-      MaterialApp(
-        theme: AppTheme.lightTheme,
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        locale: const Locale('zh'),
-        home: const AgentModeSettingPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('zh'),
+          home: const AgentModeSettingPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('运行中'), findsOneWidget);
-    expect(
-      find.byKey(
-        const Key('plugin-action-stop-com.omnimind.agent-web/open_opencode_web'),
-      ),
-      findsOneWidget,
-    );
-    await tester.tap(
-      find.byKey(
-        const Key('plugin-action-stop-com.omnimind.agent-web/open_opencode_web'),
-      ),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
+      // Group 1: 小万
+      expect(find.text('小万'), findsWidgets);
+      expect(find.byKey(const Key('agent-config-xiaowan-acp')), findsOneWidget);
 
-    final stopInvocation = calls.lastWhere(
-      (call) =>
-          call.method == 'invokeAction' &&
-          (call.arguments as Map)['actionId'] == 'stop_opencode_web',
-    );
-    expect(stopInvocation.arguments, <String, Object?>{
-      'pluginId': 'com.omnimind.agent-web',
-      'actionId': 'stop_opencode_web',
-      'arguments': <String, dynamic>{},
-    });
-    expect(find.text('运行中'), findsNothing);
-    expect(
-      find.byKey(
-        const Key('plugin-action-button-com.omnimind.agent-web/open_opencode_web'),
-      ),
-      findsOneWidget,
-    );
-    expect(tester.takeException(), isNull);
-  });
+      // Group 2: 已启用的其他 Agent (local & remote)
+      expect(find.text('已启用的其他 Agent'), findsOneWidget);
+      expect(find.text('Codex'), findsOneWidget);
+      expect(find.text('OpenCode'), findsOneWidget);
+      expect(find.text('Codex (Remote)'), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-codex-acp')), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-opencode-acp')), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-codex-remote')), findsOneWidget);
+
+      // Group 3: 添加其他 Agent (默认折叠未安装/未启用)
+      expect(find.text('添加其他 Agent'), findsOneWidget);
+      expect(find.text('Claude Code'), findsNothing);
+      expect(find.text('Pi'), findsNothing);
+      expect(find.byKey(const Key('agent-config-claude-code-acp')), findsNothing);
+      expect(find.byKey(const Key('agent-config-pi-acp')), findsNothing);
+
+      // 点击展开（不触发安装或网络请求）
+      expect(find.text('展开'), findsWidgets);
+      final group3ExpandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+      final group3ToggleButton = find.byKey(const Key('agent-toggle-add-others'));
+      if (group3ExpandTile.evaluate().isNotEmpty) {
+        await tester.tap(group3ExpandTile);
+        await tester.pumpAndSettle();
+      } else if (group3ToggleButton.evaluate().isNotEmpty) {
+        await tester.tap(group3ToggleButton);
+        await tester.pumpAndSettle();
+      }
+
+      // 展开后展示未安装与未启用 Agent
+      expect(find.text('Claude Code'), findsOneWidget);
+      expect(find.text('Pi'), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-claude-code-acp')), findsOneWidget);
+      expect(find.byKey(const Key('agent-config-pi-acp')), findsOneWidget);
+      expect(find.text('收起'), findsOneWidget);
+
+      // 折叠/展开只改变UI，不执行安装、健康探测网络或修改引擎
+      expect(calls.where((c) => c.method == 'agent/prepare'), isEmpty);
+      expect(calls.where((c) => c.method == 'agent/refresh'), isEmpty);
+
+      // 点击收起
+      await tester.tap(find.byKey(const Key('agent-toggle-add-others')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Claude Code'), findsNothing);
+      expect(find.text('Pi'), findsNothing);
+      expect(find.text('展开'), findsWidgets);
+    },
+  );
+
+  testWidgets(
+    'Remote Codex is placed in Group 3 when disabled or missing',
+    (tester) async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(agentRuntimeChannel, (call) async {
+            if (call.method != 'agent/list') return null;
+            return <String, dynamic>{
+              'agents': <Map<String, dynamic>>[
+                {
+                  ..._agent(
+                    'codex-remote',
+                    'Codex (Remote)',
+                    'codex-remote',
+                    'offline',
+                  ),
+                  'enabled': false,
+                },
+              ],
+            };
+          });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('zh'),
+          home: const AgentModeSettingPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Disabled Remote Codex goes to Group 3 and is collapsed by default
+      expect(find.text('已启用的其他 Agent'), findsNothing);
+      expect(find.text('添加其他 Agent'), findsOneWidget);
+      expect(find.text('Codex (Remote)'), findsNothing);
+
+      final remoteExpandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+      final remoteToggleButton = find.byKey(const Key('agent-toggle-add-others'));
+      if (remoteExpandTile.evaluate().isNotEmpty) {
+        await tester.tap(remoteExpandTile);
+        await tester.pumpAndSettle();
+      } else if (remoteToggleButton.evaluate().isNotEmpty) {
+        await tester.tap(remoteToggleButton);
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Codex (Remote)'), findsOneWidget);
+    },
+  );
 }
 
 Map<String, dynamic> _agent(

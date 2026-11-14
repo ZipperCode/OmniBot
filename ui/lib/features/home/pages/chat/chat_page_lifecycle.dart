@@ -10,31 +10,6 @@ ConversationThreadTarget _newThreadTargetForConversationMode(
   );
 }
 
-ConversationThreadTarget _newAgentThreadTarget({
-  String? agentId,
-  String? agentRuntime,
-  int? conversationId,
-}) {
-  if (conversationId != null) {
-    return ConversationThreadTarget.existing(
-      conversationId: conversationId,
-      mode: ConversationMode.agent,
-      agentId: agentId,
-      agentRuntime: agentRuntime,
-    );
-  }
-  return ConversationThreadTarget.newConversation(
-    mode: ConversationMode.agent,
-    requestKey: DateTime.now().microsecondsSinceEpoch.toString(),
-    agentId:
-        agentId ??
-        (agentRuntime == 'remote'
-            ? _kRemoteCodexModeAgentId
-            : _kXiaowanAcpAgentId),
-    agentRuntime: agentRuntime,
-  );
-}
-
 mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
   // UI-only preservation while the existing conversation initializer resets
   // an unsubmitted target. The request id prevents an older initialization
@@ -327,7 +302,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
         _showModelMentionPanel = false;
         _activeModelMentionToken = null;
         _openClawPanelExpanded = false;
-        _isBrowserOverlayVisible = false;
         _isSurfacePageScrolling = false;
       });
       // A new Harness target without a conversationId is a new conversation.
@@ -402,7 +376,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
               _isAiResponding ||
               _sendMessageInFlightTargetIds.contains(activeRequestId) ||
               _isWorkspaceSurface ||
-              _isBrowserOverlayVisible ||
               _isPopupVisible) {
             return;
           }
@@ -733,6 +706,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
 
   @override
   void dispose() {
+    _outboxService.dispose();
     for (final mode in _unboundConfigurationSessions.keys.toList()) {
       _releaseUnboundConfigurationSession(mode);
     }
@@ -944,7 +918,9 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     // 这条消息只在 DB 里、还没进入 runtime.messages，必须强制从 DB 重载，
     // 否则 agent 流事件先到时 hasInFlightTask=true 会让 in-memory 分支吞掉它。
     final reason = event['reason']?.toString();
-    final isExternalUserMessage = reason == 'external_user_message';
+    final isHostHistorySource =
+        reason == 'external_user_message' ||
+        reason == 'host_messages_replaced';
     // 流事件已经由 runtime reducer 直接维护。原生侧每次把流式快照落库后
     // 还会发送 messages_replaced；若在这里重新安装同一份 in-memory 列表，
     // 会重建消息 notifier 并清空 reducer 的排序状态，造成思考卡闪烁和
@@ -960,7 +936,7 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
     }
     await loadConversation(
       conversationId,
-      preferInMemory: !isExternalUserMessage && hasLiveTurn,
+      preferInMemory: !isHostHistorySource && hasLiveTurn,
       lifecycleToken: lifecycleToken,
     );
     if (!mounted ||
@@ -1096,7 +1072,6 @@ mixin _ChatPageLifecycleMixin on _ChatPageStateBase {
           ChatPageMode.normal,
           ChatIslandDisplayLayer.mode,
         );
-        _isBrowserOverlayVisible = false;
       });
       _hideSlashCommandPanel();
       if (syncPage) _jumpToCurrentModePage();

@@ -126,6 +126,9 @@ internal class XiaowanAcpConnection(
     override val isRunning: Boolean
         get() = ::clientTransport.isInitialized && clientTransport.started
 
+    fun sessionProviderProfile(sessionId: String): ModelProviderProfile? =
+        if (::agentSupport.isInitialized) agentSupport.sessionProviderProfile(sessionId) else null
+
     override fun createTransport(parentScope: CoroutineScope): Transport {
         clientTransport = LoopbackTransport()
         serverTransport = LoopbackTransport()
@@ -323,6 +326,9 @@ private class XiaowanAgentSupport(
 
     private val activeSessions = ConcurrentHashMap<String, XiaowanAgentSession>()
     private val profileStore = AcpAgentProfileStore(context)
+
+    fun sessionProviderProfile(sessionId: String): ModelProviderProfile? =
+        activeSessions[sessionId]?.providerProfile
 
     override suspend fun initialize(clientInfo: ClientInfo): AgentInfo {
         // Provider/model resolution is owned by Dispatch Model. A persisted
@@ -675,7 +681,7 @@ private class XiaowanAgentSession(
     private val conversationIdProvider: suspend (String) -> Long?,
     override var availableModels: List<ModelInfo>,
     private val configuredModelId: String,
-    private val providerProfile: ModelProviderProfile,
+    val providerProfile: ModelProviderProfile,
     override val sessionId: SessionId,
     private val requestPermission: suspend (String, String, String, String, String?, String?, JsonObject?) -> Boolean,
     private val mcpSession: XiaowanMcpSession,

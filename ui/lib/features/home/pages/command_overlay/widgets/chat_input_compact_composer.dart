@@ -126,6 +126,21 @@ extension _ChatInputCompactComposer on _ChatInputAreaComposerMixin {
                                   ),
                                 ),
                               ),
+                            if (widget.isProcessing &&
+                                _composerStateMachine.value.primaryAction(
+                                      isProcessing: widget.isProcessing,
+                                      hasAttachments:
+                                          widget.attachments.isNotEmpty,
+                                      hasExternalPayload:
+                                          widget.hasExternalSendPayload,
+                                      hasTextOverride: widget.controller.text
+                                          .trim()
+                                          .isNotEmpty,
+                                    ) ==
+                                    ChatComposerPrimaryAction.queue) ...[
+                              _buildIndependentStopButton(),
+                              const SizedBox(width: 4),
+                            ],
                             SizedBox(
                               width: 36,
                               height: 36,
@@ -144,7 +159,7 @@ extension _ChatInputCompactComposer on _ChatInputAreaComposerMixin {
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (widget.attachments.isNotEmpty) ...[
+            if (widget.showAttachments && widget.attachments.isNotEmpty) ...[
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 7),
                 child: _buildAttachmentPreview(),

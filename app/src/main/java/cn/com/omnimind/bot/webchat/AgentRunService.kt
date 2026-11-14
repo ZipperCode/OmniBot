@@ -363,10 +363,7 @@ class AgentRunService(
         ConversationDomainService(context.applicationContext)
     }
     private val agentRunBridge by lazy {
-        WebAgentRunBridge(
-            context = context.applicationContext,
-            manager = AgentRuntimeManager.getInstance(context)
-        )
+        AgentRuntimeManager.getInstance(context).conversationRunBridge
     }
 
     fun hasActiveConversationRun(

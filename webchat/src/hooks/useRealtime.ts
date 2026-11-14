@@ -15,6 +15,7 @@ const EVENT_NAMES: RealtimeEventName[] = [
   "chat_task_event",
   "browser_snapshot_updated",
   "workspace_changed",
+  "conversation_outbox_changed",
 ];
 
 export function useRealtime(

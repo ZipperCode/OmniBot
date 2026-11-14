@@ -1,10 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { request } from "./api";
+import {
+  extractOutboxSnapshot,
+  formatOutboxError,
+  getConversationOutbox,
+  importOutboxAttachments,
+  isRecord,
+  mutateConversationOutbox,
+  request,
+} from "./api";
 import { ChatPanel } from "./components/ChatPanel";
 import { ContextPane } from "./components/ContextPane";
 import { ConversationSidebar } from "./components/ConversationSidebar";
 import { Icon } from "./components/Icon";
 import { LoginView } from "./components/LoginView";
+import { WorkspaceChangeListModal } from "./components/WorkspaceChangeListModal";
+import { WorkspaceChangeModal } from "./components/WorkspaceChangeModal";
 import {
   createConversationDraft,
   conversationAgentId,
@@ -36,6 +46,7 @@ import type {
   WorkspaceInfo,
   WorkspaceItem,
   WorkspaceListing,
+  OutboxSnapshot,
 } from "./types";
 
 const TOKEN_STORAGE_KEY = "omnibot_webchat_token";
@@ -78,9 +89,54 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatViewRevision, setChatViewRevision] = useState(0);
   const [sending, setSending] = useState(false);
-  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [activeRenderTaskId, setActiveRenderTaskId] = useState<string | null>(null);
-  const [clarifyTaskId, setClarifyTaskId] = useState<string | null>(null);
+  const [workspaceChangesListOpen, setWorkspaceChangesListOpen] = useState(false);
+  const [previewChangeId, setPreviewChangeId] = useState<string | null>(null);
+  const [skillRefreshRevision, setSkillRefreshRevision] = useState(0);
+  // 按会话独立跟踪活跃任务运行状态，防止全局变量跨会话串扰
+  interface ConversationRunState {
+    taskId: string | null;
+    renderTaskId: string | null;
+    turnId: string | null;
+    sessionId: string | null;
+    clarifyTaskId: string | null;
+    requestId: string | null;
+  }
+  const [conversationRuns, setConversationRuns] = useState<Record<number, ConversationRunState>>({});
+  const conversationRunsRef = useRef<Record<number, ConversationRunState>>({});
+
+  function setRunStateForConversation(
+    conversationId: number,
+    run: Partial<ConversationRunState> | null,
+  ) {
+    if (!conversationId || conversationId <= 0) return;
+    setConversationRuns((prev) => {
+      const existing: ConversationRunState = prev[conversationId] || {
+        taskId: null,
+        renderTaskId: null,
+        turnId: null,
+        sessionId: null,
+        clarifyTaskId: null,
+        requestId: null,
+      };
+      const next = { ...prev };
+      if (run === null) {
+        delete next[conversationId];
+      } else {
+        next[conversationId] = { ...existing, ...run };
+      }
+      conversationRunsRef.current = next;
+      return next;
+    });
+  }
+
+  // 派生当前选中会话的状态（切换会话时自动反映对应状态）
+  const currentConversationId = Number(selectedConversation?.id ?? 0);
+  const currentRun = currentConversationId > 0 ? (conversationRuns[currentConversationId] ?? null) : null;
+  const activeTaskId = currentRun?.taskId ?? null;
+  const activeRenderTaskId = currentRun?.renderTaskId ?? null;
+  const activeTurnId = currentRun?.turnId ?? null;
+  const activeSessionId = currentRun?.sessionId ?? null;
+  const clarifyTaskId = currentRun?.clarifyTaskId ?? null;
   const [workspaceInfo, setWorkspaceInfo] = useState<WorkspaceInfo | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceItems, setWorkspaceItems] = useState<WorkspaceItem[]>([]);
@@ -95,6 +151,8 @@ export default function App() {
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(false);
   const [toast, setToast] = useState("");
+  const [outboxSnapshot, setOutboxSnapshot] = useState<OutboxSnapshot | null>(null);
+  const [outboxError, setOutboxError] = useState<string | null>(null);
   const selectedRef = useRef<Conversation | null>(null);
   const conversationHistoryRef = useRef<string[]>([]);
   const conversationHistoryIndexRef = useRef(-1);
@@ -158,6 +216,12 @@ export default function App() {
     conversationHistoryIndexRef.current = target.index;
     selectedRef.current = target.conversation;
     setSelectedConversation(target.conversation);
+    setOutboxError(null);
+    if (isPersistedConversation(target.conversation)) {
+      void loadOutbox(target.conversation.id);
+    } else {
+      setOutboxSnapshot(null);
+    }
     await loadMessages(target.conversation);
   }
 
@@ -177,6 +241,28 @@ export default function App() {
       }
     } catch (error) {
       showError(error);
+    }
+  }
+
+  async function loadOutbox(conversationId: number) {
+    if (!conversationId || conversationId <= 0) {
+      setOutboxSnapshot(null);
+      return;
+    }
+    try {
+      const snapshot = await getConversationOutbox(conversationId);
+      if (Number(selectedRef.current?.id ?? 0) === conversationId) {
+        setOutboxSnapshot((current) => {
+          // 快照单调性：忽略小于当前 revision 的陈旧快照
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+    } catch (error) {
+      // load 失败给出真实提示
+      if (Number(selectedRef.current?.id ?? 0) === conversationId) {
+        setOutboxError(formatOutboxError(error));
+      }
     }
   }
 
@@ -207,10 +293,21 @@ export default function App() {
     setSelectedConversation(nextSelected);
     recordConversationNavigation(nextSelected);
     if (nextSelected) {
-      if (selectionChanged) setMessages([]);
+      if (selectionChanged) {
+        setMessages([]);
+        setOutboxError(null);
+      }
+      if (isPersistedConversation(nextSelected)) {
+        void loadOutbox(nextSelected.id);
+      } else {
+        setOutboxSnapshot(null);
+      }
       await loadMessages(nextSelected);
     }
-    else setMessages([]);
+    else {
+      setMessages([]);
+      setOutboxSnapshot(null);
+    }
   }
 
   async function loadArchivedConversations(reportError = true) {
@@ -295,9 +392,8 @@ export default function App() {
     selectedRef.current = draftConversation;
     setSelectedConversation(draftConversation);
     setMessages([]);
-    setActiveTaskId(null);
-    setActiveRenderTaskId(null);
-    setClarifyTaskId(null);
+    setOutboxSnapshot(null);
+    setOutboxError(null);
     setConversationsOpen(false);
   }
 
@@ -305,8 +401,16 @@ export default function App() {
     selectedRef.current = conversation;
     setSelectedConversation(conversation);
     setMessages([]);
+    // 切换会话先清除旧快照与错误，避免陈旧快照闪现
+    setOutboxSnapshot(null);
+    setOutboxError(null);
     recordConversationNavigation(conversation);
     setConversationsOpen(false);
+    if (isPersistedConversation(conversation)) {
+      void loadOutbox(conversation.id);
+    } else {
+      setOutboxSnapshot(null);
+    }
     await loadMessages(conversation);
   }
 
@@ -354,6 +458,8 @@ export default function App() {
         loadConversations(true),
         loadArchivedConversations(false),
       ]);
+      setOutboxSnapshot(null);
+      setOutboxError(null);
       showToast("会话已删除");
     } catch (error) {
       showError(error);
@@ -369,13 +475,17 @@ export default function App() {
     setSending(true);
     let conversationCreatedForSend: Conversation | null = null;
     let optimisticUserEntryId: string | null = null;
+    let targetConversation: Conversation | null = null;
     try {
       if (clarifyTaskId) {
         await request(`/tasks/${encodeURIComponent(clarifyTaskId)}/clarify`, {
           method: "POST",
           body: { reply: text },
         });
-        setClarifyTaskId(null);
+        const convId = selectedRef.current?.id ? Number(selectedRef.current.id) : 0;
+        if (convId > 0) {
+          setRunStateForConversation(convId, { clarifyTaskId: null });
+        }
         return true;
       }
 
@@ -403,6 +513,7 @@ export default function App() {
         recordConversationNavigation(conversation);
       }
       if (!conversation) throw new Error("无法创建新对话");
+      targetConversation = conversation;
       const conversationMode = normalizeConversationMode(conversation.mode);
       const taskId = createTaskId();
       const userMessageCreatedAt = Date.now();
@@ -419,8 +530,14 @@ export default function App() {
         createAt: userMessageCreatedAt,
       };
       completedTaskIdsRef.current.delete(taskId);
-      setActiveTaskId(taskId);
-      setActiveRenderTaskId(taskId);
+      setRunStateForConversation(conversation.id, {
+        taskId,
+        renderTaskId: taskId,
+        turnId: null,
+        sessionId: null,
+        clarifyTaskId: null,
+        requestId: taskId,
+      });
       setMessages((current) => (
         conversationMode === "codex"
           ? reconcileCodexMessages(current, [optimisticUserMessage])
@@ -448,20 +565,34 @@ export default function App() {
         applyConversationSnapshot(updatedConversation);
       }
       const acceptedTaskId = String(result?.taskId ?? taskId);
+      const returnedTurnId = result?.turnId ? String(result.turnId).trim() : null;
+      const returnedSessionId = (result?.threadId ?? result?.sessionId)
+        ? String(result.threadId ?? result.sessionId).trim()
+        : null;
       const completedBeforeAcceptance = completedTaskIdsRef.current.has(acceptedTaskId);
-      setActiveTaskId(completedBeforeAcceptance ? null : acceptedTaskId);
-      setActiveRenderTaskId(
-        completedBeforeAcceptance
-          ? null
-          : String(result?.turnId ?? acceptedTaskId),
-      );
+      if (completedBeforeAcceptance) {
+        setRunStateForConversation(conversation.id, null);
+      } else {
+        setRunStateForConversation(conversation.id, {
+          taskId: acceptedTaskId,
+          renderTaskId: returnedTurnId ?? acceptedTaskId,
+          turnId: returnedTurnId,
+          sessionId: returnedSessionId,
+          requestId: acceptedTaskId,
+        });
+      }
       completedTaskIdsRef.current.delete(acceptedTaskId);
+      if (conversation && isPersistedConversation(conversation)) {
+        void loadOutbox(conversation.id);
+      }
       void loadConversations(true).catch(showError);
       return true;
     } catch (error) {
       showError(error);
-      setActiveTaskId(null);
-      setActiveRenderTaskId(null);
+      const failedConvId = Number(targetConversation?.id ?? selectedRef.current?.id ?? 0);
+      if (failedConvId > 0) {
+        setRunStateForConversation(failedConvId, null);
+      }
       if (optimisticUserEntryId) {
         const failedEntryId = optimisticUserEntryId;
         setMessages((current) => current.filter((message) => (
@@ -506,11 +637,13 @@ export default function App() {
   }
 
   async function cancelRun() {
-    if (!activeTaskId) return;
+    const targetId = selectedRef.current?.id ? Number(selectedRef.current.id) : 0;
+    const currentRun = targetId > 0 ? conversationRunsRef.current[targetId] : null;
+    const taskIdToCancel = currentRun?.taskId;
+    if (!taskIdToCancel) return;
     try {
-      await request(`/tasks/${encodeURIComponent(activeTaskId)}/cancel`, { method: "POST" });
-      setActiveTaskId(null);
-      setActiveRenderTaskId(null);
+      await request(`/tasks/${encodeURIComponent(taskIdToCancel)}/cancel`, { method: "POST" });
+      // 注意：cancel HTTP 返回并不代表官方终态，不清除活跃状态；仅等待正式 prompt 响应或拥有请求错误时才清
     } catch (error) {
       showError(error);
     }
@@ -607,35 +740,112 @@ export default function App() {
       setBrowserFrameSeed((seed) => seed + 1);
       return;
     }
+    if (eventName === "conversation_outbox_changed") {
+      const conversationId = Number(data.conversationId ?? 0);
+      const selected = selectedRef.current;
+      if (selected && isPersistedConversation(selected) && Number(selected.id) === conversationId) {
+        void loadOutbox(conversationId);
+      }
+      return;
+    }
+    if (eventName === "skill_assets_changed") {
+      setSkillRefreshRevision((rev) => rev + 1);
+      return;
+    }
     if (eventName === "chat_task_event") {
       const kind = String(data.kind ?? "");
       const taskId = String(data.taskId ?? "");
+      let conversationId = Number(data.conversationId ?? 0);
+      if (!conversationId || conversationId <= 0) {
+        for (const [cidStr, run] of Object.entries(conversationRunsRef.current)) {
+          if (taskId && run.taskId === taskId) {
+            conversationId = Number(cidStr);
+            break;
+          }
+        }
+      }
       if (["completed", "error"].includes(kind)) {
         if (taskId) completedTaskIdsRef.current.add(taskId);
-        setActiveTaskId(null);
-        setActiveRenderTaskId(null);
-        setClarifyTaskId(null);
+        if (conversationId > 0) {
+          setRunStateForConversation(conversationId, null);
+          const selected = selectedRef.current;
+          if (selected && isPersistedConversation(selected) && Number(selected.id) === conversationId) {
+            void loadOutbox(conversationId);
+          }
+        }
       }
       return;
     }
     if (eventName !== "acp_event") return;
-    const presentation = data.presentation && typeof data.presentation === "object"
-      ? data.presentation as Record<string, unknown>
+    const method = typeof data.method === "string" ? data.method : "";
+    const params = isRecord(data.params) ? (data.params as Record<string, unknown>) : null;
+    const result = isRecord(data.result) ? (data.result as Record<string, unknown>) : null;
+    const error = data.error;
+    const requestId = (data.requestId ?? data.id) ? String(data.requestId ?? data.id) : null;
+    const eventSessionId = (data.sessionId ?? data.threadId ?? params?.sessionId)
+      ? String(data.sessionId ?? data.threadId ?? params?.sessionId).trim()
       : null;
-    const kind = String(presentation?.kind ?? "");
-    const turnId = String(data.turnId ?? presentation?.turnId ?? "");
-    if (kind === "approval_requested") setClarifyTaskId(turnId || activeTaskId);
-    if (["turn_completed", "turn_failed"].includes(kind)) {
-      if (turnId) completedTaskIdsRef.current.add(turnId);
-      setActiveTaskId(null);
-      setActiveRenderTaskId(null);
-      setClarifyTaskId(null);
+    const eventTurnId = data.turnId ? String(data.turnId).trim() : null;
+
+    let targetConversationId = Number(data.conversationId ?? 0);
+    if (!targetConversationId || targetConversationId <= 0) {
+      for (const [cidStr, run] of Object.entries(conversationRunsRef.current)) {
+        const cid = Number(cidStr);
+        if (eventSessionId && run.sessionId === eventSessionId) {
+          targetConversationId = cid;
+          break;
+        }
+        if (requestId && run.requestId === requestId) {
+          targetConversationId = cid;
+          break;
+        }
+        if (eventTurnId && run.turnId === eventTurnId) {
+          targetConversationId = cid;
+          break;
+        }
+      }
     }
-    if (kind === "tool_completed" && String(data.toolType ?? "") === "browser") {
+    if (!targetConversationId || targetConversationId <= 0) {
+      const selected = selectedRef.current;
+      if (selected && isPersistedConversation(selected)) {
+        targetConversationId = selected.id;
+      } else {
+        return;
+      }
+    }
+
+    if (method === "session/update" && params) {
+      const update = isRecord(params.update) ? (params.update as Record<string, unknown>) : null;
+      const sessionUpdate = typeof update?.sessionUpdate === "string" ? update.sessionUpdate : "";
+      setRunStateForConversation(targetConversationId, {
+        ...(eventSessionId ? { sessionId: eventSessionId } : {}),
+        ...(eventTurnId ? { turnId: eventTurnId } : {}),
+        ...(sessionUpdate === "request_permission" || sessionUpdate === "approval_requested"
+          ? { clarifyTaskId: eventTurnId ?? conversationRunsRef.current[targetConversationId]?.taskId }
+          : {}),
+      });
+      if (String(data.toolType ?? "") === "browser" || sessionUpdate === "browser_action") {
+        void refreshBrowser(false);
+      }
+      return;
+    }
+
+    const isPromptResponse = Boolean(result !== null || error !== undefined || data.completed === true);
+    if (isPromptResponse) {
+      const activeRun = conversationRunsRef.current[targetConversationId];
+      if (activeRun?.taskId) {
+        completedTaskIdsRef.current.add(activeRun.taskId);
+      }
+      setRunStateForConversation(targetConversationId, null);
+      const selected = selectedRef.current;
+      if (selected && isPersistedConversation(selected) && Number(selected.id) === targetConversationId) {
+        void loadOutbox(targetConversationId);
+      }
+    }
+    if (String(data.toolType ?? "") === "browser") {
       void refreshBrowser(false);
     }
   }
-
   const connectionStatus = useRealtime(authenticated, handleRealtimeEvent);
 
   function selectMobileSection(section: MobileSection) {
@@ -659,6 +869,245 @@ export default function App() {
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
   }, [workspaceDirty]);
+  // 记录最近一次排队意图与其稳定 UUID，网络不明失败后重试保持同意图 UUID，不自动 retry
+  const pendingEnqueueIntentRef = useRef<{
+    text: string;
+    attachmentSig: string;
+    id: string;
+  } | null>(null);
+
+  async function enqueueOutboxMessage(text: string, attachments: Attachment[]): Promise<boolean> {
+    const conversation = selectedRef.current;
+    if (!conversation || !isPersistedConversation(conversation)) {
+      setOutboxError("当前会话尚未创建，无法排队发送。");
+      return false;
+    }
+    const attachmentSig = attachments.map((a) => `${a.fileName}:${a.size}`).sort().join(",");
+    let id: string;
+    if (
+      pendingEnqueueIntentRef.current &&
+      pendingEnqueueIntentRef.current.text === text.trim() &&
+      pendingEnqueueIntentRef.current.attachmentSig === attachmentSig
+    ) {
+      id = pendingEnqueueIntentRef.current.id;
+    } else {
+      id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `outbox-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      pendingEnqueueIntentRef.current = { text: text.trim(), attachmentSig, id };
+    }
+    const expectedRevision = outboxSnapshot?.revision;
+    const conversationMode = normalizeConversationMode(conversation.mode);
+
+    try {
+      setOutboxError(null);
+      // 先将携带 dataUrl 的附件导入为持久引用
+      const persistentAttachments = await importOutboxAttachments(conversation.id, attachments);
+      const snapshot = await mutateConversationOutbox(conversation.id, "enqueue", {
+        id,
+        expectedRevision,
+        payload: {
+          text,
+          attachments: persistentAttachments,
+          conversationMode,
+        },
+      });
+      // 成功投递后清空保留的意图 UUID 缓存
+      pendingEnqueueIntentRef.current = null;
+      if (selectedRef.current?.id === conversation.id) {
+        setOutboxSnapshot((current) => {
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+      showToast("已排队发送");
+      return true;
+    } catch (error) {
+      setOutboxError(formatOutboxError(error));
+      const snapshot = extractOutboxSnapshot(error);
+      if (snapshot) {
+        if (selectedRef.current?.id === conversation.id) {
+          setOutboxSnapshot((current) => {
+            if (current && snapshot.revision < current.revision) return current;
+            return snapshot;
+          });
+        }
+      } else {
+        void loadOutbox(conversation.id);
+      }
+      return false;
+    }
+  }
+
+  async function updateOutboxItem(
+    id: string,
+    text: string,
+    attachments: Attachment[],
+    expectedRevision?: number,
+    targetConversationId?: number,
+  ): Promise<boolean> {
+    const conversation = selectedRef.current;
+    if (!conversation || !isPersistedConversation(conversation)) return false;
+    if (targetConversationId !== undefined && targetConversationId !== conversation.id) {
+      setOutboxError("会话已切换，无法在此更新原会话的待发项。");
+      return false;
+    }
+    const conversationMode = normalizeConversationMode(conversation.mode);
+
+    try {
+      setOutboxError(null);
+      // 先将携带 dataUrl 的附件导入为持久引用
+      const persistentAttachments = await importOutboxAttachments(conversation.id, attachments);
+      const snapshot = await mutateConversationOutbox(conversation.id, "update", {
+        id,
+        expectedRevision, // 固定使用打开时的 revision，不拿最新 revision 覆盖旧编辑
+        payload: {
+          text,
+          attachments: persistentAttachments,
+          conversationMode,
+        },
+      });
+      if (selectedRef.current?.id === conversation.id) {
+        setOutboxSnapshot((current) => {
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+      showToast("待发项已更新");
+      return true;
+    } catch (error) {
+      setOutboxError(formatOutboxError(error));
+      const snapshot = extractOutboxSnapshot(error);
+      if (snapshot) {
+        if (selectedRef.current?.id === conversation.id) {
+          setOutboxSnapshot((current) => {
+            if (current && snapshot.revision < current.revision) return current;
+            return snapshot;
+          });
+        }
+      } else {
+        void loadOutbox(conversation.id);
+      }
+      return false;
+    }
+  }
+
+  async function removeOutboxItem(id: string): Promise<boolean> {
+    const conversation = selectedRef.current;
+    if (!conversation || !isPersistedConversation(conversation)) return false;
+    const expectedRevision = outboxSnapshot?.revision;
+
+    try {
+      setOutboxError(null);
+      const snapshot = await mutateConversationOutbox(conversation.id, "remove", {
+        id,
+        expectedRevision,
+      });
+      if (selectedRef.current?.id === conversation.id) {
+        setOutboxSnapshot((current) => {
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+      showToast("已从待发箱移除");
+      return true;
+    } catch (error) {
+      setOutboxError(formatOutboxError(error));
+      const snapshot = extractOutboxSnapshot(error);
+      if (snapshot) {
+        if (selectedRef.current?.id === conversation.id) {
+          setOutboxSnapshot((current) => {
+            if (current && snapshot.revision < current.revision) return current;
+            return snapshot;
+          });
+        }
+      } else {
+        void loadOutbox(conversation.id);
+      }
+      return false;
+    }
+  }
+
+  async function resumeOutboxItem(id: string): Promise<boolean> {
+    const conversation = selectedRef.current;
+    if (!conversation || !isPersistedConversation(conversation)) return false;
+    const expectedRevision = outboxSnapshot?.revision;
+
+    try {
+      setOutboxError(null);
+      const snapshot = await mutateConversationOutbox(conversation.id, "resume", {
+        id,
+        expectedRevision,
+      });
+      if (selectedRef.current?.id === conversation.id) {
+        setOutboxSnapshot((current) => {
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+      showToast("已恢复发送");
+      return true;
+    } catch (error) {
+      setOutboxError(formatOutboxError(error));
+      const snapshot = extractOutboxSnapshot(error);
+      if (snapshot) {
+        if (selectedRef.current?.id === conversation.id) {
+          setOutboxSnapshot((current) => {
+            if (current && snapshot.revision < current.revision) return current;
+            return snapshot;
+          });
+        }
+      } else {
+        void loadOutbox(conversation.id);
+      }
+      return false;
+    }
+  }
+
+  async function stopAndSendOutboxItem(id: string): Promise<boolean> {
+    const conversation = selectedRef.current;
+    if (!conversation || !isPersistedConversation(conversation)) return false;
+    const currentRun = conversationRunsRef.current[conversation.id];
+    const expectedTurnId = currentRun?.turnId?.trim();
+    const expectedSessionId = currentRun?.sessionId?.trim();
+    if (!expectedTurnId || !expectedSessionId) {
+      setOutboxError("当前任务尚未建立有效的会话与轮次标识，无法停止并发送。");
+      return false;
+    }
+    const expectedRevision = outboxSnapshot?.revision;
+
+    try {
+      setOutboxError(null);
+      const snapshot = await mutateConversationOutbox(conversation.id, "stop_and_send", {
+        id,
+        expectedRevision,
+        expectedSessionId,
+        expectedTurnId,
+      });
+      if (selectedRef.current?.id === conversation.id) {
+        setOutboxSnapshot((current) => {
+          if (current && snapshot.revision < current.revision) return current;
+          return snapshot;
+        });
+      }
+      showToast("已排队到首位，将在当前任务停止后发送");
+      return true;
+    } catch (error) {
+      setOutboxError(formatOutboxError(error));
+      const snapshot = extractOutboxSnapshot(error);
+      if (snapshot) {
+        if (selectedRef.current?.id === conversation.id) {
+          setOutboxSnapshot((current) => {
+            if (current && snapshot.revision < current.revision) return current;
+            return snapshot;
+          });
+        }
+      } else {
+        void loadOutbox(conversation.id);
+      }
+      return false;
+    }
+  }
 
   if (!authenticated) {
     return (
@@ -780,7 +1229,11 @@ export default function App() {
           globalError={globalError}
           sending={sending}
           activeTaskId={activeRenderTaskId ?? activeTaskId}
+          activeSessionId={activeSessionId}
+          activeTurnId={activeTurnId}
           clarifyTaskId={clarifyTaskId}
+          outboxSnapshot={outboxSnapshot}
+          outboxError={outboxError}
           onOpenConversations={() => setConversationsOpen(true)}
           onArchive={() => void updateArchiveState()}
           onDelete={() => void deleteConversation()}
@@ -788,6 +1241,13 @@ export default function App() {
           onCancel={() => void cancelRun()}
           onClearError={() => setGlobalError("")}
           onAttachmentError={showError}
+          onEnqueue={enqueueOutboxMessage}
+          onUpdateOutboxItem={updateOutboxItem}
+          onRemoveOutboxItem={removeOutboxItem}
+          onResumeOutboxItem={resumeOutboxItem}
+          onStopAndSendOutboxItem={stopAndSendOutboxItem}
+          onClearOutboxError={() => setOutboxError(null)}
+          skillRefreshRevision={skillRefreshRevision}
         />
         <ContextPane
           activePanel={contextPanel}
@@ -816,6 +1276,7 @@ export default function App() {
           onWorkspaceSave={() => void saveWorkspaceFile()}
           onBrowserAction={(payload) => void browserAction(payload)}
           onBrowserRefresh={() => void refreshBrowser()}
+          onOpenWorkspaceChanges={() => setWorkspaceChangesListOpen(true)}
         />
 
         <nav className="mobile-nav" aria-label="Web Chat 区域">
@@ -839,6 +1300,25 @@ export default function App() {
         />
       </div>
       {toast && <div className="toast" role="status">{toast}</div>}
+      {workspaceChangesListOpen && (
+        <WorkspaceChangeListModal
+          conversationId={selectedConversation?.id}
+          workspaceId={selectedConversation?.id ? `conversation_${selectedConversation.id}` : "conversation_default"}
+          onClose={() => setWorkspaceChangesListOpen(false)}
+          onSelectChange={(change) => {
+            setWorkspaceChangesListOpen(false);
+            setPreviewChangeId(change.changeId);
+          }}
+        />
+      )}
+      {previewChangeId && (
+        <WorkspaceChangeModal
+          changeId={previewChangeId}
+          conversationId={selectedConversation?.id}
+          workspaceId={selectedConversation?.id ? `conversation_${selectedConversation.id}` : "conversation_default"}
+          onClose={() => setPreviewChangeId(null)}
+        />
+      )}
     </>
   );
 }

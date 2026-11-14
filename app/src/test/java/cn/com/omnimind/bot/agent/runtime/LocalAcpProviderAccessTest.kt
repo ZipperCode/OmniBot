@@ -1,5 +1,8 @@
+@file:OptIn(com.agentclientprotocol.annotations.UnstableApi::class)
+
 package cn.com.omnimind.bot.agent.runtime
 
+import android.content.Context
 import com.rk.terminal.runtime.TerminalDistribution
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import cn.com.omnimind.baselib.llm.OpenAiWireApi
@@ -13,6 +16,21 @@ import com.agentclientprotocol.model.CloseSessionResponse
 import com.agentclientprotocol.model.SessionId
 import com.agentclientprotocol.transport.StdioTransport
 import kotlinx.coroutines.CompletableDeferred
+import cn.com.omnimind.baselib.database.AgentSessionBinding
+import cn.com.omnimind.bot.agent.computeSkillSuggestionCredentialDigest
+import com.agentclientprotocol.common.Event
+import com.agentclientprotocol.model.ContentBlock
+import com.agentclientprotocol.model.PromptResponse
+import com.agentclientprotocol.model.StopReason
+import com.agentclientprotocol.model.SessionConfigId
+import com.agentclientprotocol.model.SessionConfigOption
+import com.agentclientprotocol.model.SessionConfigOptionCategory
+import com.agentclientprotocol.model.SessionConfigSelectOption
+import com.agentclientprotocol.model.SessionConfigSelectOptions
+import com.agentclientprotocol.model.SessionConfigValueId
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
+import org.mockito.Mockito.any
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +52,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.mockito.MockedConstruction
+import org.mockito.Mockito.CALLS_REAL_METHODS
 import org.mockito.Mockito.doAnswer
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.mockConstruction
@@ -293,6 +312,111 @@ class LocalAcpProviderAccessTest {
         }
     }
 
+    @Test fun xiaowanPromptAdmissionCapturesSessionProviderProfileAndCredentialDigestWithoutBorrowingGlobal() = runBlocking {
+        val admissions = mutableListOf<PromptAdmissionRecord>()
+        val fixture = promptFixture(
+            agentId = AcpAgentProfileStore.XIAOWAN_AGENT_ID,
+            onAdmitted = { admissions += it },
+        )
+        try {
+            val xiaowanConnection = XiaowanAcpConnection(
+                context = fixture.context,
+                scope = fixture.scope,
+                scheduleToolBridge = mock(AgentScheduleToolBridge::class.java),
+            )
+            xiaowanConnection.createTransport(fixture.scope)
+
+            val agentSupportField = xiaowanConnection.javaClass.getDeclaredField("agentSupport").apply { isAccessible = true }
+            val agentSupport = agentSupportField.get(xiaowanConnection)
+            val activeSessionsField = agentSupport.javaClass.getDeclaredField("activeSessions").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val activeSessions = activeSessionsField.get(agentSupport) as ConcurrentHashMap<String, Any>
+
+            val sessionType = Class.forName("cn.com.omnimind.bot.agent.runtime.XiaowanAgentSession")
+            val session1 = mock(sessionType, CALLS_REAL_METHODS)
+            val session2 = mock(sessionType, CALLS_REAL_METHODS)
+            val providerProfileField = sessionType.getDeclaredField("providerProfile").apply { isAccessible = true }
+
+            val profileA = ModelProviderProfile("provider-a", "Provider A", apiKey = "key-a", baseUrl = "https://a.example.com/v1")
+            val profileB = ModelProviderProfile("provider-b", "Provider B", apiKey = "key-b", baseUrl = "https://b.example.com/v1")
+            providerProfileField.set(session1, profileA)
+            providerProfileField.set(session2, profileB)
+            activeSessions["session-1"] = session1
+            activeSessions["session-2"] = session2
+
+            fixture.runtime.setField("connection", xiaowanConnection)
+
+            val externalAccess = Access(mutableListOf())
+            fixture.runtime.setField("activePreparedLaunch", PreparedAcpLaunch(emptyMap(), externalAccess))
+
+            fixture.registerSession("session-1", conversationId = 101L, model = "model-a")
+            fixture.registerSession("session-2", conversationId = 102L, model = "model-b")
+
+            val res1 = fixture.prompt("session-1", conversationId = 101L, requestId = "req-1")
+            assertEquals("end_turn", res1["status"])
+
+            val admission1 = admissions.single { it.sessionId == "session-1" }
+            assertEquals("provider-a", admission1.providerProfileId)
+            assertEquals("model-a", admission1.modelId)
+            assertEquals(computeSkillSuggestionCredentialDigest(profileA), admission1.credentialDigest)
+            assertNotEquals(externalAccess.profile.id, admission1.providerProfileId)
+
+            val res2 = fixture.prompt("session-2", conversationId = 102L, requestId = "req-2")
+            assertEquals("end_turn", res2["status"])
+
+            val admission2 = admissions.single { it.sessionId == "session-2" }
+            assertEquals("provider-b", admission2.providerProfileId)
+            assertEquals("model-b", admission2.modelId)
+            assertEquals(computeSkillSuggestionCredentialDigest(profileB), admission2.credentialDigest)
+
+            assertNotEquals(admission1.providerProfileId, admission2.providerProfileId)
+            assertNotEquals(admission1.credentialDigest, admission2.credentialDigest)
+
+            xiaowanConnection.close()
+        } finally {
+            fixture.scope.cancel()
+        }
+    }
+
+    @Test fun externalAcpConnectionFallsBackToActiveProviderAccessGrant() = runBlocking {
+        val admissions = mutableListOf<PromptAdmissionRecord>()
+        val fixture = promptFixture(
+            agentId = "external-acp-agent",
+            onAdmitted = { admissions += it },
+        )
+        try {
+            val externalConnection = mock(AcpRuntimeConnection::class.java)
+            `when`(externalConnection.exitSignal).thenReturn(CompletableDeferred())
+            `when`(externalConnection.materializesPromptAttachments).thenReturn(true)
+            fixture.runtime.setField("connection", externalConnection)
+
+            val externalAccess = Access(mutableListOf())
+            fixture.runtime.setField("activePreparedLaunch", PreparedAcpLaunch(emptyMap(), externalAccess))
+
+            fixture.registerSession("session-ext", conversationId = 201L, model = "codex-5")
+
+            val res = fixture.prompt("session-ext", conversationId = 201L, requestId = "req-ext")
+            assertEquals("end_turn", res["status"])
+
+            val admission = admissions.single { it.sessionId == "session-ext" }
+            assertEquals(externalAccess.profile.id, admission.providerProfileId)
+            assertEquals("codex-5", admission.modelId)
+            assertEquals(computeSkillSuggestionCredentialDigest(externalAccess.profile), admission.credentialDigest)
+
+            fixture.runtime.setField("activePreparedLaunch", PreparedAcpLaunch(emptyMap()))
+            admissions.clear()
+            fixture.registerSession("session-ext-no-grant", conversationId = 202L, model = "codex-5")
+            val res2 = fixture.prompt("session-ext-no-grant", conversationId = 202L, requestId = "req-ext-2")
+            assertEquals("end_turn", res2["status"])
+
+            val admissionNoGrant = admissions.single { it.sessionId == "session-ext-no-grant" }
+            assertNull(admissionNoGrant.providerProfileId)
+            assertNull(admissionNoGrant.credentialDigest)
+        } finally {
+            fixture.scope.cancel()
+        }
+    }
+
     private fun fixture(
         profileOverride: AcpAgentProfile? = null,
         beforePrepare: ((AcpLaunchPreparation) -> Unit)? = null,
@@ -406,4 +530,120 @@ class LocalAcpProviderAccessTest {
         var closes = 0
         override fun close() { closes++; closedResources += "grant" }
     }
+
+    private fun promptFixture(
+        agentId: String,
+        onAdmitted: (PromptAdmissionRecord) -> Unit,
+    ): PromptFixture {
+        val context = acpProfileStoreTestContext(directory.newFolder())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val bindings = mock(AgentSessionBindingRepository::class.java)
+        val store = AcpAgentProfileStore(context)
+        val agentProfile = store.list().firstOrNull { it.id == agentId }
+            ?: AcpAgentProfile(id = agentId, name = agentId, command = "test")
+
+        val runtime = LocalAcpRuntime(
+            context = context,
+            scope = scope,
+            bindingRepository = bindings,
+            profileStore = store,
+            ownerAgentId = agentId,
+            currentDistribution = { TerminalDistribution.alpine },
+            prepareLaunchEnvironment = { _, _ -> PreparedAcpLaunch(emptyMap()) },
+            buildHandoffContext = { _, _ -> null },
+            scheduleToolBridge = mock(AgentScheduleToolBridge::class.java),
+            onMessage = {},
+            onPromptAdmitted = { sessionId, turnId, requestId, conversationId, userMessageId, providerProfileId, modelId, credentialDigest ->
+                onAdmitted(PromptAdmissionRecord(
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    requestId = requestId,
+                    conversationId = conversationId,
+                    userMessageId = userMessageId,
+                    providerProfileId = providerProfileId,
+                    modelId = modelId,
+                    credentialDigest = credentialDigest,
+                ))
+            },
+        ).also {
+            it.setField("workspaceManager", mock(AgentWorkspaceManager::class.java))
+            val info = mock(AgentInfo::class.java)
+            `when`(info.capabilities).thenReturn(xiaowanAgentCapabilities())
+            it.setField("agentInfo", info)
+            it.setField("activeProfile", agentProfile)
+        }
+        return PromptFixture(runtime, scope, store, bindings, context)
+    }
+
+    private data class PromptAdmissionRecord(
+        val sessionId: String,
+        val turnId: String,
+        val requestId: String?,
+        val conversationId: Long?,
+        val userMessageId: String?,
+        val providerProfileId: String?,
+        val modelId: String?,
+        val credentialDigest: String?,
+    )
+
+    private class PromptFixture(
+        val runtime: LocalAcpRuntime,
+        val scope: CoroutineScope,
+        val store: AcpAgentProfileStore,
+        val bindings: AgentSessionBindingRepository,
+        val context: Context,
+    ) {
+        suspend fun registerSession(sessionId: String, conversationId: Long, model: String) {
+            store.bindSession(sessionId, runtime.ownerAgentId)
+            val binding = AgentSessionBinding(conversationId, sessionId, "/workspace", 1, 1)
+            `when`(bindings.getBindingByConversationId(conversationId)).thenReturn(binding)
+            `when`(bindings.getBindingByThreadId(sessionId)).thenReturn(binding)
+            `when`(bindings.ensureBinding(
+                eqNonNull(sessionId),
+                anyNonNullString(),
+                any(),
+                anyNonNullString(),
+                any(),
+                any(),
+                anyNonNullString(),
+            )).thenReturn(conversationId)
+
+            val session = mock(ClientSession::class.java)
+            `when`(session.sessionId).thenReturn(SessionId(sessionId))
+            `when`(session.configOptionsSupported).thenReturn(true)
+            `when`(session.configOptions).thenReturn(MutableStateFlow(modelOptions(model)))
+            `when`(session.prompt(anyNonNullBlocks(), any())).thenReturn(flow {
+                emit(Event.PromptResponseEvent(PromptResponse(stopReason = StopReason.END_TURN)))
+            })
+            @Suppress("UNCHECKED_CAST")
+            (runtime.field("sessions") as ConcurrentHashMap<String, ClientSession>)[sessionId] = session
+        }
+
+        suspend fun prompt(sessionId: String, conversationId: Long, requestId: String): Map<*, *> =
+            runtime.handleMethod("session/prompt", mapOf(
+                "sessionId" to sessionId,
+                "conversationId" to conversationId,
+                "requestId" to requestId,
+                "text" to "hello",
+            )) as Map<*, *>
+    }
 }
+
+private fun LocalAcpRuntime.setField(name: String, value: Any?) {
+    javaClass.getDeclaredField(name).apply { isAccessible = true }.set(this, value)
+}
+
+private fun LocalAcpRuntime.field(name: String): Any? =
+    javaClass.getDeclaredField(name).apply { isAccessible = true }.get(this)
+
+private fun anyNonNullString(): String = org.mockito.Mockito.any() ?: ""
+
+private fun anyNonNullBlocks(): List<ContentBlock> = org.mockito.Mockito.any() ?: emptyList()
+
+private fun <T : Any> eqNonNull(value: T): T = org.mockito.Mockito.eq(value) ?: value
+
+private fun modelOptions(model: String): List<SessionConfigOption> = listOf(SessionConfigOption.Select(
+    id = SessionConfigId("model"), name = "Model", category = SessionConfigOptionCategory.MODEL,
+    currentValue = SessionConfigValueId(model),
+    options = SessionConfigSelectOptions.Flat(listOf(SessionConfigSelectOption(SessionConfigValueId(model), model))),
+))

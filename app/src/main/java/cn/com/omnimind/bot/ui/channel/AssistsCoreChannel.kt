@@ -60,6 +60,16 @@ class AssistsCoreChannel {
                 "agentSkillSyncOfficialRepository" -> {
                     assistsCoreManager!!.agentSkillSyncOfficialRepository(call, result)
                 }
+                "agentSkillSuggestionList", "agentSkillSuggestionSave",
+                "agentSkillSuggestionApprove", "agentSkillSuggestionReject",
+                "agentSkillSuggestionRegenerate", "agentSkillSuggestionsSetEnabled",
+                "agentSkillFeedback", "agentSkillRestoreRevision" -> {
+                    assistsCoreManager!!.agentSkillAssets(call, result)
+                }
+                "workspaceChangesList", "workspaceChangesListByWorkspace",
+                "workspaceChangePreview", "workspaceChangeRestore", "workspaceChangeDiscard" -> {
+                    assistsCoreManager!!.workspaceChanges(call, result)
+                }
                 "getModelProviderConfig" -> {
                     assistsCoreManager!!.getModelProviderConfig(call, result)
                 }
@@ -288,6 +298,15 @@ class AssistsCoreChannel {
                 }
                 "replaceConversationMessages" -> {
                     assistsCoreManager!!.replaceConversationMessages(call, result)
+                }
+                "conversationOutboxList" -> {
+                    assistsCoreManager!!.conversationOutboxList(call, result)
+                }
+                "conversationOutboxMutate" -> {
+                    assistsCoreManager!!.conversationOutboxMutate(call, result)
+                }
+                "conversationOutboxImportAttachments" -> {
+                    assistsCoreManager!!.conversationOutboxImportAttachments(call, result)
                 }
                 "upsertConversationUiCard" -> {
                     assistsCoreManager!!.upsertConversationUiCard(call, result)

@@ -6,6 +6,7 @@ import 'package:ui/widgets/flclash/liquid_glass.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
+import 'package:ui/features/home/pages/chat/widgets/agent_run_result_actions.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/history_payload_attachments.dart';
 import 'package:ui/models/chat_message_model.dart';
@@ -37,6 +38,11 @@ Future<void> showAgentRunDetailsSheet({
   required BuildContext context,
   required ValueListenable<AgentRunTimelineGroup> group,
   ValueChanged<ModalRoute<void>>? onRouteCreated,
+  String? currentDraft,
+  Future<bool> Function(String prompt)? onFillDraft,
+  String? conversationOwner,
+  bool isProcessing = false,
+  int? conversationId,
 }) {
   final navigator = Navigator.of(context, rootNavigator: true);
   final localizations = MaterialLocalizations.of(context);
@@ -54,7 +60,14 @@ Future<void> showAgentRunDetailsSheet({
       builder: (sheetContext) {
         final route = ModalRoute.of<void>(sheetContext);
         if (route != null) onRouteCreated?.call(route);
-        return AgentRunDetailsSheet(group: group);
+        return AgentRunDetailsSheet(
+          group: group,
+          currentDraft: currentDraft,
+          onFillDraft: onFillDraft,
+          conversationOwner: conversationOwner,
+          isProcessing: isProcessing,
+          conversationId: conversationId,
+        );
       },
     ),
   );
@@ -120,9 +133,22 @@ class _AgentRunDetailsRoute extends ModalBottomSheetRoute<void> {
 /// Sheet navigation is presentation state only. Selecting an item never
 /// changes the conversation, expands its rows or issues an ACP request.
 class AgentRunDetailsSheet extends StatefulWidget {
-  const AgentRunDetailsSheet({super.key, required this.group});
+  const AgentRunDetailsSheet({
+    super.key,
+    required this.group,
+    this.currentDraft,
+    this.onFillDraft,
+    this.conversationOwner,
+    this.isProcessing = false,
+    this.conversationId,
+  });
 
   final ValueListenable<AgentRunTimelineGroup> group;
+  final String? currentDraft;
+  final Future<bool> Function(String prompt)? onFillDraft;
+  final String? conversationOwner;
+  final bool isProcessing;
+  final int? conversationId;
 
   @override
   State<AgentRunDetailsSheet> createState() => _AgentRunDetailsSheetState();
@@ -309,6 +335,16 @@ class _AgentRunDetailsSheetState extends State<AgentRunDetailsSheet>
                           ],
                         ),
                       ),
+                      if (selected == null && !group.isRunning)
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(22, 0, 22, 8),
+                          child: AgentRunResultActionsBar(
+                            group: group,
+                            conversationId: widget.conversationId ??
+                                resolveGroupConversationId(group),
+                            conversationOwner: widget.conversationOwner,
+                          ),
+                        ),
                       Expanded(
                         child: selected == null
                             ? ListView.builder(
@@ -342,6 +378,10 @@ class _AgentRunDetailsSheetState extends State<AgentRunDetailsSheet>
                                 ),
                                 cardData: selected.cardData!,
                                 scrollController: scrollController,
+                                currentDraft: widget.currentDraft,
+                                onFillDraft: widget.onFillDraft,
+                                conversationOwner: widget.conversationOwner,
+                                isProcessing: widget.isProcessing,
                               )
                             : SingleChildScrollView(
                                 key: ValueKey(

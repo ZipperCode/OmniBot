@@ -8,6 +8,9 @@ import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_diff_viewer.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/terminal_output_utils.dart';
+import 'package:ui/features/home/pages/command_overlay/widgets/cards/workspace_change_preview_sheet.dart';
+import 'package:ui/features/home/pages/command_overlay/widgets/cards/phone_development_result_section.dart';
+import 'package:ui/features/home/pages/omnibot_workspace/omnibot_artifact_preview_page.dart';
 import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/services/chat_detail_sheet_preferences.dart';
 import 'package:ui/services/agent_diff_parser.dart';
@@ -53,6 +56,10 @@ class AgentToolDetailBody extends StatelessWidget {
     this.showCopyButton = true,
     this.showActions = true,
     this.padding = const EdgeInsets.fromLTRB(22, 4, 22, 24),
+    this.currentDraft,
+    this.onFillDraft,
+    this.isProcessing = false,
+    this.conversationOwner,
   });
 
   final Map<String, dynamic> cardData;
@@ -60,6 +67,11 @@ class AgentToolDetailBody extends StatelessWidget {
   final bool showCopyButton;
   final bool showActions;
   final EdgeInsetsGeometry padding;
+  final String? currentDraft;
+  final Future<bool> Function(String prompt)? onFillDraft;
+  final bool isProcessing;
+  final String? conversationOwner;
+
 
   @override
   Widget build(BuildContext context) {
@@ -133,6 +145,15 @@ class AgentToolDetailBody extends StatelessWidget {
               summary: diffSummary!,
               padding: EdgeInsets.zero,
               scrollable: false,
+            )
+          else if (isPhoneDevelopmentTool(cardData))
+            PhoneDevelopmentResultSection(
+              cardData: cardData,
+              isReadOnly: !showActions,
+              currentDraft: currentDraft,
+              onFillDraft: onFillDraft,
+              isProcessing: isProcessing,
+              conversationOwner: conversationOwner,
             )
           else
             _AgentToolNeutralSurface(
@@ -1327,7 +1348,7 @@ class _AgentToolActionBar extends StatelessWidget {
           for (var index = 0; index < actions.length; index++)
             OutlinedButton(
               key: ValueKey('agent-tool-action-$index'),
-              onPressed: () => unawaited(_runAgentToolAction(actions[index])),
+              onPressed: () => unawaited(_runAgentToolAction(context, actions[index])),
               style: OutlinedButton.styleFrom(
                 foregroundColor: context.omniPalette.textPrimary,
                 side: BorderSide(color: context.omniPalette.borderStrong),
@@ -1349,7 +1370,10 @@ class _AgentToolActionBar extends StatelessWidget {
   }
 }
 
-Future<void> _runAgentToolAction(Map<String, dynamic> action) async {
+Future<void> _runAgentToolAction(
+  BuildContext context,
+  Map<String, dynamic> action,
+) async {
   final type = (action['type'] ?? '').toString().trim().toLowerCase();
   final target = (action['target'] ?? '').toString().trim();
   final rawPayload = action['payload'];
@@ -1377,6 +1401,23 @@ Future<void> _runAgentToolAction(Map<String, dynamic> action) async {
     );
     return;
   }
+  if (type == 'workspace_change') {
+    final changeId = (payload['changeId'] ?? '').toString().trim();
+    final rawConvId = payload['conversationId'];
+    final conversationId = rawConvId is int
+        ? rawConvId
+        : int.tryParse(rawConvId?.toString() ?? '');
+    final workspaceId = payload['workspaceId']?.toString();
+    if (changeId.isNotEmpty) {
+      await showWorkspaceChangePreviewSheet(
+        context: context,
+        changeId: changeId,
+        conversationId: conversationId,
+        workspaceId: workspaceId,
+      );
+    }
+    return;
+  }
   if (type == 'save' && path.isNotEmpty) {
     await OmnibotResourceService.saveToLocal(
       sourcePath: path,
@@ -1387,7 +1428,7 @@ Future<void> _runAgentToolAction(Map<String, dynamic> action) async {
     return;
   }
   if (path.isNotEmpty && (type == 'preview' || type == 'open')) {
-    await OmnibotResourceService.openFilePath(
+    final metadata = OmnibotResourceService.describePath(
       path,
       uri: target.isEmpty ? null : target,
       title: payload['title']?.toString(),
@@ -1395,13 +1436,41 @@ Future<void> _runAgentToolAction(Map<String, dynamic> action) async {
       mimeType: payload['mimeType']?.toString(),
       shellPath: shellPath.isEmpty ? null : shellPath,
     );
+    if (!metadata.exists && target.isEmpty) {
+      showToast(
+        LegacyTextLocalizer.isEnglish ? 'File is unavailable' : '文件已不可用',
+        type: ToastType.error,
+      );
+      return;
+    }
+    if (shouldOpenOmnibotArtifactInFullPage(metadata.previewKind)) {
+      await OmnibotResourceService.openFilePath(
+        metadata.path,
+        uri: metadata.uri,
+        title: metadata.title,
+        previewKind: metadata.previewKind,
+        mimeType: metadata.mimeType,
+        shellPath: metadata.shellPath,
+      );
+      return;
+    }
+    await showOmnibotArtifactPreviewSheet(context, metadata);
     return;
   }
-  if (target.isNotEmpty) {
-    if (!await OmnibotResourceService.handleLinkTap(target)) {
-      await OmnibotResourceService.openUri(target);
+  if (type == 'link' ||
+      type == 'url' ||
+      (type.isEmpty &&
+          (target.startsWith('http://') ||
+              target.startsWith('https://') ||
+              target.startsWith('omnibot://')))) {
+    if (target.isNotEmpty) {
+      if (!await OmnibotResourceService.handleLinkTap(target)) {
+        await OmnibotResourceService.openUri(target);
+      }
     }
+    return;
   }
+  // Unknown type is safely ignored; do NOT fall back to arbitrary URL navigation.
 }
 
 AgentDiffSummary? _resolveDiffSummary(Map<String, dynamic> cardData) {

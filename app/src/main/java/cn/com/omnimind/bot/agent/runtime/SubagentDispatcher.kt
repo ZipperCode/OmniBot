@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import cn.com.omnimind.bot.agent.runtime.SubagentResourceGate
 /**
  * Spawns and supervises real subagents.
  *
@@ -93,7 +94,7 @@ class SubagentDispatcher(
         }
     }
 
-    private data class ChildModelContext(
+    internal data class ChildModelContext(
         val model: String,
         val llmClient: AgentLlmClient,
         val toolImageContinuationPolicy: AgentToolImageContinuationPolicy,
@@ -235,26 +236,103 @@ class SubagentDispatcher(
             kind = "dispatch_started",
             summary = "正在分派 ${tasks.size} 个子任务（并发 $limit）"
         )
-        val semaphore = Semaphore(limit)
-        return supervisorScope {
-            specsWithProfiles.mapIndexed { index, (spec, profile) ->
-                val modelContext = checkNotNull(modelContextsByProfileId[profile.id])
-                async {
-                    semaphore.withPermit {
-                        runSingleSubagent(
-                            parentEnv = parentEnv,
-                            taskIndex = index,
-                            spec = spec,
-                            profile = profile,
-                            parentToolCallId = parentToolCallId,
-                            modelContext = modelContext,
-                            progressReporter = progressReporter,
-                            progressSequence = progressSequence
-                        )
-                    }
-                }
-            }.awaitAll().sortedBy { it.taskIndex }
+        val canonicalWorkspace = SubagentResourceGate.canonicalizeRoot(parentEnv.workspaceDescriptor?.androidRootPath)
+
+        val taskUnits = specsWithProfiles.mapIndexed { index, (spec, profile) ->
+            val modelContext = checkNotNull(modelContextsByProfileId[profile.id])
+            val catalog = inheritedSubagentCatalog(parentCatalogProvider(), profile)
+            val isReadOnly = isReadOnlyCatalog(catalog)
+            TaskExecutionUnit(
+                index = index,
+                spec = spec,
+                profile = profile,
+                isReadOnly = isReadOnly,
+                modelContext = modelContext
+            )
         }
+
+        // 按租约类型形成 FIFO 批次：连续只读任务合并为并发批次，排他写任务独占单任务批次
+        val batches = mutableListOf<List<TaskExecutionUnit>>()
+        var currentReadBatch = mutableListOf<TaskExecutionUnit>()
+        for (unit in taskUnits) {
+            if (unit.isReadOnly) {
+                currentReadBatch.add(unit)
+            } else {
+                if (currentReadBatch.isNotEmpty()) {
+                    batches.add(currentReadBatch)
+                    currentReadBatch = mutableListOf()
+                }
+                batches.add(listOf(unit))
+            }
+        }
+        if (currentReadBatch.isNotEmpty()) {
+            batches.add(currentReadBatch)
+        }
+
+        val semaphore = Semaphore(limit)
+        val allResults = mutableListOf<SubagentRunResult>()
+
+        for (batch in batches) {
+            val batchResults = supervisorScope {
+                batch.map { unit ->
+                    async {
+                        // 1. 先取得跨步骤工作区读/写租约
+                        val lease = if (unit.isReadOnly) {
+                            SubagentResourceGate.acquireShared(
+                                canonicalRoot = canonicalWorkspace,
+                                ownerId = parentEnv.agentRunId,
+                                onWaiting = {
+                                    emitProgress(
+                                        progressReporter,
+                                        progressSequence,
+                                        kind = "subagent_progress",
+                                        summary = "等待共享资源",
+                                        taskIndex = unit.index,
+                                        profileId = unit.profile.id
+                                    )
+                                }
+                            )
+                        } else {
+                            SubagentResourceGate.acquireExclusive(
+                                canonicalRoot = canonicalWorkspace,
+                                ownerId = parentEnv.agentRunId,
+                                onWaiting = {
+                                    emitProgress(
+                                        progressReporter,
+                                        progressSequence,
+                                        kind = "subagent_progress",
+                                        summary = "等待共享资源",
+                                        taskIndex = unit.index,
+                                        profileId = unit.profile.id
+                                    )
+                                }
+                            )
+                        }
+
+                        // 2. 租约覆盖 runSingleSubagent 整个生命周期至 finally；先租 workspace 再占模型 semaphore
+                        try {
+                            semaphore.withPermit {
+                                runSingleSubagent(
+                                    parentEnv = parentEnv,
+                                    taskIndex = unit.index,
+                                    spec = unit.spec,
+                                    profile = unit.profile,
+                                    parentToolCallId = parentToolCallId,
+                                    modelContext = unit.modelContext,
+                                    progressReporter = progressReporter,
+                                    progressSequence = progressSequence
+                                )
+                            }
+                        } finally {
+                            lease.release()
+                        }
+                    }
+                }.awaitAll()
+            }
+            allResults.addAll(batchResults)
+        }
+
+        return allResults.sortedBy { it.taskIndex }
     }
 
     private suspend fun runSingleSubagent(
@@ -485,7 +563,13 @@ class SubagentDispatcher(
             )
         )
     }
-
+    private data class TaskExecutionUnit(
+        val index: Int,
+        val spec: SubagentTaskSpec,
+        val profile: SubagentProfile,
+        val isReadOnly: Boolean,
+        val modelContext: ChildModelContext
+    )
 }
 
 /** Role permissions narrow the parent catalog; they never add capabilities or execution budgets. */
@@ -493,6 +577,23 @@ internal fun inheritedSubagentCatalog(
     parent: AgentToolCatalog,
     profile: SubagentProfile = SubagentProfileRegistry.general,
 ): AgentToolCatalog = SubagentToolCatalogView(parent, profile)
+
+
+internal fun isReadOnlyCatalog(catalog: AgentToolCatalog): Boolean {
+    val tools = catalog.toolsForModel
+    if (tools.isEmpty()) return true
+    return tools.all { tool ->
+        tool.function.name in READ_ONLY_TOOL_NAMES
+    }
+}
+
+internal val READ_ONLY_TOOL_NAMES = setOf(
+    "file_read", "file_list", "file_search", "file_stat",
+    "read", "glob", "grep",
+    "memory_search", "memory_load",
+    "skills_list", "skills_read",
+    "context_apps_query", "context_time_now"
+)
 
 /**
  * Callback that swallows subagent streaming output (we don't want subagent

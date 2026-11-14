@@ -1,0 +1,3 @@
+{
+  "prompt": "Use file_write to create clean-restore-{{MARKER}}.txt in workspace with content CLEAN_RESTORE_{{MARKER}}."
+}

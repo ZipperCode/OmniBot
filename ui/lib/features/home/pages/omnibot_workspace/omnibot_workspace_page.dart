@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:ui/features/home/pages/omnibot_workspace/workspace_changes_management_page.dart';
+import 'package:ui/l10n/legacy_text_localizer.dart';
 import 'package:ui/core/router/go_router_manager.dart';
 import 'package:ui/features/home/pages/omnibot_workspace/widgets/omnibot_workspace_browser.dart';
+import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/services/app_background_service.dart';
 import 'package:ui/theme/theme_context.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
@@ -38,7 +42,20 @@ class _OmnibotWorkspacePageState extends State<OmnibotWorkspacePage> {
     }
   }
 
+  String? _resolveWorkspaceId() {
+    final rawId = widget.workspaceId?.trim();
+    if (rawId != null && rawId.isNotEmpty) {
+      if (rawId == 'unknown') return null;
+      return rawId;
+    }
+    if (widget.workspacePath.isEmpty ||
+        widget.workspacePath == OmnibotResourceService.rootPath) {
+      return 'conversation_default';
+    }
+    return null;
+  }
   @override
+
   Widget build(BuildContext context) {
     return ValueListenableBuilder<AppBackgroundConfig>(
       valueListenable: AppBackgroundService.notifier,
@@ -74,6 +91,32 @@ class _OmnibotWorkspacePageState extends State<OmnibotWorkspacePage> {
                         opacity: 0.68,
                       ),
                       onBackPressed: _handleBackPressed,
+                      actions: [
+                        Builder(
+                          builder: (context) {
+                            final effectiveId = _resolveWorkspaceId();
+                            return IconButton(
+                              key: const ValueKey('workspace-changes-history-button'),
+                              icon: const Icon(LucideIcons.history, size: 20),
+                              tooltip: LegacyTextLocalizer.isEnglish
+                                  ? 'Change history'
+                                  : '变更记录',
+                              onPressed: effectiveId == null
+                                  ? null
+                                  : () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute<void>(
+                                          builder: (_) => WorkspaceChangesManagementPage(
+                                            workspaceId: effectiveId,
+                                            workspacePath: widget.workspacePath,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                            );
+                          },
+                        ),
+                      ],
                     ),
                     body: OmniContentWidth(
                       key: const ValueKey('workspace-browser-column'),

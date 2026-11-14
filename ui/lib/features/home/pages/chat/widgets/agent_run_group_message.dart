@@ -4,6 +4,7 @@ import 'package:ui/features/home/pages/chat/tool_activity_utils.dart';
 import 'package:ui/features/home/pages/chat/utils/agent_run_timeline.dart';
 import 'package:ui/features/home/pages/chat/widgets/agent_run_details_sheet.dart';
 import 'package:ui/features/home/pages/chat/widgets/agent_run_header.dart';
+import 'package:ui/features/home/pages/chat/widgets/agent_run_result_actions.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/card_widget_factory.dart'
     show OnBeforeTaskExecute, OnRequestAuthorize;
@@ -29,6 +30,11 @@ class AgentRunGroupMessage extends StatefulWidget {
     this.onStreamingTextLayoutChanged,
     this.visualProfile = AppBackgroundVisualProfile.defaultProfile,
     this.appearanceConfig = AppBackgroundConfig.defaults,
+    this.currentDraft,
+    this.onFillDraft,
+    this.conversationOwner,
+    this.isProcessing = false,
+    this.conversationId,
   });
 
   final AgentRunTimelineGroup group;
@@ -42,6 +48,11 @@ class AgentRunGroupMessage extends StatefulWidget {
   final VoidCallback? onStreamingTextLayoutChanged;
   final AppBackgroundVisualProfile visualProfile;
   final AppBackgroundConfig appearanceConfig;
+  final String? currentDraft;
+  final Future<bool> Function(String prompt)? onFillDraft;
+  final String? conversationOwner;
+  final bool isProcessing;
+  final int? conversationId;
 
   @override
   State<AgentRunGroupMessage> createState() => _AgentRunGroupMessageState();
@@ -155,6 +166,11 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
       await showAgentRunDetailsSheet(
         context: context,
         group: group,
+        currentDraft: widget.currentDraft,
+        onFillDraft: widget.onFillDraft,
+        conversationOwner: widget.conversationOwner,
+        isProcessing: widget.isProcessing,
+        conversationId: widget.conversationId,
         onRouteCreated: (route) {
           if (!mounted ||
               widget.group.taskId != group.value.taskId ||
@@ -268,6 +284,14 @@ class _AgentRunGroupMessageState extends State<AgentRunGroupMessage>
             _buildAnimatedHistoricalTextSection(segment.message)
           else
             _buildVisibleMessageBubble(segment.message),
+        if (!widget.group.isRunning)
+          AgentRunResultActionsBar(
+            group: widget.group,
+            conversationId: widget.conversationId ??
+                resolveGroupConversationId(widget.group) ??
+                int.tryParse(widget.conversationOwner ?? ''),
+            conversationOwner: widget.conversationOwner,
+          ),
       ],
     );
   }

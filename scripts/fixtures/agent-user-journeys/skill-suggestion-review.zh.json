@@ -1,0 +1,147 @@
+{
+  "name": "小万合格任务后台技能建议提炼、审核编辑、试用与独立使用后反馈",
+  "preconditions": "中文聊天页，空闲小万会话，空输入框。真实模型 Provider 已配置就绪，且已开启自动技能建议。",
+  "requireClockSync": true,
+  "requireProvider": true,
+  "steps": [
+    {
+      "action": "precondition",
+      "check": "provider-configured"
+    },
+    {
+      "action": "send",
+      "marker": "OOB_SKILL_ELIGIBLE",
+      "scenario": "oob-skill-eligible-task.json"
+    },
+    {
+      "action": "reply",
+      "text": "OOB_SKILL_ELIGIBLE_DONE",
+      "timeoutMs": 180000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_SKILL_ELIGIBLE",
+      "expected": "done"
+    },
+    {
+      "action": "expect",
+      "containsText": "技能建议待审核",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "tap",
+      "label": "技能建议待审核"
+    },
+    {
+      "action": "expect",
+      "containsText": "技能建议审核",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "set-input",
+      "label": "技能标识 (kebab-case)",
+      "text": "oob-candidate-helper-skill-{{RUN_ID}}"
+    },
+    {
+      "action": "set-input",
+      "label": "技能 Markdown 定义 (SKILL.md)",
+      "text": "# Workspace verifier. Use file_list to inspect workspace files and file_read to verify only candidate-verify-OOB_SKILL_ELIGIBLE.txt. Never modify existing user files."
+    },
+    {
+      "action": "tap",
+      "label": "保存并试用"
+    },
+    {
+      "action": "expect",
+      "text": "保存并启用试用",
+      "timeoutMs": 10000
+    },
+    {
+      "action": "tap",
+      "label": "确认试用"
+    },
+    {
+      "action": "expect",
+      "text": "发送",
+      "timeoutMs": 20000
+    },
+    {
+      "action": "send",
+      "marker": "OOB_SKILL_USE",
+      "scenario": "oob-skill-use-task.json"
+    },
+    {
+      "action": "reply",
+      "text": "OOB_SKILL_USE_DONE",
+      "timeoutMs": 180000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_SKILL_USE",
+      "expected": "done"
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "tap",
+      "label": "显示菜单"
+    },
+    {
+      "action": "tap",
+      "label": "技能仓库"
+    },
+    {
+      "action": "set-input",
+      "hint": "搜索技能名称或描述",
+      "text": "oob-candidate-helper-skill-{{RUN_ID}}"
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "expect",
+      "text": "试用反馈",
+      "timeoutMs": 20000
+    },
+    {
+      "action": "tap",
+      "label": "试用反馈"
+    },
+    {
+      "action": "expect",
+      "text": "有效，保留",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "tap",
+      "label": "有效，保留"
+    },
+    {
+      "action": "expect",
+      "text": "确认保留此技能",
+      "timeoutMs": 10000
+    },
+    {
+      "action": "tap",
+      "label": "确认有效并保留"
+    },
+    {
+      "action": "expect",
+      "containsText": "自动技能建议",
+      "timeoutMs": 20000
+    },
+    {
+      "action": "tap",
+      "label": "自动技能建议"
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "expect",
+      "text": "新对话",
+      "timeoutMs": 15000
+    }
+  ]
+}

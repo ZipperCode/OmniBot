@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:path/path.dart' as p;
 import 'package:ui/services/omnibot_resource_service.dart';
 import 'package:ui/services/workspace_mount_service.dart';
 import 'package:ui/theme/app_colors.dart';
@@ -411,22 +412,20 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
       ),
     ];
 
-    if (targetPath == _normalizePath(_rootDirectory.path) && !isFile) {
+    if (p.equals(targetPath, _rootDirectory.path) && !isFile) {
       return segments;
     }
 
-    final relative = targetPath.substring(
-      _normalizePath(_rootDirectory.path).length,
-    );
-    final parts = relative
-        .split('/')
-        .where((segment) => segment.trim().isNotEmpty)
+    final relative = p.relative(targetPath, from: _rootDirectory.path);
+    final parts = p
+        .split(relative)
+        .where((segment) => segment.trim().isNotEmpty && segment != '.')
         .toList(growable: false);
-    var runningPath = _normalizePath(_rootDirectory.path);
+    var runningPath = _rootDirectory.path;
     for (var index = 0; index < parts.length; index++) {
       final part = parts[index];
-      runningPath = '$runningPath/$part';
-      final isCurrent = runningPath == targetPath;
+      runningPath = p.join(runningPath, part);
+      final isCurrent = p.equals(runningPath, targetPath);
       segments.add(
         _WorkspaceBreadcrumbSegment(
           label: part,
@@ -982,7 +981,7 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     bool roundTop = true,
     bool roundBottom = true,
   }) {
-    final name = entry.path.split('/').last;
+    final name = p.basename(entry.path);
     final mountEntry = _workspaceMountEntryFor(entry);
     final isWorkspaceMountEntry = mountEntry != null;
     final isDirectory = _isDirectoryLikeEntry(entry);
@@ -1718,19 +1717,12 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
   }
 
   bool _isInsideWorkspace(String path) {
-    final normalizedPath = _normalizePath(path);
-    final normalizedRoot = _normalizePath(_rootDirectory.path);
-    return normalizedPath == normalizedRoot ||
-        normalizedPath.startsWith('$normalizedRoot/');
+    return p.equals(path, _rootDirectory.path) ||
+        p.isWithin(_rootDirectory.path, path);
   }
 
   String _entryNameFromPath(String path) {
-    final normalizedPath = _normalizePath(path);
-    final slashIndex = normalizedPath.lastIndexOf('/');
-    if (slashIndex < 0 || slashIndex == normalizedPath.length - 1) {
-      return normalizedPath;
-    }
-    return normalizedPath.substring(slashIndex + 1);
+    return p.basename(path);
   }
 
   Widget _buildExpandedChildren({
@@ -1876,7 +1868,7 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     if (_isDirectoryLikeEntry(entry)) {
       return isExpanded ? _folderOpenIconAsset : _folderIconAsset;
     }
-    final fileName = entry.path.split('/').last.toLowerCase();
+    final fileName = p.basename(entry.path).toLowerCase();
     final dotIndex = fileName.lastIndexOf('.');
     final extension = dotIndex >= 0 ? fileName.substring(dotIndex) : '';
     if (_audioExtensions.contains(extension)) {
@@ -1892,9 +1884,9 @@ class OmnibotWorkspaceBrowserState extends State<OmnibotWorkspaceBrowser> {
     final baseAndroid = widget.workspacePath;
     final baseShell = widget.workspaceShellPath;
     if (baseShell == null || baseShell.isEmpty) return null;
-    if (_directory.path == baseAndroid) return baseShell;
-    if (_directory.path.startsWith('$baseAndroid/')) {
-      final suffix = _directory.path.substring(baseAndroid.length + 1);
+    if (p.equals(_directory.path, baseAndroid)) return baseShell;
+    if (p.isWithin(baseAndroid, _directory.path)) {
+      final suffix = p.relative(_directory.path, from: baseAndroid).replaceAll('\\', '/');
       return '$baseShell/$suffix';
     }
     return OmnibotResourceService.shellPathForAndroidPath(_directory.path) ??

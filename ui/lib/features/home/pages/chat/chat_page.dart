@@ -1,4 +1,5 @@
 import 'widgets/acp_config_button.dart';
+import 'widgets/chat_compact_input_wrapper.dart';
 // ignore_for_file: unused_element, unused_element_parameter
 
 import 'dart:async';
@@ -21,6 +22,7 @@ import '../../../../models/conversation_model.dart';
 import '../../../../models/conversation_thread_target.dart';
 import '../../../../models/chat_link_preview.dart';
 import '../../../../models/chat_message_model.dart';
+import '../../../../models/conversation_outbox.dart';
 import '../../../../services/agent_stream_meta.dart';
 import '../../../../services/agent_identity.dart';
 import '../../../../services/assists_core_service.dart';
@@ -88,12 +90,14 @@ import 'widgets/context_threshold_sheet.dart';
 import 'widgets/chat_keyboard_layout.dart';
 import 'widgets/chat_pane_resize_handle.dart';
 import 'widgets/chat_message_viewport.dart';
-import 'widgets/chat_browser_overlay.dart';
 import 'widgets/chat_history_loading_transition.dart';
+import 'widgets/agent_browser_overlay_permission_sheet.dart';
 import 'widgets/chat_message_anchor_bar.dart';
 import 'widgets/chat_tool_activity_strip.dart';
 import 'widgets/chat_spotlight_tour.dart';
 import 'widgets/new_conversation_mode_selector.dart';
+import 'services/chat_conversation_outbox_service.dart';
+import 'widgets/chat_outbox_pending_bar.dart';
 
 import 'package:ui/widgets/app_update_dialog.dart';
 import 'package:ui/widgets/app_background_widgets.dart';
@@ -169,7 +173,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   final GlobalKey<HomeDrawerState> _embeddedDrawerKey =
       GlobalKey<HomeDrawerState>();
   final GlobalKey _embeddedDrawerSearchFieldKey = GlobalKey();
-  final GlobalKey _browserOverlayKey = GlobalKey();
   final GlobalKey _slashCommandStripKey = GlobalKey();
   final GlobalKey _firstUseTourMenuAnchorKey = GlobalKey();
   final GlobalKey _firstUseTourActionsAnchorKey = GlobalKey();
@@ -213,6 +216,7 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   // in flight until its ACP turn completes, but that must not block sending
   // from another conversation that the user opens in the meantime.
   final Set<int> _sendMessageInFlightTargetIds = <int>{};
+  final Set<int> _enqueueInFlightTargetIds = <int>{};
   final HarnessSwitchSendBarrier _harnessSwitchSendBarrier =
       HarnessSwitchSendBarrier();
   final Set<String> _consumedInitialMessageRequests = <String>{};
@@ -318,11 +322,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   // F05 原则：默认按任务授权 (defaultMode)；仅在用户手动开启全权模式时切换为 fullAccess
   AgentPermissionMode _agentPermissionMode = AgentPermissionMode.defaultMode;
   ChatBrowserSessionSnapshot? _liveBrowserSessionSnapshot;
-  bool _isBrowserOverlayVisible = false;
-  bool _isBrowserOverlayInitialized = false;
-  Offset _browserOverlayOffset = Offset.zero;
-  Size _browserOverlaySize = const Size(360, 420);
-  int _browserOverlayViewSeed = 0;
   String? _lastObservedBrowserSnapshotSignature;
   int _surfaceSwitchRequestId = 0;
   bool _isSurfacePageScrolling = false;
@@ -343,6 +342,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   _hdPadRemoteWorkspaceBrowserKey =
       GlobalKey<CodexRemoteWorkspaceBrowserState>();
 
+  late final ChatConversationOutboxService _outboxService =
+      ChatConversationOutboxService();
   ChatPageMode get _activeMode => _activeConversationMode;
 
   bool get _isFirstUseTourActive =>
@@ -1066,8 +1067,10 @@ abstract class _ChatPageStateBase extends State<ChatPage>
 
   int? get _currentConversationId =>
       _modeState(_activeMode).currentConversationId;
-  set _currentConversationId(int? value) =>
-      _modeState(_activeMode).currentConversationId = value;
+  set _currentConversationId(int? value) {
+    _modeState(_activeMode).currentConversationId = value;
+    _outboxService.bindConversation(value);
+  }
   ConversationModel? get _currentConversation =>
       _activeRuntime?.conversation ??
       _modeState(_activeMode).currentConversation;
@@ -1771,8 +1774,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
       _showModelMentionPanel = false;
       _activeModelMentionToken = null;
       _liveBrowserSessionSnapshot = null;
-      _isBrowserOverlayVisible = false;
-      _isBrowserOverlayInitialized = false;
       _lastObservedBrowserSnapshotSignature = null;
     }
   }
@@ -1996,20 +1997,6 @@ abstract class _ChatPageStateBase extends State<ChatPage>
 
   Future<void> _handleBrowserToolTap();
 
-  void _hideBrowserOverlay();
-
-  void _ensureBrowserOverlayGeometry(BoxConstraints constraints);
-
-  void _moveBrowserOverlay(Offset delta, BoxConstraints constraints);
-
-  void _resizeBrowserOverlayFromLeft(Offset delta, BoxConstraints constraints);
-
-  void _resizeBrowserOverlayFromRight(Offset delta, BoxConstraints constraints);
-
-  Rect _browserOverlayBounds(BoxConstraints constraints);
-
-  Widget _buildBrowserOverlay(BoxConstraints constraints);
-
   void _handleSlashCommandInput();
 
   bool get _supportsManualContextCompaction;
@@ -2075,12 +2062,8 @@ abstract class _ChatPageStateBase extends State<ChatPage>
   Future<void> _pickAttachments({FileType type = FileType.any});
 
   void _removePendingAttachment(String id);
-  bool get _isFullAccessDraftSelected;
-
 
   String _fileNameFromPath(String path);
-  String? _readAgentPreference(String kind, {int? conversationId});
-
 
   bool _isImageFilePath(String path, {String? mimeType});
 
@@ -2100,7 +2083,11 @@ abstract class _ChatPageStateBase extends State<ChatPage>
 
   String get _newConversationModeId;
 
+  bool get _isFullAccessDraftSelected;
+
   Future<void> _selectNewConversationMode(String modeId);
+
+  String? _readAgentPreference(String kind, {int? conversationId});
 
   Future<void> _retryUserMessageText(
     String text, {

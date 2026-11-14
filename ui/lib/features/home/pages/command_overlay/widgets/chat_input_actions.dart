@@ -192,6 +192,11 @@ extension _ChatInputActionSupport on _ChatInputAreaStateBase {
         iconKey = 'pause';
         onPressed = widget.onCancelTask;
         break;
+      case ChatComposerPrimaryAction.queue:
+        icon = _queueSvg;
+        iconKey = 'queue';
+        onPressed = widget.onSendMessage;
+        break;
       case ChatComposerPrimaryAction.send:
         icon = _sendSvg;
         iconKey = 'send';

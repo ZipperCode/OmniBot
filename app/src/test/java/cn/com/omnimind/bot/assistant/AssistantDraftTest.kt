@@ -443,10 +443,10 @@ class AssistantDraftTest {
         assertNull("关闭后 screenshotBitmap 必须清空", session.screenshotBitmap)
         assertNull("关闭后 screenshotPngBytes 必须为 null", session.screenshotPngBytes)
 
-        // 驱动主线程 Looper 等待后台压缩完成及 invokeOnCompletion 回调执行
+        // 驱动主线程 Looper 等待后台压缩完成及源 Bitmap 安全 recycle 释放
         val waitDeadline = System.currentTimeMillis() + 4000L
         val compressionJobField = OmniVoiceSession::class.java.getDeclaredField("compressionJob").apply { isAccessible = true }
-        while ((compressionJobField.get(session) as? Job)?.isCompleted != true && System.currentTimeMillis() < waitDeadline) {
+        while ((!bitmap.isRecycled || (compressionJobField.get(session) as? Job)?.isCompleted != true) && System.currentTimeMillis() < waitDeadline) {
             shadowOf(Looper.getMainLooper()).idle()
             LockSupport.parkNanos(10_000_000L)
         }
@@ -454,6 +454,8 @@ class AssistantDraftTest {
 
         // 验证：即使后台 compress 完成，已关闭的 session 绝不能复活 screenshotPngBytes
         assertNull("闭合 session 绝不能被后台压缩任务写回 screenshotPngBytes 复活数据", session.screenshotPngBytes)
+        // 验证：后台压缩任务必须已处于完成态
+        assertTrue("后台压缩任务必须已处于完成态", (compressionJobField.get(session) as? Job)?.isCompleted == true)
         // 验证：bitmap 必须在任务完成后被安全 recycle
         assertTrue("源 Bitmap 必须在压缩任务完成后被安全 recycle 释放", bitmap.isRecycled)
     }

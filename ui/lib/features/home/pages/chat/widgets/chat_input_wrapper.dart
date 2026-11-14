@@ -26,6 +26,7 @@ class ChatInputWrapper extends StatelessWidget {
   final ValueChanged<String>? onRemoveAttachment;
   final VoidCallback? onTriggerSlashCommand;
   final Widget? topBanner;
+  final Widget? outboxPendingBar;
   final String? selectedModelOverrideId;
   final VoidCallback? onClearSelectedModelOverride;
   final double? contextUsageRatio;
@@ -43,6 +44,7 @@ class ChatInputWrapper extends StatelessWidget {
   onAgentPermissionModeChanged;
   final bool useIndependentSendButton;
   final bool translucent;
+  final bool showAttachments;
 
   const ChatInputWrapper({
     super.key,
@@ -70,6 +72,7 @@ class ChatInputWrapper extends StatelessWidget {
     this.onRemoveAttachment,
     this.onTriggerSlashCommand,
     this.topBanner,
+    this.outboxPendingBar,
     this.selectedModelOverrideId,
     this.onClearSelectedModelOverride,
     this.contextUsageRatio,
@@ -86,6 +89,7 @@ class ChatInputWrapper extends StatelessWidget {
     this.onAgentPermissionModeChanged,
     this.useIndependentSendButton = true,
     this.translucent = false,
+    this.showAttachments = true,
   });
 
   @override
@@ -107,6 +111,7 @@ class ChatInputWrapper extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (topBanner != null) ...[topBanner!, const SizedBox(height: 8)],
+          if (outboxPendingBar != null) ...[outboxPendingBar!],
           ChatInputArea(
             key: inputAreaKey,
             controller: controller,
@@ -147,6 +152,7 @@ class ChatInputWrapper extends StatelessWidget {
             onAgentPermissionModeChanged: onAgentPermissionModeChanged,
             onInputHeightChanged: onInputHeightChanged,
             useIndependentSendButton: useIndependentSendButton,
+            showAttachments: showAttachments,
           ),
         ],
       ),

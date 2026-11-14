@@ -89,14 +89,26 @@ internal object XposedManagementHandler {
 
         if (cli != null) {
             // 优先复用 Vector CLI 的 JSON 输出读取，无需依赖外部 sqlite3
-            val cliRes = execution.run(cli, "modules", "ls")
-            if (cliRes.success) {
+            val cliRes = execution.run(cli, "--json", "modules", "ls")
+            val parsedModules = if (cliRes.success) XposedStatusParser.parseModulesLs(cliRes.stdout) else null
+            if (parsedModules != null) {
+                val modulesArray = buildJsonArray {
+                    for (mod in parsedModules) {
+                        add(buildJsonObject {
+                            put("packageName", mod.packageName)
+                            put("enabled", mod.enabled)
+                            put("status", mod.status)
+                        })
+                    }
+                }
                 return execution.success(
                     message = "LSPosed modules listed via Vector CLI.",
                     observation = buildJsonObject {
                         put("managedVia", "vector_cli")
-                        put("rawOutput", cliRes.stdout.trim())
+                        put("count", parsedModules.size)
+                        put("modules", modulesArray)
                     },
+                    data = mapOf("count" to parsedModules.size.toString()),
                     stdout = cliRes.stdout,
                 )
             }
@@ -171,10 +183,10 @@ internal object XposedManagementHandler {
         val accepted = cliRes.success && !cliRes.stdout.contains("\"Failed\": [\"$modulePkgName\"", ignoreCase = true) &&
                 !cliRes.stdout.contains("\"Failed\":[\"$modulePkgName\"", ignoreCase = true)
 
-        // 真实读回验证：调用 cli modules ls 读取最新真实生效状态
-        val verifyRes = execution.run(cli, "modules", "ls")
-        val isConfirmedEnabled = verifyRes.stdout.contains(modulePkgName) &&
-                verifyRes.stdout.lineSequence().any { it.contains(modulePkgName) && it.contains("enabled", ignoreCase = true) }
+        // 真实读回验证：调用 cli --json modules ls 读取最新真实生效状态
+        val verifyRes = execution.run(cli, "--json", "modules", "ls")
+        val parsed = if (verifyRes.success) XposedStatusParser.parseModulesLs(verifyRes.stdout) else null
+        val isConfirmedEnabled = parsed?.any { it.packageName == modulePkgName && it.enabled } == true
 
         val verified = accepted && isConfirmedEnabled
 
@@ -219,8 +231,9 @@ internal object XposedManagementHandler {
 
         val accepted = cliRes.success && !cliRes.stdout.contains("\"Failed\": [\"$modulePkgName\"", ignoreCase = true)
 
-        val verifyRes = execution.run(cli, "modules", "ls")
-        val isConfirmedDisabled = verifyRes.stdout.lineSequence().any { it.contains(modulePkgName) && it.contains("disabled", ignoreCase = true) }
+        val verifyRes = execution.run(cli, "--json", "modules", "ls")
+        val parsed = if (verifyRes.success) XposedStatusParser.parseModulesLs(verifyRes.stdout) else null
+        val isConfirmedDisabled = parsed != null && parsed.none { it.packageName == modulePkgName && it.enabled }
 
         val verified = accepted && isConfirmedDisabled
 
@@ -262,14 +275,26 @@ internal object XposedManagementHandler {
         val cli = findCliBinary(execution)
 
         if (cli != null) {
-            val cliRes = execution.run(cli, "scope", "ls", modulePkgName)
-            if (cliRes.success) {
+            val cliRes = execution.run(cli, "--json", "scope", "ls", modulePkgName)
+            val parsedScope = if (cliRes.success) XposedStatusParser.parseScopeLs(cliRes.stdout) else null
+            if (parsedScope != null) {
+                val scopesArray = buildJsonArray {
+                    for (entry in parsedScope) {
+                        add(buildJsonObject {
+                            put("appPackage", entry.appPackage)
+                            put("userId", entry.userId)
+                        })
+                    }
+                }
                 return execution.success(
                     message = "Module scope retrieved via Vector CLI.",
                     observation = buildJsonObject {
                         put("modulePkgName", modulePkgName)
-                        put("rawOutput", cliRes.stdout.trim())
+                        put("managedVia", "vector_cli")
+                        put("count", parsedScope.size)
+                        put("scope", scopesArray)
                     },
+                    data = mapOf("count" to parsedScope.size.toString()),
                     stdout = cliRes.stdout,
                 )
             }
@@ -320,15 +345,17 @@ internal object XposedManagementHandler {
         val cliRes = execution.run(*cliArgs.toTypedArray())
         val accepted = cliRes.success
 
-        // 读回验证：调用 cli scope ls 核实条目
-        val listRes = execution.run(cli, "scope", "ls", modulePkgName)
-        val currentScopeText = listRes.stdout
+        // 读回验证：调用 cli --json scope ls 核实条目
+        val listRes = execution.run(cli, "--json", "scope", "ls", modulePkgName)
+        val parsedScope = if (listRes.success) XposedStatusParser.parseScopeLs(listRes.stdout) else null
 
-        val verified = if (operation == "remove") {
-            accepted && targetPackages.none { currentScopeText.contains(it) }
-        } else {
-            accepted && targetPackages.all { currentScopeText.contains(it) }
-        }
+        val verified = if (parsedScope != null) {
+            if (operation == "remove") {
+                accepted && targetPackages.none { target -> parsedScope.any { it.appPackage == target && it.userId == userId } }
+            } else {
+                accepted && targetPackages.all { target -> parsedScope.any { it.appPackage == target && it.userId == userId } }
+            }
+        } else false
 
         val obs = ManagementActionExecution.observation(
             before = JsonNull,
@@ -409,45 +436,51 @@ internal object XposedManagementHandler {
         val modulePkgName = requireValidPackage(execution.request.arguments["module_pkg_name"])
         val targetPackage = execution.request.arguments["target_package"]?.trim()
 
-        // 1. 配置层读回: 优先经由 CLI 确认模块在配置中处于 enabled 状态
+        val currentUserId = execution.request.arguments["user_id"]?.toIntOrNull() ?: execution.userId
+
+        // 1. 配置层读回: 优先经由 CLI 确认模块在配置中处于 enabled 状态，且目标在作用域中
         val cli = findCliBinary(execution)
         val configVerified = if (cli != null) {
-            val lsModules = execution.run(cli, "modules", "ls")
-            val isEnabled = lsModules.stdout.lineSequence().any { it.contains(modulePkgName) && it.contains("enabled", ignoreCase = true) }
+            val lsModules = execution.run(cli, "--json", "modules", "ls")
+            val parsedModules = if (lsModules.success) XposedStatusParser.parseModulesLs(lsModules.stdout) else null
+            val isEnabled = parsedModules?.any { it.packageName == modulePkgName && it.enabled } == true
             val inScope = if (!targetPackage.isNullOrBlank()) {
-                val lsScope = execution.run(cli, "scope", "ls", modulePkgName)
-                lsScope.stdout.contains(targetPackage)
+                val lsScope = execution.run(cli, "--json", "scope", "ls", modulePkgName)
+                val parsedScope = if (lsScope.success) XposedStatusParser.parseScopeLs(lsScope.stdout) else null
+                parsedScope?.any { it.appPackage == targetPackage && it.userId == currentUserId } == true
             } else true
             isEnabled && inScope
         } else {
+            // DB 只读 fallback: 必须 module + target + userId 精确 join，不能写 DB
             val db = findExistingDb(execution)
             val sqlite3 = findSqliteBinary(execution)
             if (db != null && sqlite3 != null) {
-                isModuleEnabled(execution, db, sqlite3, modulePkgName) == true
+                checkConfigFromDb(execution, db, sqlite3, modulePkgName, targetPackage, currentUserId)
             } else false
         }
 
         // 2. 行为层读回规范：不能使用任意 caller marker，必须检查目标真实 PID 与框架注入日志
         var hookVerified = false
-        var hookEvidence: String? = null
+        var frameworkEvidence: XposedStatusParser.XposedFrameworkEvidence? = null
 
         if (!targetPackage.isNullOrBlank()) {
             val pidResult = execution.run("pidof", targetPackage)
-            val targetPid = pidResult.stdout.trim().split(Regex("\\s+")).firstOrNull()?.takeIf { it.isNotEmpty() }
+            val activePids = pidResult.stdout.trim().split(Regex("\\s+"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toSet()
 
-            if (targetPid != null) {
-                // 目标进程当前存活，精准检查该 PID 的日志或框架加载绑定记录
-                val logResult = execution.run("logcat", "-d", "-b", "main", "-b", "system", "-t", "500")
-                for (line in logResult.stdout.lineSequence()) {
-                    val containsFramework = line.contains("LSPosed-Bridge", ignoreCase = true) ||
-                            line.contains("Vector", ignoreCase = true) ||
-                            line.contains("XposedBridge", ignoreCase = true)
-                    val bindsTargetAndModule = line.contains(targetPid) || line.contains(targetPackage)
-                    if (containsFramework && bindsTargetAndModule && line.contains(modulePkgName, ignoreCase = true)) {
-                        hookVerified = true
-                        hookEvidence = line.trim()
-                        break
-                    }
+            if (activePids.isNotEmpty()) {
+                // 目标进程当前存活，精准检查该 PID 的日志或框架加载绑定记录（-v threadtime 格式）
+                val logResult = execution.run("logcat", "-d", "-v", "threadtime", "-b", "main", "-b", "system", "-t", "500")
+                if (logResult.success) {
+                    frameworkEvidence = XposedStatusParser.findFrameworkEvidence(
+                        logcatOutput = logResult.stdout,
+                        modulePkgName = modulePkgName,
+                        targetPackage = targetPackage,
+                        activePids = activePids
+                    )
+                    hookVerified = (frameworkEvidence != null)
                 }
             }
         }
@@ -469,18 +502,33 @@ internal object XposedManagementHandler {
             put("configVerified", configVerified)
             put("hookVerified", hookVerified)
             if (targetPackage != null) put("targetPackage", targetPackage)
-            if (hookEvidence != null) put("hookEvidence", hookEvidence)
+            if (frameworkEvidence != null) {
+                put("frameworkEvidence", buildJsonObject {
+                    put("module", frameworkEvidence.module)
+                    put("target", frameworkEvidence.target)
+                    put("pid", frameworkEvidence.pid)
+                    put("observedAt", frameworkEvidence.observedAt)
+                    put("tag", frameworkEvidence.tag)
+                })
+                put("hookEvidence", "${frameworkEvidence.tag}[PID ${frameworkEvidence.pid}] observed at ${frameworkEvidence.observedAt}")
+            }
             put("explanation", explanation)
         }
 
         return execution.success(
             message = explanation,
             observation = obs,
-            data = mapOf(
+            data = mutableMapOf(
                 "status" to status,
                 "configVerified" to configVerified.toString(),
                 "hookVerified" to hookVerified.toString(),
-            ),
+            ).apply {
+                if (frameworkEvidence != null) {
+                    put("evidencePid", frameworkEvidence.pid)
+                    put("evidenceTag", frameworkEvidence.tag)
+                    put("evidenceObservedAt", frameworkEvidence.observedAt)
+                }
+            },
         )
     }
 
@@ -525,11 +573,26 @@ internal object XposedManagementHandler {
         return null
     }
 
-    private suspend fun isModuleEnabled(execution: ManagementActionExecution, dbPath: String, sqlite3: String, modulePkgName: String): Boolean? {
-        val sql = "SELECT enabled FROM modules WHERE module_pkg_name = ${ManagementActionExecution.shellQuote(modulePkgName)};"
-        val res = execution.runRaw("$sqlite3 ${ManagementActionExecution.shellQuote(dbPath)} ${ManagementActionExecution.shellQuote(sql)}")
-        if (!res.success || res.stdout.isBlank()) return null
-        return res.stdout.trim() == "1"
+    private suspend fun checkConfigFromDb(
+        execution: ManagementActionExecution,
+        dbPath: String,
+        sqlite3: String,
+        modulePkgName: String,
+        targetPackage: String?,
+        userId: Int
+    ): Boolean {
+        return if (!targetPackage.isNullOrBlank()) {
+            val sql = "SELECT m.enabled FROM modules m JOIN scope s ON m.mid = s.mid " +
+                    "WHERE m.module_pkg_name = ${ManagementActionExecution.shellQuote(modulePkgName)} " +
+                    "AND s.app_pkg_name = ${ManagementActionExecution.shellQuote(targetPackage)} " +
+                    "AND s.user_id = $userId;"
+            val res = execution.runRaw("$sqlite3 ${ManagementActionExecution.shellQuote(dbPath)} ${ManagementActionExecution.shellQuote(sql)}")
+            res.success && res.stdout.lineSequence().any { it.trim() == "1" }
+        } else {
+            val sql = "SELECT enabled FROM modules WHERE module_pkg_name = ${ManagementActionExecution.shellQuote(modulePkgName)};"
+            val res = execution.runRaw("$sqlite3 ${ManagementActionExecution.shellQuote(dbPath)} ${ManagementActionExecution.shellQuote(sql)}")
+            res.success && res.stdout.lineSequence().any { it.trim() == "1" }
+        }
     }
 
     private fun requireValidPackage(pkg: String?): String {

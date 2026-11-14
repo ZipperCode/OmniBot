@@ -32,7 +32,11 @@ void main() {
     tempDir = await Directory.systemTemp.createTemp(
       'omnibot_image_preview_overlay_test_',
     );
-    imageFile = File('${tempDir.path}/preview.png');
+    final sep = Platform.pathSeparator;
+    final basePath = tempDir.path.endsWith(sep)
+        ? tempDir.path
+        : '${tempDir.path}$sep';
+    imageFile = File('${basePath}preview.png');
     await imageFile.writeAsBytes(largePngBytes);
     fileChannelCalls = <MethodCall>[];
 

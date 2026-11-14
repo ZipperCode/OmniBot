@@ -24,6 +24,7 @@ interface ContextPaneProps {
   onWorkspaceRefresh: () => void;
   onWorkspaceContent: (content: string) => void;
   onWorkspaceSave: () => void;
+  onOpenWorkspaceChanges?: () => void;
   onBrowserAction: (payload: Record<string, unknown>) => void;
   onBrowserRefresh: () => void;
 }
@@ -44,6 +45,7 @@ export function ContextPane({
   onWorkspaceRefresh,
   onWorkspaceContent,
   onWorkspaceSave,
+  onOpenWorkspaceChanges,
   onBrowserAction,
   onBrowserRefresh,
 }: ContextPaneProps) {
@@ -92,6 +94,16 @@ export function ContextPane({
             </button>
           </div>
           <div className="header-actions">
+            {onOpenWorkspaceChanges && (
+              <button
+                className="quiet-button"
+                type="button"
+                onClick={onOpenWorkspaceChanges}
+                title="受管工作区变更记录"
+              >
+                <Icon name="workspace" size={14} /><span>变更记录</span>
+              </button>
+            )}
             {workspaceFilePath && (
               <a className="quiet-link" href={workspaceDownloadUrl(workspaceFilePath)} title="下载">
                 <Icon name="download" size={15} /><span>下载</span>

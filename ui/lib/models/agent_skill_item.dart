@@ -15,7 +15,11 @@ class AgentSkillItem {
   final bool enabled;
   final String source;
   final bool installed;
-
+  final String verificationStatus;
+  final String? revisionId;
+  final String? previousRevisionId;
+  final String? contentHash;
+  final bool contentModified;
   const AgentSkillItem({
     required this.id,
     required this.name,
@@ -33,8 +37,12 @@ class AgentSkillItem {
     required this.enabled,
     required this.source,
     required this.installed,
+    this.verificationStatus = 'unverified',
+    this.revisionId,
+    this.previousRevisionId,
+    this.contentHash,
+    this.contentModified = false,
   });
-
   factory AgentSkillItem.fromMap(Map<String, dynamic> raw) {
     return AgentSkillItem(
       id: (raw['id'] ?? '').toString(),
@@ -56,8 +64,18 @@ class AgentSkillItem {
       enabled: raw['enabled'] != false,
       source: (raw['source'] ?? 'user').toString(),
       installed: raw['installed'] != false,
+      verificationStatus:
+          (raw['verificationStatus'] ?? 'unverified').toString(),
+      revisionId: raw['revisionId']?.toString(),
+      previousRevisionId: raw['previousRevisionId']?.toString(),
+      contentHash: (raw['contentHash'] ?? raw['metadata']?['contentHash'])
+          ?.toString(),
+      contentModified: raw['contentModified'] == true,
     );
   }
+  factory AgentSkillItem.fromJson(Map<String, dynamic> raw) =>
+      AgentSkillItem.fromMap(raw);
+
 
   List<String> get capabilities {
     final values = <String>[];
@@ -71,6 +89,17 @@ class AgentSkillItem {
   bool get isBuiltin => source == 'builtin';
 
   bool get isOfficial => source == 'official';
+
+  bool get isUnverified => verificationStatus == 'unverified';
+
+  bool get isTrial => verificationStatus == 'trial';
+
+  bool get isVerified => verificationStatus == 'verified';
+
+  bool get isRetired => verificationStatus == 'retired';
+
+  bool get canRestoreRevision =>
+      previousRevisionId != null && previousRevisionId!.isNotEmpty;
 
   AgentSkillItem copyWith({
     String? id,
@@ -89,6 +118,11 @@ class AgentSkillItem {
     bool? enabled,
     String? source,
     bool? installed,
+    String? verificationStatus,
+    String? revisionId,
+    String? previousRevisionId,
+    String? contentHash,
+    bool? contentModified,
   }) {
     return AgentSkillItem(
       id: id ?? this.id,
@@ -107,6 +141,39 @@ class AgentSkillItem {
       enabled: enabled ?? this.enabled,
       source: source ?? this.source,
       installed: installed ?? this.installed,
+      verificationStatus: verificationStatus ?? this.verificationStatus,
+      revisionId: revisionId ?? this.revisionId,
+      previousRevisionId: previousRevisionId ?? this.previousRevisionId,
+      contentHash: contentHash ?? this.contentHash,
+      contentModified: contentModified ?? this.contentModified,
     );
   }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'name': name,
+      'description': description,
+      'compatibility': compatibility,
+      'metadata': metadata,
+      'rootPath': rootPath,
+      'shellRootPath': shellRootPath,
+      'skillFilePath': skillFilePath,
+      'shellSkillFilePath': shellSkillFilePath,
+      'hasScripts': hasScripts,
+      'hasReferences': hasReferences,
+      'hasAssets': hasAssets,
+      'hasEvals': hasEvals,
+      'enabled': enabled,
+      'source': source,
+      'installed': installed,
+      'verificationStatus': verificationStatus,
+      'revisionId': revisionId,
+      'previousRevisionId': previousRevisionId,
+      'contentHash': contentHash,
+      'contentModified': contentModified,
+    };
+  }
+
+  Map<String, dynamic> toJson() => toMap();
 }

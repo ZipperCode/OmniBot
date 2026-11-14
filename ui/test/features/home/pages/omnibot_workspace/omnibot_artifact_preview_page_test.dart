@@ -57,8 +57,15 @@ void main() {
   });
 
   tearDown(() async {
-    if (await tempDir.exists()) {
-      await tempDir.delete(recursive: true);
+    for (var i = 0; i < 5; i++) {
+      try {
+        if (await tempDir.exists()) {
+          await tempDir.delete(recursive: true);
+        }
+        break;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
     }
   });
 
@@ -114,8 +121,10 @@ void main() {
       ),
       findsOneWidget,
     );
-  });
 
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
   testWidgets('artifact preview keeps path and editor surfaces dark', (
     tester,
   ) async {
@@ -163,8 +172,10 @@ void main() {
     final editor = tester.widget<TextField>(editorFinder);
     expect(editor.decoration?.fillColor, OmniThemePalette.dark.surfacePrimary);
     expect(editor.style?.color, OmniThemePalette.dark.textPrimary);
-  });
 
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
   testWidgets('image artifact preview uses shared interactive image surface', (
     tester,
   ) async {
@@ -185,5 +196,8 @@ void main() {
       find.byKey(const ValueKey('artifact-preview-image-bounds')),
       findsOneWidget,
     );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
   });
 }

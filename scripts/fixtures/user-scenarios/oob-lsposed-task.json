@@ -1,0 +1,3 @@
+{
+  "prompt": "Use phone_development on target cn.com.omnimind.validation.target and module cn.com.omnimind.validation.module: 1. check env; 2. analyze project; 3. build & verify signature; 4. deploy to LSPosed (install, enable, scope, reload); 5. verify status. Check text VALIDATION_HOOK_SUCCESS_{{MARKER}} in target."
+}

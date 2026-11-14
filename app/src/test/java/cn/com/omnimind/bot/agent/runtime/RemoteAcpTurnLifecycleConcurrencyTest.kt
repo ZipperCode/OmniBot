@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.res.AssetManager
 import cn.com.omnimind.baselib.database.DatabaseHelper
+import cn.com.omnimind.baselib.database.Conversation
 import cn.com.omnimind.bot.task.runtime.TaskRuntime
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -49,11 +50,16 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
     @Before
     fun setUp() {
         TaskRuntime.resetForTesting()
+        val app: Application = RuntimeEnvironment.getApplication()
+        com.rk.libcommons.application = app
+        DatabaseHelper.init(app)
+        resetDatabase()
     }
 
     @After
     fun tearDown() {
         TaskRuntime.resetForTesting()
+        resetDatabase()
         scopes.forEach { it.cancel() }
         managers.forEach { manager ->
             val scopeField = manager.javaClass.getDeclaredField("scope").apply { isAccessible = true }
@@ -65,6 +71,32 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
         connections.clear()
         managers.clear()
         scopes.clear()
+    }
+
+    private fun resetDatabase() {
+        runCatching {
+            val getDbMethod = DatabaseHelper::class.java.getMethod("getDatabase")
+            val db = getDbMethod.invoke(DatabaseHelper)
+            db?.javaClass?.getMethod("clearAllTables")?.invoke(db)
+        }
+    }
+
+    private fun ensureConversation(context: Context, conversationId: Long) {
+        runBlocking {
+            val existing = DatabaseHelper.getConversationById(conversationId)
+            if (existing == null) {
+                DatabaseHelper.insertConversation(
+                    Conversation(
+                        id = conversationId,
+                        title = "Remote Codex Conversation $conversationId",
+                        mode = "agent",
+                        createdAt = System.currentTimeMillis(),
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            AcpAgentProfileStore(context).bindConversation(conversationId, REMOTE_CODEX_AGENT_ID)
+        }
     }
 
     private fun createFixture(): Pair<Context, AgentRuntimeManager> {
@@ -118,6 +150,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
                 transport.start("test-client")
 
                 val conversationId = 4242L
+                ensureConversation(context, conversationId)
                 val sessionId = "session-remote-admission"
                 val gate = CompletableDeferred<Unit>()
                 connection.promptGate = gate
@@ -169,6 +202,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
 
                 val conversationId = 5001L
                 val sessionId = "session-stale-cancel"
+                ensureConversation(context, conversationId)
 
                 // Turn 1 runs to completion
                 val turn1Result = manager.handleMethod(
@@ -275,6 +309,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
 
                 val conversationId = 6001L
                 val sessionId = "session-ordinary-cancel"
+                ensureConversation(context, conversationId)
 
                 val gate = CompletableDeferred<Unit>()
                 connection.promptGate = gate
@@ -368,6 +403,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
 
                 val conversationId = 7701L
                 val sessionId = "session-no-awaiter"
+                ensureConversation(context, conversationId)
                 val requestId = "req-no-awaiter"
 
                 val promptResult = manager.handleMethod(
@@ -424,6 +460,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
                 val transport = attachMockRemoteSession(manager, connection, scope)
                 transport.start("test-client")
 
+                ensureConversation(context, 301L)
                 val emittedEvents = mutableListOf<Map<String, Any?>>()
                 manager.setEventListener { event ->
                     synchronized(emittedEvents) { emittedEvents += event }
@@ -500,7 +537,7 @@ class RemoteAcpTurnLifecycleConcurrencyTest {
                 val connection = ControlledConnection()
                 val transport = attachMockRemoteSession(manager, connection, scope)
                 transport.start("test-client")
-
+                ensureConversation(context, 101L)
                 val emittedEvents = mutableListOf<Map<String, Any?>>()
                 manager.setEventListener { event ->
                     synchronized(emittedEvents) { emittedEvents += event }

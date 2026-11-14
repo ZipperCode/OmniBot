@@ -1,6 +1,6 @@
 import { isAgentConversationMode } from "./conversationDraft";
 import { isRecord } from "./api";
-import type { ChatMessage, Conversation } from "./types";
+import type { Attachment, ChatMessage, Conversation } from "./types";
 
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -191,4 +191,21 @@ export function formatBytes(raw?: number): string {
 
 export function messageContent(message: ChatMessage): Record<string, unknown> {
   return isRecord(message.content) ? message.content : {};
+}
+
+export function fileToAttachment(file: File): Promise<Attachment> {
+  return new Promise<Attachment>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve({
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        size: file.size,
+        dataUrl: String(reader.result ?? ""),
+        isImage: file.type.startsWith("image/"),
+      });
+    };
+    reader.onerror = () => reject(new Error("读取附件失败"));
+    reader.readAsDataURL(file);
+  });
 }

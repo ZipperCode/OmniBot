@@ -549,6 +549,76 @@ void main() {
     expect(runtime.messages.single.text, 'POSIX Shell and Markdown');
   });
 
+  final officialChunkCases = <String, List<String>>{
+    'O/O/B': const ['O', 'O', 'B_OUTBOX_NAV_A'],
+    'O/OB': const ['O', 'OB_OUTBOX_NAV_B'],
+    'repeated whole chunks': const ['第一行\n', '第一行\n', '第二行\n'],
+    'repeated tokens': const ['token', 'token', 'token'],
+    'whitespace tokens': const ['  ', '  ', '\t\t', '\n\n', '\n\n'],
+  };
+
+  for (final entry in officialChunkCases.entries) {
+    test('official stream chunks preserve ${entry.key} byte for byte', () {
+      final chunks = entry.value;
+      for (final chunk in chunks) {
+        reducer.reduce(
+          runtime: runtime,
+          event: {
+            'method': 'session/update',
+            'params': {
+              'sessionId': 'session-official-chunks',
+              'turnId': 'turn-official-chunks',
+              'update': {
+                'sessionUpdate': 'agent_message_chunk',
+                'messageId': 'message-official-chunks',
+                'content': {'type': 'text', 'text': chunk},
+              },
+            },
+          },
+        );
+      }
+
+      expect(runtime.messages.single.text, chunks.join());
+    });
+  }
+
+  test(
+    'official stream chunks preserve replayed deltas after snapshot hydration',
+    () {
+      runtime.messages.add(
+        ChatMessageModel(
+          id: 'turn-hydrate-replay-msg-hydrate-test-agent-message',
+          type: 1,
+          user: 2,
+          content: {
+            'text': 'Hello',
+            'id': 'turn-hydrate-replay-msg-hydrate-test-agent-message',
+          },
+        ),
+      );
+
+      for (final chunk in const ['Hel', 'lo', '!']) {
+        reducer.reduce(
+          runtime: runtime,
+          event: {
+            'method': 'session/update',
+            'params': {
+              'sessionId': 'session-hydrate-replay',
+              'turnId': 'turn-hydrate-replay',
+              'update': {
+                'sessionUpdate': 'agent_message_chunk',
+                'messageId': 'msg-hydrate-test',
+                'content': {'type': 'text', 'text': chunk},
+              },
+            },
+          },
+        );
+      }
+
+      expect(runtime.messages.single.text, 'Hello!');
+    },
+  );
+
   test('projects ACP assistant image content into the shared image card', () {
     reducer.reduce(
       runtime: runtime,
@@ -2156,7 +2226,7 @@ void main() {
       ('think', 'plan'),
     ];
 
-    for (final (kind, expectedToolType) in cases) {
+    for (final (kind, _) in cases) {
       final callId = 'kind-$kind';
       reducer.reduce(
         runtime: runtime,
@@ -3941,55 +4011,6 @@ void main() {
     expect(runtime.messages, hasLength(1));
     expect(runtime.messages.single.cardData?['type'], 'permission_section');
   });
-
-  test('deduplicates repeated committed ACP assistant blocks', () {
-    final event = <String, dynamic>{
-      'message': {
-        'method': 'session/update',
-        'turnId': 'turn-1',
-        'params': {
-          'sessionId': 'session-1',
-          'update': {
-            'sessionUpdate': 'agent_message_chunk',
-            'messageId': 'message-1',
-            'content': {'type': 'text', 'text': '来自 ACP 的完整消息'},
-          },
-        },
-      },
-    };
-
-    reducer.reduce(runtime: runtime, event: event);
-    reducer.reduce(runtime: runtime, event: event);
-
-    expect(runtime.messages, hasLength(1));
-    expect(runtime.messages.single.text, '来自 ACP 的完整消息');
-  });
-
-  test(
-    'accepts cumulative committed ACP assistant blocks without repetition',
-    () {
-      Map<String, dynamic> event(String text) => <String, dynamic>{
-        'message': {
-          'method': 'session/update',
-          'turnId': 'turn-1',
-          'params': {
-            'sessionId': 'session-1',
-            'update': {
-              'sessionUpdate': 'agent_message_chunk',
-              'messageId': 'message-1',
-              'content': {'type': 'text', 'text': text},
-            },
-          },
-        },
-      };
-
-      reducer.reduce(runtime: runtime, event: event('第一段'));
-      reducer.reduce(runtime: runtime, event: event('第一段第二段'));
-
-      expect(runtime.messages.single.text, '第一段第二段');
-    },
-  );
-
   test('isolates ACP chunks without messageId by host turn', () {
     for (final turn in <String>['turn-1', 'turn-2']) {
       final result = reducer.reduce(

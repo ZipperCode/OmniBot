@@ -61,11 +61,15 @@ class ChatMessageList extends StatefulWidget {
   final String? emptyGreetingAgentWorkspaceName;
   final VoidCallback? onEmptyGreetingAgentWorkspaceTap;
   final ValueChanged<bool>? onInternalInputFocusChanged;
+  final String? currentDraft;
+  final Future<bool> Function(String prompt)? onFillDraft;
+  final bool isProcessing;
 
   const ChatMessageList({
     super.key,
     required this.messages,
     required this.scrollController,
+    this.conversationId,
     this.navigator,
     required this.onBeforeTaskExecute,
     this.onCancelTask,
@@ -91,7 +95,11 @@ class ChatMessageList extends StatefulWidget {
     this.emptyGreetingAgentWorkspaceName,
     this.onEmptyGreetingAgentWorkspaceTap,
     this.onInternalInputFocusChanged,
+    this.currentDraft,
+    this.onFillDraft,
+    this.isProcessing = false,
   });
+  final int? conversationId;
 
   @override
   State<ChatMessageList> createState() => _ChatMessageListState();
@@ -640,6 +648,11 @@ class _ChatMessageListState extends State<ChatMessageList> {
         useAcpPresentation: widget.useAcpPresentation,
         visualProfile: widget.visualProfile,
         appearanceConfig: widget.appearanceConfig,
+        currentDraft: widget.currentDraft,
+        onFillDraft: widget.onFillDraft,
+        conversationOwner: widget.activeAcpAgentId,
+        isProcessing: widget.isProcessing,
+        conversationId: widget.conversationId,
       );
     }
 
@@ -894,6 +907,11 @@ class _ChatTimelineListRow extends StatelessWidget {
     required this.useAcpPresentation,
     required this.visualProfile,
     required this.appearanceConfig,
+    this.currentDraft,
+    this.onFillDraft,
+    this.conversationOwner,
+    this.conversationId,
+    this.isProcessing = false,
   });
 
   final AgentRunTimelineEntry entry;
@@ -912,6 +930,11 @@ class _ChatTimelineListRow extends StatelessWidget {
   final bool useAcpPresentation;
   final AppBackgroundVisualProfile visualProfile;
   final AppBackgroundConfig appearanceConfig;
+  final String? currentDraft;
+  final Future<bool> Function(String prompt)? onFillDraft;
+  final String? conversationOwner;
+  final bool isProcessing;
+  final int? conversationId;
 
   @override
   Widget build(BuildContext context) {
@@ -933,6 +956,11 @@ class _ChatTimelineListRow extends StatelessWidget {
         onStreamingTextLayoutChanged: onStreamingTextLayoutChanged,
         visualProfile: visualProfile,
         appearanceConfig: appearanceConfig,
+        currentDraft: currentDraft,
+        onFillDraft: onFillDraft,
+        conversationOwner: conversationOwner,
+        isProcessing: isProcessing,
+        conversationId: conversationId,
       ),
     );
   }

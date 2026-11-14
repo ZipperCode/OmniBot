@@ -46,6 +46,7 @@ class _PendingPersistenceRequest {
     this.markComplete = false,
     this.persistMessages = false,
     this.preserveActivityTime = false,
+    this.settledPromptReceipt,
   });
 
   final int conversationId;
@@ -55,6 +56,7 @@ class _PendingPersistenceRequest {
   final bool markComplete;
   final bool persistMessages;
   final bool preserveActivityTime;
+  final Map<String, dynamic>? settledPromptReceipt;
 }
 
 class ChatConversationRuntimeCoordinator extends ChangeNotifier {
@@ -662,13 +664,15 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
               dispatchTurnBefore.isNotEmpty &&
               activeAcpTurnBefore.isEmpty
         : activeAcpTurnBefore.isEmpty
-        ? runtime.isAiResponding && dispatchTurnBefore.isNotEmpty
+        ? (runtime.isAiResponding && dispatchTurnBefore.isNotEmpty) ||
+            allowsHostSessionAdmission
         : activeAcpTurnBefore == eventTurnId;
     final reduced = _agentEventReducer.reduce(runtime: runtime, event: event);
     final result = reduced.copyWith(
       affectsActiveTurn: affectsActiveTurn && reduced.affectsActiveTurn,
     );
     if (result.handled) {
+      Map<String, dynamic>? settledPromptReceipt;
       if (isPromptResponse &&
           eventTurnId != null &&
           runtime.completedAcpTurnIds.contains(eventTurnId)) {
@@ -676,6 +680,22 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           sessionId: eventSessionId,
           turnId: eventTurnId,
         );
+        final resolvedRequestId = targetTaskId ??
+            event['requestId']?.toString() ??
+            event['id']?.toString() ??
+            rawMessage['id']?.toString();
+        final resolvedSessionId = eventSessionId ?? runtime.activeAcpSessionId;
+        if (resolvedSessionId != null &&
+            eventTurnId.isNotEmpty &&
+            resolvedRequestId != null &&
+            resolvedRequestId.isNotEmpty) {
+          settledPromptReceipt = <String, dynamic>{
+            'sessionId': resolvedSessionId,
+            'turnId': eventTurnId,
+            'requestId': resolvedRequestId,
+          };
+          runtime.registerSettledPromptReceipt(settledPromptReceipt);
+        }
         if (targetTaskId != null) {
           final b = _taskBindings[targetTaskId];
           if (b != null &&
@@ -716,6 +736,7 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           delay: (carriesFinalTurnUsage || isPromptResponse)
               ? Duration.zero
               : const Duration(milliseconds: 350),
+          settledPromptReceipt: settledPromptReceipt,
         );
       }
     }
@@ -757,6 +778,44 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
           binding.mode == mode) {
         _taskBindings.remove(taskId);
       }
+      // If official session/prompt event arrived first and completed the turn,
+      // _taskBindings was removed. Allow supplementing receipt for matching reservation,
+      // without duplicating UI reduction.
+      String? matchedTurnId = turnId?.trim().isNotEmpty == true
+          ? turnId
+          : runtime.acpTurnIdForRun(taskId);
+      if (matchedTurnId == null || matchedTurnId.isEmpty) {
+        for (final entry in runtime.settledPromptReceipts.entries) {
+          if (entry.value['requestId'] == taskId) {
+            matchedTurnId = entry.key;
+            break;
+          }
+        }
+      }
+      if (matchedTurnId != null &&
+          (runtime.completedAcpTurnIds.contains(matchedTurnId) ||
+              runtime.settledPromptReceipts.containsKey(matchedTurnId))) {
+        final resolvedSessionId = sessionId ??
+            runtime.activeAcpSessionId ??
+            runtime.settledPromptReceipts[matchedTurnId]?['sessionId'];
+        if (resolvedSessionId != null && matchedTurnId.isNotEmpty) {
+          final receipt = <String, dynamic>{
+            'sessionId': resolvedSessionId,
+            'turnId': matchedTurnId,
+            'requestId': taskId,
+          };
+          runtime.registerSettledPromptReceipt(receipt);
+          if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
+            schedulePersistRuntimeConversation(
+              conversationId: conversationId,
+              mode: mode,
+              persistMessages: true,
+              delay: Duration.zero,
+              settledPromptReceipt: receipt,
+            );
+          }
+        }
+      }
       return const AgentReduceResult(handled: false, affectsActiveTurn: false);
     }
     final result = _agentEventReducer.reducePromptResponse(
@@ -771,12 +830,30 @@ class ChatConversationRuntimeCoordinator extends ChangeNotifier {
     _taskBindings.remove(taskId);
     if (result.handled) {
       notifyListeners();
+      final resolvedTurnId = turnId?.trim().isNotEmpty == true
+          ? turnId!
+          : (runtime.acpTurnIdForRun(taskId) ?? runtime.activeAcpTurnId);
+      final resolvedSessionId = sessionId ?? runtime.activeAcpSessionId;
+      final resolvedRequestId = taskId;
+      Map<String, dynamic>? settledPromptReceipt;
+      if (resolvedSessionId != null &&
+          resolvedTurnId != null &&
+          resolvedTurnId.isNotEmpty &&
+          resolvedRequestId.isNotEmpty) {
+        settledPromptReceipt = <String, dynamic>{
+          'sessionId': resolvedSessionId,
+          'turnId': resolvedTurnId,
+          'requestId': resolvedRequestId,
+        };
+        runtime.registerSettledPromptReceipt(settledPromptReceipt);
+      }
       if (!isEphemeralRuntime(conversationId: conversationId, mode: mode)) {
         schedulePersistRuntimeConversation(
           conversationId: conversationId,
           mode: mode,
           persistMessages: true,
           delay: Duration.zero,
+          settledPromptReceipt: settledPromptReceipt,
         );
       }
     }

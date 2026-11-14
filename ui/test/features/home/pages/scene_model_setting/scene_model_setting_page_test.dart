@@ -15,6 +15,7 @@ import 'package:ui/theme/app_theme.dart';
 import 'package:ui/widgets/settings_ui.dart';
 import 'package:ui/widgets/omni_menu.dart';
 import 'package:ui/widgets/provider_vendor_icon.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class _SvgTestAssetBundle extends CachingAssetBundle {
   static final Uint8List _svgBytes = Uint8List.fromList(
@@ -77,6 +78,26 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 50));
   }
+  Future<void> expandOptionalScene(
+    WidgetTester tester,
+    String sceneId,
+  ) async {
+    final toggle = find.byKey(Key('scene-optional-toggle-$sceneId'));
+    if (toggle.evaluate().isNotEmpty) {
+      final iconFinder = find.descendant(
+        of: toggle,
+        matching: find.byType(Icon),
+      );
+      if (iconFinder.evaluate().isNotEmpty) {
+        final icon = tester.widget<Icon>(iconFinder.first);
+        if (icon.icon == LucideIcons.chevronDown) {
+          await tester.ensureVisible(toggle);
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+        }
+      }
+    }
+  }
 
   late Map<String, dynamic> savedOperationConfig;
   late Map<String, dynamic> codexReadConfig;
@@ -133,10 +154,78 @@ void main() {
     savedOperationConfig = <String, dynamic>{'useOfficialService': true};
     sceneCatalog = <Map<String, dynamic>>[
       <String, dynamic>{
+        'sceneId': 'scene.dispatch.model',
+        'description': '负责主对话、任务理解与工具分流决策',
+        'defaultModel': 'gpt-4o',
+        'effectiveModel': 'gpt-4o',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.vision.understanding',
+        'description': '负责图片解析与文字识别',
+        'defaultModel': 'qwen-vl-max',
+        'effectiveModel': 'qwen-vl-max',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
         'sceneId': 'scene.vlm.operation.primary',
         'description': '负责 Android GUI 观察与动作决策',
         'defaultModel': 'qwen3-vl-plus',
         'effectiveModel': 'qwen3-vl-plus',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.image.generate',
+        'description': '负责文生图调用',
+        'defaultModel': 'dall-e-3',
+        'effectiveModel': 'dall-e-3',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.voice',
+        'description': '负责助手回复语音合成',
+        'defaultModel': 'gpt-4o-audio-preview',
+        'effectiveModel': 'gpt-4o-audio-preview',
         'effectiveProviderProfileId': '',
         'effectiveProviderProfileName': '',
         'boundProviderProfileId': '',
@@ -171,6 +260,23 @@ void main() {
         'description': '负责 workspace 记忆向量检索的嵌入模型',
         'defaultModel': 'embedding-default',
         'effectiveModel': 'embedding-default',
+        'effectiveProviderProfileId': '',
+        'effectiveProviderProfileName': '',
+        'boundProviderProfileId': '',
+        'boundProviderProfileName': '',
+        'transport': 'openai_compatible',
+        'configSource': 'builtin',
+        'overrideApplied': false,
+        'overrideModel': '',
+        'providerConfigured': false,
+        'bindingExists': false,
+        'bindingProfileMissing': false,
+      },
+      <String, dynamic>{
+        'sceneId': 'scene.memory.rollup',
+        'description': '负责夜间记忆整理策略与事实提炼',
+        'defaultModel': 'rollup-default',
+        'effectiveModel': 'rollup-default',
         'effectiveProviderProfileId': '',
         'effectiveProviderProfileName': '',
         'boundProviderProfileId': '',
@@ -263,6 +369,15 @@ void main() {
                 (call.arguments as Map).cast<String, dynamic>(),
               );
               return savedOperationConfig;
+            case 'getSceneVoiceConfig':
+              return <String, dynamic>{
+                'isCustomCurl': false,
+                'customCurlCommand': '',
+              };
+            case 'getModelCapabilityOverrides':
+              return <String, dynamic>{};
+            case 'syncProviderCatalogMetadata':
+              return true;
             default:
               return null;
           }
@@ -282,6 +397,16 @@ void main() {
               return null;
           }
         });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('cn.com.omnimind.bot/SpecialPermissionEvent'),
+      (call) async {
+        if (call.method == 'getRootStatus') {
+          return {'enabled': false, 'status': 'DISABLED'};
+        }
+        return null;
+      },
+    );
   });
 
   tearDown(() async {
@@ -293,6 +418,11 @@ void main() {
         .setMockMethodCallHandler(channel, null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(agentRuntimeChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel('cn.com.omnimind.bot/SpecialPermissionEvent'),
+      null,
+    );
     ModelsDevCatalogService.resetForTesting();
   });
 
@@ -373,6 +503,7 @@ void main() {
         findsOneWidget,
       );
 
+      await expandOptionalScene(tester, 'scene.compactor.context.chat');
       await tester.tap(
         find.byKey(
           const Key('scene-model-selector-scene.compactor.context.chat'),
@@ -415,6 +546,7 @@ void main() {
       );
 
       // 主动刷新失败仍能选择 cached 模型
+      await expandOptionalScene(tester, 'scene.compactor.context.chat');
       final selector = find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
       );
@@ -485,6 +617,7 @@ void main() {
       await tester.pump();
     }
 
+    await expandOptionalScene(tester, 'scene.compactor.context.chat');
     await tester.tap(
       find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
@@ -603,6 +736,7 @@ void main() {
       await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
       await tester.pumpAndSettle();
       final fetchCountBeforeOpen = providerFetchCount;
+      await expandOptionalScene(tester, 'scene.compactor.context.chat');
       final selector = find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
       );
@@ -677,6 +811,7 @@ void main() {
       await tester.pumpAndSettle();
       tester.view.physicalSize = const Size(360, 800);
       await tester.pumpAndSettle();
+      await expandOptionalScene(tester, 'scene.compactor.context.chat');
       final selector = find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
       );
@@ -705,6 +840,7 @@ void main() {
   ) async {
     providerConfigured = false;
     await pumpSceneSettings(tester);
+    await expandOptionalScene(tester, 'scene.compactor.context.chat');
     await tester.tap(
       find.byKey(
         const Key('scene-model-selector-scene.compactor.context.chat'),
@@ -789,6 +925,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 上下文压缩场景：embedding 模型被过滤，文本模型与未知能力模型可选。
+    await expandOptionalScene(tester, 'scene.compactor.context.chat');
     final compactorSelector = find.byKey(
       const Key('scene-model-selector-scene.compactor.context.chat'),
     );
@@ -866,6 +1003,7 @@ void main() {
     await pumpSceneSettings(tester);
     await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
     await tester.pumpAndSettle();
+    await expandOptionalScene(tester, 'scene.image.generate');
     final imageSelector = find.byKey(
       const Key('scene-model-selector-scene.image.generate'),
     );
@@ -929,6 +1067,7 @@ void main() {
     await pumpSceneSettings(tester);
     await tester.tap(find.byKey(const Key('scene-model-refresh-button')));
     await tester.pumpAndSettle();
+    await expandOptionalScene(tester, 'scene.voice');
     final voiceSelector = find.byKey(
       const Key('scene-model-selector-scene.voice'),
     );
@@ -977,6 +1116,119 @@ void main() {
     expect(find.text('服务商已失效 / bound-model'), findsOneWidget);
     expect(find.textContaining('继承：'), findsNothing);
   });
+
+  testWidgets(
+    'groups scenes into basic configuration, optional capabilities, and privileged support',
+    (tester) async {
+      await pumpSceneSettings(tester);
+      expect(find.text('基础配置'), findsOneWidget);
+      expect(find.text('可选能力'), findsOneWidget);
+      expect(find.text('特权与系统能力'), findsOneWidget);
+      expect(find.text('绑定摘要：'), findsOneWidget);
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.dispatch.model')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('scene-root-status-badge')), findsOneWidget);
+      expect(find.byKey(const Key('scene-lsposed-status-badge')), findsOneWidget);
+      expect(find.byKey(const Key('scene-root-manage-button')), findsOneWidget);
+      expect(find.byKey(const Key('scene-lsposed-manage-button')), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'unbound scenes are collapsed by default and bound scenes are expanded by default',
+    (tester) async {
+      sceneBindings = <Map<String, dynamic>>[
+        {
+          'sceneId': 'scene.vlm.operation.primary',
+          'providerProfileId': 'provider-1',
+          'modelId': 'bound-vlm-model',
+        },
+      ];
+      await pumpSceneSettings(tester);
+
+      // 已绑定的 GUI 操作默认展开，选择器可见
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.vlm.operation.primary')),
+        findsOneWidget,
+      );
+
+      // 未绑定的视觉理解和上下文压缩默认收起，选择器不可见
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.vision.understanding')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.compactor.context.chat')),
+        findsNothing,
+      );
+
+      // 点击展开未绑定的视觉理解
+      final visionToggle = find.byKey(
+        const Key('scene-optional-toggle-scene.vision.understanding'),
+      );
+      await tester.ensureVisible(visionToggle);
+      await tester.tap(visionToggle);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.vision.understanding')),
+        findsOneWidget,
+      );
+
+      // 点击收起已绑定的 GUI 操作
+      final vlmToggle = find.byKey(
+        const Key('scene-optional-toggle-scene.vlm.operation.primary'),
+      );
+      await tester.ensureVisible(vlmToggle);
+      await tester.tap(vlmToggle);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('scene-model-selector-scene.vlm.operation.primary')),
+        findsNothing,
+      );
+    },
+  );
+
+  testWidgets(
+    'page initialization never invokes su or privileged mutation commands',
+    (tester) async {
+      final speCalls = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel('cn.com.omnimind.bot/SpecialPermissionEvent'),
+        (call) async {
+          speCalls.add(call.method);
+          if (call.method == 'getRootStatus') {
+            return {'enabled': true, 'status': 'GRANTED'};
+          }
+          return null;
+        },
+      );
+
+      await pumpSceneSettings(tester);
+      // 验证仅允许只读状态查询，绝无 requestRootAccess、setRootEnabled、runShell 或 su 探测
+      expect(speCalls, contains('getRootStatus'));
+      expect(speCalls, isNot(contains('requestRootAccess')));
+      expect(speCalls, isNot(contains('setRootEnabled')));
+      expect(speCalls, isNot(contains('runShell')));
+      expect(speCalls, isNot(contains('executeShell')));
+      expect(speCalls, isNot(contains('su')));
+
+      expect(find.text('已授权'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'full model selector button reuses ConversationModelSelectorContent',
+    (tester) async {
+      await pumpSceneSettings(tester);
+      final fullSelectorButton = find.byKey(
+        const Key('scene-model-conversation-selector-scene.dispatch.model'),
+      );
+      expect(fullSelectorButton, findsOneWidget);
+    },
+  );
 
 }
 

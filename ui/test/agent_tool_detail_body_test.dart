@@ -220,6 +220,37 @@ diff --git a/lib/main.dart b/lib/main.dart
       'mimeType': 'text/plain',
     });
   });
+
+  testWidgets('phone development tool renders PhoneDevelopmentResultSection with 5 phases', (tester) async {
+    final cardData = {
+      'toolName': 'phone_development',
+      'status': 'success',
+      'argsJson': jsonEncode({'action': 'lsposed_deploy'}),
+      'resultPreviewJson': jsonEncode({
+        'isReadyForBuild': true,
+        'architecture': 'arm64',
+        'targetPackage': 'com.demo.target',
+        'signatureVerified': true,
+        'installed': true,
+        'moduleEnabled': true,
+        'scopeConfigured': true,
+        'configVerified': true,
+        'hookVerified': true,
+      }),
+    };
+
+    await tester.pumpWidget(_app(AgentToolDetailBody(cardData: cardData)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('环境检查'), findsOneWidget);
+    expect(find.text('项目 / APK 分析'), findsOneWidget);
+    expect(find.text('构建与签名'), findsOneWidget);
+    expect(find.text('模块部署与配置'), findsOneWidget);
+    expect(find.text('状态验证与三层证据'), findsOneWidget);
+    expect(find.text('第一层：配置读回验证'), findsOneWidget);
+    expect(find.text('第二层：框架加载证据'), findsOneWidget);
+    expect(find.text('第三层：业务功能效果'), findsOneWidget);
+  });
 }
 
 Widget _app(Widget body, {ThemeData? theme}) {

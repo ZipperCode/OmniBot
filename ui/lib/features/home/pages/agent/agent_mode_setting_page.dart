@@ -68,6 +68,35 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
   // 远程 PC Bridge 状态：先用缓存同步渲染，后台再刷新，避免一帧加载闪烁。
   bool _remoteBridgeEnabled =
       StorageService.getBool(StorageService.kRemoteBridgeEnabledKey) ?? false;
+  bool _addOthersExpanded = false;
+
+  bool _isXiaowan(AcpAgentProfile agent) {
+    final normalizedId =
+        AgentBrandIcon.normalizeAgentId(agent.id.trim().toLowerCase());
+    if (normalizedId == 'xiaowan-acp' ||
+        normalizedId == 'xiaowan' ||
+        normalizedId == 'legacy-xiaowan-bot' ||
+        normalizedId == 'legacy-xiaowan-command') {
+      return true;
+    }
+    final rawId = agent.id.trim().toLowerCase();
+    if (rawId == 'xiaowan-acp' ||
+        rawId == 'xiaowan' ||
+        rawId == 'legacy-xiaowan-bot' ||
+        rawId == 'legacy-xiaowan-command') {
+      return true;
+    }
+    final name = agent.name.trim().toLowerCase();
+    return name == '小万' || name == 'xiaowan';
+  }
+
+  bool _isAgentEnabledAndInstalled(AcpAgentProfile agent) {
+    if (!agent.enabled) return false;
+    if (agent.installed == false) return false;
+    final status = agent.status.trim().toLowerCase();
+    if (status == 'missing') return false;
+    return true;
+  }
 
   bool get _english =>
       Localizations.localeOf(context).languageCode.toLowerCase() == 'en';
@@ -738,9 +767,16 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
   Widget build(BuildContext context) {
     final palette = context.omniPalette;
     final agents = _visibleAgents;
-    final managed = agents.where((agent) => agent.builtIn).toList()
+    // Agent 分组规范：首组小万，第二组已启用的其他 Agent，第三组添加其他 Agent（默认折叠未安装项）
+    final xiaowan = agents.where(_isXiaowan).toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    final custom = agents.where((agent) => !agent.builtIn).toList()
+    final enabledOthers = agents
+        .where((agent) => !_isXiaowan(agent) && _isAgentEnabledAndInstalled(agent))
+        .toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final addOthers = agents
+        .where((agent) => !_isXiaowan(agent) && !_isAgentEnabledAndInstalled(agent))
+        .toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     return PopScope(
       canPop: !widget.active || !_searchVisible,
@@ -798,7 +834,11 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
                       ),
                     ),
                   )
-                : _buildList(managed: managed, custom: custom),
+                : _buildList(
+                    xiaowan: xiaowan,
+                    enabledOthers: enabledOthers,
+                    addOthers: addOthers,
+                  ),
           ),
         ),
       ),
@@ -806,8 +846,9 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
   }
 
   Widget _buildList({
-    required List<AcpAgentProfile> managed,
-    required List<AcpAgentProfile> custom,
+    required List<AcpAgentProfile> xiaowan,
+    required List<AcpAgentProfile> enabledOthers,
+    required List<AcpAgentProfile> addOthers,
   }) {
     final sections = <Widget>[
       OmniSegmentedSlider<_AgentFilter>(
@@ -832,17 +873,22 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
         ],
         onChanged: (value) => setState(() => _filter = value),
       ),
-      if (managed.isNotEmpty)
+      if (xiaowan.isNotEmpty)
         _buildContactSection(
-          title: _text('预置 Agent', 'Built-in Agents'),
-          agents: managed,
+          title: _text('小万', 'Xiaowan'),
+          agents: xiaowan,
         ),
-      if (custom.isNotEmpty)
+      if (enabledOthers.isNotEmpty)
         _buildContactSection(
-          title: _text('自定义 Agent', 'Custom Agents'),
-          agents: custom,
+          title: _text('已启用的其他 Agent', 'Other enabled Agents'),
+          agents: enabledOthers,
         ),
-      if (managed.isEmpty && custom.isEmpty)
+      if (addOthers.isNotEmpty)
+        _buildAddOthersSection(
+          title: _text('添加其他 Agent', 'Add other Agents'),
+          agents: addOthers,
+        ),
+      if (xiaowan.isEmpty && enabledOthers.isEmpty && addOthers.isEmpty)
         OmniSettingsCard(
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 32),
           child: Column(
@@ -916,6 +962,66 @@ class _AgentModeSettingPageState extends State<AgentModeSettingPage>
         ),
     ],
   );
+  // 第三组“添加其他 Agent”：默认收起未安装与未启用项；展开与折叠仅切换本地展示状态，不得触发网络探测或静默安装
+  Widget _buildAddOthersSection({
+    required String title,
+    required List<AcpAgentProfile> agents,
+  }) {
+    final isExpanded = _addOthersExpanded || _query.trim().isNotEmpty;
+    final palette = context.omniPalette;
+    return OmniSettingsGroup(
+      title: title,
+      translateTitle: false,
+      dividerIndent: 76,
+      headerTrailing: TextButton.icon(
+        key: const Key('agent-toggle-add-others'),
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          minimumSize: const Size(0, 32),
+        ),
+        onPressed: () =>
+            setState(() => _addOthersExpanded = !_addOthersExpanded),
+        icon: Icon(
+          isExpanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+          size: 16,
+        ),
+        label: Text(
+          isExpanded ? _text('收起', 'Collapse') : _text('展开', 'Expand'),
+        ),
+      ),
+      children: isExpanded
+          ? [
+              for (var index = 0; index < agents.length; index++)
+                _buildAgentTile(
+                  agents[index],
+                  first: index == 0,
+                  last: index == agents.length - 1,
+                ),
+            ]
+          : [
+              OmniSettingsTile(
+                tileKey: const Key('agent-expand-add-others-tile'),
+                icon: LucideIcons.chevronDown,
+                title: _text('展开未启用 Agent', 'Expand uninstalled Agents'),
+                subtitle: _text(
+                  '共 ${agents.length} 位 Agent，点击展开',
+                  '${agents.length} Agents, tap to expand',
+                ),
+                trailing: Text(
+                  _text('展开', 'Expand'),
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: palette.accentPrimary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                translateText: false,
+                onTap: () => setState(() => _addOthersExpanded = true),
+              ),
+            ],
+    );
+  }
+
 
   Widget _buildGeneralSettings() => OmniSettingsGroup(
     title: _text('通用配置', 'General'),

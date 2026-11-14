@@ -11,6 +11,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool allowEphemeralPersistence = false,
     bool allowHistoryRemoval = false,
     List<String>? removedMessageIds,
+    Map<String, dynamic>? settledPromptReceipt,
   }) async {
     if (allowHistoryRemoval && removedMessageIds == null) {
       throw ArgumentError('History removal requires explicit message IDs');
@@ -43,6 +44,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
             preserveActivityTime: preserveActivityTime,
             allowHistoryRemoval: allowHistoryRemoval,
             removedMessageIds: removals,
+            settledPromptReceipt: settledPromptReceipt,
           ),
         );
     _persistenceTails[key] = operation;
@@ -73,6 +75,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool preserveActivityTime = false,
     bool allowHistoryRemoval = false,
     List<String>? removedMessageIds,
+    Map<String, dynamic>? settledPromptReceipt,
   }) async {
     final runtime =
         expectedRuntime ??
@@ -87,8 +90,13 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     final persistenceGeneration = runtime.persistenceGeneration;
     _flushRuntimeStreamingText(runtime);
     // Completion/disposal may observe an empty projection. Explicit item removal
-    // is the only write that can still be meaningful with no remaining messages.
-    if (runtime.messages.isEmpty && !(persistMessages && allowHistoryRemoval)) {
+    // or settled prompt receipts can still be meaningful with no remaining messages.
+    final pendingReceipt = settledPromptReceipt ??
+        (runtime.settledPromptReceipts.isNotEmpty
+            ? runtime.settledPromptReceipts.values.last
+            : null);
+    if (runtime.messages.isEmpty &&
+        !(persistMessages && (allowHistoryRemoval || pendingReceipt != null))) {
       return;
     }
 
@@ -150,10 +158,12 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       updatedAt: preserveActivityTime ? baseConversation.updatedAt : now,
     );
 
-    await ConversationService.updateConversation(
-      updatedConversation,
-      preserveLatestMetadata: true,
-    );
+    if (pendingReceipt == null || snapshotMessages.isNotEmpty || allowHistoryRemoval) {
+      await ConversationService.updateConversation(
+        updatedConversation,
+        preserveLatestMetadata: true,
+      );
+    }
     if (persistMessages) {
       // Metadata I/O can overlap streamed chunks and PromptResponse. Capture
       // message content at the write boundary, not before that await. Keep the
@@ -177,7 +187,14 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
         mode: conversationMode,
         allowHistoryRemoval: allowHistoryRemoval,
         removedMessageIds: removedMessageIds,
+        settledPromptReceipt: pendingReceipt,
       );
+      if (pendingReceipt != null) {
+        final ackTurnId = pendingReceipt['turnId']?.toString();
+        if (ackTurnId != null && ackTurnId.isNotEmpty) {
+          runtime.acknowledgeSettledPromptReceipt(ackTurnId);
+        }
+      }
     }
     // A page switch may dispose this runtime while the durable write is
     // awaiting the database. Do not mutate a replaced runtime when the old
@@ -219,6 +236,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
     bool persistMessages = false,
     bool preserveActivityTime = false,
     Duration delay = const Duration(milliseconds: 350),
+    Map<String, dynamic>? settledPromptReceipt,
   }) {
     final key = _runtimeKey(conversationId: conversationId, mode: mode);
     if (_ephemeralRuntimeKeys.contains(key)) {
@@ -247,6 +265,7 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
               markComplete: request.markComplete,
               persistMessages: request.persistMessages,
               preserveActivityTime: request.preserveActivityTime,
+              settledPromptReceipt: request.settledPromptReceipt,
             ),
           );
         });
@@ -259,6 +278,8 @@ extension ChatRuntimePersistenceSupport on ChatConversationRuntimeCoordinator {
       persistMessages: nextPersistMessages,
       preserveActivityTime:
           preserveActivityTime && (previous?.preserveActivityTime ?? true),
+      settledPromptReceipt:
+          settledPromptReceipt ?? previous?.settledPromptReceipt,
     );
   }
 

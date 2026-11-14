@@ -20,6 +20,10 @@ import 'package:ui/widgets/settings_section_title.dart';
 import 'package:ui/widgets/settings_ui.dart';
 import 'package:ui/features/home/pages/model_provider_setting/model_provider_setting_page.dart';
 import 'package:ui/widgets/navigation/page_route.dart';
+import 'package:ui/features/home/pages/authorize_setting/authorize_setting_page.dart';
+import 'package:ui/services/root_access_service.dart';
+import 'package:ui/widgets/conversation_model_selector.dart';
+import 'package:ui/widgets/glass_popup.dart';
 
 enum ModelCapabilityStatus {
   compatible,
@@ -84,45 +88,79 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
   Map<String, List<ProviderModelOption>> _providerModelsByProfileId = {};
   Set<String> _savingSceneIds = <String>{};
   Map<String, String> _providerErrors = <String, String>{};
+  RootAccessSnapshot _rootSnapshot = const RootAccessSnapshot();
+  final Set<String> _manuallyToggledScenes = <String>{};
+  final Set<String> _expandedOptionalSceneIds = <String>{};
+
   @override
   void initState() {
     super.initState();
     _loadData();
   }
 
+  static const List<String> _optionalSceneIds = [
+    SceneModelConfigService.sceneVisionUnderstanding,
+    SceneModelConfigService.sceneVlmOperationPrimary,
+    SceneModelConfigService.sceneImageGenerate,
+    SceneModelConfigService.sceneVoice,
+    SceneModelConfigService.sceneCompactorContextChat,
+    SceneModelConfigService.sceneMemoryEmbedding,
+    SceneModelConfigService.sceneMemoryRollup,
+  ];
+
   List<SceneCatalogItem> get _orderedBasicScenes {
-    final map = {
-      for (final item in _catalog)
-        if (item.sceneId != 'scene.compactor.context') item.sceneId: item,
-    };
-    final result = <SceneCatalogItem>[];
-    for (final id in SceneModelConfigService.basicSceneIds) {
-      final item = map.remove(id);
-      if (item != null) {
-        result.add(item);
-      }
+    final dispatchItem = _catalog
+        .where((item) => item.sceneId == SceneModelConfigService.sceneDispatchModel)
+        .firstOrNull;
+    if (dispatchItem != null) {
+      return [dispatchItem];
     }
-    return result;
+    return const [];
   }
 
-  List<SceneCatalogItem> get _orderedAdvancedScenes {
+  List<SceneCatalogItem> get _orderedOptionalScenes {
     final map = {
       for (final item in _catalog)
-        if (item.sceneId != 'scene.compactor.context') item.sceneId: item,
+        if (item.sceneId != 'scene.compactor.context' &&
+            item.sceneId != SceneModelConfigService.sceneDispatchModel)
+          item.sceneId: item,
     };
     final result = <SceneCatalogItem>[];
-    for (final id in SceneModelConfigService.advancedSceneIds) {
+    for (final id in _optionalSceneIds) {
       final item = map.remove(id);
       if (item != null) {
         result.add(item);
       }
     }
     for (final entry in map.entries) {
-      if (!SceneModelConfigService.basicSceneIds.contains(entry.key)) {
-        result.add(entry.value);
-      }
+      result.add(entry.value);
     }
     return result;
+  }
+
+
+  bool _hasBinding(String sceneId) {
+    final binding = _bindingMap[sceneId];
+    return binding != null && binding.modelId.trim().isNotEmpty;
+  }
+
+  bool _isSceneExpanded(String sceneId) {
+    if (_manuallyToggledScenes.contains(sceneId)) {
+      return _expandedOptionalSceneIds.contains(sceneId);
+    }
+    return _hasBinding(sceneId);
+  }
+
+  void _toggleOptionalScene(String sceneId) {
+    setState(() {
+      final current = _isSceneExpanded(sceneId);
+      _manuallyToggledScenes.add(sceneId);
+      if (current) {
+        _expandedOptionalSceneIds.remove(sceneId);
+      } else {
+        _expandedOptionalSceneIds.add(sceneId);
+      }
+    });
   }
 
   Map<String, SceneModelBindingEntry> get _bindingMap {
@@ -342,7 +380,6 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
   }
 
   Future<void> _loadData({bool showLoading = true}) async {
-    if (!await waitForPageReady() || !mounted) return;
     if (showLoading && mounted) {
       setState(() => _isLoading = true);
     }
@@ -352,13 +389,15 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         SceneModelConfigService.getSceneModelBindings(),
         ModelProviderConfigService.listProfiles(),
         SceneModelConfigService.getSceneVoiceConfig(),
+        RootAccessService.status().catchError((_) => const RootAccessSnapshot()),
       ]);
-      if (!await waitForPageReady() || !mounted) return;
 
       final catalog = results[0] as List<SceneCatalogItem>;
       final bindings = results[1] as List<SceneModelBindingEntry>;
       final profilesPayload = results[2] as ModelProviderProfilesPayload;
       final voiceConfig = results[3] as SceneVoiceConfig;
+      final rootSnapshot = (results.length > 4 ? results[4] : null) as RootAccessSnapshot? ??
+          const RootAccessSnapshot();
       final providerModelsByProfileId = <String, List<ProviderModelOption>>{};
       for (final profile in profilesPayload.profiles) {
         providerModelsByProfileId[profile.id] =
@@ -374,12 +413,13 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         bindings: bindings,
       );
 
-      if (!await waitForPageReady() || !mounted) return;
+      if (!mounted) return;
       setState(() {
         _catalog = catalog;
         _bindings = bindings;
         _profiles = profilesPayload.profiles;
         _voiceConfig = voiceConfig;
+        _rootSnapshot = rootSnapshot;
         _providerModelsByProfileId = enriched;
         _providerErrors = <String, String>{};
       });
@@ -388,10 +428,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         providerModelsByProfileId: enriched,
       );
     } catch (_) {
-      if (!await waitForPageReady() || !mounted) return;
+      if (!mounted) return;
       showToast(context.l10n.sceneModelLoadFailed, type: ToastType.error);
     } finally {
-      if (showLoading && await waitForPageReady() && mounted) {
+      if (showLoading && mounted) {
         setState(() => _isLoading = false);
       }
     }
@@ -493,7 +533,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
   }
 
   Future<void> _refreshProviderModels() async {
-    if (!await waitForPageReady() || !mounted) return;
+    if (!mounted) return;
     if (_isRefreshingModels) {
       await _providerRefreshCompleter?.future;
       return;
@@ -545,7 +585,7 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
         }
       }
 
-      if (!await waitForPageReady() ||
+      if (!mounted ||
           !_isProviderRefreshActive(refreshGeneration)) {
         return;
       }
@@ -669,6 +709,10 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
           providerModelsByProfileId: _providerModelsByProfileId,
           bindings: bindings,
         );
+        if (!clearing) {
+          _manuallyToggledScenes.add(sceneId);
+          _expandedOptionalSceneIds.add(sceneId);
+        }
       });
       if (sceneId == VoicePlaybackCoordinator.sceneVoiceId) {
         await VoicePlaybackCoordinator.instance.refreshConfiguration();
@@ -776,6 +820,53 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     if (!mounted) return;
     await _loadData(showLoading: false);
   }
+  Future<void> _openAuthorizeSetting(BuildContext context) async {
+    await Navigator.of(context).push(
+      OmniPageRoute<void>(
+        builder: (_) => const AuthorizeSettingPage(),
+        settings: const RouteSettings(name: '/home/authorize_setting'),
+      ),
+    );
+  }
+
+  Future<void> openConversationModelSelector(
+    BuildContext context,
+    SceneCatalogItem scene,
+  ) async {
+    final binding = _bindingMap[scene.sceneId];
+    final modelsByProfile = _modelsForScene(scene);
+    final anchor = glassPopupAnchorFromContext(context) ??
+        const Rect.fromLTWH(0, 0, 100, 100);
+    final selection = await showGlassPopup<ConversationModelSelection>(
+      context: context,
+      sourceContext: context,
+      anchor: anchor,
+      child: Builder(
+        builder: (popupContext) => LayoutBuilder(
+          builder: (context, constraints) => ConversationModelSelectorContent(
+            width: 320,
+            maxHeight: constraints.maxHeight.clamp(220.0, 460.0),
+            profiles: _profiles,
+            providerModelsByProfileId: modelsByProfile,
+            loadLiveProviders: false,
+            currentSelection: binding == null
+                ? null
+                : ConversationModelSelection(
+                    providerProfileId: binding.providerProfileId,
+                    modelId: binding.modelId,
+                  ),
+            onSelect: (value) => Navigator.of(popupContext).pop(value),
+          ),
+        ),
+      ),
+    );
+    if (!mounted || selection == null) return;
+    await _saveSceneBinding(
+      scene: scene,
+      providerProfileId: selection.providerProfileId,
+      modelId: selection.modelId,
+    );
+  }
 
   Widget _buildSceneSelectorField(
     SceneCatalogItem scene, {
@@ -857,11 +948,8 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     );
   }
 
-  Widget _buildDefaultSceneRow(SceneCatalogItem scene) {
-    final isSaving = _isSavingScene(scene.sceneId);
-    final isBusy = isSaving;
+  List<Widget> _buildSceneStatusNotes(SceneCatalogItem scene) {
     final binding = _bindingMap[scene.sceneId];
-
     ModelCapabilityStatus? currentModelCapability;
     if (binding != null) {
       final profile = _profiles
@@ -890,18 +978,127 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
     final isUnconfiguredOptional =
         isOptional && binding == null && scene.effectiveModel.isEmpty;
 
+    return [
+      if (isUnconfiguredOptional) ...[
+        const SizedBox(height: 4),
+        Text(
+          '未配置时此功能不启用（可选场景）',
+          style: TextStyle(
+            color: _tertiaryTextColor,
+            fontSize: 12,
+          ),
+        ),
+      ] else if (currentModelCapability == ModelCapabilityStatus.incompatible) ...[
+        const SizedBox(height: 4),
+        Text(
+          '当前模型不支持此场景，请重新选择模型或确认能力标记。',
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.error,
+            fontSize: 12,
+          ),
+        ),
+      ] else if (currentModelCapability == ModelCapabilityStatus.unknown) ...[
+        const SizedBox(height: 4),
+        InkWell(
+          onTap: () => _openModelProviderSetting(context),
+          borderRadius: BorderRadius.circular(4),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Row(
+              children: [
+                Icon(
+                  LucideIcons.alertTriangle,
+                  size: 14,
+                  color: _secondaryTextColor,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    '当前模型能力待确认 · 点击前往服务商设置标记',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    ];
+  }
+
+  Widget _buildOptionalSceneItem(SceneCatalogItem scene) {
+    final isExpanded = _isSceneExpanded(scene.sceneId);
+    final hasBinding = _hasBinding(scene.sceneId);
+
+    if (!isExpanded) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          key: Key('scene-optional-row-${scene.sceneId}'),
+          children: [
+            Expanded(flex: 4, child: _buildSceneLabel(scene)),
+            const SizedBox(width: 10),
+            Expanded(
+              flex: 6,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Flexible(
+                    child: OmniSettingsStatusBadge(
+                      label: hasBinding ? _selectionLabel(scene) : '未绑定',
+                      color: hasBinding
+                          ? context.omniPalette.brandPrimary
+                          : _tertiaryTextColor,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    key: Key('scene-optional-toggle-${scene.sceneId}'),
+                    icon: const Icon(LucideIcons.chevronDown, size: 16),
+                    tooltip: '展开',
+                    onPressed: () => _toggleOptionalScene(scene.sceneId),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final isSaving = _isSavingScene(scene.sceneId);
+    final isBusy = isSaving;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            key: Key('scene-optional-row-${scene.sceneId}'),
             children: [
               Expanded(flex: 4, child: _buildSceneLabel(scene)),
               const SizedBox(width: 10),
               Expanded(
                 flex: 6,
-                child: _buildSceneSelectorField(scene, isSaving: isBusy),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _buildSceneSelectorField(scene, isSaving: isBusy),
+                    ),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      key: Key('scene-optional-toggle-${scene.sceneId}'),
+                      icon: const Icon(LucideIcons.chevronUp, size: 16),
+                      tooltip: '收起',
+                      onPressed: () => _toggleOptionalScene(scene.sceneId),
+                    ),
+                  ],
+                ),
               ),
               if (isBusy) ...[
                 const SizedBox(width: 8),
@@ -913,61 +1110,278 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
               ],
             ],
           ),
-          if (isUnconfiguredOptional) ...[
-            const SizedBox(height: 4),
-            Text(
-              '未配置时此功能不启用（可选场景）',
-              style: TextStyle(
-                color: _tertiaryTextColor,
-                fontSize: 12,
-              ),
-            ),
-          ] else if (currentModelCapability == ModelCapabilityStatus.incompatible) ...[
-            const SizedBox(height: 4),
-            Text(
-              '当前模型不支持此场景，请重新选择模型或确认能力标记。',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.error,
-                fontSize: 12,
-              ),
-            ),
-          ] else if (currentModelCapability == ModelCapabilityStatus.unknown) ...[
-            const SizedBox(height: 4),
-            InkWell(
-              onTap: () => _openModelProviderSetting(context),
-              borderRadius: BorderRadius.circular(4),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 48),
-                child: Row(
-                  children: [
-                    Icon(
-                      LucideIcons.alertTriangle,
-                      size: 14,
-                      color: _secondaryTextColor,
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        '当前模型能力待确认 · 点击前往服务商设置标记',
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          ..._buildSceneStatusNotes(scene),
+          if (scene.sceneId == SceneModelConfigService.sceneVoice) ...[
+            const SizedBox(height: 12),
+            _buildVoiceCard(),
           ],
         ],
       ),
     );
   }
 
-  Widget _buildSceneRow(SceneCatalogItem scene) {
-    return _buildDefaultSceneRow(scene);
+  Widget _buildBasicSceneSection(SceneCatalogItem scene) {
+    final isSaving = _isSavingScene(scene.sceneId);
+    final isBusy = isSaving;
+    final hasBinding = _hasBinding(scene.sceneId);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SettingsSectionTitle(
+          label: '基础配置',
+          subtitle: '主 Agent 用于对话与工具分流决策。',
+        ),
+        _buildCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(flex: 4, child: _buildSceneLabel(scene)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 6,
+                    child: _buildSceneSelectorField(scene, isSaving: isBusy),
+                  ),
+                  if (isBusy) ...[
+                    const SizedBox(width: 8),
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              Divider(
+                height: 16,
+                thickness: 0.6,
+                color: context.omniPalette.borderSubtle.withValues(alpha: 0.9),
+              ),
+              Row(
+                children: [
+                  Icon(
+                    LucideIcons.fileText,
+                    size: 14,
+                    color: _tertiaryTextColor,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '绑定摘要：',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _secondaryTextColor,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      hasBinding
+                          ? _selectionLabel(scene)
+                          : '未绑定专用模型 (使用系统默认)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: hasBinding
+                            ? _primaryTextColor
+                            : _tertiaryTextColor,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  InkWell(
+                    key: Key('scene-model-conversation-selector-${scene.sceneId}'),
+                    onTap: () => openConversationModelSelector(context, scene),
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 4,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            LucideIcons.listFilter,
+                            size: 13,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '完整选择器',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).colorScheme.primary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOptionalSceneSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SettingsSectionTitle(
+          label: '可选能力',
+          subtitle:
+              '视觉、GUI、图像、语音、压缩与记忆等按需配置；已有绑定默认展开，未配置默认收起。',
+        ),
+        _buildCard(
+          child: ListView.separated(
+            physics: const NeverScrollableScrollPhysics(),
+            shrinkWrap: true,
+            itemCount: _orderedOptionalScenes.length,
+            itemBuilder: (context, index) {
+              final scene = _orderedOptionalScenes[index];
+              return _buildOptionalSceneItem(scene);
+            },
+            separatorBuilder: (_, _) => Divider(
+              height: 20,
+              thickness: 0.6,
+              color: context.omniPalette.borderSubtle.withValues(alpha: 0.9),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPrivilegedSection() {
+    final isRootGranted = _rootSnapshot.granted;
+    final rootStatusLabel = isRootGranted ? '已授权' : '未授权 / 未启用';
+    final rootStatusColor = isRootGranted
+        ? context.omniPalette.brandPrimary
+        : _tertiaryTextColor;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SettingsSectionTitle(
+          label: '特权与系统能力',
+          subtitle: '展示 Root 与 LSPosed 已知状态与授权入口，页面初始化不触发 su 探测。',
+        ),
+        _buildCard(
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Icon(
+                      LucideIcons.shieldAlert,
+                      size: 18,
+                      color: _tertiaryTextColor,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Root 访问权限',
+                            style: TextStyle(
+                              color: _primaryTextColor,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '只读已知状态，不会在页面初始化时触发 su 探测。',
+                            style: TextStyle(
+                              color: _secondaryTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OmniSettingsStatusBadge(
+                      key: const Key('scene-root-status-badge'),
+                      label: rootStatusLabel,
+                      color: rootStatusColor,
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      key: const Key('scene-root-manage-button'),
+                      onPressed: () => _openAuthorizeSetting(context),
+                      child: const Text('前往授权'),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(
+                height: 20,
+                thickness: 0.6,
+                color: context.omniPalette.borderSubtle.withValues(alpha: 0.9),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Icon(
+                      LucideIcons.boxes,
+                      size: 18,
+                      color: _tertiaryTextColor,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'LSPosed / Xposed 模块',
+                            style: TextStyle(
+                              color: _primaryTextColor,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '展示已知管理状态；模块部署与作用域由会话或工具箱管理。',
+                            style: TextStyle(
+                              color: _secondaryTextColor,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OmniSettingsStatusBadge(
+                      key: const Key('scene-lsposed-status-badge'),
+                      label: '只读状态',
+                      color: _secondaryTextColor,
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      key: const Key('scene-lsposed-manage-button'),
+                      onPressed: () => _openAuthorizeSetting(context),
+                      child: const Text('前往管理'),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildVoiceCard() {
@@ -1209,80 +1623,16 @@ class _SceneModelSettingPageState extends State<SceneModelSettingPage>
                         ),
                       ),
                     if (_orderedBasicScenes.isNotEmpty) ...[
-                      SettingsSectionTitle(
-                        label: '基础能力',
-                        subtitle:
-                            '主 Agent 用于对话与工具调用；视觉、生图、语音按需配置，GUI 未单独绑定时跟随主 Agent。',
-                      ),
-                      _buildCard(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              context.trLegacy(
-                                '点击右侧按钮选择模型，也可按模型名称、ID 或服务商搜索。',
-                              ),
-                              style: TextStyle(
-                                color: _secondaryTextColor,
-                                fontSize: 12,
-                                height: 1.5,
-                                fontFamily: 'PingFang SC',
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            ListView.separated(
-                              physics: const NeverScrollableScrollPhysics(),
-                              shrinkWrap: true,
-                              itemCount: _orderedBasicScenes.length,
-                              itemBuilder: (context, index) {
-                                final scene = _orderedBasicScenes[index];
-                                return _buildSceneRow(scene);
-                              },
-                              separatorBuilder: (_, _) => Divider(
-                                height: 20,
-                                thickness: 0.6,
-                                color: context.omniPalette.borderSubtle
-                                    .withValues(alpha: 0.9),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      SettingsSectionTitle(
-                        label: context.trLegacy('语音能力'),
-                        subtitle:
-                            context.trLegacy('统一由 ACP 语音场景提供播放和自动朗读。'),
-                      ),
-                      _buildVoiceCard(),
+                      _buildBasicSceneSection(_orderedBasicScenes.first),
                       const SizedBox(height: 16),
                     ],
-                    if (_orderedAdvancedScenes.isNotEmpty) ...[
-                      SettingsSectionTitle(
-                        label: '高级配置',
-                        subtitle:
-                            '按需配置上下文压缩与记忆维护；未配置嵌入模型时使用词法检索。',
-                      ),
-                      _buildCard(
-                        child: ListView.separated(
-                          physics: const NeverScrollableScrollPhysics(),
-                          shrinkWrap: true,
-                          itemCount: _orderedAdvancedScenes.length,
-                          itemBuilder: (context, index) {
-                            final scene = _orderedAdvancedScenes[index];
-                            return _buildSceneRow(scene);
-                          },
-                          separatorBuilder: (_, _) => Divider(
-                            height: 20,
-                            thickness: 0.6,
-                            color: context.omniPalette.borderSubtle
-                                .withValues(alpha: 0.9),
-                          ),
-                        ),
-                      ),
+                    if (_orderedOptionalScenes.isNotEmpty) ...[
+                      _buildOptionalSceneSection(),
+                      const SizedBox(height: 16),
                     ],
+                    _buildPrivilegedSection(),
                     if (_orderedBasicScenes.isEmpty &&
-                        _orderedAdvancedScenes.isEmpty)
+                        _orderedOptionalScenes.isEmpty)
                       _buildCard(
                         child: Padding(
                           padding: const EdgeInsets.symmetric(vertical: 12),

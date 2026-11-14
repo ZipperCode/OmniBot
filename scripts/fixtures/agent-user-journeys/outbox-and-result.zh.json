@@ -1,0 +1,174 @@
+{
+  "name": "待发箱排队、编辑移除与完成投递，结果预览与现场保持",
+  "preconditions": "中文聊天页，空闲小万会话，空输入框。真实模型 Provider 已配置就绪。",
+  "requireClockSync": true,
+  "requireProvider": true,
+  "steps": [
+    {
+      "action": "precondition",
+      "check": "provider-configured"
+    },
+    {
+      "action": "send",
+      "marker": "OOB_OUTBOX_A",
+      "scenario": "oob-outbox-task.json"
+    },
+    {
+      "action": "expect",
+      "containsText": "停止",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "queue",
+      "marker": "OOB_OUTBOX_B",
+      "text": "Reply OOB_OUTBOX_B End your final reply with OOB_OUTBOX_B_DONE."
+    },
+    {
+      "action": "queue",
+      "marker": "OOB_OUTBOX_C",
+      "text": "Reply OOB_OUTBOX_C End your final reply with OOB_OUTBOX_C_DONE."
+    },
+    {
+      "action": "expect",
+      "text": "待发 2 条",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "tap",
+      "label": "待发 2 条"
+    },
+    {
+      "action": "tap",
+      "label": "待发消息 #1 更多选项"
+    },
+    {
+      "action": "tap",
+      "label": "编辑"
+    },
+    {
+      "action": "expect",
+      "text": "编辑待发消息",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "set-input",
+      "text": "Reply UPDATED. End your final reply with OOB_OUTBOX_B_DONE."
+    },
+    {
+      "action": "tap",
+      "label": "保存修改"
+    },
+    {
+      "action": "tap",
+      "label": "待发消息 #2 更多选项"
+    },
+    {
+      "action": "tap",
+      "label": "移除"
+    },
+    {
+      "action": "expect",
+      "text": "移除待发消息",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "expect",
+      "text": "确定从队列中移除此条待发消息吗？"
+    },
+    {
+      "action": "tap",
+      "label": "确定移除"
+    },
+    {
+      "action": "expect",
+      "text": "待发 1 条",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "reply",
+      "text": "OOB_OUTBOX_A_DONE",
+      "timeoutMs": 360000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_OUTBOX_A",
+      "expected": "done"
+    },
+    {
+      "action": "reply",
+      "text": "OOB_OUTBOX_B_DONE",
+      "timeoutMs": 180000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_OUTBOX_B",
+      "expected": "done"
+    },
+    {
+      "action": "set-input",
+      "text": "OOB_OUTBOX_RETURN_DRAFT_{{RUN_ID}}"
+    },
+    {
+      "action": "expect",
+      "containsText": "打开产物",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "tap",
+      "label": "打开产物"
+    },
+    {
+      "action": "expect",
+      "containsText": "产物列表 (",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "tap",
+      "label": "outbox-run-OOB_OUTBOX_A.txt"
+    },
+    {
+      "action": "expect",
+      "containsText": "OUTBOX_RUN_CONTENT_OOB_OUTBOX_A",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "expect",
+      "text": "OOB_OUTBOX_RETURN_DRAFT_{{RUN_ID}}",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "expect",
+      "containsText": "查看变更",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "tap",
+      "label": "查看变更"
+    },
+    {
+      "action": "expect",
+      "containsText": "受管工作区变更",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "expect",
+      "text": "OOB_OUTBOX_RETURN_DRAFT_{{RUN_ID}}",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "set-input",
+      "text": ""
+    },
+    {
+      "action": "expect",
+      "text": "发送",
+      "timeoutMs": 15000
+    }
+  ]
+}

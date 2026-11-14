@@ -20,14 +20,13 @@ import cn.com.omnimind.bot.quicklog.QuickLogWidgetActionRouter
 import cn.com.omnimind.bot.task.runtime.TaskContinuationCoordinator
 import cn.com.omnimind.bot.ui.channel.ChannelManager
 import cn.com.omnimind.bot.ui.channel.FileSaveChannel
-import cn.com.omnimind.bot.ui.platformview.AgentBrowserPlatformViewFactory
 import cn.com.omnimind.bot.ui.platformview.EmbeddedTerminalPlatformViewFactory
 import cn.com.omnimind.bot.update.AppUpdateManager
 import cn.com.omnimind.bot.util.SchemeUtil
 import cn.com.omnimind.bot.util.TaskRuntimeSettings
 import io.flutter.embedding.android.FlutterActivity
-import kotlinx.coroutines.Dispatchers
 import io.flutter.embedding.engine.FlutterEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : FlutterActivity() {
@@ -105,7 +104,6 @@ class MainActivity : FlutterActivity() {
 
         super.configureFlutterEngine(flutterEngine)
         channelManager.configureFlutterEngine(flutterEngine)
-        AgentBrowserPlatformViewFactory.registerWith(flutterEngine = flutterEngine)
         EmbeddedTerminalPlatformViewFactory.registerWith(flutterEngine = flutterEngine)
 
         OmniLog.d(TAG, "MainActivity configureFlutterEngine cost: ${System.currentTimeMillis() - configStart}ms")
@@ -170,11 +168,11 @@ class MainActivity : FlutterActivity() {
         super.onResume()
         TaskRuntimeSettings.attachActivity(this)
         TaskRuntimeSettings.onActivityResumed(this)
+        EmbeddedTerminalInstallService.refresh(applicationContext)
+        AppUpdateManager.requestSilentCheckIfDue(this)
         lifecycleScope.launch(Dispatchers.IO) {
             TaskContinuationCoordinator.resumePendingContinuationIfAny(applicationContext)
         }
-        EmbeddedTerminalInstallService.refresh(applicationContext)
-        AppUpdateManager.requestSilentCheckIfDue(this)
 
     }
 

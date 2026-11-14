@@ -8,6 +8,11 @@ import cn.com.omnimind.bot.agent.AgentToolRegistry
 import cn.com.omnimind.bot.agent.AgentWorkspaceManager
 import cn.com.omnimind.bot.agent.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
+import cn.com.omnimind.bot.agent.ArtifactAction
+import cn.com.omnimind.bot.agent.workspace.WorkspaceChangeService
+import cn.com.omnimind.bot.agent.workspace.WorkspaceUnifiedDiff
+import cn.com.omnimind.baselib.database.WorkspaceChangeEntry
+import cn.com.omnimind.bot.agent.workspace.WorkspacePathLock
 import java.io.IOException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -166,8 +171,11 @@ private fun bytesMatchImageExtension(fileName: String, bytes: ByteArray): Boolea
 
 class FileToolHandler(
     private val helper: SharedHelper,
-    private val workspaceManager: AgentWorkspaceManager
+    private val workspaceManager: AgentWorkspaceManager,
+    private val workspaceChangeService: WorkspaceChangeService? = null
 ) : ToolHandler {
+    private val effectiveChangeService: WorkspaceChangeService?
+        get() = workspaceChangeService ?: runCatching { WorkspaceChangeService.getInstance(helper.context) }.getOrNull()
     override val toolNames: Set<String> = setOf(
         "file_read", "file_write", "file_edit", "file_list", "file_search", "file_stat", "file_move",
         "read", "write", "edit", "glob", "grep"
@@ -187,8 +195,8 @@ class FileToolHandler(
                 env.workspaceDescriptor,
                 callback,
             )
-            "file_write", "write" -> executeFileWrite(args, env.workspaceDescriptor, callback)
-            "file_edit", "edit" -> executeFileEdit(args, env.workspaceDescriptor, callback)
+            "file_write", "write" -> executeFileWrite(args, env, callback, toolHandle)
+            "file_edit", "edit" -> executeFileEdit(args, env, callback, toolHandle)
             "file_list", "glob" -> executeFileList(
                 args,
                 env.workspaceDescriptor,
@@ -200,7 +208,7 @@ class FileToolHandler(
                 callback,
             )
             "file_stat" -> executeFileStat(args, env.workspaceDescriptor, callback)
-            "file_move" -> executeFileMove(args, env.workspaceDescriptor, callback)
+            "file_move" -> executeFileMove(args, env, callback, toolHandle)
             else -> ToolExecutionResult.Error(toolCall.function.name, "Unknown file tool")
         }
     }
@@ -303,10 +311,12 @@ class FileToolHandler(
 
     private suspend fun executeFileWrite(
         args: JsonObject,
-        workspace: AgentWorkspaceDescriptor,
-        callback: AgentCallback
+        env: AgentExecutionEnvironment,
+        callback: AgentCallback,
+        toolHandle: AgentToolExecutionHandle
     ): ToolExecutionResult {
         val toolName = "file_write"
+        val workspace = env.workspaceDescriptor
         return try {
             val path = args["path"]?.jsonPrimitive?.content?.trim().orEmpty()
             val content = args["content"]?.jsonPrimitive?.content
@@ -323,34 +333,82 @@ class FileToolHandler(
                 allowPublicStorage = true
             )
             val append = args["append"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
-            file.parentFile?.mkdirs()
-            if (append) {
-                file.appendText(content)
-            } else {
-                val imageBytes = decodeImageWriteContentForFileName(file.name, content)
-                if (imageBytes != null) {
-                    file.writeBytes(imageBytes)
-                } else {
-                    file.writeText(normalizeSvgWriteContentForFileName(file.name, content))
+
+            WorkspacePathLock.withPathLock(file) {
+                val wsRoot = File(workspace.androidRootPath)
+                val beforeText = if (file.exists() && file.isFile) runCatching { file.readText() }.getOrNull() else null
+                val prepared = effectiveChangeService?.prepareWriteOrEdit(
+                    file = file,
+                    workspaceRoot = wsRoot,
+                    operation = if (file.exists()) "write" else "create"
+                )
+
+                try {
+                    file.parentFile?.mkdirs()
+                    if (append) {
+                        file.appendText(content)
+                    } else {
+                        val imageBytes = decodeImageWriteContentForFileName(file.name, content)
+                        if (imageBytes != null) {
+                            file.writeBytes(imageBytes)
+                        } else {
+                            file.writeText(normalizeSvgWriteContentForFileName(file.name, content))
+                        }
+                    }
+
+                    val afterText = if (file.exists() && file.isFile) runCatching { file.readText() }.getOrNull() else null
+                    val diffText = if (beforeText != null && afterText != null) {
+                        WorkspaceUnifiedDiff.generate(beforeText, afterText, file.name)
+                    } else if (beforeText == null && afterText != null) {
+                        WorkspaceUnifiedDiff.generate("", afterText, file.name)
+                    } else ""
+
+                    val changeEntry = if (prepared != null) {
+                        effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = true)
+                    } else null
+
+                    val actions = mutableListOf<ArtifactAction>()
+                    if (changeEntry != null && changeEntry.snapshotStatus == WorkspaceChangeEntry.SNAPSHOT_STATUS_READY) {
+                        actions.add(
+                            ArtifactAction(
+                                type = "workspace_change",
+                                label = helper.localized("查看变更"),
+                                payload = mapOf(
+                                    "changeId" to changeEntry.changeId,
+                                    "conversationId" to env.conversationId
+                                )
+                            )
+                        )
+                    }
+
+                    val artifact = workspaceManager.buildArtifactForFile(file, toolName)
+                    val payload = linkedMapOf<String, Any?>(
+                        "path" to (workspaceManager.shellPathForAndroid(file) ?: file.absolutePath),
+                        "androidPath" to file.absolutePath,
+                        "uri" to artifact.uri,
+                        "size" to file.length(),
+                        "append" to append,
+                        "diffText" to diffText.ifEmpty { null }
+                    )
+                    ToolExecutionResult.ContextResult(
+                        toolName = toolName,
+                        summaryText = helper.localized(if (append) "已追加写入文件：${file.name}" else "已写入文件：${file.name}"),
+                        previewJson = helper.encodeLocalizedPayload(payload),
+                        rawResultJson = helper.encodeLocalizedPayload(payload),
+                        success = true,
+                        artifacts = listOf(artifact),
+                        workspaceId = workspace.id,
+                        actions = actions
+                    )
+                } catch (e: Exception) {
+                    if (prepared != null) {
+                        runCatching {
+                            effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = false)
+                        }
+                    }
+                    throw e
                 }
             }
-            val artifact = workspaceManager.buildArtifactForFile(file, toolName)
-            val payload = linkedMapOf<String, Any?>(
-                "path" to (workspaceManager.shellPathForAndroid(file) ?: file.absolutePath),
-                "androidPath" to file.absolutePath,
-                "uri" to artifact.uri,
-                "size" to file.length(),
-                "append" to append
-            )
-            ToolExecutionResult.ContextResult(
-                toolName = toolName,
-                summaryText = helper.localized(if (append) "已追加写入文件：${file.name}" else "已写入文件：${file.name}"),
-                previewJson = helper.encodeLocalizedPayload(payload),
-                rawResultJson = helper.encodeLocalizedPayload(payload),
-                success = true,
-                artifacts = listOf(artifact),
-                workspaceId = workspace.id
-            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -361,10 +419,12 @@ class FileToolHandler(
 
     private suspend fun executeFileEdit(
         args: JsonObject,
-        workspace: AgentWorkspaceDescriptor,
-        callback: AgentCallback
+        env: AgentExecutionEnvironment,
+        callback: AgentCallback,
+        toolHandle: AgentToolExecutionHandle
     ): ToolExecutionResult {
         val toolName = "file_edit"
+        val workspace = env.workspaceDescriptor
         return try {
             helper.requireWorkspaceStorageAccess(callback)?.let { return it }
             helper.requirePublicStorageAccessIfNeeded(
@@ -381,30 +441,71 @@ class FileToolHandler(
             val oldText = args["oldText"]?.jsonPrimitive?.content ?: throw IllegalArgumentException("缺少 oldText")
             val newText = args["newText"]?.jsonPrimitive?.content ?: ""
             val replaceAll = args["replaceAll"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
-            val original = file.readText()
-            require(original.contains(oldText)) { "文件中未找到 oldText" }
-            val updated = if (replaceAll) {
-                original.replace(oldText, newText)
-            } else {
-                original.replaceFirst(oldText, newText)
+
+            WorkspacePathLock.withPathLock(file) {
+                val original = file.readText()
+                require(original.contains(oldText)) { "文件中未找到 oldText" }
+                val wsRoot = File(workspace.androidRootPath)
+                val prepared = effectiveChangeService?.prepareWriteOrEdit(
+                    file = file,
+                    workspaceRoot = wsRoot,
+                    operation = "write"
+                )
+
+                try {
+                    val updated = if (replaceAll) {
+                        original.replace(oldText, newText)
+                    } else {
+                        original.replaceFirst(oldText, newText)
+                    }
+                    file.writeText(updated)
+
+                    val diffText = WorkspaceUnifiedDiff.generate(original, updated, file.name)
+                    val changeEntry = if (prepared != null) {
+                        effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = true)
+                    } else null
+
+                    val actions = mutableListOf<ArtifactAction>()
+                    if (changeEntry != null && changeEntry.snapshotStatus == WorkspaceChangeEntry.SNAPSHOT_STATUS_READY) {
+                        actions.add(
+                            ArtifactAction(
+                                type = "workspace_change",
+                                label = helper.localized("查看变更"),
+                                payload = mapOf(
+                                    "changeId" to changeEntry.changeId,
+                                    "conversationId" to env.conversationId
+                                )
+                            )
+                        )
+                    }
+
+                    val artifact = workspaceManager.buildArtifactForFile(file, toolName)
+                    val payload = linkedMapOf<String, Any?>(
+                        "path" to (workspaceManager.shellPathForAndroid(file) ?: file.absolutePath),
+                        "androidPath" to file.absolutePath,
+                        "uri" to artifact.uri,
+                        "replaceAll" to replaceAll,
+                        "diffText" to diffText.ifEmpty { null }
+                    )
+                    ToolExecutionResult.ContextResult(
+                        toolName = toolName,
+                        summaryText = helper.localized("已更新文件：${file.name}"),
+                        previewJson = helper.encodeLocalizedPayload(payload),
+                        rawResultJson = helper.encodeLocalizedPayload(payload),
+                        success = true,
+                        artifacts = listOf(artifact),
+                        workspaceId = workspace.id,
+                        actions = actions
+                    )
+                } catch (e: Exception) {
+                    if (prepared != null) {
+                        runCatching {
+                            effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = false)
+                        }
+                    }
+                    throw e
+                }
             }
-            file.writeText(updated)
-            val artifact = workspaceManager.buildArtifactForFile(file, toolName)
-            val payload = linkedMapOf<String, Any?>(
-                "path" to (workspaceManager.shellPathForAndroid(file) ?: file.absolutePath),
-                "androidPath" to file.absolutePath,
-                "uri" to artifact.uri,
-                "replaceAll" to replaceAll
-            )
-            ToolExecutionResult.ContextResult(
-                toolName = toolName,
-                summaryText = helper.localized("已更新文件：${file.name}"),
-                previewJson = helper.encodeLocalizedPayload(payload),
-                rawResultJson = helper.encodeLocalizedPayload(payload),
-                success = true,
-                artifacts = listOf(artifact),
-                workspaceId = workspace.id
-            )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -412,6 +513,7 @@ class FileToolHandler(
             helper.errorResult(toolName, e.message, "编辑文件失败")
         }
     }
+
 
     private suspend fun executeFileList(
         args: JsonObject,
@@ -590,10 +692,12 @@ class FileToolHandler(
 
     private suspend fun executeFileMove(
         args: JsonObject,
-        workspace: AgentWorkspaceDescriptor,
-        callback: AgentCallback
+        env: AgentExecutionEnvironment,
+        callback: AgentCallback,
+        toolHandle: AgentToolExecutionHandle
     ): ToolExecutionResult {
         val toolName = "file_move"
+        val workspace = env.workspaceDescriptor
         return try {
             helper.requireWorkspaceStorageAccess(callback)?.let { return it }
             helper.requirePublicStorageAccessIfNeeded(
@@ -615,30 +719,69 @@ class FileToolHandler(
             require(source.exists()) { "源文件不存在：${source.absolutePath}" }
             val overwrite = args["overwrite"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
             require(overwrite || !target.exists()) { "目标已存在：${target.absolutePath}" }
-            target.parentFile?.mkdirs()
-            if (overwrite && target.exists()) {
-                target.deleteRecursively()
-            }
-            source.copyRecursively(target, overwrite = overwrite)
-            source.deleteRecursively()
-            val artifact = target.takeIf { it.isFile }?.let { workspaceManager.buildArtifactForFile(it, toolName) }
-            val payload = linkedMapOf<String, Any?>(
-                "sourcePath" to (workspaceManager.shellPathForAndroid(source) ?: source.absolutePath),
-                "androidSourcePath" to source.absolutePath,
-                "targetPath" to (workspaceManager.shellPathForAndroid(target) ?: target.absolutePath),
-                "androidTargetPath" to target.absolutePath,
-                "overwrite" to overwrite,
-                "targetUri" to artifact?.uri
-            )
-            ToolExecutionResult.ContextResult(
-                toolName = toolName,
-                summaryText = helper.localized("已移动到：${target.name}"),
-                previewJson = helper.encodeLocalizedPayload(payload),
-                rawResultJson = helper.encodeLocalizedPayload(payload),
-                success = true,
-                artifacts = artifact?.let { listOf(it) } ?: emptyList(),
-                workspaceId = workspace.id
-            )
+
+            WorkspacePathLock.withPathLocks(listOf(source, target)) {
+                    val wsRoot = File(workspace.androidRootPath)
+                    val prepared = effectiveChangeService?.prepareMove(
+                        source = source,
+                        target = target,
+                        workspaceRoot = wsRoot
+                    )
+
+                    try {
+                        target.parentFile?.mkdirs()
+                        if (overwrite && target.exists()) {
+                            target.deleteRecursively()
+                        }
+                        source.copyRecursively(target, overwrite = overwrite)
+                        source.deleteRecursively()
+
+                        val changeEntry = if (prepared != null) {
+                            effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = true)
+                        } else null
+
+                        val actions = mutableListOf<ArtifactAction>()
+                        if (changeEntry != null && changeEntry.snapshotStatus == WorkspaceChangeEntry.SNAPSHOT_STATUS_READY) {
+                            actions.add(
+                                ArtifactAction(
+                                    type = "workspace_change",
+                                    label = helper.localized("查看变更"),
+                                    payload = mapOf(
+                                        "changeId" to changeEntry.changeId,
+                                        "conversationId" to env.conversationId
+                                    )
+                                )
+                            )
+                        }
+
+                        val artifact = target.takeIf { it.isFile }?.let { workspaceManager.buildArtifactForFile(it, toolName) }
+                        val payload = linkedMapOf<String, Any?>(
+                            "sourcePath" to (workspaceManager.shellPathForAndroid(source) ?: source.absolutePath),
+                            "androidSourcePath" to source.absolutePath,
+                            "targetPath" to (workspaceManager.shellPathForAndroid(target) ?: target.absolutePath),
+                            "androidTargetPath" to target.absolutePath,
+                            "overwrite" to overwrite,
+                            "targetUri" to artifact?.uri
+                        )
+                        ToolExecutionResult.ContextResult(
+                            toolName = toolName,
+                            summaryText = helper.localized("已移动到：${target.name}"),
+                            previewJson = helper.encodeLocalizedPayload(payload),
+                            rawResultJson = helper.encodeLocalizedPayload(payload),
+                            success = true,
+                            artifacts = artifact?.let { listOf(it) } ?: emptyList(),
+                            workspaceId = workspace.id,
+                            actions = actions
+                        )
+                    } catch (e: Exception) {
+                        if (prepared != null) {
+                            runCatching {
+                                effectiveChangeService?.recordChange(prepared, env, toolHandle.toolCallId, success = false)
+                            }
+                        }
+                        throw e
+                    }
+                }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

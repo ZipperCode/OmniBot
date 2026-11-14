@@ -53,15 +53,57 @@ class AgentBrowserSessionService {
     'cn.com.omnimind.bot/AgentBrowserSession',
   );
 
-  static const String platformViewType =
-      'cn.com.omnimind.bot/agent_browser_view';
+  /// Whether the system-level overlay browser (WindowManager overlay) may be
+  /// shown. Backed by AgentBrowserOverlayHost.isOverlayPermitted.
+  static Future<bool> isOverlayPermitted() async {
+    try {
+      return await _channel.invokeMethod<bool>('isOverlayPermitted') ?? false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Opens the system overlay-permission settings screen. Never auto-grants.
+  /// Returns whether the settings screen was launched.
+  static Future<bool> requestOverlayPermission() async {
+    try {
+      return await _channel.invokeMethod<bool>('requestOverlayPermission') ??
+          false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Opens the native system overlay browser host for [workspaceId].
+  /// Returns the host result map (`opened`, `sessionAvailable`, `reason`) or
+  /// null when the native side is unavailable.
+  static Future<Map<String, dynamic>?> openOverlayHost(String workspaceId) async {
+    try {
+      final rawResult = await _channel.invokeMethod<dynamic>(
+        'openOverlayHost',
+        <String, dynamic>{'workspaceId': workspaceId},
+      );
+      return _normalizeMap(rawResult);
+    } on PlatformException {
+      rethrow;
+    } on MissingPluginException {
+      return null;
+    }
+  }
 
   static Future<ChatBrowserSessionSnapshot?> getLiveSessionSnapshot() {
     return getSnapshot();
   }
 
-  static Future<ChatBrowserSessionSnapshot?> getSnapshot() {
-    return _invokeSnapshot('getSnapshot');
+  static Future<ChatBrowserSessionSnapshot?> getSnapshot({String? workspaceId}) {
+    final requestedWorkspaceId = workspaceId?.trim() ?? '';
+    return _invokeSnapshot(
+      'getSnapshot',
+      <String, dynamic>{
+        if (requestedWorkspaceId.isNotEmpty)
+          'workspaceId': requestedWorkspaceId,
+      },
+    );
   }
 
   static Future<AgentBrowserPreviewFrame?> capturePreviewFrame({

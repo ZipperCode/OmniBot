@@ -7,11 +7,11 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { agentAvatarUrl, isRecord } from "../api";
+import { agentAvatarUrl, isRecord, workspaceDownloadUrl } from "../api";
 import { formatBytes, markdownToHtml, messageContent, messageTime } from "../format";
 import { buildRunTimeline } from "../runTimeline";
 import { buildMessageSummaries } from "../messageSummary";
-import type { Attachment, ChatMessage, Conversation } from "../types";
+import type { Attachment, ChatMessage, Conversation, OutboxSnapshot } from "../types";
 import {
   ComposerAttachmentIcon,
   ComposerSendIcon,
@@ -19,6 +19,22 @@ import {
 } from "./ComposerIcons";
 import { Icon } from "./Icon";
 import { MessageSummaryRail } from "./MessageSummaryRail";
+import { OutboxPanel } from "./OutboxPanel";
+import {
+  TurnResultActions,
+  type TurnArtifactItem,
+  type TurnSkillSuggestion,
+  type TurnWorkspaceChangesSummary,
+} from "./TurnResultActions";
+import {
+  PhoneDevelopmentResultSection,
+  parsePhoneDevelopmentStages,
+} from "./PhoneDevelopmentResultSection";
+import { WorkspaceChangeModal } from "./WorkspaceChangeModal";
+import { SkillSuggestionModal } from "./SkillSuggestionModal";
+
+import { isCompactAvailableHeight } from "../viewportLayout";
+export { isCompactAvailableHeight };
 
 
 interface ChatPanelProps {
@@ -28,7 +44,11 @@ interface ChatPanelProps {
   unavailableMessage?: string;
   sending: boolean;
   activeTaskId: string | null;
+  activeSessionId?: string | null;
+  activeTurnId?: string | null;
   clarifyTaskId: string | null;
+  outboxSnapshot?: OutboxSnapshot | null;
+  outboxError?: string | null;
   onOpenConversations: () => void;
   onArchive: () => void;
   onDelete: () => void;
@@ -36,6 +56,19 @@ interface ChatPanelProps {
   onCancel: () => void;
   onClearError: () => void;
   onAttachmentError: (error: unknown) => void;
+  onEnqueue?: (text: string, attachments: Attachment[]) => Promise<boolean>;
+  onUpdateOutboxItem?: (
+    id: string,
+    text: string,
+    attachments: Attachment[],
+    expectedRevision?: number,
+    conversationId?: number,
+  ) => Promise<boolean>;
+  onRemoveOutboxItem?: (id: string) => Promise<boolean>;
+  onResumeOutboxItem?: (id: string) => Promise<boolean>;
+  onStopAndSendOutboxItem?: (id: string) => Promise<boolean>;
+  onClearOutboxError?: () => void;
+  skillRefreshRevision?: number;
 }
 
 const GREETING_WORDS = ["聊天", "执行", "构建", "探索", "规划", "总结", "检索", "记忆"];
@@ -327,6 +360,10 @@ function Message({
   anchorId,
   suppressReasoning = false,
   suppressThinkingAvatar = false,
+  currentDraft,
+  isAgentRunActive,
+  onFillDraft,
+  onViewWorkspaceChange,
 }: {
   message: ChatMessage;
   agentId?: string;
@@ -334,6 +371,10 @@ function Message({
   anchorId?: string;
   suppressReasoning?: boolean;
   suppressThinkingAvatar?: boolean;
+  currentDraft?: string;
+  isAgentRunActive?: boolean;
+  onFillDraft?: (text: string) => void;
+  onViewWorkspaceChange?: (changes: TurnWorkspaceChangesSummary) => void;
 }) {
   const content = messageContent(message);
   const isUser = Number(message.user) === 1;
@@ -362,25 +403,70 @@ function Message({
 
   // 工具调用卡 (agent_tool_summary 及其他卡片类型)
   if (isCard) {
-    const title = card.toolTitle ?? card.toolName ?? card.displayName ?? card.title ?? card.toolType ?? "工具运行";
+    const isPhoneDev = parsePhoneDevelopmentStages(card).isPhoneDevelopment;
+    const title = card.toolTitle ?? card.toolName ?? card.displayName ?? card.title ?? card.toolType ?? (isPhoneDev ? "手机开发 / LSPosed" : "工具运行");
     const status = card.status ?? (message.isLoading ? "running" : "completed");
     const running = String(status) === "running";
     return (
       <article className={`${classes} card-message`}>
         <div className="message-content">
-          <details className={`tool-message status-${statusClass(status)}`} open={running}>
+          <details className={`tool-message status-${statusClass(status)}`} open={running || isPhoneDev}>
             <summary>
-              <span className="tool-icon"><Icon name={toolIcon(card)} size={16} /></span>
+              <span className="tool-icon"><Icon name={isPhoneDev ? "terminal" : toolIcon(card)} size={16} /></span>
               <span className="tool-heading">
                 <strong className={running ? "shimmer" : ""}>{String(title)}</strong>
               </span>
               <span className="tool-status-toggle">
-                <span className="tool-status">{running ? toolTypeLabel(card) : statusLabel(status)}</span>
+                <span className="tool-status">{running ? (isPhoneDev ? "手机开发" : toolTypeLabel(card)) : statusLabel(status)}</span>
                 <Icon className="tool-chevron" name="chevron-down" size={14} />
               </span>
             </summary>
             <div className="tool-detail">
-              <pre>{JSON.stringify(card, null, 2)}</pre>
+              {isPhoneDev ? (
+                <PhoneDevelopmentResultSection
+                  card={card}
+                  currentDraft={currentDraft ?? ""}
+                  isAgentRunActive={Boolean(isAgentRunActive)}
+                  onFillDraft={onFillDraft ?? (() => {})}
+                />
+              ) : (
+                <>
+                  <pre>{JSON.stringify(card, null, 2)}</pre>
+                  {Array.isArray(card.actions) && card.actions.length > 0 && (
+                    <div className="tool-actions-bar" style={{ marginTop: "8px", display: "flex", gap: "6px" }}>
+                      {card.actions.map((act, actIdx) => {
+                        if (!act || typeof act !== "object") return null;
+                        const actionObj = act as Record<string, unknown>;
+                        const type = String(actionObj.type ?? "").toLowerCase();
+                        const label = String(actionObj.label ?? (type === "workspace_change" ? "查看变更" : "操作"));
+                        if (type === "workspace_change") {
+                          const payload = (typeof actionObj.payload === "object" && actionObj.payload !== null
+                            ? actionObj.payload
+                            : actionObj) as Record<string, unknown>;
+                          return (
+                            <button
+                              key={`act-${actIdx}`}
+                              type="button"
+                              className="turn-result-btn changes-btn"
+                              onClick={() => {
+                                onViewWorkspaceChange?.({
+                                  changeId: payload.changeId ? String(payload.changeId) : undefined,
+                                  conversationId: typeof payload.conversationId === "number" ? payload.conversationId : undefined,
+                                  diffText: card.diffText ? String(card.diffText) : undefined,
+                                });
+                              }}
+                            >
+                              <Icon name="workspace" size={14} />
+                              <span>{label}</span>
+                            </button>
+                          );
+                        }
+                        return null;
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </details>
         </div>
@@ -669,11 +755,27 @@ function buildGroups(messages: ChatMessage[], activeTaskId: string | null): Rend
 function AgentRunGroup({
   group,
   agentId,
+  conversationId,
+  skillRefreshRevision,
   anchorFor,
+  currentDraft,
+  isAgentRunActive,
+  onFillDraft,
+  onOpenArtifact,
+  onViewChanges,
+  onViewSkillSuggestion,
 }: {
   group: RunGroup;
   agentId?: string;
+  conversationId?: number;
+  skillRefreshRevision?: number;
   anchorFor?: (message: ChatMessage) => string | undefined;
+  currentDraft?: string;
+  isAgentRunActive?: boolean;
+  onFillDraft?: (text: string) => void;
+  onOpenArtifact?: (artifact: TurnArtifactItem) => void;
+  onViewChanges?: (changes: TurnWorkspaceChangesSummary) => void;
+  onViewSkillSuggestion?: (suggestion: TurnSkillSuggestion) => void;
 }) {
   const [expanded, setExpanded] = useState(group.active);
   const elapsed = Math.max(0, Math.round((group.endTime - group.startTime) / 1000));
@@ -706,6 +808,10 @@ function AgentRunGroup({
             anchorId={anchorFor?.(msg)}
             suppressReasoning={group.hasThinking}
             suppressThinkingAvatar={isDeepThinkingMessage(msg)}
+            currentDraft={currentDraft}
+            isAgentRunActive={isAgentRunActive}
+            onFillDraft={onFillDraft}
+            onViewWorkspaceChange={onViewChanges}
             key={String(msg.id ?? `${messageTime(msg)}-${index}`)}
           />
         ))}
@@ -717,9 +823,25 @@ function AgentRunGroup({
           active={msg === activeTailMessage}
           anchorId={anchorFor?.(msg)}
           suppressReasoning={group.hasThinking}
+          currentDraft={currentDraft}
+          isAgentRunActive={isAgentRunActive}
+          onFillDraft={onFillDraft}
+          onViewWorkspaceChange={onViewChanges}
           key={String(msg.id ?? `${messageTime(msg)}-v${index}`)}
         />
       ))}
+      {!group.active && (
+        <TurnResultActions
+          messages={groupMessages}
+          isRunning={group.active}
+          conversationId={conversationId}
+          turnId={group.taskId}
+          skillRefreshRevision={skillRefreshRevision}
+          onOpenArtifact={onOpenArtifact}
+          onViewChanges={onViewChanges}
+          onViewSkillSuggestion={onViewSkillSuggestion}
+        />
+      )}
     </div>
   );
 }
@@ -731,7 +853,11 @@ export function ChatPanel({
   unavailableMessage,
   sending,
   activeTaskId,
+  activeSessionId,
+  activeTurnId,
   clarifyTaskId,
+  outboxSnapshot,
+  outboxError,
   onOpenConversations,
   onArchive,
   onDelete,
@@ -739,9 +865,57 @@ export function ChatPanel({
   onCancel,
   onClearError,
   onAttachmentError,
+  onEnqueue,
+  onUpdateOutboxItem,
+  onRemoveOutboxItem,
+  onResumeOutboxItem,
+  onStopAndSendOutboxItem,
+  onClearOutboxError,
+  skillRefreshRevision = 0,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [activeWorkspaceChange, setActiveWorkspaceChange] = useState<TurnWorkspaceChangesSummary | null>(null);
+  const [activeSkillCandidate, setActiveSkillCandidate] = useState<TurnSkillSuggestion | null>(null);
+  const [availableHeight, setAvailableHeight] = useState(() =>
+    typeof window !== "undefined"
+      ? (window.visualViewport?.height ?? window.innerHeight)
+      : 800
+  );
+  const [compactSheetOpen, setCompactSheetOpen] = useState(false);
+
+  // 会话切换时重置活跃弹窗，不影响输入框草稿与附件
+  useEffect(() => {
+    setActiveSkillCandidate(null);
+    setActiveWorkspaceChange(null);
+  }, [conversation?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const update = () => {
+      const h = window.visualViewport?.height ?? window.innerHeight;
+      setAvailableHeight(h);
+    };
+    update();
+    const vv = window.visualViewport;
+    if (vv) {
+      vv.addEventListener("resize", update);
+      vv.addEventListener("scroll", update);
+    }
+    window.addEventListener("resize", update);
+    return () => {
+      if (vv) {
+        vv.removeEventListener("resize", update);
+        vv.removeEventListener("scroll", update);
+      }
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+
+  const isCompact = isCompactAvailableHeight(availableHeight);
+  const outboxCount = outboxSnapshot?.items?.length ?? 0;
+  const attachmentCount = attachments.length;
+  const hasNonBlocking = outboxCount > 0 || attachmentCount > 0;
   const messageListRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -782,8 +956,10 @@ export function ChatPanel({
     ? newestBySequence(activeTaskMessages)
     : null;
   const canManageConversation = Number(conversation?.id ?? 0) > 0;
-  const isProcessing = sending || Boolean(activeTaskId && !clarifyTaskId);
-  const canSend = !unavailableMessage && !isProcessing && (clarifyTaskId ? Boolean(draft.trim()) : Boolean(draft.trim() || attachments.length));
+  const isAgentRunActive = Boolean(activeTaskId && !clarifyTaskId);
+  const hasInput = Boolean(draft.trim() || attachments.length);
+  const canQueue = !unavailableMessage && !sending && hasInput;
+  const canSend = !unavailableMessage && !sending && (clarifyTaskId ? Boolean(draft.trim()) : hasInput);
 
   useEffect(() => {
     const list = messageListRef.current;
@@ -799,12 +975,52 @@ export function ChatPanel({
 
   async function submit(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
+    if (isAgentRunActive) {
+      if (!canQueue || !onEnqueue) return;
+      const submittedText = draft.trim();
+      const submittedAttachments = [...attachments];
+      const submittedConvId = conversation?.id;
+      onClearError();
+      onClearOutboxError?.();
+      const enqueued = await onEnqueue(submittedText, submittedAttachments);
+      if (enqueued) {
+        // queue 成功只清原 conversation 原提交文本/附件，不清 await 中新输入/切换新稿
+        if (conversation?.id === submittedConvId) {
+          setDraft((current) => (current.trim() === submittedText ? "" : current));
+          setAttachments((current) =>
+            current.filter(
+              (att) =>
+                !submittedAttachments.some(
+                  (submitted) =>
+                    submitted.fileName === att.fileName && submitted.size === att.size,
+                ),
+            ),
+          );
+        }
+      }
+      return;
+    }
+
     if (!canSend) return;
+    const submittedText = draft.trim();
+    const submittedAttachments = [...attachments];
+    const submittedConvId = conversation?.id;
     onClearError();
-    const sent = await onSend(draft.trim(), attachments);
+    onClearOutboxError?.();
+    const sent = await onSend(submittedText, submittedAttachments);
     if (sent) {
-      setDraft("");
-      setAttachments([]);
+      if (conversation?.id === submittedConvId) {
+        setDraft((current) => (current.trim() === submittedText ? "" : current));
+        setAttachments((current) =>
+          current.filter(
+            (att) =>
+              !submittedAttachments.some(
+                (submitted) =>
+                  submitted.fileName === att.fileName && submitted.size === att.size,
+              ),
+          ),
+        );
+      }
     }
   }
 
@@ -833,6 +1049,36 @@ export function ChatPanel({
 
   return (
     <section className="chat-pane">
+      {activeWorkspaceChange && (
+        <WorkspaceChangeModal
+          changeId={activeWorkspaceChange.changeId}
+          diffText={activeWorkspaceChange.diffText}
+          conversationId={activeWorkspaceChange.conversationId ?? conversation?.id}
+          workspaceId={conversation?.id ? `conversation_${conversation.id}` : "conversation_default"}
+          onClose={() => setActiveWorkspaceChange(null)}
+        />
+      )}
+      {activeSkillCandidate && (
+        <SkillSuggestionModal
+          candidateId={activeSkillCandidate.candidateId}
+          conversationId={activeSkillCandidate.conversationId ?? conversation?.id}
+          turnId={activeSkillCandidate.turnId}
+          skillRefreshRevision={skillRefreshRevision}
+          onClose={() => setActiveSkillCandidate(null)}
+          onCandidateUpdated={(updated) => {
+            setActiveSkillCandidate((prev) => (prev ? {
+              ...prev,
+              candidateId: updated.candidateId,
+              revision: updated.revision,
+              name: updated.name,
+              description: updated.description,
+              bodyMarkdown: updated.bodyMarkdown,
+              targetSkillId: updated.targetSkillId,
+              state: updated.state,
+            } : null));
+          }}
+        />
+      )}
       <header className="chat-app-bar">
         <button
           className="appbar-icon menu-trigger"
@@ -843,6 +1089,15 @@ export function ChatPanel({
           <Icon name="menu" size={20} />
         </button>
         <div className="chat-header-actions">
+          <button
+            className="appbar-icon"
+            type="button"
+            aria-label="技能建议与资产管理"
+            title="技能建议与资产管理"
+            onClick={() => setActiveSkillCandidate({ id: "all", name: "技能建议与资产管理" })}
+          >
+            <Icon name="agent" size={18} />
+          </button>
           <button
             className="appbar-icon"
             type="button"
@@ -873,24 +1128,70 @@ export function ChatPanel({
         {!sortedMessages.length && <EmptyGreeting />}
         {buildGroups(sortedMessages, activeTaskId).map((item, index) => {
           if (item.kind === "run") {
-            return <AgentRunGroup anchorFor={anchorFor} group={item.group} agentId={conversation?.agentId} key={`run-${item.group.taskId}`} />;
+            return (
+              <AgentRunGroup
+                anchorFor={anchorFor}
+                group={item.group}
+                agentId={conversation?.agentId}
+                conversationId={conversation?.id}
+                skillRefreshRevision={skillRefreshRevision}
+                currentDraft={draft}
+                isAgentRunActive={isAgentRunActive}
+                onFillDraft={(cmd) => setDraft(cmd)}
+                onOpenArtifact={(art) => {
+                  if (art.path) window.open(workspaceDownloadUrl(art.path), "_blank");
+                  else if (art.uri) window.open(art.uri, "_blank");
+                }}
+                onViewChanges={(c) => setActiveWorkspaceChange(c)}
+                onViewSkillSuggestion={(s) => setActiveSkillCandidate({
+                  ...s,
+                  turnId: s.turnId || item.group.taskId,
+                  conversationId: s.conversationId ?? conversation?.id,
+                })}
+                key={`run-${item.group.taskId}`}
+              />
+            );
           }
           const taskId = agentRunParentTaskId(item.message);
           const isThinking = isDeepThinkingMessage(item.message);
           return (
-            <Message
-              message={item.message}
-              agentId={conversation?.agentId}
-              active={item.message === activeTailMessage}
-              anchorId={anchorByMessage.get(item.message)}
-              suppressReasoning={thinkingTaskIds.has(taskId ?? "")}
-              suppressThinkingAvatar={Boolean(
-                isThinking
-                && taskId
-                && firstThinkingMessageByTask.get(taskId) !== item.message
+            <div key={String(item.message.id ?? `${messageTime(item.message)}-${index}`)}>
+              <Message
+                message={item.message}
+                agentId={conversation?.agentId}
+                active={item.message === activeTailMessage}
+                anchorId={anchorByMessage.get(item.message)}
+                suppressReasoning={thinkingTaskIds.has(taskId ?? "")}
+                suppressThinkingAvatar={Boolean(
+                  isThinking
+                  && taskId
+                  && firstThinkingMessageByTask.get(taskId) !== item.message
+                )}
+                currentDraft={draft}
+                isAgentRunActive={isAgentRunActive}
+                onFillDraft={(cmd) => setDraft(cmd)}
+                onViewWorkspaceChange={(c) => setActiveWorkspaceChange(c)}
+              />
+              {Number(item.message.user) !== 1 && !isAgentRunActive && (
+                <TurnResultActions
+                  messages={[item.message]}
+                  isRunning={false}
+                  conversationId={conversation?.id}
+                  turnId={taskId ?? undefined}
+                  skillRefreshRevision={skillRefreshRevision}
+                  onOpenArtifact={(art) => {
+                    if (art.path) window.open(workspaceDownloadUrl(art.path), "_blank");
+                    else if (art.uri) window.open(art.uri, "_blank");
+                  }}
+                  onViewChanges={(c) => setActiveWorkspaceChange(c)}
+                  onViewSkillSuggestion={(s) => setActiveSkillCandidate({
+                    ...s,
+                    turnId: s.turnId || taskId || undefined,
+                    conversationId: s.conversationId ?? conversation?.id,
+                  })}
+                />
               )}
-              key={String(item.message.id ?? `${messageTime(item.message)}-${index}`)}
-            />
+            </div>
           );
         })}
       </div>
@@ -903,17 +1204,142 @@ export function ChatPanel({
       </div>
 
       <div className="composer-region">
+        {/* 低视口紧凑模式 (<420px): 非阻塞状态折叠为一行小条 */}
+        {isCompact ? (
+          <>
+            {hasNonBlocking && (
+              <div className="compact-bar">
+                <button
+                  type="button"
+                  className="compact-bar-trigger"
+                  onClick={() => setCompactSheetOpen(true)}
+                  aria-label="展开待发与附件详情"
+                >
+                  <span className="compact-bar-summary">
+                    {outboxCount > 0 && <span>待发 {outboxCount} 条</span>}
+                    {outboxCount > 0 && attachmentCount > 0 && <span className="compact-bar-dot">·</span>}
+                    {attachmentCount > 0 && <span>附件 {attachmentCount} 个</span>}
+                    <span className="compact-bar-dot">·</span>
+                    <span className="compact-bar-more">更多</span>
+                  </span>
+                  <Icon name="chevron-down" size={14} />
+                </button>
+              </div>
+            )}
+            {/* 审批与需操作错误不静默折叠 */}
+            {outboxError && (
+              <div className="outbox-error-banner" role="alert">
+                <span className="outbox-error-text">{outboxError}</span>
+                {onClearOutboxError && (
+                  <button type="button" onClick={onClearOutboxError} aria-label="关闭错误提示">
+                    <Icon name="x" size={14} />
+                  </button>
+                )}
+              </div>
+            )}
+            {/* 展开 Sheet: 70% available height 内可滚动 */}
+            {compactSheetOpen && (
+              <div
+                className="compact-sheet-overlay"
+                role="dialog"
+                aria-modal="true"
+                aria-label="待发与附件详情"
+              >
+                <div
+                  className="compact-sheet"
+                  style={{ maxHeight: `${Math.round(availableHeight * 0.7)}px` }}
+                >
+                  <header className="compact-sheet-header">
+                    <h4>待发与附件详情</h4>
+                    <button
+                      type="button"
+                      className="compact-sheet-close"
+                      onClick={() => setCompactSheetOpen(false)}
+                      aria-label="关闭"
+                    >
+                      <Icon name="x" size={16} />
+                    </button>
+                  </header>
+                  <div className="compact-sheet-body">
+                    {outboxCount > 0 && (
+                      <OutboxPanel
+                        snapshot={outboxSnapshot ?? null}
+                        error={null}
+                        isAgentRunActive={isAgentRunActive}
+                        activeSessionId={activeSessionId}
+                        activeTurnId={activeTurnId}
+                        onClearError={onClearOutboxError}
+                        onUpdateItem={onUpdateOutboxItem ?? (async () => false)}
+                        onRemoveItem={onRemoveOutboxItem ?? (async () => false)}
+                        onResumeItem={onResumeOutboxItem ?? (async () => false)}
+                        onStopAndSendItem={onStopAndSendOutboxItem ?? (async () => false)}
+                      />
+                    )}
+                    {attachmentCount > 0 && (
+                      <div className="compact-attachment-section">
+                        <h5>附件列表 ({attachmentCount})</h5>
+                        <div className="attachment-list">
+                          {attachments.map((attachment, index) => (
+                            <div className={`composer-attachment${attachment.isImage ? " image" : ""}`} key={`${attachment.fileName}-${index}`}>
+                              {attachment.isImage ? (
+                                <img
+                                  src={attachment.dataUrl || (attachment.path ? workspaceDownloadUrl(attachment.path) : (attachment.uri || ""))}
+                                  alt={attachment.fileName}
+                                />
+                              ) : (
+                                <>
+                                  <Icon name="file" size={16} />
+                                  <span>
+                                    <strong>{attachment.fileName}</strong>
+                                    <small>{formatBytes(attachment.size)}</small>
+                                  </span>
+                                </>
+                              )}
+                              <button
+                                type="button"
+                                aria-label={`移除 ${attachment.fileName}`}
+                                onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                              >
+                                <Icon name="x" size={12} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <OutboxPanel
+            snapshot={outboxSnapshot ?? null}
+            error={outboxError ?? null}
+            isAgentRunActive={isAgentRunActive}
+            activeSessionId={activeSessionId}
+            activeTurnId={activeTurnId}
+            onClearError={onClearOutboxError}
+            onUpdateItem={onUpdateOutboxItem ?? (async () => false)}
+            onRemoveItem={onRemoveOutboxItem ?? (async () => false)}
+            onResumeItem={onResumeOutboxItem ?? (async () => false)}
+            onStopAndSendItem={onStopAndSendOutboxItem ?? (async () => false)}
+          />
+        )}
         {clarifyTaskId && (
           <div className="clarify-banner">Agent 正在等待你的补充说明，发送下一条消息后继续。</div>
         )}
         {unavailableMessage ? <p role="status">{unavailableMessage}</p> : (
         <form className="composer" onSubmit={(event) => void submit(event)}>
-          {!!attachments.length && (
+          {!isCompact && !!attachments.length && (
             <div className="attachment-list">
               {attachments.map((attachment, index) => (
                 <div className={`composer-attachment${attachment.isImage ? " image" : ""}`} key={`${attachment.fileName}-${index}`}>
                   {attachment.isImage ? (
-                    <img src={attachment.dataUrl} alt={attachment.fileName} />
+                    <img
+                      src={attachment.dataUrl || (attachment.path ? workspaceDownloadUrl(attachment.path) : (attachment.uri || ""))}
+                      alt={attachment.fileName}
+                    />
                   ) : (
                     <>
                       <Icon name="file" size={16} />
@@ -954,12 +1380,47 @@ export function ChatPanel({
             </button>
             <input ref={attachmentInputRef} type="file" multiple hidden onChange={(event) => void addAttachments(event)} />
             <span className="composer-hint">Enter 发送 · Shift + Enter 换行</span>
-            {activeTaskId && !clarifyTaskId ? (
-              <button className="send-button stop" type="button" aria-label="停止" title="停止" onClick={onCancel}>
-                <ComposerStopIcon />
-              </button>
+            {isAgentRunActive ? (
+              hasInput ? (
+                <>
+                  <button
+                    className="composer-icon-button stop-btn"
+                    type="button"
+                    aria-label="停止当前任务"
+                    title="停止当前任务"
+                    onClick={onCancel}
+                  >
+                    <ComposerStopIcon />
+                  </button>
+                  <button
+                    className={`send-button queue${sending ? " loading" : ""}`}
+                    type="submit"
+                    aria-label="排队发送"
+                    title="排队发送"
+                    disabled={!canQueue}
+                  >
+                    <ComposerSendIcon />
+                    <span className="queue-badge">排队发送</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="send-button stop"
+                  type="button"
+                  aria-label="停止"
+                  title="停止"
+                  onClick={onCancel}
+                >
+                  <ComposerStopIcon />
+                </button>
+              )
             ) : (
-              <button className={`send-button${sending ? " loading" : ""}`} type="submit" aria-label="发送" disabled={!canSend}>
+              <button
+                className={`send-button${sending ? " loading" : ""}`}
+                type="submit"
+                aria-label="发送"
+                disabled={!canSend}
+              >
                 <ComposerSendIcon />
               </button>
             )}

@@ -10,6 +10,10 @@ import 'package:ui/utils/ui.dart';
 import 'package:ui/widgets/common_app_bar.dart';
 import 'package:ui/widgets/settings_detail_sheet.dart';
 import 'package:ui/widgets/settings_ui.dart';
+import 'package:ui/core/router/go_router_manager.dart';
+import 'package:ui/models/conversation_model.dart';
+import 'package:ui/models/conversation_thread_target.dart';
+import 'package:ui/services/root_access_service.dart';
 
 class ToolsPage extends StatefulWidget {
   const ToolsPage({super.key});
@@ -28,6 +32,7 @@ class _ToolsPageState extends State<ToolsPage>
   bool _remoteLoading = true;
   bool _localFailed = false;
   bool _remoteFailed = false;
+  RootAccessSnapshot? _rootStatus;
 
   String _text(String zh, String en) =>
       Localizations.localeOf(context).languageCode == 'en' ? en : zh;
@@ -63,7 +68,7 @@ class _ToolsPageState extends State<ToolsPage>
       _localLoading = _remoteLoading = true;
       _localFailed = _remoteFailed = false;
     });
-    await Future.wait([_loadLocal(), _loadRemote()]);
+    await Future.wait([_loadLocal(), _loadRemote(), _loadRootStatus()]);
   }
 
   Future<void> _loadLocal() async {
@@ -106,6 +111,31 @@ class _ToolsPageState extends State<ToolsPage>
         setState(() => _remoteLoading = false);
       }
     }
+  }
+
+  Future<void> _loadRootStatus() async {
+    try {
+      final status = await RootAccessService.status();
+      if (mounted) {
+        setState(() => _rootStatus = status);
+      }
+    } catch (_) {}
+  }
+
+  bool get _shouldShowPhoneDevelopmentCard {
+    if (_query.isEmpty) return true;
+    const keywords = [
+      '手机开发',
+      'lsposed',
+      'lsp',
+      'xposed',
+      'phone',
+      'development',
+      'hook',
+      'root',
+      '模块',
+    ];
+    return keywords.any((k) => k.contains(_query) || _query.contains(k));
   }
 
   Future<void> _configure(String path) async {
@@ -200,6 +230,8 @@ class _ToolsPageState extends State<ToolsPage>
                           ),
                         ),
                       ),
+                      if (_shouldShowPhoneDevelopmentCard)
+                        _buildPhoneDevelopmentCard(),
                       if (_localLoading || _remoteLoading)
                         Padding(
                           padding: const EdgeInsets.symmetric(
@@ -348,6 +380,139 @@ class _ToolsPageState extends State<ToolsPage>
       ),
     ),
   );
+
+  Widget _buildPhoneDevelopmentCard() {
+    final palette = context.omniPalette;
+    final isEnglish = Localizations.localeOf(context).languageCode == 'en';
+    final rootLabel = _rootStatus?.label(isEnglish) ??
+        (isEnglish ? 'Read-only check' : '只读检测');
+    final isGranted = _rootStatus?.granted == true;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 14, bottom: 4),
+      child: OmniSettingsCard(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: palette.accentPrimary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    LucideIcons.smartphone,
+                    size: 20,
+                    color: palette.accentPrimary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _text('手机开发 / LSPosed', 'Phone Development / LSPosed'),
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                color: palette.textPrimary,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isGranted
+                                  ? const Color(0xFF2F8F4E).withValues(alpha: 0.12)
+                                  : palette.surfaceSecondary,
+                              borderRadius: BorderRadius.circular(5),
+                            ),
+                            child: Text(
+                              rootLabel,
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w500,
+                                color: isGranted
+                                    ? const Color(0xFF2F8F4E)
+                                    : palette.textTertiary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _text(
+                          '本地构建、逆向分析、作用域与框架验证',
+                          'Build, APK analysis, scope & framework verification',
+                        ),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: palette.textSecondary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _text(
+                '支持在手机本地执行编译构建、APK 静态分析与 LSPosed 模块作用域管理。所有特权操作由“小万”Agent 在会话中通过特权通道申请并经用户授权执行。本页面仅读取状态，不开页执行 Root/probe 探测。',
+                'Supports local module builds, APK analysis and LSPosed scope management. Privileged operations are requested by Xiaowan in chat via ACP with user authorization. This page only reads status and never probes Root automatically.',
+              ),
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: palette.textSecondary,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  icon: const Icon(LucideIcons.messageSquare, size: 14),
+                  label: Text(_text('前往小万会话', 'Open Xiaowan Chat')),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: palette.textPrimary,
+                    side: BorderSide(color: palette.borderStrong),
+                    minimumSize: const Size(0, 36),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                  ),
+                  onPressed: () {
+                    GoRouterManager.push(
+                      '/home/chat',
+                      extra: const ConversationThreadTarget.newConversation(
+                        mode: ConversationMode.agent,
+                        agentId: 'xiaowan-acp',
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(width: 10),
+                TextButton(
+                  onPressed: () => context.push('/home/authorize_setting'),
+                  child: Text(_text('权限管理', 'Permissions')),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _error(String text) => Padding(
     padding: const EdgeInsets.only(top: 8),

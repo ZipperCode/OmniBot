@@ -11,7 +11,7 @@ const [serial, marker, expectedHarness] = process.argv.slice(2);
 const localCommand = ['/compact', '/pause', '/resume'].includes(marker);
 const scenarioFile = process.env.OOB_USER_SCENARIO_FILE;
 const scenario = scenarioFile ? JSON.parse(readFileSync(scenarioFile, 'utf8')) : null;
-const userText = scenario ? `${scenario.prompt.replaceAll('{{MARKER}}', marker)} End your final reply with ${marker}_DONE.`
+const userText = scenario ? `${scenario.prompt.replaceAll('{{MARKER}}', marker).replaceAll('{{RUN_ID}}', process.env.OOB_USER_SCENARIO_RUN_ID || '')} End your final reply with ${marker}_DONE.`
   : localCommand ? marker : `Reply ${marker}`;
 assert(!localCommand || !scenario, 'Command checks cannot use a scenario');
 assert(!scenario || (typeof scenario.prompt === 'string' && scenario.prompt.length < 3000), 'Invalid bounded user scenario');
@@ -19,8 +19,13 @@ assert((/^emulator-\d+$/.test(serial || '') ||
   (process.env.OOB_ALLOW_PHYSICAL_DEVICE === '1' && /^[A-Za-z0-9._:-]+$/.test(serial || ''))) &&
   (/^[A-Z][A-Z0-9_]+$/.test(marker || '') || localCommand),
   'Explicit device and test marker required; physical devices require OOB_ALLOW_PHYSICAL_DEVICE=1');
-const adb = (...args) => execFileSync(process.env.ADB || 'adb', ['-s', serial, ...args],
-  {encoding: 'utf8', timeout: 30000});
+const adb = (...args) => {
+  const binary = process.env.ADB || 'adb';
+  const options = {encoding: 'utf8', timeout: 30000};
+  return process.platform === 'win32' && binary !== 'adb' && !binary.toLowerCase().endsWith('.exe')
+    ? execFileSync(process.execPath, [binary, '-s', serial, ...args], options)
+    : execFileSync(binary, ['-s', serial, ...args], options);
+};
 const snapshot = (allowUnavailable = false) => {
   const path = '/data/local/tmp/oob-send-test.xml';
   const dump = adb('shell', 'uiautomator', 'dump', path);
@@ -69,11 +74,14 @@ do {
   await new Promise(resolve => setTimeout(resolve, 250));
 } while (Date.now() < focusDeadline);
 assert.equal(field(input(focusedNodes), 'focused'), 'true', 'Composer did not gain focus');
-// Android input text emits a whole string without waiting for Flutter frames.
-// Separate commands avoid losing edge characters on a loaded software-GPU AVD.
-// This types once; the exact draft gate below still rejects any dropped input.
-for (const character of userText) {
-  adb('shell', 'input', 'text', shellQuote(character === ' ' ? '%s' : character));
+// 实体机合成场景一次输入，避免逐字 ADB 往返耗尽运行中排队窗口。
+// 软件渲染模拟器保留逐字输入；两条路径都必须通过下方精确草稿校验。
+if (!serial.startsWith('emulator-') && /^[\x20-\x7e]+$/.test(userText) && !userText.includes('%s')) {
+  adb('shell', 'input', 'text', shellQuote(userText.replaceAll(' ', '%s')));
+} else {
+  for (const character of userText) {
+    adb('shell', 'input', 'text', shellQuote(character === ' ' ? '%s' : character));
+  }
 }
 // Keep the IME as the user left it. Android Back can leave the activity when
 // no IME is present, and keyboard dismissal can invalidate accessible bounds.

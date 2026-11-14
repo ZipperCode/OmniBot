@@ -374,6 +374,90 @@ object DatabaseHelper {
             )
         }
     }
+    val MIGRATION_19_20 = object : Migration(19, 20) {
+        override fun migrate(database: SupportSQLiteDatabase) {
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `conversation_outbox` (
+                    `id` TEXT NOT NULL,
+                    `conversationId` INTEGER NOT NULL,
+                    `agentId` TEXT NOT NULL,
+                    `payloadJson` TEXT NOT NULL,
+                    `state` TEXT NOT NULL,
+                    `revision` INTEGER NOT NULL,
+                    `sequence` INTEGER NOT NULL,
+                    `requestId` TEXT NOT NULL,
+                    `userMessageId` TEXT NOT NULL,
+                    `blockedBySessionId` TEXT,
+                    `blockedByTurnId` TEXT,
+                    `createdAt` INTEGER NOT NULL,
+                    `updatedAt` INTEGER NOT NULL,
+                    `pauseReason` TEXT,
+                    PRIMARY KEY(`id`),
+                    FOREIGN KEY(`conversationId`) REFERENCES `conversations`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE INDEX IF NOT EXISTS `index_conversation_outbox_conversationId_state_sequence`
+                ON `conversation_outbox` (`conversationId`, `state`, `sequence`)
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS `index_conversation_outbox_requestId`
+                ON `conversation_outbox` (`requestId`)
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `conversation_outbox_meta` (
+                    `conversationId` INTEGER NOT NULL,
+                    `revision` INTEGER NOT NULL DEFAULT 0,
+                    `nextSequence` INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY(`conversationId`),
+                    FOREIGN KEY(`conversationId`) REFERENCES `conversations`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `workspace_changes` (
+                    `changeId` TEXT NOT NULL,
+                    `conversationId` INTEGER NOT NULL,
+                    `sessionId` TEXT NOT NULL,
+                    `turnId` TEXT NOT NULL,
+                    `toolCallId` TEXT NOT NULL,
+                    `workspaceRoot` TEXT NOT NULL,
+                    `operation` TEXT NOT NULL,
+                    `sourceRelativePath` TEXT,
+                    `targetRelativePath` TEXT,
+                    `beforeSha256` TEXT,
+                    `afterSha256` TEXT,
+                    `beforeExists` INTEGER NOT NULL,
+                    `afterExists` INTEGER NOT NULL,
+                    `snapshotStatus` TEXT NOT NULL,
+                    `revision` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    `beforeManifestJson` TEXT NOT NULL,
+                    `afterManifestJson` TEXT NOT NULL,
+                    `restoreJournalJson` TEXT NOT NULL,
+                    `snapshotBytes` INTEGER NOT NULL,
+                    `unavailableReason` TEXT,
+                    PRIMARY KEY(`changeId`)
+                )
+                """.trimIndent()
+            )
+            database.execSQL(
+                """
+                CREATE INDEX IF NOT EXISTS `index_workspace_changes_conversationId_turnId_createdAt`
+                ON `workspace_changes` (`conversationId`, `turnId`, `createdAt`)
+                """.trimIndent()
+            )
+        }
+    }
+
 
     internal val ALL_MIGRATIONS = arrayOf(
         MIGRATION_1_2,
@@ -393,7 +477,8 @@ object DatabaseHelper {
         MIGRATION_15_16,
         MIGRATION_16_17,
         MIGRATION_17_18,
-        MIGRATION_18_19
+        MIGRATION_18_19,
+        MIGRATION_19_20
     )
 
     fun init(context: Context) {
@@ -720,6 +805,147 @@ object DatabaseHelper {
 
     suspend fun deleteAgentSessionBindingByThreadId(threadId: String): Int {
         return getDatabase().agentSessionBindingDao().deleteByThreadId(threadId)
+    }
+
+    // Outbox & Workspace DAOs
+    fun getConversationOutboxDao(): ConversationOutboxDao = getDatabase().conversationOutboxDao()
+
+    fun getConversationOutboxMetaDao(): ConversationOutboxMetaDao = getDatabase().conversationOutboxMetaDao()
+
+    fun getWorkspaceChangeDao(): WorkspaceChangeDao = getDatabase().workspaceChangeDao()
+
+    // ConversationOutbox 相关方法
+    suspend fun insertConversationOutboxEntry(entry: ConversationOutboxEntry): Long {
+        return getDatabase().conversationOutboxDao().insert(entry)
+    }
+
+    suspend fun upsertConversationOutboxEntry(entry: ConversationOutboxEntry): Long {
+        return getDatabase().conversationOutboxDao().upsert(entry)
+    }
+
+    suspend fun updateConversationOutboxEntry(entry: ConversationOutboxEntry): Int {
+        return getDatabase().conversationOutboxDao().update(entry)
+    }
+
+    suspend fun getConversationOutboxEntryById(id: String): ConversationOutboxEntry? {
+        return getDatabase().conversationOutboxDao().getById(id)
+    }
+
+    suspend fun getConversationOutboxEntryByRequestId(requestId: String): ConversationOutboxEntry? {
+        return getDatabase().conversationOutboxDao().getByRequestId(requestId)
+    }
+
+    suspend fun getConversationOutboxEntries(conversationId: Long): List<ConversationOutboxEntry> {
+        return getDatabase().conversationOutboxDao().getByConversationId(conversationId)
+    }
+
+    suspend fun getActiveConversationOutboxEntries(
+        conversationId: Long,
+        excludedState: String = ConversationOutboxEntry.STATE_SUBMITTED
+    ): List<ConversationOutboxEntry> {
+        return getDatabase().conversationOutboxDao().getActiveByConversationId(conversationId, excludedState)
+    }
+
+    suspend fun countConversationOutboxEntries(conversationId: Long): Int {
+        return getDatabase().conversationOutboxDao().countByConversationId(conversationId)
+    }
+
+    suspend fun countActiveConversationOutboxEntries(
+        conversationId: Long,
+        excludedState: String = ConversationOutboxEntry.STATE_SUBMITTED
+    ): Int {
+        return getDatabase().conversationOutboxDao().countActiveByConversationId(conversationId, excludedState)
+    }
+
+    suspend fun deleteConversationOutboxEntryById(id: String): Int {
+        return getDatabase().conversationOutboxDao().deleteById(id)
+    }
+
+    suspend fun deleteConversationOutboxEntriesByConversationId(conversationId: Long): Int {
+        return getDatabase().conversationOutboxDao().deleteByConversationId(conversationId)
+    }
+
+    // ConversationOutboxMeta 相关方法
+    suspend fun getConversationOutboxMeta(conversationId: Long): ConversationOutboxMeta? {
+        return getDatabase().conversationOutboxMetaDao().getByConversationId(conversationId)
+    }
+
+    suspend fun getOrCreateConversationOutboxMeta(conversationId: Long): ConversationOutboxMeta {
+        return getDatabase().conversationOutboxMetaDao().getOrCreate(conversationId)
+    }
+
+    suspend fun allocateConversationOutboxSequence(
+        conversationId: Long,
+        expectedRevision: Long? = null
+    ): ConversationOutboxMetaDao.SequenceAllocation? {
+        return getDatabase().conversationOutboxMetaDao().allocateSequence(conversationId, expectedRevision)
+    }
+
+    suspend fun incrementConversationOutboxRevision(
+        conversationId: Long,
+        expectedRevision: Long? = null
+    ): Long? {
+        return getDatabase().conversationOutboxMetaDao().nextRevision(conversationId, expectedRevision)
+    }
+
+    suspend fun deleteConversationOutboxMetaByConversationId(conversationId: Long): Int {
+        return getDatabase().conversationOutboxMetaDao().deleteByConversationId(conversationId)
+    }
+
+    // WorkspaceChange 相关方法
+    suspend fun insertWorkspaceChange(entry: WorkspaceChangeEntry): Long {
+        return getDatabase().workspaceChangeDao().insert(entry)
+    }
+
+    suspend fun upsertWorkspaceChange(entry: WorkspaceChangeEntry): Long {
+        return getDatabase().workspaceChangeDao().upsert(entry)
+    }
+
+    suspend fun updateWorkspaceChange(entry: WorkspaceChangeEntry): Int {
+        return getDatabase().workspaceChangeDao().update(entry)
+    }
+
+    suspend fun getWorkspaceChangeById(changeId: String): WorkspaceChangeEntry? {
+        return getDatabase().workspaceChangeDao().getById(changeId)
+    }
+
+    suspend fun getWorkspaceChangesByConversationId(
+        conversationId: Long,
+        turnId: String? = null
+    ): List<WorkspaceChangeEntry> {
+        return getDatabase().workspaceChangeDao().getByConversationIdAndTurnId(conversationId, turnId)
+    }
+
+    suspend fun getWorkspaceChangesByWorkspaceRoot(
+        workspaceRoot: String,
+        limit: Int = 50,
+        offset: Int = 0
+    ): List<WorkspaceChangeEntry> {
+        return getDatabase().workspaceChangeDao().getByWorkspaceRootPaged(workspaceRoot, limit, offset)
+    }
+
+    suspend fun countWorkspaceChangesByWorkspaceRoot(workspaceRoot: String): Int {
+        return getDatabase().workspaceChangeDao().countByWorkspaceRoot(workspaceRoot)
+    }
+
+    suspend fun countWorkspaceChangesByConversationId(conversationId: Long): Int {
+        return getDatabase().workspaceChangeDao().countByConversationId(conversationId)
+    }
+
+    suspend fun getTotalWorkspaceSnapshotBytes(): Long {
+        return getDatabase().workspaceChangeDao().getTotalSnapshotBytes()
+    }
+
+    suspend fun deleteWorkspaceChangeById(changeId: String): Int {
+        return getDatabase().workspaceChangeDao().deleteById(changeId)
+    }
+
+    suspend fun deleteWorkspaceChangesByConversationId(conversationId: Long): Int {
+        return getDatabase().workspaceChangeDao().deleteByConversationId(conversationId)
+    }
+
+    suspend fun deleteWorkspaceChangesByWorkspaceRoot(workspaceRoot: String): Int {
+        return getDatabase().workspaceChangeDao().deleteByWorkspaceRoot(workspaceRoot)
     }
 
 }

@@ -65,45 +65,104 @@ extension ChatRuntimeSnapshotSupport on ChatConversationRuntimeCoordinator {
     // metadata; everything else (isAiResponding, currentAiMessages,
     // currentThinkingMessages, currentDispatchTurnId, …) stays exactly as
     // the reducer left it.
+    final dbItemsById = <String, ChatMessageModel>{
+      for (final message in normalizedMessages) message.id: message,
+    };
+    final existingIds = <String>{};
+
+    // 1. 保留当前 runtime 内存条目（包括读取期间新准入并已完成的 Turn C 与未落库用户输入）；
+    // 若 DB 提供了同一 ID 且具有相同 canonical session/turn 的官方终态答复，安全确认为终态完整版本（不回滚已有正式终态）
+    final mergedMessages = <ChatMessageModel>[
+      ..._normalizeIdleAgentRequestCards(
+        runtime.messages,
+        isAiResponding: isAiResponding,
+        preserveLiveStreamingState: preserveLiveStreamingState || hasBoundLiveTask,
+      ).map((msg) {
+        existingIds.add(msg.id);
+        final dbItem = dbItemsById[msg.id];
+        if (dbItem != null) {
+          final dbSession = dbItem.sessionId?.trim();
+          final msgSession = msg.sessionId?.trim();
+          final dbTurn = dbItem.turnId?.trim();
+          final msgTurn = msg.turnId?.trim();
+          final hasCanonicalIdentity = dbSession != null &&
+              dbSession.isNotEmpty &&
+              dbTurn != null &&
+              dbTurn.isNotEmpty &&
+              msgSession != null &&
+              msgSession.isNotEmpty &&
+              msgTurn != null &&
+              msgTurn.isNotEmpty &&
+              msgSession == dbSession &&
+              msgTurn == dbTurn;
+          if (hasCanonicalIdentity) {
+            final msgStopReason =
+                msg.streamMeta?['stopReason']?.toString().trim();
+            final msgHasOfficialStopReason =
+                msgStopReason != null && msgStopReason.isNotEmpty;
+            final dbStopReason =
+                dbItem.streamMeta?['stopReason']?.toString().trim();
+            final dbHasOfficialStopReason =
+                dbStopReason != null && dbStopReason.isNotEmpty;
+            final isDbFinal =
+                dbHasOfficialStopReason ||
+                dbItem.streamMeta?['isFinal'] == true;
+
+            // 仅含 isFinal 的旧快照不能降级官方 stopReason 或正文，
+            // 但可以补齐当前缺失的用量字段。
+            if (msgHasOfficialStopReason && !dbHasOfficialStopReason) {
+              if (dbItem.turnUsage != null) {
+                final mergedUsage = <String, dynamic>{
+                  ...?dbItem.turnUsage,
+                  ...?msg.turnUsage,
+                };
+                if (msg.turnUsage == null ||
+                    msg.turnUsage!.length != mergedUsage.length) {
+                  return msg.copyWith(turnUsage: mergedUsage);
+                }
+              }
+              return msg;
+            }
+
+            if (dbHasOfficialStopReason ||
+                (!msgHasOfficialStopReason && isDbFinal)) {
+              final mergedUsage = msg.turnUsage == null
+                  ? dbItem.turnUsage
+                  : <String, dynamic>{
+                      ...?msg.turnUsage,
+                      ...?dbItem.turnUsage,
+                    };
+              return dbItem.copyWith(turnUsage: mergedUsage);
+            }
+          }
+        }
+        return msg;
+      }),
+    ];
+
+    // 2. 将 DB 快照中新产生但当前内存缺失的条目（如后台落库的上一轮助手回复或用户消息），
+    // 按 createAt 时间戳（newest-first）有序插入到正确历史位置，维持 A -> B -> C 真实跨轮顺序
+    final missingDbItems = dbItemsById.values
+        .where((message) => !existingIds.contains(message.id));
+
+    for (final item in missingDbItems) {
+      var insertIndex = mergedMessages.length;
+      for (var i = 0; i < mergedMessages.length; i++) {
+        if (mergedMessages[i].createAt.isBefore(item.createAt)) {
+          insertIndex = i;
+          break;
+        }
+      }
+      mergedMessages.insert(insertIndex, item);
+    }
+
     if (preserveLiveStreamingState || hasBoundLiveTask) {
-      // A snapshot's render flags cannot re-admit a live turn or clear its
-      // official ACP identity. Keep reducer-owned items and add genuinely new
-      // history/user items by identity; stale copies cannot roll back updates.
-      final knownIds = runtime.messages.map((message) => message.id).toSet();
-      final mergedMessages = <ChatMessageModel>[
-        ..._normalizeIdleAgentRequestCards(
-          runtime.messages,
-          isAiResponding: true,
-          preserveLiveStreamingState: true,
-        ),
-        ...normalizedMessages.where((message) => knownIds.add(message.id)),
-      ];
       _replaceRuntimeMessagesIfChanged(runtime, mergedMessages);
       runtime.conversation = conversation ?? runtime.conversation;
       _pruneAgentReplayDeltaOffsets(runtime, mergedMessages);
-      notifyListeners();
+      _notifyRuntimeListeners();
       return;
     }
-    // History reads can finish after PromptResponse. Preserve a committed
-    // item when the same item in an older snapshot lacks its official terminal
-    // result. Completed history may still enrich it (for example with usage).
-    final committedItems = <String, ChatMessageModel>{
-      for (final message in _normalizeIdleAgentRequestCards(
-        runtime.messages,
-        isAiResponding: true,
-        preserveLiveStreamingState: true,
-      ))
-        if (message.streamMeta?['stopReason']?.toString().trim().isNotEmpty ==
-            true)
-          message.id: message,
-    };
-    normalizedMessages = normalizedMessages.map((message) {
-      if (message.streamMeta?['stopReason']?.toString().trim().isNotEmpty !=
-          true) {
-        return committedItems[message.id] ?? message;
-      }
-      return message;
-    }).toList();
     final hadInFlightTask = runtime.hasInFlightTask;
     final snapshotHasLiveWork =
         isAiResponding || isCheckingExecutableTask || isExecutingTask;
@@ -136,7 +195,7 @@ extension ChatRuntimeSnapshotSupport on ChatConversationRuntimeCoordinator {
       }
     }
     _flushRuntimeStreamingText(runtime);
-    _replaceRuntimeMessagesIfChanged(runtime, normalizedMessages);
+    _replaceRuntimeMessagesIfChanged(runtime, mergedMessages);
     runtime.conversation = conversation ?? runtime.conversation;
     runtime.isAiResponding = isAiResponding;
     runtime.isContextCompressing = isContextCompressing;
@@ -192,7 +251,7 @@ extension ChatRuntimeSnapshotSupport on ChatConversationRuntimeCoordinator {
     );
     _pruneAgentReplayDeltaOffsets(runtime, normalizedMessages);
     runtime.agentNextEntrySequence = 0;
-    notifyListeners();
+    _notifyRuntimeListeners();
   }
 
   /// Updates the runtime projection and persists the same snapshot through
@@ -240,7 +299,7 @@ extension ChatRuntimeSnapshotSupport on ChatConversationRuntimeCoordinator {
     // persistence owner filters these identities from the outgoing snapshot.
     _replaceRuntimeMessagesIfChanged(runtime, merged);
     runtime.conversation = conversation ?? runtime.conversation;
-    notifyListeners();
+    _notifyRuntimeListeners();
     await persistRuntimeConversation(
       conversationId: conversationId,
       mode: mode,

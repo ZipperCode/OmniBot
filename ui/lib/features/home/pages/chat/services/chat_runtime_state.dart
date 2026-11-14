@@ -113,6 +113,26 @@ class ChatConversationRuntimeState {
   final Map<String, Map<String, dynamic>> pendingAcpAssistantPresentation =
       <String, Map<String, dynamic>>{};
 
+  /// Receipts for settled ACP turns that need durable history confirmation.
+  /// Keyed by turnId so duplicate terminal responses remain idempotent and
+  /// failed native commits do not lose receipts.
+  final Map<String, Map<String, dynamic>> _settledPromptReceipts =
+      <String, Map<String, dynamic>>{};
+
+  Map<String, Map<String, dynamic>> get settledPromptReceipts =>
+      Map.unmodifiable(_settledPromptReceipts);
+
+  void registerSettledPromptReceipt(Map<String, dynamic> receipt) {
+    final turnId = receipt['turnId']?.toString();
+    if (turnId != null && turnId.isNotEmpty) {
+      _settledPromptReceipts[turnId] = Map<String, dynamic>.unmodifiable(receipt);
+    }
+  }
+
+  void acknowledgeSettledPromptReceipt(String turnId) {
+    _settledPromptReceipts.remove(turnId);
+  }
+
   /// Host-generated ACP notification ids already reduced by this runtime.
   /// A reconnecting bridge may deliver the same official session/update more
   /// than once; dedupe only the explicit host id, never message text.

@@ -13,6 +13,7 @@ import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
 import cn.com.omnimind.bot.agent.AgentScheduleToolBridge
 import cn.com.omnimind.bot.agent.AgentPermissionRequester
 import cn.com.omnimind.bot.agent.tool.handlers.StructuredDeviceActionContext
+import cn.com.omnimind.bot.agent.computeSkillSuggestionCredentialDigest
 import cn.com.omnimind.baselib.database.DatabaseHelper
 import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
 import cn.com.omnimind.baselib.database.TokenUsageRecord
@@ -520,11 +521,21 @@ internal class LocalAcpRuntime(
     private val currentDistribution: () -> TerminalDistribution.Spec = TerminalDistribution::selected,
     private val serverRequestOwners: AcpServerRequestOwnerRegistry =
         AcpServerRequestOwnerRegistry(),
-    private val turnOwnership: AcpTurnOwnershipRegistry = AcpTurnOwnershipRegistry(),
+    internal val turnOwnership: AcpTurnOwnershipRegistry = AcpTurnOwnershipRegistry(),
     private val recordTokenUsage: suspend (TokenUsageRecord) -> Unit = {
         DatabaseHelper.insertTokenUsageRecord(it)
     },
-    private val onMessage: suspend (Map<String, Any?>) -> Unit
+    private val onMessage: suspend (Map<String, Any?>) -> Unit,
+    private val onPromptAdmitted: (suspend (
+        sessionId: String,
+        turnId: String,
+        requestId: String?,
+        conversationId: Long?,
+        userMessageId: String?,
+        providerProfileId: String?,
+        modelId: String?,
+        credentialDigest: String?
+    ) -> Unit)? = null
 ) {
     init {
         require(ownerAgentId.isNotBlank() && ownerAgentId == ownerAgentId.trim()) {
@@ -2660,15 +2671,7 @@ internal class LocalAcpRuntime(
             is AcpTurnReservation.Busy -> {
                 throw IllegalStateException("ACP session $threadId already has an active turn.")
             }
-            is AcpTurnReservation.Started -> {
-                cn.com.omnimind.bot.task.runtime.AcpTaskTerminalJournal.recordAdmission(
-                    context = appContext,
-                    agentId = activeAgentId(),
-                    sessionId = threadId,
-                    turnId = turnId,
-                    requestId = requestId
-                )
-            }
+            is AcpTurnReservation.Started -> Unit
         }
         val execution = checkNotNull(startedExecution)
         val turnIdentity = AcpTurnIdentity(threadId, turnId)
@@ -2680,6 +2683,15 @@ internal class LocalAcpRuntime(
         // without configOptions keep the legacy per-turn compatibility path.
         val usageAttribution: AcpPromptUsageAttribution?
         try {
+            cn.com.omnimind.bot.task.runtime.AcpTaskTerminalJournal.recordAdmission(
+                context = appContext,
+                agentId = activeAgentId(),
+                sessionId = threadId,
+                turnId = turnId,
+                requestId = requestId
+            )
+            val admittedConversationId = bindingRepository.getBindingByThreadId(threadId)?.conversationId
+            val admittedUserMessageId = args.stringValue("userMessageId")
             if (sessionConfigOptions(session).isEmpty()) {
                 applyRunConfig(session, args)
             } else if (hasAcpPermissionPolicy(args)) {
@@ -2693,6 +2705,21 @@ internal class LocalAcpRuntime(
                     AcpPermissionBehavior.ASK_USER
                 )
             }
+
+            val providerProfile = when (val activeConnection = connection) {
+                is XiaowanAcpConnection -> activeConnection.sessionProviderProfile(threadId)
+                else -> activeProviderAccess()?.profile
+            }
+            val credentialDigest = providerProfile?.let(::computeSkillSuggestionCredentialDigest)
+            val modelOption = sessionConfigOptions(session).firstOrNull {
+                it.id.value == "model" || it.category == SessionConfigOptionCategory.MODEL
+            } as? SessionConfigOption.Select
+            val admittedModel = modelOption?.currentValue?.value
+                ?: if (session.modelsSupported) session.currentModel.value.value else ""
+            onPromptAdmitted?.invoke(
+                threadId, turnId, requestId, admittedConversationId, admittedUserMessageId,
+                providerProfile?.id, admittedModel, credentialDigest
+            )
             // Snapshot the prompt's owner and model before dispatch. Reading
             // the selected profile or binding at completion could attribute a
             // late response to another conversation or model.

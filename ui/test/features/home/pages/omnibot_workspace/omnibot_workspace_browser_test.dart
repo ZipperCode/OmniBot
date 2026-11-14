@@ -57,8 +57,15 @@ void main() {
   });
 
   tearDown(() async {
-    if (await workspaceDir.exists()) {
-      await workspaceDir.delete(recursive: true);
+    for (var i = 0; i < 5; i++) {
+      try {
+        if (await workspaceDir.exists()) {
+          await workspaceDir.delete(recursive: true);
+        }
+        break;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
     }
   });
 
@@ -120,6 +127,9 @@ void main() {
       find.byKey(const ValueKey('workspace-inline-preview-edit')),
       findsNothing,
     );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
   });
 
   testWidgets('supports editing and saving inline preview files', (
@@ -192,5 +202,8 @@ void main() {
       find.byKey(const ValueKey('workspace-inline-preview-edit')),
       findsOneWidget,
     );
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
   });
 }

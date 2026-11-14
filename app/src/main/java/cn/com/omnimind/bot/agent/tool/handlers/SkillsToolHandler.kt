@@ -13,10 +13,12 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
+import java.security.MessageDigest
 
 class SkillsToolHandler(
     private val helper: SharedHelper,
-    private val workspaceManager: AgentWorkspaceManager
+    private val workspaceManager: AgentWorkspaceManager,
+    private val lifecycleStore: SkillLifecycleStore = SkillLifecycleStore.getInstance(helper.context)
 ) : ToolHandler {
     override val toolNames: Set<String> = setOf("skills_list", "skills_read")
 
@@ -39,7 +41,7 @@ class SkillsToolHandler(
             )
             "skills_read" -> executeSkillsRead(
                 args,
-                env.workspaceDescriptor,
+                env,
                 callback,
             )
             else -> ToolExecutionResult.Error(toolCall.function.name, "Unknown skills tool")
@@ -107,18 +109,47 @@ class SkillsToolHandler(
 
     private suspend fun executeSkillsRead(
         args: JsonObject,
-        workspace: AgentWorkspaceDescriptor,
+        env: AgentExecutionEnvironment,
         callback: AgentCallback,
     ): ToolExecutionResult {
+        val workspace = env.workspaceDescriptor
         val toolName = "skills_read"
         return try {
             helper.requireWorkspaceStorageAccess(callback)?.let { return it }
             val skillId = args["skillId"]?.jsonPrimitive?.content?.trim().orEmpty()
             require(skillId.isNotEmpty()) { "缺少 skillId" }
             val entry = skillIndexService.findInstalledSkill(skillId) ?: throw IllegalArgumentException("未找到 skill：$skillId")
-            val resolved = skillLoader.load(entry, "agent 主动读取 skill") ?: throw IllegalStateException("读取 SKILL.md 失败：${entry.shellSkillFilePath}")
+            val loaded = skillLoader.loadWithFingerprint(entry, "agent 主动读取 skill")
+                ?: throw IllegalStateException("读取 SKILL.md 失败：${entry.shellSkillFilePath}")
+            val resolved = loaded.context
+            val actualHash = loaded.contentHash
             val skillFile = File(entry.skillFilePath)
             val artifact = workspaceManager.buildArtifactForFile(skillFile, toolName)
+
+            // 成功读取时记录精确使用身份至宿主资产库（缺身份不记但照常 read；metadata 不算使用）
+            val convId = env.conversationId
+            val sessId = env.acpSessionId
+            val tId = env.acpTurnId
+            if (convId != null && !sessId.isNullOrBlank() && !tId.isNullOrBlank()) {
+                runCatching {
+                    // revision 仅当 entry.revisionId == actualHash 时可用，否则 null（不将修改后的内容当原版本记录）
+                    val matchingRevisionId = if (!entry.revisionId.isNullOrBlank() && entry.revisionId == actualHash) {
+                        entry.revisionId
+                    } else {
+                        null
+                    }
+                    lifecycleStore.recordUsage(
+                        SkillUsageRecord(
+                            conversationId = convId,
+                            sessionId = sessId,
+                            turnId = tId,
+                            skillId = entry.id,
+                            revisionId = matchingRevisionId,
+                            contentHash = actualHash
+                        )
+                    )
+                }
+            }
             val payload = linkedMapOf<String, Any?>(
                 "id" to entry.id, "name" to entry.name,
                 "description" to resolveDistributionText(entry.description),

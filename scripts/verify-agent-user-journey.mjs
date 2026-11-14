@@ -21,23 +21,35 @@ assert(Array.isArray(journey.steps) && journey.steps.length, 'Journey requires s
 // Old successful history must never satisfy a new run's reply assertion.
 const runId = Date.now().toString();
 const checkpoints = new Map();
-const markers = new Map(journey.steps.filter(s => ['send','prepare-draft'].includes(s.action))
+const markers = new Map(journey.steps
+  .filter(s => ['send', 'prepare-draft', 'queue'].includes(s.action) && typeof s.marker === 'string')
   .map(s => [s.marker, `${s.marker}_${runId}`]));
+const markerNames = [...markers.keys()].sort((a, b) => b.length - a.length);
+const markerPattern = markerNames.length
+  ? new RegExp(markerNames.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g')
+  : null;
 for (const step of journey.steps) {
-  if (markers.has(step.marker)) step.marker = markers.get(step.marker);
-  if (typeof step.text === 'string') {
-    for (const [original, unique] of markers) {
-      if (step.text === original || step.text.startsWith(original + '_')) {
-        step.text = unique + step.text.slice(original.length);
-        break;
-      }
+  for (const [key, value] of Object.entries(step)) {
+    if (typeof value === 'string') {
+      const expanded = value.replaceAll('{{RUN_ID}}', runId);
+      step[key] = markerPattern
+        ? expanded.replace(markerPattern, original => markers.get(original))
+        : expanded;
     }
   }
 }
 const out = resolve(outputPath);
 mkdirSync(out, {recursive: true, mode: 0o700});
-const adb = (...args) => execFileSync(process.env.ADB || 'adb', ['-s', serial, ...args],
-  {timeout: 30000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']});
+const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+const adb = (...args) => {
+  const binary = process.env.ADB || 'adb';
+  if (process.platform === 'win32' && binary !== 'adb' && !binary.toLowerCase().endsWith('.exe')) {
+    return execFileSync(process.execPath, [binary, '-s', serial, ...args],
+      {timeout: 30000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']});
+  }
+  return execFileSync(binary, ['-s', serial, ...args],
+    {timeout: 30000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']});
+};
 
 function snapshot() {
   assert.match(adb('shell', 'uiautomator', 'dump', '/data/local/tmp/oob-user-journey.xml').toString(),
@@ -46,17 +58,73 @@ function snapshot() {
     .matchAll(/<node\b[^>]*>/g)].map(([n]) => n)
     .filter(n => field(n, 'package') === 'cn.com.omnimind.bot');
 }
-const label = n => field(n, 'content-desc') || field(n, 'text');
+const nodeLabels = n => [field(n, 'content-desc'), field(n, 'text'), field(n, 'hint')].filter(Boolean);
+const label = n => field(n, 'content-desc') || field(n, 'text') || field(n, 'hint') || '';
+function configuredModelIndicator(nodes) {
+  const explicit = nodes.find(n => {
+    const value = label(n).trim();
+    return /^(?:模型与参数：|Model & settings:)\s*\S/.test(value);
+  });
+  if (explicit) return explicit;
+
+  // 紧凑输入区只暴露模型名；仅接受附件与发送按钮之间同一行的唯一控件。
+  const bounds = n => [...field(n, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+  const attachments = nodes.filter(n => ['附件与权限', 'Attachments & permissions'].includes(label(n)));
+  const sends = nodes.filter(n => ['发送', 'Send', '排队发送', 'Queue send', '停止', 'Stop'].includes(label(n)));
+  if (attachments.length !== 1 || sends.length !== 1) return null;
+  const left = bounds(attachments[0]);
+  const right = bounds(sends[0]);
+  if (left.length !== 4 || right.length !== 4 || left[2] >= right[0]) return null;
+  const candidates = nodes.filter(n => {
+    const value = label(n).trim();
+    if (field(n, 'clickable') !== 'true' || field(n, 'enabled') !== 'true' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:/+()-]{0,255}$/.test(value) ||
+        /^(?:model|select|default|auto)$/i.test(value)) return false;
+    const area = bounds(n);
+    return area.length === 4 && area[0] >= left[2] && area[2] <= right[0] &&
+      area[1] < Math.min(left[3], right[3]) && area[3] > Math.max(left[1], right[1]);
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
 const report = {name: journey.name, serial, runId,
   kind: serial.startsWith('emulator-') ? 'emulator-user-interface' : 'physical-device-user-interface',
   passed: false, steps: []};
 let index = 0;
 let mcpBaseline;
 try {
+  if (journey.requireDevice || journey.requireProvider || journey.requireLsposedValidationTarget) {
+    let deviceState = '';
+    try {
+      deviceState = adb('get-state').toString().trim();
+    } catch (err) {
+      assert.fail(`PRECONDITION_FAILED: Device '${serial}' is not reachable via adb: ${err.message}`);
+    }
+    assert.equal(deviceState, 'device', `PRECONDITION_FAILED: Device '${serial}' state is '${deviceState}', expected 'device'`);
+  }
+
   if (journey.requireClockSync) {
     const deviceSeconds = Number(adb('shell', 'date', '+%s').toString().trim());
     assert(Number.isFinite(deviceSeconds) && Math.abs(deviceSeconds - Date.now() / 1000) < 300,
       'Device clock differs by more than five minutes; correct test environment before real TLS requests');
+  }
+  if (journey.requireLsposedValidationTarget) {
+    const targetPrefix = journey.requireLsposedValidationTargetPrefix || 'cn.com.omnimind.validation.';
+    const modulePrefix = journey.requireLsposedValidationModulePrefix || 'cn.com.omnimind.validation.module';
+    const lines = adb('shell', 'pm', 'list', 'packages').toString().split('\n')
+      .map(l => l.trim().replace(/^package:/, '').trim())
+      .filter(Boolean);
+    const hasTarget = lines.some(pkg => pkg.startsWith(targetPrefix) && !pkg.startsWith(modulePrefix));
+    assert(hasTarget,
+      `PRECONDITION_FAILED: Dedicated validation target package starting with '${targetPrefix}' is not installed on device; zero deployment enforced`);
+    const deployedModule = lines.find(pkg => pkg === modulePrefix || pkg.startsWith(modulePrefix + '.'));
+    assert(!deployedModule,
+      `PRECONDITION_FAILED: Unauthorized module '${deployedModule}' is already installed; zero deployment boundary violated`);
+  }
+  if (journey.requireProvider) {
+    const nodes = snapshot();
+    const modelIndicator = configuredModelIndicator(nodes);
+    assert(modelIndicator != null,
+      `PRECONDITION_FAILED: ChatPage UI does not display a configured active model on device '${serial}'; select a model in UI before running journey`);
   }
   for (const step of journey.steps) {
     index++;
@@ -77,8 +145,57 @@ try {
         await new Promise(resolve=>setTimeout(resolve,250));
       }
     } else if (step.action === 'tap' || step.action === 'long-press') {
-      execFileSync(process.execPath, [resolve(scripts, 'tap-agent-device-control.mjs'), serial, step.label, step.parentLabel || '', ...(step.action === 'long-press' ? ['long-press'] : [])],
-        {timeout: 40000, stdio: ['ignore', 'pipe', 'pipe']});
+      let tapped = false;
+      if (step.matchIndex != null) {
+        const matches = snapshot().filter(n =>
+          field(n, 'clickable') === 'true' && field(n, 'enabled') === 'true' &&
+          nodeLabels(n).some(value => value === step.label))
+          .sort((a, b) => Number(field(a, 'bounds').match(/\d+/g)?.[1]) - Number(field(b, 'bounds').match(/\d+/g)?.[1]));
+        assert.equal(matches.length, step.expectedMatches, 'Fixture control count changed; no tap performed');
+        assert(Number.isInteger(step.matchIndex) && step.matchIndex >= 0 && step.matchIndex < matches.length);
+        const bounds = [...field(matches[step.matchIndex], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+        adb('shell', 'input', 'tap', String(Math.round((bounds[0] + bounds[2]) / 2)),
+          String(Math.round((bounds[1] + bounds[3]) / 2)));
+        tapped = true;
+      } else {
+      try {
+        execFileSync(process.execPath, [resolve(scripts, 'tap-agent-device-control.mjs'), serial, step.label, step.parentLabel || '', ...(step.action === 'long-press' ? ['long-press'] : [])],
+          {timeout: 40000, stdio: ['ignore', 'pipe', 'pipe']});
+        tapped = true;
+      } catch (tapErr) {
+        const nodes = snapshot();
+        const clickable = nodes.filter(n => field(n, 'package') === 'cn.com.omnimind.bot' &&
+          field(n, 'enabled') === 'true' && (field(n, 'clickable') === 'true' || field(n, 'long-clickable') === 'true'));
+        let matches = clickable.filter(n => {
+          const labels = nodeLabels(n);
+          return labels.some(l => l === step.label || l.split('\n')[0] === step.label || l.split('\n').includes(step.label));
+        });
+        if (matches.length === 0) {
+          matches = clickable.filter(n => nodeLabels(n).some(l => l.includes(step.label)));
+        }
+        if (step.parentLabel) {
+          const parent = nodes.find(n => label(n).split('\n')[0] === step.parentLabel);
+          if (parent) {
+            const pb = [...field(parent, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+            matches = matches.filter(n => {
+              const b = [...field(n, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+              return b[0] >= pb[0] && b[1] >= pb[1] && b[2] <= pb[2] && b[3] <= pb[3];
+            });
+          }
+        }
+        assert.equal(matches.length, 1, `Expected one matching clickable control for '${step.label}' (found ${matches.length}); original error: ${tapErr.message}`);
+        const b = [...field(matches[0], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+        const x = String(Math.round((b[0] + b[2]) / 2));
+        const y = String(Math.round((b[1] + b[3]) / 2));
+        if (step.action === 'long-press') {
+          adb('shell', 'input', 'swipe', x, y, x, y, '900');
+        } else {
+          adb('shell', 'input', 'tap', x, y);
+        }
+        tapped = true;
+      }
+      }
+      assert(tapped, `Failed to tap control: ${step.label}`);
     } else if (step.action === 'dismiss-settings') {
       const nodes=snapshot();
       assert(nodes.some(n=>label(n)==='Next turn') && nodes.some(n=>label(n)==='Model & settings'), 'Expected Agent settings sheet');
@@ -283,7 +400,7 @@ try {
       try {
         observations = execFileSync(process.execPath, [resolve(scripts, 'send-agent-test-message.mjs'), serial, step.marker],
         {timeout: step.timeoutMs || 90000, stdio: ['ignore', 'pipe', 'pipe'],
-          env: {...process.env, OOB_PREPARE_DRAFT_ONLY:step.action==='prepare-draft'?'1':'0', ...(step.scenario ? {OOB_USER_SCENARIO_FILE: resolve(scripts, 'fixtures', 'user-scenarios', step.scenario)} : {})}});
+          env: {...process.env, OOB_PREPARE_DRAFT_ONLY:step.action==='prepare-draft'?'1':'0', OOB_USER_SCENARIO_RUN_ID: runId, ...(step.scenario ? {OOB_USER_SCENARIO_FILE: resolve(scripts, 'fixtures', 'user-scenarios', step.scenario)} : {})}});
       } catch (error) {
         observations = error.stdout;
         throw error;
@@ -306,10 +423,11 @@ try {
           await new Promise(r => setTimeout(r, 750));
           continue;
         }
-        // A user bubble says "Reply MARKER". Only a separate exact line in
-        // an assistant item qualifies, and the Send control must be idle.
-        const matching = nodes.filter(n => label(n).split('\n').includes(step.text) &&
-          !label(n).includes(`Reply ${step.text}`));
+        const matching = nodes.filter(n => {
+          const labels = nodeLabels(n);
+          if (step.containsText) return labels.some(l => l.includes(step.containsText));
+          return labels.some(l => l.split('\n').includes(step.text) && !l.includes(`Reply ${step.text}`));
+        });
         const running = nodes.some(n => /^(Stop|停止|停止生成)(\n|$)/.test(label(n)));
         found = matching.length > 0 && (step.action !== 'reply' || !running);
         if (found) break;
@@ -317,9 +435,13 @@ try {
       } while (Date.now() < deadline);
       assert(found, `Expected visible result did not appear before deadline (${snapshotFailures} unavailable snapshots)`);
     } else if (step.action === 'assertAbsent') {
-      const matching = snapshot().filter(n => label(n).split('\n')[0] === step.label &&
-        field(n, 'enabled') === 'true' && field(n, 'clickable') === 'true');
-      assert.equal(matching.length, 0, `Stale interactive control remains: ${step.label}`);
+      const target = step.label || step.text;
+      const matching = snapshot().filter(n => {
+        const labels = nodeLabels(n);
+        return labels.some(l => l === target || l.split('\n')[0] === target || l.includes(target)) &&
+          field(n, 'enabled') === 'true' && field(n, 'clickable') === 'true';
+      });
+      assert.equal(matching.length, 0, `Stale interactive control remains: ${target}`);
     } else if (step.action === 'background') {
       assert(!snapshot().some(n => /^(Stop|停止|停止生成)(\n|$)/.test(label(n))), 'Parent turn must be idle');
       if (step.marker) {
@@ -350,6 +472,223 @@ try {
         'Cannot restart during an active turn');
       adb('shell', 'am', 'force-stop', 'cn.com.omnimind.bot');
       adb('shell', 'am', 'start', '-n', 'cn.com.omnimind.bot/.activity.LauncherActivity');
+    } else if (step.action === 'queue') {
+      let queueText = step.text;
+      if (!queueText && step.scenario) {
+        const scenarioFile = resolve(scripts, 'fixtures', 'user-scenarios', step.scenario);
+        const sc = JSON.parse(readFileSync(scenarioFile, 'utf8'));
+        queueText = `${sc.prompt.replaceAll('{{MARKER}}', step.marker)} End your final reply with ${step.marker}_DONE.`;
+      } else if (!queueText && step.marker) {
+        queueText = `Reply ${step.marker}`;
+      }
+      assert(queueText, 'Queue action requires text, scenario, or marker');
+      assert(/^[\x20-\x7E]*$/.test(queueText), 'Queue action requires ASCII text for batch input');
+      const deadline = Date.now() + (step.timeoutMs || 30000);
+      let inputs;
+      do {
+        inputs = snapshot().filter(n => field(n, 'class') === 'android.widget.EditText');
+        if (inputs.length === 1) break;
+        await new Promise(r => setTimeout(r, 250));
+      } while (Date.now() < deadline);
+      assert.equal(inputs.length, 1, 'Expected one composer input for queue action');
+      const comp = inputs[0];
+      assert.equal(field(comp, 'text'), '', 'Queue requires an empty composer; preserve existing draft');
+      const runningBefore = snapshot().some(n => /^(Stop|停止|停止生成)(\n|$)/.test(label(n)));
+      assert(runningBefore, 'Queue requires an active running task');
+      const b = [...field(comp, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+      adb('shell', 'input', 'tap', String(Math.round((b[0]+b[2])/2)), String(Math.round((b[1]+b[3])/2)));
+      await new Promise(r => setTimeout(r, 200));
+      adb('shell', 'input', 'text', shellQuote(queueText.replaceAll(' ', '%s')));
+      let ready = null;
+      let readyInput = null;
+      const inputDeadline = Date.now() + 10000;
+      do {
+        ready = snapshot();
+        readyInput = ready.find(n => field(n, 'class') === 'android.widget.EditText');
+        if (readyInput && field(readyInput, 'text') === queueText) break;
+        await new Promise(r => setTimeout(r, 200));
+      } while (Date.now() < inputDeadline);
+      assert.equal(field(readyInput, 'text'), queueText, 'Queue text was not entered into composer correctly');
+      const queueButtons = ready.filter(n => ['排队发送', 'Queue', 'Queue send'].includes(label(n)) &&
+        field(n, 'clickable') === 'true' && field(n, 'enabled') === 'true');
+      assert.equal(queueButtons.length, 1, 'Expected one enabled Queue ("排队发送") button; task may not be running');
+      const sendButtons = ready.filter(n => ['发送', 'Send'].includes(label(n)) &&
+        field(n, 'clickable') === 'true' && field(n, 'enabled') === 'true');
+      assert.equal(sendButtons.length, 0, 'Forbidden: Ordinary Send button present while queuing');
+      const qb = [...field(queueButtons[0], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+      adb('shell', 'input', 'tap', String(Math.round((qb[0]+qb[2])/2)), String(Math.round((qb[1]+qb[3])/2)));
+      let cleared = false;
+      const clearDeadline = Date.now() + 15000;
+      do {
+        try {
+          const snap = snapshot();
+          const cur = snap.find(n => field(n, 'class') === 'android.widget.EditText');
+          if (field(cur, 'text') === '') { cleared = true; break; }
+        } catch (_) {}
+        await new Promise(r => setTimeout(r, 400));
+      } while (Date.now() < clearDeadline);
+      assert(cleared, 'Queue was tapped but composer did not clear');
+      writeFileSync(resolve(out, `${index}-queue.json`), JSON.stringify({marker: step.marker, text: queueText, queued: true, passed: true}));
+    } else if (step.action === 'set-input' || step.action === 'edit-input') {
+      const newText = step.text || (step.marker ? `Reply ${step.marker}` : '');
+      assert(typeof newText === 'string', 'Input action requires text');
+      assert(/^[\x20-\x7E]*$/.test(newText), 'set-input requires ASCII text for batch input');
+      const nodes = snapshot();
+      let target = null;
+      if (step.hint) {
+        target = nodes.find(n => field(n, 'class') === 'android.widget.EditText' &&
+          [field(n, 'hint'), field(n, 'content-desc'), field(n, 'text')].some(v => v && (v === step.hint || v.split('\n')[0] === step.hint || v.includes(step.hint))));
+      } else if (step.label) {
+        target = nodes.find(n => field(n, 'class') === 'android.widget.EditText' &&
+          [field(n, 'content-desc'), field(n, 'text'), field(n, 'hint')].some(v => v && (v === step.label || v.split('\n')[0] === step.label || v.split('\n').includes(step.label) || v.includes(step.label))));
+      } else {
+        const inputs = nodes.filter(n => field(n, 'class') === 'android.widget.EditText');
+        target = inputs.find(n => field(n, 'focused') === 'true') || (inputs.length === 1 ? inputs[0] : null);
+      }
+      assert(target, `Target input field not found (hint: ${step.hint || ''}, label: ${step.label || ''})`);
+      let focusBounds = [...field(target, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+      if (!step.hint && !step.label && field(target, 'focused') !== 'true') {
+        const left = nodes.filter(n => ['附件与权限', 'Attachments & permissions'].includes(label(n)));
+        const right = nodes.filter(n => ['发送', 'Send', '排队发送', 'Queue send', '停止', 'Stop'].includes(label(n)));
+        if (left.length === 1 && right.length === 1) {
+          const lb = [...field(left[0], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+          const rb = [...field(right[0], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+          if (lb[2] < rb[0] && Math.max(lb[1], rb[1]) < Math.min(lb[3], rb[3])) {
+            focusBounds = [lb[2], Math.max(lb[1], rb[1]), rb[0], Math.min(lb[3], rb[3])];
+          }
+        }
+      }
+      adb('shell', 'input', 'tap', String(Math.round((focusBounds[0]+focusBounds[2])/2)), String(Math.round((focusBounds[1]+focusBounds[3])/2)));
+      let focusedTarget = null;
+      const focusDeadline = Date.now() + 10000;
+      do {
+        const focused = snapshot().filter(n =>
+          field(n, 'class') === 'android.widget.EditText' && field(n, 'focused') === 'true' &&
+          (!step.hint && !step.label || nodeLabels(n).some(value =>
+            value === (step.hint || step.label) || value.split('\n').includes(step.hint || step.label) ||
+            value.includes(step.hint || step.label))));
+        if (focused.length === 1) { focusedTarget = focused[0]; break; }
+        await new Promise(r => setTimeout(r, 150));
+      } while (Date.now() < focusDeadline);
+      assert(focusedTarget, 'Target editor did not gain focus; input retained');
+      // 获得唯一聚焦目标后，在后续观测仅跟踪该唯一聚焦输入框，需保持 resource-id 若非空、label 仍在时一致
+      const targetId = field(focusedTarget, 'resource-id') || (target ? field(target, 'resource-id') : '') || '';
+      const targetLabel = step.hint || step.label || '';
+      const findTrackedEditor = (snap) => {
+        const focused = snap.filter(n =>
+          field(n, 'class') === 'android.widget.EditText' && field(n, 'focused') === 'true');
+        // 必须为唯一聚焦输入框；无焦点或存在多个焦点歧义时均拒绝
+        if (focused.length !== 1) return null;
+        const cur = focused[0];
+        const curId = field(cur, 'resource-id') || '';
+        // 若存在 resource-id，则必须保持一致
+        if ((targetId || curId) && curId !== targetId) return null;
+        // 若当前仍保留 label/hint/content-desc，则必须与期望一致；若输入后占位 hint 消失变空，则允许通过
+        if (targetLabel) {
+          const remainingLabels = [field(cur, 'hint'), field(cur, 'content-desc')].filter(Boolean);
+          if (remainingLabels.length > 0 && !remainingLabels.some(v =>
+            v === targetLabel || v.split('\n')[0] === targetLabel || v.split('\n').includes(targetLabel) || v.includes(targetLabel))) {
+            return null;
+          }
+        }
+        return cur;
+      };
+      const oldText = field(focusedTarget, 'text') || '';
+      if (oldText) {
+        let cleared = false;
+        try {
+          adb('shell', 'input', 'keycombination', '113', '29');
+          adb('shell', 'input', 'keyevent', '67');
+          const check = findTrackedEditor(snapshot());
+          if (check && field(check, 'text') === '') cleared = true;
+        } catch (_) {}
+        if (!cleared) {
+          const focusedEditor = () => findTrackedEditor(snapshot());
+          const current = focusedEditor();
+          assert(current, 'Target editor lost focus; replacement not entered');
+          const bounds = [...field(current, 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+          const x = String(Math.round((bounds[0] + bounds[2]) / 2));
+          const y = String(Math.round((bounds[1] + bounds[3]) / 2));
+          adb('shell', 'input', 'swipe', x, y, x, y, '900');
+          const selectAll = snapshot().filter(n =>
+            nodeLabels(n).some(value => ['全选', 'Select all'].includes(value)) &&
+            field(n, 'clickable') === 'true' && field(n, 'enabled') === 'true');
+          assert.equal(selectAll.length, 1, 'Select all unavailable; replacement not entered');
+          const selectedBounds = [...field(selectAll[0], 'bounds').matchAll(/\d+/g)].map(([v]) => Number(v));
+          adb('shell', 'input', 'tap', String(Math.round((selectedBounds[0] + selectedBounds[2]) / 2)),
+            String(Math.round((selectedBounds[1] + selectedBounds[3]) / 2)));
+          adb('shell', 'input', 'keyevent', '67');
+          const emptyEditor = focusedEditor();
+          assert(emptyEditor && field(emptyEditor, 'text') === '',
+            'Target editor did not clear; replacement not entered');
+        }
+      }
+      adb('shell', 'input', 'text', shellQuote(newText.replaceAll(' ', '%s')));
+      let updatedTarget = null;
+      const verifyDeadline = Date.now() + (step.timeoutMs || 10000);
+      do {
+        const snap = snapshot();
+        const candidate = findTrackedEditor(snap);
+        if (candidate && field(candidate, 'text') === newText) {
+          updatedTarget = candidate;
+          break;
+        }
+        await new Promise(r => setTimeout(r, 200));
+      } while (Date.now() < verifyDeadline);
+      assert(updatedTarget, 'Target input field missing after typing');
+      assert.equal(field(updatedTarget, 'text'), newText, `Field text was not set correctly (expected: "${newText}", actual: "${field(updatedTarget, 'text')}")`);
+      writeFileSync(resolve(out, `${index}-set-input.json`), JSON.stringify({text: newText, passed: true}));
+    } else if (step.action === 'modify-file') {
+      assert(step.path && typeof step.content === 'string');
+      assert(/^workspace\/[A-Za-z0-9._/-]+$/.test(step.path), 'Path must be within workspace');
+      adb('shell', 'run-as', 'cn.com.omnimind.bot', 'sh', '-c',
+        shellQuote(`printf '%s' ${shellQuote(step.content)} > ${shellQuote(step.path)}`));
+      writeFileSync(resolve(out, `${index}-modify-file.json`), JSON.stringify({path: step.path, content: step.content, passed: true}));
+    } else if (step.action === 'assert-file') {
+      assert(step.path);
+      assert(/^workspace\/[A-Za-z0-9._/-]+$/.test(step.path), 'Path must be within workspace');
+      if (step.exists === false) {
+        assert(step.path.includes('OOB_'), 'Absence checks require a synthetic workspace file');
+        adb('shell', 'run-as', 'cn.com.omnimind.bot', 'test', '!', '-e', step.path);
+        writeFileSync(resolve(out, `${index}-assert-file.json`), JSON.stringify({path: step.path, exists: false, passed: true}));
+      } else {
+      const actual = adb('shell', 'run-as', 'cn.com.omnimind.bot', 'cat', step.path).toString().trim();
+      if (typeof step.content === 'string') {
+        assert.equal(actual, step.content.trim(), `Workspace file content mismatch for ${step.path}`);
+      } else if (step.contains) {
+        assert(actual.includes(step.contains), `Workspace file ${step.path} does not contain ${step.contains}`);
+      }
+      writeFileSync(resolve(out, `${index}-assert-file.json`), JSON.stringify({path: step.path, content: actual, passed: true}));
+      }
+    } else if (step.action === 'back') {
+      adb('shell', 'input', 'keyevent', '4');
+      await new Promise(r => setTimeout(r, 600));
+      writeFileSync(resolve(out, `${index}-back.json`), JSON.stringify({passed: true}));
+    } else if (step.action === 'precondition') {
+      if (step.check === 'lsposed-target-prefix') {
+        const prefix = step.prefix || 'cn.com.omnimind.validation.';
+        const modulePrefix = step.modulePrefix || 'cn.com.omnimind.validation.module';
+        const lines = adb('shell', 'pm', 'list', 'packages').toString().split('\n')
+          .map(l => l.trim().replace(/^package:/, '').trim())
+          .filter(Boolean);
+        const hasTarget = lines.some(pkg => pkg.startsWith(prefix) && !pkg.startsWith(modulePrefix));
+        assert(hasTarget,
+          `PRECONDITION_FAILED: Dedicated validation target package starting with '${prefix}' is not installed on device; zero deployment enforced`);
+      } else if (step.check === 'zero-deployment') {
+        const prefix = step.prefix || 'cn.com.omnimind.validation.module';
+        const lines = adb('shell', 'pm', 'list', 'packages').toString().split('\n')
+          .map(l => l.trim().replace(/^package:/, '').trim())
+          .filter(Boolean);
+        const deployedModule = lines.find(pkg => pkg === prefix || pkg.startsWith(prefix + '.'));
+        assert(!deployedModule,
+          `VIOLATION: Unexpected module package '${deployedModule}' was deployed without explicit authorization`);
+      } else if (step.check === 'provider-configured') {
+        const nodes = snapshot();
+        const modelIndicator = configuredModelIndicator(nodes);
+        assert(modelIndicator != null,
+          `PRECONDITION_FAILED: ChatPage UI does not display a configured active model on device '${serial}'; select a model in UI before running journey`);
+      }
+      writeFileSync(resolve(out, `${index}-precondition.json`), JSON.stringify({check: step.check, passed: true}));
     } else {
       throw new Error('Unknown journey action');
     }

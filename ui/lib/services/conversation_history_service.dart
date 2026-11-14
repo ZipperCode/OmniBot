@@ -131,6 +131,7 @@ class ConversationHistoryService {
     ConversationMode mode = ConversationMode.agent,
     bool allowHistoryRemoval = false,
     List<String>? removedMessageIds,
+    Map<String, dynamic>? settledPromptReceipt,
   }) {
     if (allowHistoryRemoval && removedMessageIds == null) {
       return Future<void>.error(
@@ -157,6 +158,7 @@ class ConversationHistoryService {
         mode: mode,
         allowHistoryRemoval: allowHistoryRemoval,
         removedMessageIds: removals,
+        settledPromptReceipt: settledPromptReceipt,
       ),
     );
   }
@@ -195,6 +197,7 @@ class ConversationHistoryService {
     required ConversationMode mode,
     bool allowHistoryRemoval = false,
     List<String>? removedMessageIds,
+    Map<String, dynamic>? settledPromptReceipt,
   }) async {
     final key = '${mode.canonicalStorageValue}:$conversationId';
     final previous =
@@ -209,13 +212,16 @@ class ConversationHistoryService {
         changed.add(message.toJson());
       }
     }
-    if (changed.isEmpty && !allowHistoryRemoval) return;
+    final hasReceipt =
+        settledPromptReceipt != null && settledPromptReceipt.isNotEmpty;
+    if (changed.isEmpty && !allowHistoryRemoval && !hasReceipt) return;
     final stored = await _replaceNativeConversationMessages(
       conversationId,
       changed,
       mode: mode,
       allowHistoryRemoval: allowHistoryRemoval,
       removedMessageIds: removedMessageIds,
+      settledPromptReceipt: settledPromptReceipt,
     );
     if (stored) {
       _acknowledgedWrites[key] = {...previous, ...next}
@@ -234,6 +240,7 @@ class ConversationHistoryService {
     required ConversationMode mode,
     bool allowHistoryRemoval = false,
     List<String>? removedMessageIds,
+    Map<String, dynamic>? settledPromptReceipt,
   }) async {
     try {
       await _assistCore.invokeMethod('replaceConversationMessages', {
@@ -242,6 +249,8 @@ class ConversationHistoryService {
         'messages': jsonList,
         'allowHistoryRemoval': allowHistoryRemoval,
         'removedMessageIds': removedMessageIds,
+        if (settledPromptReceipt != null)
+          'settledPromptReceipt': settledPromptReceipt,
       });
       return true;
     } on PlatformException catch (e) {

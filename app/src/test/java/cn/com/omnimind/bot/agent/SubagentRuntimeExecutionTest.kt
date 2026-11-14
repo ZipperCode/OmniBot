@@ -18,6 +18,17 @@ import cn.com.omnimind.baselib.llm.ChatCompletionMessage
 import cn.com.omnimind.baselib.llm.ModelProviderProfile
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import cn.com.omnimind.androidgui.DisplayInputCoordinator
+import cn.com.omnimind.bot.agent.runtime.SubagentResourceGate
+import org.junit.After
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.putJsonObject
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CopyOnWriteArrayList
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotEquals
@@ -41,6 +52,11 @@ class SubagentRuntimeExecutionTest {
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
         helper = SharedHelper(context, json)
+    }
+    @After
+    fun tearDown() {
+        SubagentResourceGate.resetForTesting()
+        DisplayInputCoordinator.resetForTesting()
     }
 
     @Test
@@ -548,6 +564,280 @@ class SubagentRuntimeExecutionTest {
         assertEquals("parent-model-real", inheritedEnv.modelId)
         assertNotEquals("scene.dispatch.model", inheritedEnv.modelId)
     }
+    @Test
+    fun `6 read tasks with default concurrency run with peak concurrency at most 2`() = runBlocking {
+        val trackingLlm = TrackingLlmClient(durationMs = 50L)
+        val dispatcher = SubagentDispatcher(
+            llmClient = trackingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        val tasks = (1..6).map { i ->
+            SubagentDispatcher.SubagentTaskSpec("planner", "read-task-$i")
+        }
+
+        val results = dispatcher.dispatch(
+            parentEnv = FakeExecutionEnvironment(),
+            tasks = tasks,
+            concurrency = 2
+        )
+
+        assertEquals(6, results.size)
+        assertTrue(results.all { it.status == "completed" })
+        assertTrue("Peak concurrency must be <= 2, was ${trackingLlm.maxActiveCount.get()}",
+            trackingLlm.maxActiveCount.get() <= 2)
+    }
+
+    @Test
+    fun `6 read tasks with explicit concurrency 4 run with peak concurrency at most 4`() = runBlocking {
+        val trackingLlm = TrackingLlmClient(durationMs = 60L)
+        val dispatcher = SubagentDispatcher(
+            llmClient = trackingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        val tasks = (1..6).map { i ->
+            SubagentDispatcher.SubagentTaskSpec("planner", "read-task-$i")
+        }
+
+        val results = dispatcher.dispatch(
+            parentEnv = FakeExecutionEnvironment(),
+            tasks = tasks,
+            concurrency = 4
+        )
+
+        assertEquals(6, results.size)
+        assertTrue(results.all { it.status == "completed" })
+        assertTrue("Peak concurrency must be <= 4, was ${trackingLlm.maxActiveCount.get()}",
+            trackingLlm.maxActiveCount.get() <= 4)
+        assertTrue("Should achieve concurrency > 1, was ${trackingLlm.maxActiveCount.get()}",
+            trackingLlm.maxActiveCount.get() >= 2)
+    }
+
+    @Test
+    fun `write task executes with exclusive workspace lease across entire run lifecycle in FIFO order`() = runBlocking {
+        val trackingLlm = TrackingLlmClient(durationMs = 40L)
+        val catalog = CustomCatalog(listOf("file_read", "file_write"))
+        val dispatcher = SubagentDispatcher(
+            llmClient = trackingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { catalog },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        // planner = read-only, general (with file_write) = write task
+        val tasks = listOf(
+            SubagentDispatcher.SubagentTaskSpec("planner", "read-task-1"),
+            SubagentDispatcher.SubagentTaskSpec("general", "write-task-2"),
+            SubagentDispatcher.SubagentTaskSpec("planner", "read-task-3")
+        )
+
+        val results = dispatcher.dispatch(
+            parentEnv = FakeExecutionEnvironment(),
+            tasks = tasks,
+            concurrency = 2
+        )
+
+        assertEquals(3, results.size)
+        assertTrue(results.all { it.status == "completed" })
+
+        val log = trackingLlm.executionLog
+        val r1End = log.indexOfFirst { it.startsWith("end:") && it.contains("read-task-1") }
+        val w2Start = log.indexOfFirst { it.startsWith("start:") && it.contains("write-task-2") }
+        val w2End = log.indexOfFirst { it.startsWith("end:") && it.contains("write-task-2") }
+        val r3Start = log.indexOfFirst { it.startsWith("start:") && it.contains("read-task-3") }
+
+        assertTrue("Read-1 must end before Write-2 starts in FIFO", w2Start > r1End)
+        assertTrue("Write-2 must end before Read-3 starts in FIFO", r3Start > w2End)
+    }
+
+    @Test
+    fun `task with browser_use or unknown tool is treated as write task`() = runBlocking {
+        val catalog = CustomCatalog(listOf("file_read", "browser_use", "mcp__unknown_tool"))
+        val trackingLlm = TrackingLlmClient(durationMs = 40L)
+        val dispatcher = SubagentDispatcher(
+            llmClient = trackingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { catalog },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        // browser_use has side effects (navigate/scroll) -> exclusive write lease
+        val tasks = listOf(
+            SubagentDispatcher.SubagentTaskSpec("general", "browser-task"),
+            SubagentDispatcher.SubagentTaskSpec("planner", "read-task")
+        )
+
+        val results = dispatcher.dispatch(
+            parentEnv = FakeExecutionEnvironment(),
+            tasks = tasks,
+            concurrency = 2
+        )
+
+        assertEquals(2, results.size)
+        val log = trackingLlm.executionLog
+        val browserEnd = log.indexOfFirst { it.startsWith("end:") && it.contains("browser-task") }
+        val readStart = log.indexOfFirst { it.startsWith("start:") && it.contains("read-task") }
+        assertTrue("browser_use write task must finish before subsequent read starts", readStart > browserEnd)
+    }
+
+    @Test
+    fun `cancelled waiting tasks do not run and release resources`() = runBlocking {
+        val blockSignal = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val task2Started = AtomicBoolean(false)
+
+        val blockingLlm = object : AgentLlmClient {
+            override suspend fun streamTurn(
+                request: ChatCompletionRequest,
+                onReasoningUpdate: (suspend (String) -> Unit)?,
+                onContentUpdate: (suspend (String) -> Unit)?,
+                onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+                allowTransportRetry: Boolean
+            ): ChatCompletionTurn {
+                val msg = request.messages.lastOrNull()?.content?.toString().orEmpty()
+                if (msg.contains("task-1")) {
+                    blockSignal.await()
+                } else if (msg.contains("task-2")) {
+                    task2Started.set(true)
+                }
+                onContentUpdate?.invoke("ok")
+                return ChatCompletionTurn(message = ChatCompletionMessage(role = "assistant", content = JsonPrimitive("ok")))
+            }
+        }
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = blockingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        val job = launch {
+            dispatcher.dispatch(
+                parentEnv = FakeExecutionEnvironment(),
+                tasks = listOf(
+                    SubagentDispatcher.SubagentTaskSpec("general", "task-1"),
+                    SubagentDispatcher.SubagentTaskSpec("general", "task-2")
+                ),
+                concurrency = 1
+            )
+        }
+
+        delay(30L) // Task-1 is blocked at blockSignal, Task-2 is waiting
+        job.cancel() // Cancel the parent job
+        blockSignal.complete(Unit)
+        job.join()
+
+        assertFalse("Waiting Task-2 must not have run after cancellation", task2Started.get())
+        assertFalse("Resource gate must not have lingering locks after cancellation", SubagentResourceGate.isHeld(""))
+    }
+
+    @Test
+    fun `different workspaces run in parallel without mutual blocking`() = runBlocking {
+        val trackingLlm = TrackingLlmClient(durationMs = 60L)
+        val catalog = CustomCatalog(listOf("file_write"))
+        val dispatcher = SubagentDispatcher(
+            llmClient = trackingLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { catalog },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        val wsDescriptorA = mock(AgentWorkspaceDescriptor::class.java).apply {
+            org.mockito.Mockito.`when`(rootPath).thenReturn("/workspace")
+            org.mockito.Mockito.`when`(androidRootPath).thenReturn("build/tmp/parallel-ws-a")
+        }
+        val wsDescriptorB = mock(AgentWorkspaceDescriptor::class.java).apply {
+            org.mockito.Mockito.`when`(rootPath).thenReturn("/workspace")
+            org.mockito.Mockito.`when`(androidRootPath).thenReturn("build/tmp/parallel-ws-b")
+        }
+
+        val envA = FakeExecutionEnvironment(workspaceDescriptor = wsDescriptorA)
+        val envB = FakeExecutionEnvironment(workspaceDescriptor = wsDescriptorB)
+
+        val jobA = async {
+            dispatcher.dispatch(envA, listOf(SubagentDispatcher.SubagentTaskSpec("general", "write-ws-a")), 1)
+        }
+        val jobB = async {
+            dispatcher.dispatch(envB, listOf(SubagentDispatcher.SubagentTaskSpec("general", "write-ws-b")), 1)
+        }
+
+        val resultsA = jobA.await()
+        val resultsB = jobB.await()
+
+        assertEquals(1, resultsA.size)
+        assertEquals(1, resultsB.size)
+        assertEquals("Different workspaces should execute write tasks in parallel",
+            2, trackingLlm.maxActiveCount.get())
+    }
+
+    @Test
+    fun `subagent acquires workspace lease before tool acquires display lease adhering to strict lock hierarchy`() = runBlocking {
+        val leaseOrderLog = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        val customToolExecutor = object : AgentToolExecutor {
+            override suspend fun execute(
+                toolCall: AssistantToolCall,
+                args: JsonObject,
+                runtimeDescriptor: AgentToolRegistry.RuntimeToolDescriptor,
+                env: AgentExecutionEnvironment,
+                callback: AgentCallback,
+                toolHandle: AgentToolExecutionHandle
+            ): ToolExecutionResult {
+                // 工具执行阶段，工作区租约已被子代理持有
+                leaseOrderLog.add("workspace_held:${SubagentResourceGate.isHeld("")}")
+                return DisplayInputCoordinator.withDisplayLease(0, "vlm-run") {
+                    leaseOrderLog.add("display_held:${DisplayInputCoordinator.isLeaseHeld(0)}")
+                    ToolExecutionResult.ContextResult(
+                        toolName = toolCall.function.name,
+                        summaryText = "ok",
+                        previewJson = "{}",
+                        rawResultJson = "{}",
+                        success = true
+                    )
+                }
+            }
+        }
+
+        val customLlm = TwoTurnToolLlmClient("vlm_tool")
+        val catalog = CustomCatalog(listOf("vlm_tool"))
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = customLlm,
+            toolExecutorProvider = { customToolExecutor },
+            parentCatalogProvider = { catalog },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig()
+        )
+
+        val results = dispatcher.dispatch(
+            parentEnv = FakeExecutionEnvironment(),
+            tasks = listOf(SubagentDispatcher.SubagentTaskSpec("general", "task with vlm")),
+            concurrency = 1
+        )
+
+        assertEquals(1, results.size)
+        assertEquals("completed", results[0].status)
+        assertTrue(leaseOrderLog.contains("workspace_held:true"))
+        assertTrue(leaseOrderLog.contains("display_held:true"))
+    }
 
     private class FakeExecutionEnvironment(
         override val runtimeContextRepository: AgentRuntimeContextRepository = mock(AgentRuntimeContextRepository::class.java),
@@ -556,11 +846,11 @@ class SubagentRuntimeExecutionTest {
         override val workspaceMemoryService: WorkspaceMemoryService = mock(WorkspaceMemoryService::class.java),
         override val modelProviderProfileId: String = "test-provider",
         override val modelId: String? = null,
-        override val reasoningEffort: String = "medium"
-    ) : AgentExecutionEnvironment {
+        override val reasoningEffort: String = "medium",
+        override val acpSessionId: String = "acp-session-1",
         override val agentRunId: String = "test-run"
+    ) : AgentExecutionEnvironment {
         override val conversationId: Long = 12345L
-        override val acpSessionId: String = "acp-session-1"
         override val acpTurnId: String = "acp-turn-1"
         override val userMessage: String = "test"
         override val resolvedSkills: List<ResolvedSkillContext> = emptyList()
@@ -701,5 +991,66 @@ class SubagentRuntimeExecutionTest {
                 )
             }
         }
+    }
+
+    private class TrackingLlmClient(
+        private val durationMs: Long = 40L,
+        private val onRunStart: ((String) -> Unit)? = null
+    ) : AgentLlmClient {
+        val activeCount = AtomicInteger(0)
+        val maxActiveCount = AtomicInteger(0)
+        val executionLog = CopyOnWriteArrayList<String>()
+
+        override suspend fun streamTurn(
+            request: ChatCompletionRequest,
+            onReasoningUpdate: (suspend (String) -> Unit)?,
+            onContentUpdate: (suspend (String) -> Unit)?,
+            onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+            allowTransportRetry: Boolean
+        ): ChatCompletionTurn {
+            val prompt = request.messages.lastOrNull()?.content?.toString().orEmpty()
+            onRunStart?.invoke(prompt)
+            val active = activeCount.incrementAndGet()
+            maxActiveCount.updateAndGet { current -> maxOf(current, active) }
+            executionLog.add("start:$prompt")
+            try {
+                if (durationMs > 0) {
+                    delay(durationMs)
+                }
+            } finally {
+                activeCount.decrementAndGet()
+                executionLog.add("end:$prompt")
+            }
+            onContentUpdate?.invoke("completed: $prompt")
+            return ChatCompletionTurn(
+                message = ChatCompletionMessage(
+                    role = "assistant",
+                    content = JsonPrimitive("completed: $prompt")
+                )
+            )
+        }
+    }
+
+    private class CustomCatalog(
+        private val toolNames: List<String>
+    ) : AgentToolCatalog {
+        override val toolsForModel: List<cn.com.omnimind.baselib.llm.ChatCompletionTool> = toolNames.map { name ->
+            cn.com.omnimind.baselib.llm.ChatCompletionTool(
+                type = "function",
+                function = cn.com.omnimind.baselib.llm.ChatCompletionFunction(
+                    name = name,
+                    description = "Tool $name",
+                    parameters = buildJsonObject {
+                        put("type", "object")
+                        putJsonObject("properties") {}
+                    }
+                )
+            )
+        }
+
+        override fun runtimeDescriptor(toolName: String) =
+            AgentToolRegistry.RuntimeToolDescriptor(toolName, toolName, if (toolName == "browser_use") "browser" else "workspace")
+
+        override fun validateArguments(toolName: String, arguments: JsonObject) = Unit
     }
 }

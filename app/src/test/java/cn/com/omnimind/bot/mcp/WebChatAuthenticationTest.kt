@@ -187,6 +187,25 @@ class WebChatAuthenticationTest {
     }
 
     @Test
+    fun `asset and outbox management reject unauthenticated access before reading or mutating`() {
+        val endpoints = listOf(
+            "/webchat/api/skills/suggestions" to null,
+            "/webchat/api/skills/suggestions" to """{"operation":"set_enabled","enabled":false}""",
+            "/webchat/api/conversations/1/workspace-changes" to null,
+            "/webchat/api/workspaces/conversation_default/changes" to null,
+            "/webchat/api/workspace-changes/00000000-0000-0000-0000-000000000000" to null,
+            "/webchat/api/workspace-changes/00000000-0000-0000-0000-000000000000" to """{"operation":"restore","expectedRevision":1,"expectedAfterHashes":{}}""",
+            "/webchat/api/conversations/1/outbox" to null,
+            "/webchat/api/conversations/1/outbox" to """{"operation":"resume","request":{}}""",
+            "/webchat/api/conversations/1/outbox/attachments" to """{"attachments":[]}""",
+        )
+        for ((path, body) in endpoints) {
+            request(path, body = body).use { assertEquals(path, 401, it.code) }
+            request(path, body = body, bearer = "wrong").use { assertEquals(path, 401, it.code) }
+        }
+    }
+
+    @Test
     fun `MCP retains its kotlinx JSON representation`() {
         request("/mcp-json").use {
             assertEquals(200, it.code)

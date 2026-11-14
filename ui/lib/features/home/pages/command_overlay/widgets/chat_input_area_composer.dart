@@ -144,7 +144,7 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.attachments.isNotEmpty) ...[
+            if (widget.showAttachments && widget.attachments.isNotEmpty) ...[
               _buildAttachmentPreview(),
               const SizedBox(height: 8),
             ],
@@ -214,6 +214,17 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
         child: _buildTerminalButton(iconSize: 22),
       ),
       const SizedBox(width: 6),
+      if (widget.isProcessing &&
+          _composerStateMachine.value.primaryAction(
+                isProcessing: widget.isProcessing,
+                hasAttachments: widget.attachments.isNotEmpty,
+                hasExternalPayload: widget.hasExternalSendPayload,
+                hasTextOverride: widget.controller.text.trim().isNotEmpty,
+              ) ==
+              ChatComposerPrimaryAction.queue) ...[
+        _buildIndependentStopButton(),
+        const SizedBox(width: 6),
+      ],
       SizedBox(width: 28, height: 28, child: _buildLargeSendOrStopButton()),
     ];
 
@@ -373,7 +384,9 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
               child: Icon(
                 action == ChatComposerPrimaryAction.cancel
                     ? LucideIcons.square
-                    : LucideIcons.arrowUp,
+                    : (action == ChatComposerPrimaryAction.queue
+                        ? LucideIcons.listPlus
+                        : LucideIcons.arrowUp),
                 size: action == ChatComposerPrimaryAction.cancel ? 14 : 20,
                 color: context.omniPalette.surfacePrimary,
               ),
@@ -381,8 +394,7 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
           )
         : action == ChatComposerPrimaryAction.cancel
         ? _pauseSvg
-        : _sendSvg;
-
+        : (action == ChatComposerPrimaryAction.queue ? _queueSvg : _sendSvg);
     return AnimatedOpacity(
       duration: widget.minimalComposer
           ? _compactAnimationDuration
@@ -395,10 +407,13 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
             ? (Localizations.localeOf(context).languageCode == 'en'
                   ? 'Stop'
                   : '停止')
-            : (Localizations.localeOf(context).languageCode == 'en'
-                  ? 'Send'
-                  : '发送'),
-        padding: EdgeInsets.zero,
+            : (action == ChatComposerPrimaryAction.queue
+                  ? (Localizations.localeOf(context).languageCode == 'en'
+                        ? 'Queue'
+                        : '排队发送')
+                  : (Localizations.localeOf(context).languageCode == 'en'
+                        ? 'Send'
+                        : '发送')),
         iconSize: 20,
         icon: AnimatedSwitcher(
           duration: widget.minimalComposer
@@ -425,6 +440,7 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
                     widget.onCancelTask();
                     break;
                   case ChatComposerPrimaryAction.send:
+                  case ChatComposerPrimaryAction.queue:
                     widget.onSendMessage();
                     break;
                   case ChatComposerPrimaryAction.addAttachment:
@@ -432,6 +448,37 @@ mixin _ChatInputAreaComposerMixin on _ChatInputAreaStateBase {
                     break;
                 }
               },
+      ),
+    );
+  }
+
+  Widget _buildIndependentStopButton() {
+    return SizedBox(
+      width: 44,
+      height: 44,
+      child: IconButton(
+        key: const ValueKey('chat-input-independent-stop-button'),
+        tooltip: Localizations.localeOf(context).languageCode == 'en'
+            ? 'Stop current task'
+            : '停止当前任务',
+        padding: EdgeInsets.zero,
+        iconSize: 20,
+        icon: DecoratedBox(
+          decoration: BoxDecoration(
+            color: context.omniPalette.surfaceElevated,
+            shape: BoxShape.circle,
+          ),
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(
+              LucideIcons.square,
+              size: 14,
+              color: context.omniPalette.textPrimary,
+            ),
+          ),
+        ),
+        onPressed: widget.onCancelTask,
       ),
     );
   }

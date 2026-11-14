@@ -120,11 +120,25 @@ Enable or disable skills from the skill repository:
   <img src="docs/tutorial/seven.png" alt="Skill example" width="260" />
 </p>
 
+### 运行中输入、结果与受管资产
+
+任务运行时支持“排队发送”，待发内容不提前进入历史；前一轮正常结束且历史保存成功后才顺序投递。支持编辑、移除、显式继续和“停止当前任务并发送”，旧任务卡不能取消新任务。取消、失败或重启后暂停，不自动重发。每个对话最多 20 条待发，单条文本上限 64 KiB。
+
+结果区按实际数据开放产物、变更、现场与技能建议入口，返回保留当前对话。低高度视口收纳非阻塞状态，不隐藏授权与需处理的错误；Agent 与可选模型能力采用分组配置，不改变 Provider 解析与默认引擎。
+
+小万文件工具为受管工作区内普通文件的写入、编辑和移动保存恢复快照；恢复须预览并明确确认，文件指纹冲突或工作区忙时拒绝覆盖。外部命令及其他 Agent 写入不承诺可恢复；敏感路径、凭据内容、符号链接与超限文件不保存快照。单文件上限 5 MiB，总额上限 100 MiB。
+
+可开启小万后台自动技能建议：合格任务正式完成后提炼，审核前不进入技能索引，审核后以不可变版本试用。仅后续独立完成且实际读取该版本的任务可反馈保留或停用；旧版本恢复不得重新启用用户手动停用的内容。
+
+LSPosed 结果将安装配置、框架加载日志和真实业务效果分开。加载日志不代表功能通过；业务效果必须在专用目标应用实际观察。快捷动作只准备小万草稿，不覆盖已有输入，不直接提权执行。
+
 ### 小万子 Agent（Subagent）
 
 在 **Agents → 小万 → 配置** 中启停子代理、选择默认子代理 Provider/模型与思考档位。每个内置或自定义角色也可单独选择 Provider/模型；优先级为“角色模型 → 默认子代理模型 → 主 Agent 当前模型”，点击“使用默认子模型”可清空角色覆盖。保存后下一轮生效。模型目录在点开选择器时加载，认证仍由现有 Provider 管理。
 
 内置角色可编辑提示词、描述与工具限制；自定义角色可增删。工具允许与禁止列表只能收窄父任务及基础角色权限，空白名单表示无工具，子代理不可递归分派。小万使用已有 `subagent_dispatch` 汇总独立上下文任务，审批、取消和工具详情仍归父 ACP Turn；其他 Agent 和公共设备 MCP 不开放此配置或分派工具。
+
+子任务模型并发默认 2、最大 4。实际有效工具集决定是否只读；共享工作区中的写任务、浏览器操作与未知 MCP 工具全程独占资源，不同工作区可独立并行。审批等待沿用父任务权限与取消，不释放已读工作区的所有权。
 
 ### Scheduled tasks
 
@@ -136,6 +150,12 @@ Enable or disable skills from the skill repository:
 Scheduled tasks execute subagent flows. Alarms are reminder-only. A subagent can be assigned a complete task and behaves like a full agent.
 
 ### Browser
+
+The `browser_use` tool opens a live browser session in an overlay window. While a
+session is active, the globe floating ball keeps the page available when the
+overlay is minimized. Tap the ball to reopen it; the browser chrome provides
+navigation, tabs, downloads, bookmarks, history, userscripts, desktop/mobile
+mode, and a close-session action.
 
 <p align="center">
   <img src="docs/tutorial/twelve.png" alt="Browser" width="260" />

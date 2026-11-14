@@ -8,8 +8,16 @@ import cn.com.omnimind.bot.termux.TermuxCommandBuilder
 import cn.com.omnimind.bot.update.ApkDownloadSource
 import cn.com.omnimind.bot.update.AppUpdateManager
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonDeserializer
+import com.google.gson.JsonElement
+import com.google.gson.JsonParseException
 import com.google.gson.reflect.TypeToken
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.io.File
+import java.security.MessageDigest
+import java.util.UUID
 import kotlin.math.min
 
 private const val BUILTIN_SKILL_MANIFEST_ASSET = "builtin_skills/manifest.json"
@@ -23,7 +31,7 @@ private const val OFFICIAL_SKILLS_GITHUB_REPOSITORY_URL = "https://github.com/om
 private const val OFFICIAL_SKILLS_CNB_REPOSITORY_URL = "https://cnb.cool/o.a/OmniBotSkills"
 private const val OFFICIAL_SKILLS_DIRECTORY_NAME = "OmniBotSkills"
 private val RETIRED_BUILTIN_SKILL_IDS = setOf("hatch-pet")
-private val SKILL_INDEX_LOCK = Any()
+internal val SKILL_INDEX_LOCK = Any()
 
 private data class BuiltinSkillManifest(
     val skills: List<BuiltinSkillAsset> = emptyList()
@@ -41,12 +49,77 @@ private data class BuiltinSkillAsset(
     val hasEvals: Boolean = false
 )
 
-private data class SkillRegistryEntry(
+internal data class SkillRegistryEntry(
     val enabled: Boolean = true,
     val source: String = USER_SOURCE,
-    val installState: String = INSTALL_STATE_INSTALLED
+    val installState: String = INSTALL_STATE_INSTALLED,
+    val verificationStatus: String = "unverified",
+    val revisionId: String? = null,
+    val previousRevisionId: String? = null,
+    val revision: Long = 1L
 )
 
+internal class SkillRegistryEntryDeserializer : JsonDeserializer<SkillRegistryEntry> {
+    override fun deserialize(
+        json: JsonElement?,
+        typeOfT: java.lang.reflect.Type?,
+        context: com.google.gson.JsonDeserializationContext?
+    ): SkillRegistryEntry {
+        if (json == null || !json.isJsonObject) {
+            throw JsonParseException("SkillRegistryEntry 必须为 JsonObject")
+        }
+        val obj = json.asJsonObject
+        val enabled = if (obj.has("enabled") && !obj.get("enabled").isJsonNull) {
+            obj.get("enabled").asBoolean
+        } else {
+            true
+        }
+        val source = if (obj.has("source") && !obj.get("source").isJsonNull) {
+            obj.get("source").asString.ifBlank { USER_SOURCE }
+        } else {
+            USER_SOURCE
+        }
+        val installState = if (obj.has("installState") && !obj.get("installState").isJsonNull) {
+            obj.get("installState").asString.ifBlank { INSTALL_STATE_INSTALLED }
+        } else {
+            INSTALL_STATE_INSTALLED
+        }
+        val verificationStatus = if (obj.has("verificationStatus") && !obj.get("verificationStatus").isJsonNull) {
+            obj.get("verificationStatus").asString.ifBlank { "unverified" }
+        } else {
+            "unverified"
+        }
+        val revisionId = if (obj.has("revisionId") && !obj.get("revisionId").isJsonNull) {
+            obj.get("revisionId").asString.ifBlank { null }
+        } else {
+            null
+        }
+        val previousRevisionId = if (obj.has("previousRevisionId") && !obj.get("previousRevisionId").isJsonNull) {
+            obj.get("previousRevisionId").asString.ifBlank { null }
+        } else {
+            null
+        }
+        val revision = if (obj.has("revision") && !obj.get("revision").isJsonNull) {
+            obj.get("revision").asLong
+        } else {
+            1L
+        }
+        return SkillRegistryEntry(
+            enabled = enabled,
+            source = source,
+            installState = installState,
+            verificationStatus = verificationStatus,
+            revisionId = revisionId,
+            previousRevisionId = previousRevisionId,
+            revision = revision
+        )
+    }
+}
+
+internal fun computeBytesSha256(bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    return digest.digest(bytes).joinToString("") { "%02x".format(it) }
+}
 data class OfficialSkillsSyncResult(
     val action: String,
     val repositoryUrl: String,
@@ -57,33 +130,62 @@ data class OfficialSkillsSyncResult(
     val output: String
 )
 
-private class SkillRegistryStore(
+internal class SkillRegistryStore(
     private val registryFile: File
 ) {
-    private val gson = Gson()
+    private val gson = GsonBuilder()
+        .registerTypeAdapter(SkillRegistryEntry::class.java, SkillRegistryEntryDeserializer())
+        .create()
     private val mapType = object : TypeToken<LinkedHashMap<String, SkillRegistryEntry>>() {}.type
 
     fun read(): LinkedHashMap<String, SkillRegistryEntry> {
         if (!registryFile.exists()) {
             return linkedMapOf()
         }
-        return runCatching {
-            gson.fromJson<LinkedHashMap<String, SkillRegistryEntry>>(
-                registryFile.readText(),
-                mapType
-            ) ?: linkedMapOf()
-        }.getOrElse {
-            linkedMapOf()
+        val text = registryFile.readText()
+        if (text.isBlank()) {
+            throw IllegalStateException("skill_asset_invalid: 注册表文件内容为空: ${registryFile.absolutePath}")
+        }
+        return try {
+            val result = gson.fromJson<LinkedHashMap<String, SkillRegistryEntry>>(text, mapType)
+                ?: throw IllegalStateException("skill_asset_invalid: 注册表文件解析为 null: ${registryFile.absolutePath}")
+            result
+        } catch (e: Exception) {
+            if (e is IllegalStateException && e.message?.startsWith("skill_asset_invalid") == true) {
+                throw e
+            }
+            throw IllegalStateException("skill_asset_invalid: 注册表文件损坏: ${registryFile.absolutePath}", e)
         }
     }
 
     fun write(entries: Map<String, SkillRegistryEntry>) {
+        if (registryFile.exists()) {
+            try {
+                read()
+            } catch (e: Exception) {
+                throw IllegalStateException("skill_asset_invalid: 注册表已损坏，拒绝覆盖写入: ${registryFile.absolutePath}", e)
+            }
+        }
         registryFile.parentFile?.mkdirs()
+        val tempFile = File(registryFile.parentFile, "${registryFile.name}.tmp.${System.nanoTime()}")
         val ordered = linkedMapOf<String, SkillRegistryEntry>()
         entries.toSortedMap().forEach { (key, value) ->
             ordered[key] = value
         }
-        registryFile.writeText(gson.toJson(ordered))
+        tempFile.writeText(gson.toJson(ordered))
+        try {
+            Files.move(
+                tempFile.toPath(),
+                registryFile.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (e: Exception) {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            throw IllegalStateException("skill_asset_invalid: 注册表原子重命名失败: ${registryFile.absolutePath}", e)
+        }
     }
 
     fun set(skillId: String, entry: SkillRegistryEntry) {
@@ -126,7 +228,7 @@ private class BuiltinSkillAssetStore(
     }
 
     fun findBuiltin(skillId: String): BuiltinSkillAsset? {
-        return listBuiltins().firstOrNull { it.id == skillId }
+        return listBuiltins().firstOrNull { it.id.equals(skillId, ignoreCase = true) }
     }
 
     fun seedMissingBuiltins(registryStore: SkillRegistryStore) {
@@ -249,9 +351,10 @@ private class BuiltinSkillAssetStore(
 
 class SkillIndexService(
     private val context: Context,
-    private val workspaceManager: AgentWorkspaceManager
+    private val workspaceManager: AgentWorkspaceManager,
+    private val lifecycleStore: SkillLifecycleStore = SkillLifecycleStore.getInstance(context)
 ) {
-    private fun registryStore(): SkillRegistryStore {
+    internal fun registryStore(): SkillRegistryStore {
         return SkillRegistryStore(File(workspaceManager.skillsRoot(), SKILL_REGISTRY_FILE_NAME))
     }
 
@@ -274,7 +377,12 @@ class SkillIndexService(
             val registryStore = registryStore()
             val registry = registryStore.read()
             val builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
-            val installedEntries = scanInstalledEntries(registry, builtinAssets)
+            val installedEntries = scanInstalledEntries(
+                root = workspaceManager.skillsRoot(),
+                registry = registry,
+                builtinAssets = builtinAssets,
+                registryStore = registryStore
+            )
             val installedIds = installedEntries.mapTo(mutableSetOf()) { it.id }
             val removedBuiltinEntries = builtinAssets.values
                 .asSequence()
@@ -323,6 +431,18 @@ class SkillIndexService(
             ?: entries.firstOrNull { normalizeSkillLookup(it.rootPath) == normalizedIdentifier }
     }
 
+    private fun isProtectedSkillId(skillId: String, registry: Map<String, SkillRegistryEntry>? = null): Boolean {
+        if (builtinStore().findBuiltin(skillId) != null) return true
+        if (RETIRED_BUILTIN_SKILL_IDS.any { it.equals(skillId, ignoreCase = true) }) return true
+        if (skillId.equals(OFFICIAL_SKILLS_DIRECTORY_NAME, ignoreCase = true)) return true
+        val reg = registry ?: registryStore().read()
+        val entry = reg[skillId]
+        if (entry != null && (entry.source == BUILTIN_SOURCE || entry.source == OFFICIAL_SOURCE)) {
+            return true
+        }
+        return false
+    }
+
     fun installSkillFromDirectory(sourcePath: String): SkillIndexEntry {
         val sourceDir = File(sourcePath).canonicalFile
         return installSkillFromDirectory(sourcePath, sourceDir.name)
@@ -331,31 +451,289 @@ class SkillIndexService(
     internal fun installSkillFromDirectory(
         sourcePath: String,
         targetDirectoryName: String,
+        verificationStatus: String = "unverified",
+        revisionId: String? = null,
+        previousRevisionId: String? = null,
     ): SkillIndexEntry {
         synchronized(SKILL_INDEX_LOCK) {
-            val sourceDir = File(sourcePath).canonicalFile
-            require(sourceDir.isDirectory) { "skill source 必须是目录" }
-            val skillFile = File(sourceDir, "SKILL.md")
-            require(skillFile.exists()) { "skill source 缺少 SKILL.md" }
             require(SKILL_TARGET_DIRECTORY.matches(targetDirectoryName)) {
                 "skill target directory 非法：$targetDirectoryName"
             }
-            val targetDir = File(workspaceManager.skillsRoot(), targetDirectoryName)
-            copyRecursively(sourceDir, targetDir)
+            if (isProtectedSkillId(targetDirectoryName)) {
+                throw IllegalStateException("skill_cannot_overwrite_builtin: 严禁覆盖内置或官方技能：$targetDirectoryName")
+            }
+            val sourceFile = File(sourcePath)
+            if (Files.isSymbolicLink(sourceFile.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：$sourcePath")
+            }
+            val sourceDir = sourceFile.canonicalFile
+            if (Files.isSymbolicLink(sourceDir.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${sourceDir.path}")
+            }
+            require(sourceDir.isDirectory) { "skill source 必须是目录" }
+            val skillFile = File(sourceDir, "SKILL.md")
+            require(skillFile.exists() && skillFile.isFile) { "skill source 缺少 SKILL.md" }
+            if (Files.isSymbolicLink(skillFile.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${skillFile.path}")
+            }
+            val skillsRoot = workspaceManager.skillsRoot().canonicalFile
+            val targetDir = File(skillsRoot, targetDirectoryName)
+            if (targetDir.exists() && Files.isSymbolicLink(targetDir.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${targetDir.path}")
+            }
+            if (sourceDir != targetDir.canonicalFile) {
+                copyRecursively(sourceDir, targetDir)
+            }
             val entry = buildInstalledEntry(
                 skillDir = targetDir,
                 registry = registryStore().read(),
-                builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
+                builtinAssets = builtinStore().listBuiltins().associateBy { it.id },
+                registryStore = registryStore()
             ) ?: throw IllegalStateException("安装 skill 后索引失败")
             registryStore().set(
                 entry.id,
                 SkillRegistryEntry(
                     enabled = true,
                     source = USER_SOURCE,
-                    installState = INSTALL_STATE_INSTALLED
+                    installState = INSTALL_STATE_INSTALLED,
+                    verificationStatus = verificationStatus,
+                    revisionId = revisionId,
+                    previousRevisionId = previousRevisionId
                 )
             )
-            return entry.copy(enabled = true, source = USER_SOURCE, installed = true)
+            return entry.copy(
+                enabled = true,
+                source = USER_SOURCE,
+                installed = true,
+                verificationStatus = verificationStatus,
+                revisionId = revisionId,
+                previousRevisionId = previousRevisionId
+            )
+        }
+    }
+
+    internal fun withReviewedSkillInstall(
+        sourcePath: String,
+        targetSkillId: String,
+        expectedCurrentContentHash: String?,
+        verificationStatus: String,
+        revisionId: String,
+        previousRevisionId: String?,
+        commit: (SkillIndexEntry) -> Unit
+    ): SkillIndexEntry {
+        synchronized(SKILL_INDEX_LOCK) {
+            require(SKILL_TARGET_DIRECTORY.matches(targetSkillId)) {
+                "skill target directory 非法：$targetSkillId"
+            }
+            if (targetSkillId.contains("..") || targetSkillId.contains("/") || targetSkillId.contains("\\")) {
+                throw IllegalArgumentException("skill_validation_failed: targetSkillId 路径逃逸：$targetSkillId")
+            }
+
+            val registryStore = registryStore()
+            val registry = registryStore.read()
+            if (isProtectedSkillId(targetSkillId, registry)) {
+                throw IllegalStateException("skill_cannot_overwrite_builtin: 严禁覆盖内置或官方技能：$targetSkillId")
+            }
+
+            val skillsRoot = workspaceManager.skillsRoot().canonicalFile
+            val targetDir = File(skillsRoot, targetSkillId)
+            if (!targetDir.toPath().normalize().startsWith(skillsRoot.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问工作区外路径：${targetDir.path}")
+            }
+            if (targetDir.exists() && Files.isSymbolicLink(targetDir.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${targetDir.path}")
+            }
+
+            val sourceFile = File(sourcePath)
+            if (Files.isSymbolicLink(sourceFile.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：$sourcePath")
+            }
+            val sourceDir = sourceFile.canonicalFile
+            if (Files.isSymbolicLink(sourceDir.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${sourceDir.path}")
+            }
+            require(sourceDir.isDirectory) { "skill source 必须是目录" }
+
+            val sourceSkillFile = File(sourceDir, "SKILL.md")
+            if (!sourceSkillFile.exists() || !sourceSkillFile.isFile) {
+                throw IllegalArgumentException("skill source 缺少 SKILL.md")
+            }
+            if (Files.isSymbolicLink(sourceSkillFile.toPath())) {
+                throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${sourceSkillFile.path}")
+            }
+            val sourceBytes = sourceSkillFile.readBytes()
+            val sourceHash = computeBytesSha256(sourceBytes)
+            require(sourceHash.equals(revisionId, ignoreCase = true)) {
+                "skill_validation_failed: revisionId 与源文件哈希不匹配: expected $sourceHash, got $revisionId"
+            }
+
+            val isUpdate = expectedCurrentContentHash != null
+            val existingEntry = registry[targetSkillId]
+            val targetSkillFile = File(targetDir, "SKILL.md")
+
+            if (!isUpdate) {
+                if (existingEntry != null && existingEntry.installState == INSTALL_STATE_INSTALLED) {
+                    throw IllegalStateException("skill_name_conflict: 同名用户技能已存在，请使用更新模式并提供 expectedCurrentContentHash")
+                }
+                if (targetDir.exists()) {
+                    throw IllegalStateException("skill_name_conflict: 目标技能目录已存在：$targetSkillId")
+                }
+
+                val stagingDir = File(skillsRoot, ".tmp-staging-$targetSkillId-${UUID.randomUUID()}")
+                try {
+                    copyRecursively(sourceDir, stagingDir)
+                } catch (copyEx: Exception) {
+                    if (stagingDir.exists()) stagingDir.deleteRecursively()
+                    throw IllegalStateException("skill_install_failed: 复制临时技能文件失败：$targetSkillId", copyEx)
+                }
+
+                var targetDirMoved = false
+                var registryWritten = false
+                try {
+                    try {
+                        Files.move(stagingDir.toPath(), targetDir.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                        targetDirMoved = true
+                    } catch (moveEx: Exception) {
+                        if (stagingDir.exists()) stagingDir.deleteRecursively()
+                        throw IllegalStateException("skill_install_failed: 原子移动技能目录失败：$targetSkillId", moveEx)
+                    }
+
+                    val nextRev = (existingEntry?.revision ?: 0L) + 1L
+                    val newRegistryEntry = SkillRegistryEntry(
+                        enabled = true,
+                        source = USER_SOURCE,
+                        installState = INSTALL_STATE_INSTALLED,
+                        verificationStatus = verificationStatus,
+                        revisionId = revisionId,
+                        previousRevisionId = previousRevisionId ?: existingEntry?.revisionId,
+                        revision = nextRev
+                    )
+                    registryStore.set(targetSkillId, newRegistryEntry)
+                    registryWritten = true
+
+                    val installedEntry = buildInstalledEntry(
+                        skillDir = targetDir,
+                        registry = registryStore.read(),
+                        builtinAssets = builtinStore().listBuiltins().associateBy { it.id },
+                        registryStore = registryStore
+                    ) ?: throw IllegalStateException("安装 skill 后索引失败：$targetSkillId")
+
+                    commit(installedEntry)
+                    return installedEntry
+                } catch (error: Throwable) {
+                    if (stagingDir.exists()) {
+                        stagingDir.deleteRecursively()
+                    }
+                    if (targetDirMoved && targetDir.exists()) {
+                        val currentBytes = if (targetSkillFile.exists()) targetSkillFile.readBytes() else ByteArray(0)
+                        val currentHash = computeBytesSha256(currentBytes)
+                        if (currentHash.equals(revisionId, ignoreCase = true)) {
+                            targetDir.deleteRecursively()
+                            if (registryWritten) {
+                                if (existingEntry != null) {
+                                    registryStore.set(targetSkillId, existingEntry)
+                                } else {
+                                    registryStore.remove(targetSkillId)
+                                }
+                            }
+                        } else {
+                            val msg = "skill_asset_invalid: 提交失败且目标已被外部改动，拒绝回滚覆盖：$targetSkillId"
+                            throw IllegalStateException(msg, error)
+                        }
+                    }
+                    throw error
+                }
+            } else {
+                if (existingEntry == null || !targetDir.exists()) {
+                    throw IllegalArgumentException("skill_candidate_not_found: 未找到要更新的已安装技能：$targetSkillId")
+                }
+                if (!targetSkillFile.exists() || !targetSkillFile.isFile) {
+                    throw IllegalArgumentException("skill_candidate_not_found: 目标 SKILL.md 不存在：$targetSkillId")
+                }
+                if (Files.isSymbolicLink(targetSkillFile.toPath())) {
+                    throw IllegalArgumentException("skill_validation_failed: 拒绝访问符号链接：${targetSkillFile.path}")
+                }
+                val oldSkillBytes = targetSkillFile.readBytes()
+                val currentDiskHash = computeBytesSha256(oldSkillBytes)
+                if (!currentDiskHash.equals(expectedCurrentContentHash, ignoreCase = true)) {
+                    throw IllegalStateException("skill_content_conflict: 当前磁盘内容哈希 ($currentDiskHash) 与预期 ($expectedCurrentContentHash) 不匹配")
+                }
+
+                // 仅替换 SKILL.md，保留现用户 skill scripts/references/assets
+                val tempSibling = File(targetDir, ".tmp-SKILL-${UUID.randomUUID()}.md")
+                tempSibling.writeBytes(sourceBytes)
+
+                var fileMoved = false
+                var registryWritten = false
+                try {
+                    try {
+                        Files.move(
+                            tempSibling.toPath(),
+                            targetSkillFile.toPath(),
+                            StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING
+                        )
+                        fileMoved = true
+                    } catch (moveEx: Exception) {
+                        if (tempSibling.exists()) tempSibling.delete()
+                        throw IllegalStateException("skill_install_failed: 原子更新 SKILL.md 失败：$targetSkillId", moveEx)
+                    }
+
+                    val nextRev = (existingEntry.revision) + 1L
+                    val newRegistryEntry = SkillRegistryEntry(
+                        enabled = true,
+                        source = USER_SOURCE,
+                        installState = INSTALL_STATE_INSTALLED,
+                        verificationStatus = verificationStatus,
+                        revisionId = revisionId,
+                        previousRevisionId = previousRevisionId ?: existingEntry.revisionId,
+                        revision = nextRev
+                    )
+                    registryStore.set(targetSkillId, newRegistryEntry)
+                    registryWritten = true
+
+                    val installedEntry = buildInstalledEntry(
+                        skillDir = targetDir,
+                        registry = registryStore.read(),
+                        builtinAssets = builtinStore().listBuiltins().associateBy { it.id },
+                        registryStore = registryStore
+                    ) ?: throw IllegalStateException("安装 skill 后索引失败：$targetSkillId")
+
+                    commit(installedEntry)
+                    return installedEntry
+                } catch (error: Throwable) {
+                    if (tempSibling.exists()) {
+                        tempSibling.delete()
+                    }
+                    if (fileMoved && targetSkillFile.exists()) {
+                        val currentBytesNow = targetSkillFile.readBytes()
+                        val currentHashNow = computeBytesSha256(currentBytesNow)
+                        if (currentHashNow.equals(revisionId, ignoreCase = true)) {
+                            val rollbackTemp = File(targetDir, ".tmp-rollback-${UUID.randomUUID()}.md")
+                            try {
+                                rollbackTemp.writeBytes(oldSkillBytes)
+                                Files.move(
+                                    rollbackTemp.toPath(),
+                                    targetSkillFile.toPath(),
+                                    StandardCopyOption.ATOMIC_MOVE,
+                                    StandardCopyOption.REPLACE_EXISTING
+                                )
+                            } catch (rollbackEx: Exception) {
+                                if (rollbackTemp.exists()) rollbackTemp.delete()
+                                error.addSuppressed(rollbackEx)
+                                throw error
+                            }
+                            if (registryWritten) {
+                                registryStore.set(targetSkillId, existingEntry)
+                            }
+                        } else {
+                            val msg = "skill_asset_invalid: 提交失败且目标已被外部改动，拒绝回滚覆盖：$targetSkillId"
+                            throw IllegalStateException(msg, error)
+                        }
+                    }
+                    throw error
+                }
+            }
         }
     }
 
@@ -369,14 +747,16 @@ class SkillIndexService(
             val entry = buildInstalledEntry(
                 skillDir = canonicalRoot,
                 registry = registryStore().read(),
-                builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
+                builtinAssets = builtinStore().listBuiltins().associateBy { it.id },
+                registryStore = registryStore()
             ) ?: return false
             val deleted = !canonicalRoot.exists() || canonicalRoot.deleteRecursively()
             if (!deleted) return false
             val stillInstalled = scanInstalledEntries(
                 root = skillsRoot,
                 registry = registryStore().read(),
-                builtinAssets = builtinStore().listBuiltins().associateBy { it.id }
+                builtinAssets = builtinStore().listBuiltins().associateBy { it.id },
+                registryStore = registryStore()
             ).any { it.id == entry.id }
             if (!stillInstalled) {
                 registryStore().remove(entry.id)
@@ -385,18 +765,63 @@ class SkillIndexService(
         }
     }
 
+    internal fun getSkillRegistryEntry(skillId: String): SkillRegistryEntry? {
+        synchronized(SKILL_INDEX_LOCK) {
+            return registryStore().read()[skillId]
+        }
+    }
+
     fun setSkillEnabled(skillId: String, enabled: Boolean): SkillIndexEntry {
-        val entry = findManagedInstalledSkill(skillId, includeDisabled = true)
-            ?: throw IllegalArgumentException("未找到已安装 skill：$skillId")
-        registryStore().set(
-            entry.id,
-            SkillRegistryEntry(
-                enabled = enabled,
-                source = entry.source,
-                installState = INSTALL_STATE_INSTALLED
+        synchronized(SKILL_INDEX_LOCK) {
+            val entry = findManagedInstalledSkill(skillId, includeDisabled = true)
+                ?: throw IllegalArgumentException("未找到已安装 skill：$skillId")
+            val currentRegistry = registryStore().read()[entry.id]
+            val nextRev = (currentRegistry?.revision ?: 1L) + 1L
+            val targetRevId = currentRegistry?.revisionId ?: entry.revisionId
+            if (!enabled && !targetRevId.isNullOrBlank()) {
+                lifecycleStore.markRevisionManuallyDisabledNow(entry.id, targetRevId)
+            }
+            registryStore().set(
+                entry.id,
+                SkillRegistryEntry(
+                    enabled = enabled,
+                    source = entry.source,
+                    installState = INSTALL_STATE_INSTALLED,
+                    verificationStatus = currentRegistry?.verificationStatus ?: entry.verificationStatus,
+                    revisionId = targetRevId,
+                    previousRevisionId = currentRegistry?.previousRevisionId ?: entry.previousRevisionId,
+                    revision = nextRev
+                )
             )
-        )
-        return entry.copy(enabled = enabled)
+            return entry.copy(enabled = enabled)
+        }
+    }
+
+    fun updateSkillLifecycle(
+        skillId: String,
+        verificationStatus: String,
+        revisionId: String? = null,
+        previousRevisionId: String? = null,
+        enabled: Boolean? = null,
+        expectedRevision: Long? = null
+    ): SkillIndexEntry? {
+        synchronized(SKILL_INDEX_LOCK) {
+            val store = registryStore()
+            val registry = store.read()
+            val current = registry[skillId] ?: return null
+            if (expectedRevision != null && current.revision != expectedRevision) {
+                throw IllegalStateException("skill_revision_conflict: 期望技能版本为 $expectedRevision，当前为 ${current.revision}")
+            }
+            val updated = current.copy(
+                verificationStatus = verificationStatus,
+                revisionId = revisionId ?: current.revisionId,
+                previousRevisionId = previousRevisionId ?: current.previousRevisionId,
+                enabled = enabled ?: current.enabled,
+                revision = current.revision + 1L
+            )
+            store.set(skillId, updated)
+            return findManagedInstalledSkill(skillId, includeDisabled = true)
+        }
     }
 
     fun deleteSkill(skillId: String): Boolean {
@@ -471,30 +896,37 @@ class SkillIndexService(
     }
 
     private fun scanInstalledEntries(
-        registry: Map<String, SkillRegistryEntry>,
+        registry: MutableMap<String, SkillRegistryEntry>,
         builtinAssets: Map<String, BuiltinSkillAsset>
     ): List<SkillIndexEntry> {
         return scanInstalledEntries(
             root = workspaceManager.skillsRoot(),
             registry = registry,
-            builtinAssets = builtinAssets
+            builtinAssets = builtinAssets,
+            registryStore = registryStore()
         )
     }
 
     private fun scanInstalledEntries(
         root: File,
-        registry: Map<String, SkillRegistryEntry>,
-        builtinAssets: Map<String, BuiltinSkillAsset>
+        registry: MutableMap<String, SkillRegistryEntry>,
+        builtinAssets: Map<String, BuiltinSkillAsset>,
+        registryStore: SkillRegistryStore? = registryStore()
     ): List<SkillIndexEntry> {
         if (!root.exists()) return emptyList()
         return root.walkTopDown()
-            .onEnter { directory -> directory.name != ".git" }
+            .onEnter { directory ->
+                directory.name != ".git" &&
+                !directory.name.startsWith(".tmp-") &&
+                directory.name != SKILL_REGISTRY_FILE_NAME
+            }
             .filter { file -> file.isFile && file.name == "SKILL.md" }
             .mapNotNull { skillFile ->
                 buildInstalledEntry(
                     skillDir = skillFile.parentFile ?: return@mapNotNull null,
                     registry = registry,
-                    builtinAssets = builtinAssets
+                    builtinAssets = builtinAssets,
+                    registryStore = registryStore
                 )
             }
             .distinctBy { it.rootPath }
@@ -561,18 +993,42 @@ class SkillIndexService(
 
     private fun buildInstalledEntry(
         skillDir: File,
-        registry: Map<String, SkillRegistryEntry>,
-        builtinAssets: Map<String, BuiltinSkillAsset>
+        registry: MutableMap<String, SkillRegistryEntry>,
+        builtinAssets: Map<String, BuiltinSkillAsset>,
+        registryStore: SkillRegistryStore? = null
     ): SkillIndexEntry? {
         val canonicalSkillDir = skillDir.canonicalFile
         val skillFile = File(canonicalSkillDir, "SKILL.md")
-        val parsed = parseSkillFile(skillFile) ?: return null
+        if (!skillFile.exists() || !skillFile.isFile) return null
+        val rawBytes = skillFile.readBytes()
+        val currentDiskHash = computeBytesSha256(rawBytes)
+        val parsed = parseSkillContent(rawBytes.toString(Charsets.UTF_8)) ?: return null
         val frontmatter = parsed.frontmatter
         val id = sanitizeSkillId(canonicalSkillDir.name, frontmatter["name"])
         val metadata = frontmatter["metadata"]
             ?.let { raw -> parseIndentedBlock(raw) }
             ?: emptyMap()
-        val registryState = registry[id]
+        var registryState = registry[id]
+
+        // 扫描已带 revision 技能检测磁盘 hash 变化
+        if (registryState != null && registryState.revisionId != null && registryState.revisionId != currentDiskHash) {
+            val nextRev = if (registryState.verificationStatus != "unverified") {
+                registryState.revision + 1L
+            } else {
+                registryState.revision
+            }
+            val updatedState = registryState.copy(
+                verificationStatus = "unverified",
+                revisionId = currentDiskHash,
+                previousRevisionId = registryState.previousRevisionId ?: registryState.revisionId,
+                revision = nextRev,
+                enabled = registryState.enabled
+            )
+            registry[id] = updatedState
+            registryStore?.set(id, updatedState)
+            registryState = updatedState
+        }
+
         val builtinAsset = builtinAssets[id]
         val shellRootPath = workspaceManager.shellPathForAndroid(canonicalSkillDir)
             ?: canonicalSkillDir.absolutePath
@@ -595,7 +1051,10 @@ class SkillIndexService(
             enabled = registryState?.enabled ?: true,
             source = registryState?.source?.ifBlank { null }
                 ?: if (builtinAsset != null) BUILTIN_SOURCE else USER_SOURCE,
-            installed = true
+            installed = true,
+            verificationStatus = registryState?.verificationStatus?.ifBlank { "unverified" } ?: "unverified",
+            revisionId = registryState?.revisionId,
+            previousRevisionId = registryState?.previousRevisionId
         )
     }
 
@@ -621,7 +1080,10 @@ class SkillIndexService(
             hasEvals = builtin.hasEvals,
             enabled = registryState?.enabled ?: false,
             source = BUILTIN_SOURCE,
-            installed = false
+            installed = false,
+            verificationStatus = registryState?.verificationStatus?.ifBlank { "unverified" } ?: "unverified",
+            revisionId = registryState?.revisionId,
+            previousRevisionId = registryState?.previousRevisionId
         )
     }
 
@@ -671,15 +1133,26 @@ class SkillIndexService(
     }
 }
 
+data class LoadedSkillFingerprint(
+    val context: ResolvedSkillContext,
+    val contentHash: String
+)
+
 class SkillLoader(
     private val workspaceManager: AgentWorkspaceManager
 ) {
-    fun load(entry: SkillIndexEntry, triggerReason: String): ResolvedSkillContext? {
+    fun loadFromContent(
+        entry: SkillIndexEntry,
+        contentBytes: ByteArray,
+        triggerReason: String
+    ): LoadedSkillFingerprint? {
         if (!entry.installed) {
             return null
         }
+        val contentHash = computeBytesSha256(contentBytes)
+        val rawText = contentBytes.toString(Charsets.UTF_8)
+        val parsed = parseSkillContent(rawText) ?: return null
         val skillDir = File(entry.rootPath)
-        val parsed = parseSkillFile(File(skillDir, "SKILL.md")) ?: return null
         val referencesDir = File(skillDir, "references")
         val loadedReferences = if (referencesDir.isDirectory) {
             referencesDir.listFiles()
@@ -690,7 +1163,7 @@ class SkillLoader(
         } else {
             emptyList()
         }
-        return ResolvedSkillContext(
+        val context = ResolvedSkillContext(
             skillId = entry.id,
             frontmatter = parsed.frontmatter,
             metadata = entry.metadata,
@@ -704,6 +1177,25 @@ class SkillLoader(
                 ?.let { workspaceManager.shellPathForAndroid(it) ?: it.absolutePath },
             triggerReason = triggerReason
         )
+        return LoadedSkillFingerprint(
+            context = context,
+            contentHash = contentHash
+        )
+    }
+
+    fun loadWithFingerprint(entry: SkillIndexEntry, triggerReason: String): LoadedSkillFingerprint? {
+        if (!entry.installed) {
+            return null
+        }
+        val skillDir = File(entry.rootPath)
+        val skillFile = File(skillDir, "SKILL.md")
+        if (!skillFile.exists() || !skillFile.isFile) return null
+        val bytes = skillFile.readBytes()
+        return loadFromContent(entry, bytes, triggerReason)
+    }
+
+    fun load(entry: SkillIndexEntry, triggerReason: String): ResolvedSkillContext? {
+        return loadWithFingerprint(entry, triggerReason)?.context
     }
 }
 
@@ -799,9 +1291,7 @@ internal data class ParsedSkillFile(
     val body: String
 )
 
-internal fun parseSkillFile(skillFile: File): ParsedSkillFile? {
-    if (!skillFile.exists() || !skillFile.isFile) return null
-    val raw = skillFile.readText()
+internal fun parseSkillContent(raw: String): ParsedSkillFile? {
     if (!raw.startsWith("---")) {
         return ParsedSkillFile(frontmatter = emptyMap(), body = raw.trim())
     }
@@ -815,6 +1305,11 @@ internal fun parseSkillFile(skillFile: File): ParsedSkillFile? {
         frontmatter = parseSimpleFrontmatter(frontmatterText),
         body = body
     )
+}
+
+internal fun parseSkillFile(skillFile: File): ParsedSkillFile? {
+    if (!skillFile.exists() || !skillFile.isFile) return null
+    return parseSkillContent(skillFile.readText())
 }
 
 internal fun parseSimpleFrontmatter(frontmatter: String): Map<String, String> {

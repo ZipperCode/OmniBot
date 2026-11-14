@@ -145,6 +145,48 @@ class AgentRuntimeAdmissionTest {
         }
     }
 
+    @Test fun conversationRunBridgeIsSharedSingletonOnAgentRuntimeManager() = runBlocking {
+        val (context, manager) = fixture()
+        val bridge1 = manager.conversationRunBridge
+        val bridge2 = manager.conversationRunBridge
+        assertSame(bridge1, bridge2)
+        val runService = cn.com.omnimind.bot.webchat.AgentRunService(context)
+        val scheduler = cn.com.omnimind.bot.agent.WorkspaceScheduledTaskScheduler(context)
+        assertNotNull(runService)
+        assertNotNull(scheduler)
+    }
+
+    @Test fun remoteTurnOwnershipTracksActiveTurnIdAndAllowsSubsequentAdmissions() = runBlocking {
+        val (_, manager) = fixture()
+        val remoteTurnOwnership = field(manager, "remoteTurnOwnership") as AcpTurnOwnershipRegistry
+        assertNull(remoteTurnOwnership.activeTurnId("test-session"))
+        val reservation = remoteTurnOwnership.adopt("test-session", "turn-1", "req-1")
+        assertTrue(reservation is AcpTurnReservation.Started)
+        assertEquals("turn-1", remoteTurnOwnership.activeTurnId("test-session"))
+        val finished = remoteTurnOwnership.finish("test-session", "turn-1", status = "completed")
+        assertNotNull(finished)
+        assertNull(remoteTurnOwnership.activeTurnId("test-session"))
+        val nextReservation = remoteTurnOwnership.adopt("test-session", "turn-2", "req-2")
+        assertTrue(nextReservation is AcpTurnReservation.Started)
+        assertEquals("turn-2", remoteTurnOwnership.activeTurnId("test-session"))
+        remoteTurnOwnership.finish("test-session", "turn-2", status = "error")
+        assertNull(remoteTurnOwnership.activeTurnId("test-session"))
+    }
+
+    @Test fun remoteTurnBusyDoesNotOverwriteActiveOwner() = runBlocking {
+        val (_, manager) = fixture()
+        val remoteTurnOwnership = field(manager, "remoteTurnOwnership") as AcpTurnOwnershipRegistry
+        val first = remoteTurnOwnership.adopt("session-busy-test", "turn-first", "req-first")
+        assertTrue(first is AcpTurnReservation.Started)
+        assertEquals("turn-first", remoteTurnOwnership.activeTurnId("session-busy-test"))
+        val second = remoteTurnOwnership.adopt("session-busy-test", "turn-second", "req-second")
+        assertTrue(second is AcpTurnReservation.Busy)
+        assertEquals("turn-first", (second as AcpTurnReservation.Busy).record.turnId)
+        assertEquals("turn-first", remoteTurnOwnership.activeTurnId("session-busy-test"))
+        remoteTurnOwnership.finish("session-busy-test", "turn-first", status = "completed")
+        assertNull(remoteTurnOwnership.activeTurnId("session-busy-test"))
+    }
+
     private class EchoConnection : RemoteCodexAppServerConnection {
         override val isRunning = true
         val writes = mutableListOf<com.google.gson.JsonObject>()

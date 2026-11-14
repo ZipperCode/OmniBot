@@ -15,6 +15,7 @@ import cn.com.omnimind.bot.App
 import cn.com.omnimind.bot.agent.AgentConversationContextCompactor
 import cn.com.omnimind.bot.agent.AgentExecutionEnvironment
 import com.tencent.mmkv.MMKV
+import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Proxy
 import java.util.concurrent.ConcurrentHashMap
@@ -65,6 +66,8 @@ class OmniVlmModelClientTest {
     private var secretStoreField: Field? = null
     private var originalSecretStore: Any? = null
     private var previousAppInstance: App? = null
+    private var originalBuiltinScenesValue: Any? = null
+    private var builtinScenesValueField: Field? = null
     private val memorySecrets = ConcurrentHashMap<String, Any?>()
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
@@ -126,7 +129,7 @@ class OmniVlmModelClientTest {
         val mockApp = mock(App::class.java)
         `when`(mockApp.applicationContext).thenReturn(app)
         App.instance = mockApp
-        ModelSceneRegistry.init(app)
+        initModelSceneRegistryWithBuiltinScenes(app)
         ModelProviderConfigStore.initialize(app)
         val f = ModelProviderConfigStore::class.java.getDeclaredField("secretStore").apply {
             isAccessible = true
@@ -207,8 +210,71 @@ class OmniVlmModelClientTest {
                 mockedMMKV = null
             } catch (_: Throwable) {
             }
+            try {
+                if (originalBuiltinScenesValue != null && (originalBuiltinScenesValue as? Map<*, *>)?.isNotEmpty() == true) {
+                    builtinScenesValueField?.let { field ->
+                        val delegateField = ModelSceneRegistry::class.java.getDeclaredField("builtinSceneMap\$delegate").apply {
+                            isAccessible = true
+                        }
+                        val lazyInstance = delegateField.get(null)
+                        field.set(lazyInstance, originalBuiltinScenesValue)
+                    }
+                }
+            } catch (_: Throwable) {
+            }
         }
     }
+    private fun initModelSceneRegistryWithBuiltinScenes(app: Application) {
+        ModelSceneRegistry.init(app)
+        try {
+            val jsonFile = listOf(
+                File("baselib/src/main/res/raw/model_scenes_default.json"),
+                File("../baselib/src/main/res/raw/model_scenes_default.json"),
+                File("app/../baselib/src/main/res/raw/model_scenes_default.json"),
+                File("src/main/res/raw/model_scenes_default.json"),
+            ).firstOrNull { it.exists() }
+            val jsonText = jsonFile?.readText()
+                ?: ModelSceneRegistry::class.java.classLoader?.getResourceAsStream("model_scenes_default.json")?.bufferedReader()?.use { it.readText() }
+
+            if (!jsonText.isNullOrBlank()) {
+                val gson = com.google.gson.Gson()
+                val rawMap = gson.fromJson<Map<String, Map<String, Any?>>>(
+                    jsonText,
+                    object : com.google.gson.reflect.TypeToken<Map<String, Map<String, Any?>>>() {}.type
+                )
+                val sceneMap = mutableMapOf<String, ModelSceneRegistry.SceneInfo>()
+                val parseMethod = ModelSceneRegistry::class.java.getDeclaredMethod(
+                    "parseSceneInfo",
+                    String::class.java,
+                    Map::class.java
+                ).apply { isAccessible = true }
+
+                rawMap.forEach { (sceneId, config) ->
+                    val sceneInfo = parseMethod.invoke(ModelSceneRegistry, sceneId, config) as? ModelSceneRegistry.SceneInfo
+                    if (sceneInfo != null) {
+                        sceneMap[sceneId] = sceneInfo
+                    }
+                }
+
+                if (sceneMap.isNotEmpty()) {
+                    val delegateField = ModelSceneRegistry::class.java.getDeclaredField("builtinSceneMap\$delegate").apply {
+                        isAccessible = true
+                    }
+                    val lazyInstance = delegateField.get(null)
+                    val valueField = lazyInstance.javaClass.getDeclaredField("_value").apply {
+                        isAccessible = true
+                    }
+                    builtinScenesValueField = valueField
+                    if (originalBuiltinScenesValue == null) {
+                        originalBuiltinScenesValue = valueField.get(lazyInstance)
+                    }
+                    valueField.set(lazyInstance, sceneMap)
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
 
     @Test
     fun `session A and session B inherit distinct models when dedicated binding is absent`() = runBlocking {

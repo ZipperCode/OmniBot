@@ -1,11 +1,13 @@
 package cn.com.omnimind.bot.webchat
 
 import android.content.Context
+import android.util.Log
 import cn.com.omnimind.bot.agent.AgentConversationHistoryRepository
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
 import cn.com.omnimind.bot.agent.resolveAgentToolPayloadStatus
 import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
 import com.google.gson.Gson
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,7 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-
+import java.util.concurrent.atomic.AtomicReference
 internal data class WebAgentToolUpdate(
     val entryId: String?,
     val parentTaskId: String?,
@@ -36,6 +38,7 @@ internal data class WebAgentEventUpdate(
     val parentTaskId: String? = null,
     val tool: WebAgentToolUpdate? = null,
     val terminalKind: String? = null,
+    val stopReason: String? = null,
     val errorMessage: String? = null
 )
 
@@ -64,10 +67,14 @@ private data class WebAgentRunState(
     val conversationMode: String,
     val createdAt: Long,
     val finished: AtomicBoolean = AtomicBoolean(false),
+    val completion: CompletableDeferred<Unit> = CompletableDeferred(),
+    val projectionFailure: AtomicReference<Throwable?> = AtomicReference(null),
     var threadId: String? = null,
     var turnId: String? = null,
     var agentId: String? = null,
     var agentName: String? = null,
+    var requestId: String? = null,
+    var stopReason: String? = null,
     var sequence: Long = 0,
     val assistantEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
     val reasoningEntries: LinkedHashMap<String, WebAgentTextEntryState> = linkedMapOf(),
@@ -99,7 +106,11 @@ internal class WebAgentRunBridge(
         ) { event -> events.trySend(event) }
         scope.launch {
             for (event in events) {
-                handleEvent(event)
+                try {
+                    handleEvent(event)
+                } catch (t: Throwable) {
+                    Log.e("WebAgentRunBridge", "Error processing web agent event: ${t.message}", t)
+                }
             }
         }
     }
@@ -120,6 +131,8 @@ internal class WebAgentRunBridge(
         effort: String? = null,
         userMessageCreatedAt: Long? = null
     ): Map<String, Any?> {
+        val requestId = java.util.UUID.randomUUID().toString()
+        val userMessageId = "$taskId-user"
         val state = WebAgentRunState(
             taskId = taskId,
             conversationId = conversationId,
@@ -129,7 +142,8 @@ internal class WebAgentRunBridge(
             ),
             createdAt = userMessageCreatedAt?.takeIf { it > 0L }
                 ?: System.currentTimeMillis(),
-            agentId = agentId?.trim()?.takeIf { it.isNotEmpty() }
+            agentId = agentId?.trim()?.takeIf { it.isNotEmpty() },
+            requestId = requestId
         )
         runAdmissionMutex.withLock {
             val existing = runsByConversationId[conversationId]
@@ -151,14 +165,14 @@ internal class WebAgentRunBridge(
             conversationService.appendUserMessage(
                 conversationId = conversationId,
                 conversationMode = state.conversationMode,
-                entryId = "$taskId-user",
+                entryId = userMessageId,
                 text = userMessage,
                 attachments = attachments,
                 createdAt = state.createdAt
             )
             // The persisted Conversation owns this request. Parallel WebChat
             // conversations carry their own Agent identity into session/prompt.
-            val arguments = buildWebAgentTurnArguments(
+            val baseArguments = buildWebAgentTurnArguments(
                 conversationId = conversationId,
                 userMessage = userMessage,
                 attachments = attachments,
@@ -168,30 +182,175 @@ internal class WebAgentRunBridge(
                 effort = effort,
                 conversationMode = state.conversationMode
             )
-            val response = normalizeMap(
-                manager.handleMethod("session/prompt", arguments)
-            )
+            val arguments = LinkedHashMap(baseArguments).apply {
+                put("requestId", requestId)
+                put("userMessageId", userMessageId)
+            }
+            val rawResult = manager.handleMethod("session/prompt", arguments)
+            val response = normalizeMap(rawResult)
             bindServerIds(
                 state = state,
-                threadId = response["threadId"]?.toString(),
+                threadId = response["threadId"]?.toString() ?: response["sessionId"]?.toString(),
                 turnId = response["turnId"]?.toString()
             )
-            if (response["completed"] == true) {
-                if (response["error"] == null) {
-                    finishSuccessfully(state)
-                } else {
-                    finishWithError(state, response["error"].toString())
-                }
+            if (isTerminalResponse(response)) {
+                awaitChannelBarrier()
+                state.completion.await()
             }
             response
         } catch (error: Throwable) {
+            val projectionError = state.projectionFailure.get()
+                ?: runCatching { if (state.completion.isCompleted) state.completion.getCompletionExceptionOrNull() else null }.getOrNull()
+            if (projectionError != null) {
+                // Projection 失败：必须传异常、不重 finish、不声称 receipt
+                throw projectionError
+            }
+            if (state.finished.get() && state.completion.isCompleted) {
+                // 仅在已准入、由官方 session/prompt 终态事件投影成功且历史回执确认无异常时，才返回原请求 error contract
+                return linkedMapOf<String, Any?>(
+                    "status" to "error",
+                    "completed" to true,
+                    "error" to (error.message ?: "Agent 执行失败"),
+                    "conversationId" to state.conversationId,
+                    "taskId" to state.taskId
+                ).apply {
+                    state.threadId?.let { put("threadId", it); put("sessionId", it) }
+                    state.turnId?.let { put("turnId", it) }
+                }
+            }
+            // 确实未准入的预检异常，才作为 start failure 处理并抛出
             finishWithError(
                 state,
                 error.message?.trim().takeUnless { it.isNullOrEmpty() }
                     ?: "Agent 启动失败"
             )
+            runCatching { state.completion.await() }
             throw error
         }
+    }
+
+    suspend fun startOutboxRun(arguments: Map<String, Any?>): Any? {
+        val conversationId = arguments.readLong("conversationId")
+            ?: error("conversationId is required for outbox prompt")
+        val requestId = arguments["requestId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: java.util.UUID.randomUUID().toString()
+        val userMessageId = arguments["userMessageId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: "$requestId-user"
+        val conversationMode = arguments["conversationMode"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: WEB_AGENT_MODE_STORAGE_VALUE
+        val agentId = arguments["agentId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        val sessionId = arguments["sessionId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: arguments["threadId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        val taskId = requestId
+
+        val state = WebAgentRunState(
+            taskId = taskId,
+            conversationId = conversationId,
+            conversationMode = conversationMode,
+            createdAt = System.currentTimeMillis(),
+            agentId = agentId,
+            threadId = sessionId,
+            requestId = requestId
+        )
+
+        runAdmissionMutex.withLock {
+            val existing = runsByConversationId[conversationId]
+            check(existing == null || existing.finished.get()) {
+                "该 Agent 会话已有运行中的任务"
+            }
+            if (existing != null) {
+                removeState(existing)
+            }
+            runsByConversationId[conversationId] = state
+            runsByTaskId[taskId] = state
+            sessionId?.let { runsByThreadId[it] = state }
+        }
+
+        return try {
+            val promptArgs = if (arguments["requestId"] == requestId && arguments["userMessageId"] == userMessageId) {
+                arguments
+            } else {
+                LinkedHashMap(arguments).apply {
+                    put("requestId", requestId)
+                    put("userMessageId", userMessageId)
+                }
+            }
+            val rawResult = manager.handleMethod("session/prompt", promptArgs)
+            val response = normalizeMap(rawResult)
+            bindServerIds(
+                state = state,
+                threadId = response["threadId"]?.toString() ?: response["sessionId"]?.toString(),
+                turnId = response["turnId"]?.toString()
+            )
+            if (isTerminalResponse(response)) {
+                awaitChannelBarrier()
+                state.completion.await()
+            }
+            rawResult
+        } catch (error: Throwable) {
+            val projectionError = state.projectionFailure.get()
+                ?: runCatching { if (state.completion.isCompleted) state.completion.getCompletionExceptionOrNull() else null }.getOrNull()
+            if (projectionError != null) {
+                // Projection 失败：必须传异常、不重 finish、不声称 receipt
+                throw projectionError
+            }
+            if (state.finished.get() && state.completion.isCompleted) {
+                // 仅在已准入、由官方 session/prompt 终态事件投影成功且历史回执确认无异常时，才返回原请求 error contract
+                return linkedMapOf<String, Any?>(
+                    "status" to "error",
+                    "completed" to true,
+                    "error" to (error.message ?: "Agent 执行失败"),
+                    "conversationId" to state.conversationId,
+                    "taskId" to state.taskId
+                ).apply {
+                    state.threadId?.let { put("threadId", it); put("sessionId", it) }
+                    state.turnId?.let { put("turnId", it) }
+                }
+            }
+            // 确实未准入的预检异常，才作为 start failure 处理并抛出
+            finishWithError(
+                state,
+                error.message?.trim().takeUnless { it.isNullOrEmpty() }
+                    ?: "Agent 启动失败"
+            )
+            runCatching { state.completion.await() }
+            throw error
+        }
+    }
+
+    private fun isTerminalResponse(response: Map<String, Any?>): Boolean {
+        val status = response["status"]?.toString()?.lowercase()
+        val stopReason = response["stopReason"]?.toString()?.lowercase()
+        val hasTerminalSignal = response["completed"] == true ||
+            stopReason != null ||
+            response["error"] != null ||
+            when (status) {
+                "completed", "end_turn", "cancelled", "error", "failed", "timeout", "max_turn_requests" -> true
+                else -> false
+            }
+        val isPendingOrInProgress = response["completed"] == false ||
+            when (status) {
+                "in_progress", "running", "accepted", "queued" -> true
+                else -> false
+            }
+        return hasTerminalSignal && !isPendingOrInProgress
+    }
+
+    private suspend fun awaitMainHandlerBarrier() {
+        val looper = runCatching { android.os.Looper.getMainLooper() }.getOrNull() ?: return
+        val deferred = CompletableDeferred<Unit>()
+        val handler = android.os.Handler(looper)
+        if (!handler.post { deferred.complete(Unit) }) {
+            deferred.complete(Unit)
+        }
+        deferred.await()
+    }
+
+    private suspend fun awaitChannelBarrier() {
+        awaitMainHandlerBarrier()
+        val barrier = CompletableDeferred<Unit>()
+        events.send(mapOf("__barrier__" to barrier))
+        barrier.await()
     }
 
     suspend fun cancelRun(taskId: String): Boolean {
@@ -206,10 +365,18 @@ internal class WebAgentRunBridge(
     }
 
     private suspend fun handleEvent(event: Map<String, Any?>) {
+        val barrier = event["__barrier__"] as? CompletableDeferred<*>
+        if (barrier != null) {
+            @Suppress("UNCHECKED_CAST")
+            (barrier as CompletableDeferred<Unit>).complete(Unit)
+            return
+        }
         val conversationId = event.readLong("conversationId")
-        val threadId = event.readString("threadId")
+        val threadId = event.readString("threadId") ?: event.readString("sessionId")
         val turnId = event.readString("turnId")
+        val taskId = event.readString("taskId")
         val state = conversationId?.let(runsByConversationId::get)
+            ?: taskId?.let(runsByTaskId::get)
             ?: threadId?.let(runsByThreadId::get)
             ?: turnId?.let(runsByTurnId::get)
             ?: return
@@ -220,111 +387,127 @@ internal class WebAgentRunBridge(
         bindServerIds(state, threadId, turnId)
         state.agentId = event.readString("agentId") ?: state.agentId
         state.agentName = event.readString("agentName") ?: state.agentName
-
+        if (state.requestId.isNullOrBlank()) {
+            state.requestId = event.readString("requestId") ?: event.readString("id")
+        }
         val update = parseWebAgentEvent(event)
         var changed = false
-        val parentTaskId = update.parentTaskId
+        val parentTaskId: String = update.parentTaskId
             ?.takeIf(String::isNotBlank)
             ?: state.turnId
             ?: state.taskId
-
-        if (
-            update.assistantSnapshot != null ||
-            !update.assistantDelta.isNullOrEmpty()
-        ) {
-            val entryId = update.assistantEntryId
-                ?.takeIf(String::isNotBlank)
-                ?: "$parentTaskId-agent-message"
-            val entry = state.assistantEntries.getOrPut(entryId) {
-                newTextEntry(state, entryId, parentTaskId)
-            }
-            entry.text = if (update.assistantSnapshot != null) {
-                mergeSnapshot(entry.text, update.assistantSnapshot)
-            } else {
-                entry.text + update.assistantDelta.orEmpty()
-            }
-            entry.isFinal = entry.isFinal || update.assistantFinal
-            persistAssistantEntry(state, entry, isError = false)
-            changed = true
-        }
-
-        if (
-            update.reasoningSnapshot != null ||
-            !update.reasoningDelta.isNullOrEmpty()
-        ) {
-            val entryId = update.reasoningEntryId
-                ?.takeIf(String::isNotBlank)
-                ?: "$parentTaskId-agent-thinking"
-            val entry = state.reasoningEntries.getOrPut(entryId) {
-                newTextEntry(state, entryId, parentTaskId)
-            }
-            entry.text = if (update.reasoningSnapshot != null) {
-                mergeSnapshot(entry.text, update.reasoningSnapshot)
-            } else {
-                entry.text + update.reasoningDelta.orEmpty()
-            }
-            entry.isFinal = entry.isFinal || update.reasoningFinal
-            persistReasoningEntry(state, entry)
-            changed = true
-        }
-
-        update.tool?.let { toolUpdate ->
-            val toolCallId = firstNonBlank(
-                toolUpdate.raw["toolCallId"],
-                toolUpdate.raw["tool_call_id"],
-                toolUpdate.raw["callId"]
-            )?.trim()?.takeIf { it.isNotEmpty() }
-            val existingEntry = if (toolCallId != null) {
-                state.toolEntries.values.firstOrNull {
-                    val rawCallId = firstNonBlank(
-                        it.update.raw["toolCallId"],
-                        it.update.raw["tool_call_id"],
-                        it.update.raw["callId"]
-                    )?.trim()
-                    rawCallId == toolCallId
+        try {
+            if (
+                update.assistantSnapshot != null ||
+                !update.assistantDelta.isNullOrEmpty()
+            ) {
+                val entryId = update.assistantEntryId
+                    ?.takeIf(String::isNotBlank)
+                    ?: "$parentTaskId-agent-message"
+                val entry = state.assistantEntries.getOrPut(entryId) {
+                    newTextEntry(state, entryId, parentTaskId)
                 }
-            } else null
-
-            val isRawOutputOnly = toolUpdate.raw["kind"] == null &&
-                toolUpdate.raw["title"] == null &&
-                toolUpdate.raw["status"] == null &&
-                toolUpdate.raw["rawOutput"] != null
-
-            if (isRawOutputOnly && existingEntry == null) {
-                return@let
+                entry.text = if (update.assistantSnapshot != null) {
+                    mergeSnapshot(entry.text, update.assistantSnapshot)
+                } else {
+                    entry.text + update.assistantDelta.orEmpty()
+                }
+                entry.isFinal = entry.isFinal || update.assistantFinal
+                persistAssistantEntry(state, entry, isError = false)
+                changed = true
             }
 
-            val entryId = existingEntry?.entryId
-                ?: toolUpdate.entryId?.takeIf(String::isNotBlank)
-                ?: "${toolUpdate.parentTaskId ?: parentTaskId}-agent-tool"
-            val toolParentTaskId = toolUpdate.parentTaskId
-                ?.takeIf(String::isNotBlank)
-                ?: parentTaskId
-            val entry = state.toolEntries.getOrPut(entryId) {
-                state.sequence += 1
-                WebAgentToolEntryState(
-                    entryId = entryId,
-                    parentTaskId = toolParentTaskId,
-                    createdAt = state.createdAt + state.sequence,
-                    sequence = state.sequence,
-                    update = toolUpdate
+            if (
+                update.reasoningSnapshot != null ||
+                !update.reasoningDelta.isNullOrEmpty()
+            ) {
+                val entryId = update.reasoningEntryId
+                    ?.takeIf(String::isNotBlank)
+                    ?: "$parentTaskId-agent-thinking"
+                val entry = state.reasoningEntries.getOrPut(entryId) {
+                    newTextEntry(state, entryId, parentTaskId)
+                }
+                entry.text = if (update.reasoningSnapshot != null) {
+                    mergeSnapshot(entry.text, update.reasoningSnapshot)
+                } else {
+                    entry.text + update.reasoningDelta.orEmpty()
+                }
+                entry.isFinal = entry.isFinal || update.reasoningFinal
+                persistReasoningEntry(state, entry)
+                changed = true
+            }
+
+            update.tool?.let { toolUpdate ->
+                val toolCallId = firstNonBlank(
+                    toolUpdate.raw["toolCallId"],
+                    toolUpdate.raw["tool_call_id"],
+                    toolUpdate.raw["callId"]
+                )?.trim()?.takeIf { it.isNotEmpty() }
+                val existingEntry = if (toolCallId != null) {
+                    state.toolEntries.values.firstOrNull {
+                        val rawCallId = firstNonBlank(
+                            it.update.raw["toolCallId"],
+                            it.update.raw["tool_call_id"],
+                            it.update.raw["callId"]
+                        )?.trim()
+                        rawCallId == toolCallId
+                    }
+                } else null
+
+                val isRawOutputOnly = toolUpdate.raw["kind"] == null &&
+                    toolUpdate.raw["title"] == null &&
+                    toolUpdate.raw["status"] == null &&
+                    toolUpdate.raw["rawOutput"] != null
+
+                if (isRawOutputOnly && existingEntry == null) {
+                    return@let
+                }
+
+                val entryId = existingEntry?.entryId
+                    ?: toolUpdate.entryId?.takeIf(String::isNotBlank)
+                    ?: "${toolUpdate.parentTaskId ?: parentTaskId}-agent-tool"
+                val toolParentTaskId: String = toolUpdate.parentTaskId
+                    ?.takeIf(String::isNotBlank)
+                    ?: parentTaskId
+                val entry = state.toolEntries.getOrPut(entryId) {
+                    state.sequence += 1
+                    WebAgentToolEntryState(
+                        entryId = entryId,
+                        parentTaskId = toolParentTaskId,
+                        createdAt = state.createdAt + state.sequence,
+                        sequence = state.sequence,
+                        update = toolUpdate
+                    )
+                }
+                entry.update = mergeToolUpdate(entry.update, toolUpdate.copy(entryId = entry.entryId, itemType = entry.update.itemType))
+                persistToolEntry(state, entry)
+                changed = true
+            }
+
+            if (changed) {
+                publishMessages(state, finalizeInterruptedEntries = false)
+            }
+
+            when (update.terminalKind) {
+                "completed" -> finishSuccessfully(state, stopReason = update.stopReason ?: "end_turn")
+                "error" -> finishWithError(
+                    state,
+                    update.errorMessage ?: "Agent 任务执行失败",
+                    stopReason = update.stopReason ?: "error"
+                )
+                "cancelled", "max_tokens", "refusal", "max_turn_requests", "interrupted" -> finishWithInterruption(
+                    state,
+                    update.terminalKind,
+                    update.errorMessage,
+                    stopReason = update.stopReason ?: update.terminalKind
                 )
             }
-            entry.update = mergeToolUpdate(entry.update, toolUpdate.copy(entryId = entry.entryId, itemType = entry.update.itemType))
-            persistToolEntry(state, entry)
-            changed = true
-        }
-
-        if (changed) {
-            publishMessages(state, finalizeInterruptedEntries = false)
-        }
-
-        when (update.terminalKind) {
-            "completed" -> finishSuccessfully(state)
-            "error" -> finishWithError(
-                state,
-                update.errorMessage ?: "Agent 任务执行失败"
-            )
+        } catch (error: Throwable) {
+            state.projectionFailure.set(error)
+            state.finished.set(true)
+            removeState(state)
+            state.completion.completeExceptionally(error)
+            throw error
         }
     }
 
@@ -361,58 +544,167 @@ internal class WebAgentRunBridge(
         }
     }
 
-    private suspend fun finishSuccessfully(state: WebAgentRunState) {
+    private suspend fun finishSuccessfully(
+        state: WebAgentRunState,
+        stopReason: String = "end_turn"
+    ) {
         if (!state.finished.compareAndSet(false, true)) return
-        state.assistantEntries.values.forEach { entry ->
-            entry.isFinal = true
-            persistAssistantEntry(state, entry, isError = false)
-        }
-        state.reasoningEntries.values.forEach { entry ->
-            entry.isFinal = true
-            persistReasoningEntry(state, entry)
-        }
-        state.toolEntries.values.forEach { entry ->
-            if (entry.update.status == "running") {
-                entry.update = entry.update.copy(status = "success")
-                persistToolEntry(state, entry)
+        state.stopReason = stopReason
+        try {
+            state.assistantEntries.values.forEach { entry ->
+                entry.isFinal = true
+                persistAssistantEntry(state, entry, isError = false)
             }
+            state.reasoningEntries.values.forEach { entry ->
+                entry.isFinal = true
+                persistReasoningEntry(state, entry)
+            }
+            state.toolEntries.values.forEach { entry ->
+                if (entry.update.status == "running") {
+                    entry.update = entry.update.copy(status = "success")
+                    persistToolEntry(state, entry)
+                }
+            }
+            publishMessages(state, finalizeInterruptedEntries = true)
+            publishTaskEvent(state, "completed")
+            removeState(state)
+            val sessionId = state.threadId
+            val turnId = state.turnId
+            val requestId = state.requestId
+            if (!sessionId.isNullOrBlank() && !turnId.isNullOrBlank() && !requestId.isNullOrBlank()) {
+                val committed = manager.onHistoryCommitted(
+                    conversationId = state.conversationId,
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    requestId = requestId
+                )
+                if (!committed) {
+                    val ex = IllegalStateException("History receipt unconfirmed by host")
+                    state.completion.completeExceptionally(ex)
+                    throw ex
+                }
+            }
+            state.completion.complete(Unit)
+        } catch (error: Throwable) {
+            state.projectionFailure.set(error)
+            state.finished.set(true)
+            removeState(state)
+            state.completion.completeExceptionally(error)
+            throw error
         }
-        publishMessages(state, finalizeInterruptedEntries = true)
-        publishTaskEvent(state, "completed")
-        removeState(state)
     }
 
     private suspend fun finishWithError(
         state: WebAgentRunState,
-        message: String
+        message: String,
+        stopReason: String = "error"
     ) {
         if (!state.finished.compareAndSet(false, true)) return
-        val entry = state.assistantEntries.values.lastOrNull() ?: run {
-            val parentTaskId = state.turnId ?: state.taskId
-            val entryId = "$parentTaskId-agent-message"
-            newTextEntry(state, entryId, parentTaskId).also {
-                state.assistantEntries[entryId] = it
+        state.stopReason = stopReason
+        try {
+            val entry = state.assistantEntries.values.lastOrNull() ?: run {
+                val parentTaskId = state.turnId ?: state.taskId
+                val entryId = "$parentTaskId-agent-message"
+                newTextEntry(state, entryId, parentTaskId).also {
+                    state.assistantEntries[entryId] = it
+                }
             }
-        }
-        if (entry.text.isBlank()) {
-            entry.text = AgentTextSanitizer.sanitizeUtf16(message)
-        }
-        entry.isFinal = true
-        persistAssistantEntry(state, entry, isError = true)
-        state.reasoningEntries.values.forEach { reasoning ->
-            reasoning.isFinal = true
-            persistReasoningEntry(state, reasoning)
-        }
-        state.toolEntries.values.forEach { tool ->
-            if (tool.update.status == "running") {
-                tool.update = tool.update.copy(status = "error")
-                persistToolEntry(state, tool)
+            if (entry.text.isBlank()) {
+                entry.text = AgentTextSanitizer.sanitizeUtf16(message)
             }
+            entry.isFinal = true
+            persistAssistantEntry(state, entry, isError = true)
+            state.reasoningEntries.values.forEach { reasoning ->
+                reasoning.isFinal = true
+                persistReasoningEntry(state, reasoning)
+            }
+            state.toolEntries.values.forEach { tool ->
+                if (tool.update.status == "running") {
+                    tool.update = tool.update.copy(status = "error")
+                    persistToolEntry(state, tool)
+                }
+            }
+            publishMessages(state, finalizeInterruptedEntries = true)
+            publishTaskEvent(state, "error", message)
+            removeState(state)
+            val sessionId = state.threadId
+            val turnId = state.turnId
+            val requestId = state.requestId
+            if (!sessionId.isNullOrBlank() && !turnId.isNullOrBlank() && !requestId.isNullOrBlank()) {
+                val committed = manager.onHistoryCommitted(
+                    conversationId = state.conversationId,
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    requestId = requestId
+                )
+                if (!committed) {
+                    val ex = IllegalStateException("History receipt unconfirmed by host for error")
+                    state.completion.completeExceptionally(ex)
+                    throw ex
+                }
+            }
+            state.completion.complete(Unit)
+        } catch (error: Throwable) {
+            state.projectionFailure.set(error)
+            state.finished.set(true)
+            removeState(state)
+            state.completion.completeExceptionally(error)
+            throw error
         }
-        publishMessages(state, finalizeInterruptedEntries = true)
-        publishTaskEvent(state, "error", message)
-        removeState(state)
     }
+
+    private suspend fun finishWithInterruption(
+        state: WebAgentRunState,
+        kind: String,
+        message: String?,
+        stopReason: String = kind
+    ) {
+        if (!state.finished.compareAndSet(false, true)) return
+        state.stopReason = stopReason
+        try {
+            state.assistantEntries.values.forEach { entry ->
+                entry.isFinal = true
+                persistAssistantEntry(state, entry, isError = (kind == "refusal"))
+            }
+            state.reasoningEntries.values.forEach { reasoning ->
+                reasoning.isFinal = true
+                persistReasoningEntry(state, reasoning)
+            }
+            state.toolEntries.values.forEach { tool ->
+                if (tool.update.status == "running") {
+                    tool.update = tool.update.copy(status = "interrupted")
+                    persistToolEntry(state, tool)
+                }
+            }
+            publishMessages(state, finalizeInterruptedEntries = true)
+            publishTaskEvent(state, kind, message)
+            removeState(state)
+            val sessionId = state.threadId
+            val turnId = state.turnId
+            val requestId = state.requestId
+            if (!sessionId.isNullOrBlank() && !turnId.isNullOrBlank() && !requestId.isNullOrBlank()) {
+                val committed = manager.onHistoryCommitted(
+                    conversationId = state.conversationId,
+                    sessionId = sessionId,
+                    turnId = turnId,
+                    requestId = requestId
+                )
+                if (!committed) {
+                    val ex = IllegalStateException("History receipt unconfirmed by host for interrupted")
+                    state.completion.completeExceptionally(ex)
+                    throw ex
+                }
+            }
+            state.completion.complete(Unit)
+        } catch (error: Throwable) {
+            state.projectionFailure.set(error)
+            state.finished.set(true)
+            removeState(state)
+            state.completion.completeExceptionally(error)
+            throw error
+        }
+    }
+
 
     private suspend fun persistAssistantEntry(
         state: WebAgentRunState,
@@ -469,7 +761,6 @@ internal class WebAgentRunBridge(
             createdAt = entry.createdAt
         )
     }
-
     private suspend fun persistToolEntry(
         state: WebAgentRunState,
         entry: WebAgentToolEntryState
@@ -600,7 +891,10 @@ internal class WebAgentRunBridge(
             "kind" to kind,
             "parentTaskId" to parentTaskId,
             "entryId" to entryId,
+            "sessionId" to state.threadId,
+            "turnId" to state.turnId,
             "isFinal" to isFinal,
+            "stopReason" to if (isFinal) state.stopReason else null,
             "agentId" to state.agentId,
             "agentName" to state.agentName
         ).filterValues { it != null }
@@ -625,6 +919,11 @@ internal class WebAgentRunBridge(
                 "messages" to messages
             )
         }
+        FlutterChatSyncBridge.dispatchConversationMessagesChanged(
+            conversationId = state.conversationId,
+            mode = state.conversationMode,
+            reason = if (finalizeInterruptedEntries) "host_messages_replaced" else "agent_stream_snapshot"
+        )
     }
 
     private fun publishTaskEvent(
@@ -761,23 +1060,93 @@ internal fun parseWebAgentEvent(event: Map<String, Any?>): WebAgentEventUpdate {
         }
     }
 
+    if (normalizedMethod == "session_prompt" || normalizedMethod == "session/prompt") {
+        val message = normalizeMap(event["message"])
+        val errorMap = normalizeMap(message["error"])
+        if (errorMap.isNotEmpty() || event["error"] != null) {
+            val errorMsg = firstNonBlank(
+                errorMap["message"],
+                errorMap["data"],
+                event["error"]
+            ) ?: "Agent 任务执行失败"
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "error",
+                stopReason = "error",
+                errorMessage = errorMsg
+            )
+        }
+        val result = normalizeMap(message["result"]).ifEmpty {
+            normalizeMap(event["result"])
+        }
+        val status = firstNonBlank(result["status"], event["status"])?.lowercase()
+        val stopReason = firstNonBlank(result["stopReason"], event["stopReason"])?.lowercase()
+        val resultError = firstNonBlank(result["error"], event["error"])
+
+        // Process status/stopReason first; error/failed/timeout/cancelled/max_tokens/refusal never successful
+        if (!resultError.isNullOrBlank() || status in setOf("error", "failed", "timeout") || stopReason in setOf("error", "failed", "timeout")) {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "error",
+                stopReason = "error",
+                errorMessage = resultError ?: "Agent 任务执行失败"
+            )
+        }
+        if (status == "cancelled" || stopReason == "cancelled") {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "cancelled",
+                stopReason = "cancelled"
+            )
+        }
+        if (status == "max_tokens" || stopReason == "max_tokens") {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "max_tokens",
+                stopReason = "max_tokens"
+            )
+        }
+        if (status == "refusal" || stopReason == "refusal") {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "refusal",
+                stopReason = "refusal"
+            )
+        }
+        if (status == "max_turn_requests" || stopReason == "max_turn_requests") {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "max_turn_requests",
+                stopReason = "max_turn_requests"
+            )
+        }
+
+        // Only explicitly normal completion succeeds. Unknown reasons must not upgrade to success.
+        val isExplicitSuccess = stopReason == "end_turn" ||
+            status == "end_turn" ||
+            (status == "completed" && (stopReason == null || stopReason == "end_turn")) ||
+            (result["completed"] == true && (status == null || status == "completed") && (stopReason == null || stopReason == "end_turn"))
+
+        if (isExplicitSuccess) {
+            return WebAgentEventUpdate(
+                parentTaskId = parentTaskId,
+                terminalKind = "completed",
+                stopReason = "end_turn"
+            )
+        }
+        return WebAgentEventUpdate(parentTaskId = parentTaskId)
+    }
+
     if (normalizedMethod == "turn_completed" || normalizedMethod == "thread_closed") {
-        return WebAgentEventUpdate(
-            parentTaskId = parentTaskId,
-            terminalKind = "completed"
-        )
+        // Legacy notification remains projection only; keep run for official session/prompt response!
+        return WebAgentEventUpdate(parentTaskId = parentTaskId)
     }
     if (
         normalizedMethod == "turn_failed" ||
         (normalizedMethod == "error" && params["willRetry"] != true)
     ) {
-        return WebAgentEventUpdate(
-            parentTaskId = parentTaskId,
-            terminalKind = "error",
-            errorMessage = extractAgentText(params["error"])
-                .ifEmpty { extractAgentText(params["message"]) }
-                .ifEmpty { "Agent 任务执行失败" }
-        )
+        // Legacy notification remains projection only; keep run for official session/prompt response!
+        return WebAgentEventUpdate(parentTaskId = parentTaskId)
     }
 
     if (normalizedMethod == "codex_event") {
@@ -842,22 +1211,13 @@ internal fun parseWebAgentEvent(event: Map<String, Any?>): WebAgentEventUpdate {
             protocolType in setOf(
                 "task_complete",
                 "turn_complete",
-                "turn_completed"
-            ) -> WebAgentEventUpdate(
-                parentTaskId = protocolParent,
-                terminalKind = "completed"
-            )
-            protocolType in setOf(
+                "turn_completed",
                 "turn_aborted",
                 "task_failed",
                 "turn_failed",
                 "error"
             ) -> WebAgentEventUpdate(
-                parentTaskId = protocolParent,
-                terminalKind = "error",
-                errorMessage = extractAgentText(protocol).ifEmpty {
-                    "Agent 任务执行失败"
-                }
+                parentTaskId = protocolParent
             )
             isAgentToolEventType(protocolType) -> WebAgentEventUpdate(
                 parentTaskId = protocolParent,

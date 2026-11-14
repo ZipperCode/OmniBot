@@ -35,6 +35,7 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
 
         scope.launch {
             val nonce = intent?.getStringExtra("nonce")?.trim().orEmpty()
+            val marker = intent?.getStringExtra("marker")?.trim()?.takeIf { it.isNotEmpty() }
             var lockFile: File? = null
             var ownedLock = false
             var tempDbFile: File? = null
@@ -48,15 +49,25 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
                     "invalid_nonce"
                 }
 
+                // 若指定了 marker，严格校验 synthetic marker 格式与边界
+                if (marker != null) {
+                    require(marker.length in 8..128 && MARKER_REGEX.matches(marker)) {
+                        "invalid_marker"
+                    }
+                }
+
                 val cacheDir = appContext.cacheDir
                 lockFile = File(cacheDir, "oob-checkpoint-$nonce.lock")
-                finalDbFile = File(cacheDir, "oob-checkpoint-$nonce.db")
-                tempDbFile = File(cacheDir, "oob-checkpoint-$nonce.db.tmp")
                 finalStatusFile = File(cacheDir, "oob-checkpoint-$nonce.json")
                 tempStatusFile = File(cacheDir, "oob-checkpoint-$nonce.json.tmp")
+                if (marker == null) {
+                    finalDbFile = File(cacheDir, "oob-checkpoint-$nonce.db")
+                    tempDbFile = File(cacheDir, "oob-checkpoint-$nonce.db.tmp")
+                }
 
                 // 2. 独占性与碰撞检查：若任何文件已存在，或锁文件创建失败，视为碰撞，绝不碰任何已有文件
-                if (finalDbFile.exists() || tempDbFile.exists() || finalStatusFile.exists() || tempStatusFile.exists() || lockFile.exists()) {
+                if (finalStatusFile.exists() || tempStatusFile.exists() || lockFile.exists() ||
+                    (finalDbFile?.exists() == true) || (tempDbFile?.exists() == true)) {
                     throw NonceCollisionException()
                 }
                 if (!lockFile.createNewFile()) {
@@ -83,46 +94,49 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
                     throw FileNotFoundException("source_database_missing")
                 }
 
-                // 5. 建立独立的只读 SQLite 连接，仅执行参数绑定的 VACUUM INTO ?
+                // 5. 建立独立的只读 SQLite 连接
                 val readOnlyDb = SQLiteDatabase.openDatabase(
                     sourceDbFile.absolutePath,
                     null,
                     SQLiteDatabase.OPEN_READONLY
                 )
 
-                try {
-                    val tempDbPath = tempDbFile.absolutePath
-                    readOnlyDb.execSQL("VACUUM INTO ?", arrayOf(tempDbPath))
+                val completedPayload = try {
+                    if (marker != null) {
+                        // Marker-scoped Turn export (never VACUUM or export whole DB)
+                        exportSyntheticTurn(readOnlyDb, nonce, marker)
+                    } else {
+                        // Whole-database VACUUM INTO (emulator-only snapshot)
+                        val tempDb = tempDbFile ?: throw IllegalStateException("temp_db_missing")
+                        val finalDb = finalDbFile ?: throw IllegalStateException("final_db_missing")
+                        val tempDbPath = tempDb.absolutePath
+                        readOnlyDb.execSQL("VACUUM INTO ?", arrayOf(tempDbPath))
+                        require(tempDb.exists() && tempDb.length() > 0) {
+                            "vacuum_into_failed"
+                        }
+                        check(tempDb.renameTo(finalDb)) {
+                            "vacuum_into_failed"
+                        }
+                        JSONObject().apply {
+                            put("schema_version", SCHEMA_VERSION)
+                            put("nonce", nonce)
+                            put("status", "completed")
+                            put("success", true)
+                            put("db_file", finalDb.name)
+                            put("size_bytes", finalDb.length())
+                            put("timestamp_ms", System.currentTimeMillis())
+                        }.toString()
+                    }
                 } finally {
                     readOnlyDb.close()
                 }
-
-                require(tempDbFile.exists() && tempDbFile.length() > 0) {
-                    "vacuum_into_failed"
-                }
-
-                // 6. 原子重命名为最终数据库文件（保持默认私有权限，绝不设为 world-readable）
-                check(tempDbFile.renameTo(finalDbFile)) {
-                    "vacuum_into_failed"
-                }
-
-                // 7. 原子写入最终 completed 状态回执
-                val completedPayload = JSONObject().apply {
-                    put("schema_version", SCHEMA_VERSION)
-                    put("nonce", nonce)
-                    put("status", "completed")
-                    put("success", true)
-                    put("db_file", finalDbFile.name)
-                    put("size_bytes", finalDbFile.length())
-                    put("timestamp_ms", System.currentTimeMillis())
-                }.toString()
 
                 tempStatusFile.writeText(completedPayload, Charsets.UTF_8)
                 check(tempStatusFile.renameTo(finalStatusFile)) {
                     "receipt_write_failed"
                 }
 
-                Log.i(TAG, "snapshot_completed nonce=$nonce size=${finalDbFile.length()}")
+                Log.i(TAG, "snapshot_completed nonce=$nonce marker=$marker")
                 pendingResult.setResultCode(Activity.RESULT_OK)
                 pendingResult.setResultData(completedPayload)
             } catch (error: Throwable) {
@@ -164,6 +178,94 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun exportSyntheticTurn(db: SQLiteDatabase, nonce: String, marker: String): String {
+        data class Candidate(val id: Long, val conversationId: Long, val payloadJson: String)
+        val candidates = mutableListOf<Candidate>()
+
+        db.rawQuery(
+            "SELECT id, conversationId, payloadJson FROM agent_conversation_entries WHERE entryType = 'user_message' AND instr(payloadJson, ?) > 0",
+            arrayOf(marker)
+        ).use { cursor ->
+            val idIdx = cursor.getColumnIndexOrThrow("id")
+            val convIdx = cursor.getColumnIndexOrThrow("conversationId")
+            val payloadIdx = cursor.getColumnIndexOrThrow("payloadJson")
+            while (cursor.moveToNext()) {
+                candidates.add(
+                    Candidate(
+                        id = cursor.getLong(idIdx),
+                        conversationId = cursor.getLong(convIdx),
+                        payloadJson = cursor.getString(payloadIdx)
+                    )
+                )
+            }
+        }
+
+        val selected = candidates.filter { c ->
+            try {
+                val json = JSONObject(c.payloadJson)
+                val text = json.optJSONObject("content")?.optString("text").orEmpty()
+                text == "Reply $marker" || text.endsWith("End your final reply with ${marker}_DONE.")
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        if (selected.isEmpty()) {
+            throw IllegalArgumentException("user_admission_missing")
+        }
+        if (selected.size > 1) {
+            throw IllegalArgumentException("user_admission_duplicated")
+        }
+
+        val admission = selected[0]
+        val startId = admission.id
+        val conversationId = admission.conversationId
+
+        var endId: Long? = null
+        db.rawQuery(
+            "SELECT min(id) FROM agent_conversation_entries WHERE conversationId = ? AND id > ? AND entryType = 'user_message'",
+            arrayOf(conversationId.toString(), startId.toString())
+        ).use { cursor ->
+            if (cursor.moveToNext() && !cursor.isNull(0)) {
+                endId = cursor.getLong(0)
+            }
+        }
+
+        val rowsArray = org.json.JSONArray()
+        val endIdBound = endId ?: Long.MAX_VALUE
+        db.rawQuery(
+            "SELECT id, entryType, payloadJson FROM agent_conversation_entries WHERE conversationId = ? AND id > ? AND id < ? ORDER BY id",
+            arrayOf(conversationId.toString(), startId.toString(), endIdBound.toString())
+        ).use { cursor ->
+            val idIdx = cursor.getColumnIndexOrThrow("id")
+            val typeIdx = cursor.getColumnIndexOrThrow("entryType")
+            val payloadIdx = cursor.getColumnIndexOrThrow("payloadJson")
+            while (cursor.moveToNext()) {
+                val rowObj = JSONObject().apply {
+                    put("id", cursor.getLong(idIdx))
+                    put("entryType", cursor.getString(typeIdx))
+                    put("payloadJson", cursor.getString(payloadIdx))
+                }
+                rowsArray.put(rowObj)
+            }
+        }
+
+        return JSONObject().apply {
+            put("schema_version", SCHEMA_VERSION)
+            put("nonce", nonce)
+            put("status", "completed")
+            put("success", true)
+            put("marker", marker)
+            put("conversation_id", conversationId)
+            put("start_id", startId)
+            if (endId != null) {
+                put("end_id", endId)
+            }
+            put("rows", rowsArray)
+            put("timestamp_ms", System.currentTimeMillis())
+        }.toString()
+    }
+
     private class NonceCollisionException : RuntimeException("nonce_collision")
 
     companion object {
@@ -172,6 +274,7 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
         private const val SCHEMA_VERSION = "oob.database_snapshot.v1"
         private const val TAG = "DebugAgentDatabaseSnapshotReceiver"
         private val NONCE_REGEX = Regex("^[0-9a-fA-F]{16,64}$")
+        private val MARKER_REGEX = Regex("^OOB_[A-Z0-9_]+_\\d+$")
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         private const val SAFE_ERROR_INVALID_NONCE = "invalid_nonce"
@@ -180,10 +283,16 @@ class DebugAgentDatabaseSnapshotReceiver : BroadcastReceiver() {
         private const val SAFE_ERROR_VACUUM_FAILED = "vacuum_into_failed"
         private const val SAFE_ERROR_RECEIPT_FAILED = "receipt_write_failed"
         private const val SAFE_ERROR_INTERNAL = "internal_error"
+        private const val SAFE_ERROR_INVALID_MARKER = "invalid_marker"
+        private const val SAFE_ERROR_ADMISSION_MISSING = "user_admission_missing"
+        private const val SAFE_ERROR_ADMISSION_DUPLICATED = "user_admission_duplicated"
 
         private fun mapSafeError(error: Throwable): String = when {
             error is NonceCollisionException -> SAFE_ERROR_NONCE_COLLISION
             error is IllegalArgumentException && error.message == "invalid_nonce" -> SAFE_ERROR_INVALID_NONCE
+            error is IllegalArgumentException && error.message == "invalid_marker" -> SAFE_ERROR_INVALID_MARKER
+            error is IllegalArgumentException && error.message == "user_admission_missing" -> SAFE_ERROR_ADMISSION_MISSING
+            error is IllegalArgumentException && error.message == "user_admission_duplicated" -> SAFE_ERROR_ADMISSION_DUPLICATED
             error is FileNotFoundException -> SAFE_ERROR_SOURCE_MISSING
             error is SQLiteException || error.message == "vacuum_into_failed" -> SAFE_ERROR_VACUUM_FAILED
             error.message == "receipt_write_failed" -> SAFE_ERROR_RECEIPT_FAILED

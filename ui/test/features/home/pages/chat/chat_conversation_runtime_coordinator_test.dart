@@ -144,16 +144,6 @@ void main() {
     );
   }
 
-  Future<void> emitPlatformEvent(String method, [dynamic arguments]) async {
-    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .handlePlatformMessage(
-          channelName,
-          codec.encodeMethodCall(MethodCall(method, arguments)),
-          (ByteData? _) {},
-        );
-    await Future<void>.delayed(Duration.zero);
-  }
-
   Future<void> emitAgentEvent(Map<String, dynamic> event) async {
     await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .handlePlatformMessage(
@@ -2211,12 +2201,103 @@ void main() {
     }
     // A durable completed projection may still supply additional metadata.
     final restored = committed.copyWith(turnUsage: {'inputTokens': 123});
-    coordinator.replaceConversationSnapshot(conversationId: conversationId,
-        mode: kChatRuntimeModeAgent, messages: [restored],
-      );
-      expect(runtime.messages.single.turnUsage?['inputTokens'], 123);
-    },
-  );
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: [restored],
+    );
+    expect(runtime.messages.single.turnUsage?['inputTokens'], 123);
+
+    // 仅有 isFinal 的旧快照不能降级官方 stopReason。
+    final isFinalOnly = committed.copyWith(
+      streamMeta: <String, dynamic>{
+        ...?committed.streamMeta,
+        'stopReason': null,
+        'isFinal': true,
+      },
+    );
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: [isFinalOnly],
+    );
+    expect(runtime.messages.single.streamMeta?['stopReason'], 'end_turn');
+    expect(runtime.messages.single.text, 'partial complete');
+
+    // 缺失身份不能作为同 ID 条目的通配符。
+    final wildcardItem = ChatMessageModel.assistantMessage(
+      'wildcard text',
+      id: committed.id,
+    ).copyWith(
+      streamMeta: const <String, dynamic>{
+        'isFinal': true,
+        'stopReason': 'end_turn',
+      },
+    );
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: [wildcardItem],
+    );
+    expect(runtime.messages.single.text, 'partial complete');
+    expect(runtime.messages.single.streamMeta?['stopReason'], 'end_turn');
+  });
+
+  test('official completed history snapshot enriches partial message with same canonical identity', () {
+    const conversationId = 99203;
+    const turn = 'canonical-enrich-turn';
+    coordinator.beginAcpTurn(
+      taskId: turn,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    expect(
+      coordinator.bindAcpSession(
+        taskId: turn,
+        conversationId: conversationId,
+        mode: kChatRuntimeModeAgent,
+        sessionId: 'canonical-enrich-session',
+      ),
+      isTrue,
+    );
+    applyAcp(
+      conversationId,
+      'session/update',
+      turnId: turn,
+      sessionId: 'canonical-enrich-session',
+      params: {
+        'update': {
+          'sessionUpdate': 'agent_message_chunk',
+          'messageId': 'reply-enrich',
+          'content': {'text': 'partial '},
+        },
+      },
+    );
+    completePrompt(conversationId, turnId: turn);
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    final partialMessage =
+        runtime.messages.firstWhere((m) => m.id == '$turn-reply-enrich-agent-message');
+    expect(partialMessage.text, 'partial ');
+
+    final enriched = partialMessage.copyWith(
+      content: <String, dynamic>{
+        ...?partialMessage.content,
+        'text': 'partial and completed full text',
+      },
+      turnUsage: const <String, dynamic>{'totalTokens': 42},
+    );
+    coordinator.replaceConversationSnapshot(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      messages: [enriched],
+    );
+    expect(runtime.messages.single.text, 'partial and completed full text');
+    expect(runtime.messages.single.streamMeta?['stopReason'], 'end_turn');
+    expect(runtime.messages.single.turnUsage?['totalTokens'], 42);
+  });
 
   test('persistence uses the completed projection after awaiting metadata I/O', () async {
     const conversationId = 99201;
@@ -3563,5 +3644,337 @@ void main() {
     expect(runtime.isAiResponding, isTrue);
     expect(runtime.activeAcpTurnId, turnId);
     expect(coordinator.isTaskActive(taskId: taskId, conversationId: conversationId, mode: kChatRuntimeModeAgent), isTrue);
+  });
+
+  test('official prompt event arriving before method response registers receipt and prevents lost receipt on later response', () {
+    const conversationId = 3801;
+    const taskId = 'task-3801';
+    const turnId = 'turn-3801';
+    const sessionId = 'sess-3801';
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    runtime.activeAcpSessionId = sessionId;
+    runtime.activeAcpTurnId = turnId;
+
+    // 1. Official session/prompt event arrives FIRST
+    final eventResult = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': taskId,
+        'requestId': taskId,
+        'sessionId': sessionId,
+        'turnId': turnId,
+        'conversationId': conversationId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': taskId,
+          'result': {
+            'status': 'completed',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+
+    expect(eventResult.handled, isTrue);
+    // Receipt must be registered by the event!
+    final receiptAfterEvent = runtime.settledPromptReceipts[turnId];
+    expect(receiptAfterEvent, isNotNull);
+    expect(receiptAfterEvent!['sessionId'], sessionId);
+    expect(receiptAfterEvent['turnId'], turnId);
+    expect(receiptAfterEvent['requestId'], taskId);
+
+    // Binding is removed by event completion
+    expect(coordinator.isTaskActive(taskId: taskId, conversationId: conversationId, mode: kChatRuntimeModeAgent), isFalse);
+
+    final initialMessageCount = runtime.messages.length;
+
+    // 2. Later, applyAcpPromptResponse arrives over method channel
+    final responseResult = coordinator.applyAcpPromptResponse(
+      taskId: taskId,
+      conversationId: conversationId,
+      sessionId: sessionId,
+      turnId: turnId,
+      stopReason: 'end_turn',
+      mode: kChatRuntimeModeAgent,
+    );
+
+    // Handled is false (no duplicate UI reduction)
+    expect(responseResult.handled, isFalse);
+    expect(runtime.messages.length, initialMessageCount);
+
+    // Receipt must STILL be registered and confirmed!
+    final receiptAfterResponse = runtime.settledPromptReceipts[turnId];
+    expect(receiptAfterResponse, isNotNull);
+    expect(receiptAfterResponse!['sessionId'], sessionId);
+    expect(receiptAfterResponse['turnId'], turnId);
+    expect(receiptAfterResponse['requestId'], taskId);
+  });
+
+  test('reverse order: method response arriving before event registers receipt idempotently', () {
+    const conversationId = 3802;
+    const taskId = 'task-3802';
+    const turnId = 'turn-3802';
+    const sessionId = 'sess-3802';
+
+    coordinator.beginAcpTurn(
+      taskId: taskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    runtime.activeAcpSessionId = sessionId;
+    runtime.activeAcpTurnId = turnId;
+
+    // 1. applyAcpPromptResponse arrives FIRST
+    final responseResult = coordinator.applyAcpPromptResponse(
+      taskId: taskId,
+      conversationId: conversationId,
+      sessionId: sessionId,
+      turnId: turnId,
+      stopReason: 'end_turn',
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(responseResult.handled, isTrue);
+    final receiptAfterResponse = runtime.settledPromptReceipts[turnId];
+    expect(receiptAfterResponse, isNotNull);
+    expect(receiptAfterResponse!['turnId'], turnId);
+
+    // 2. session/prompt event arrives SECOND
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      event: {
+        'method': 'session/prompt',
+        'id': taskId,
+        'requestId': taskId,
+        'sessionId': sessionId,
+        'turnId': turnId,
+        'conversationId': conversationId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': taskId,
+          'result': {
+            'status': 'completed',
+            'stopReason': 'end_turn',
+            'completed': true,
+          },
+        },
+      },
+    );
+
+    expect(runtime.settledPromptReceipts[turnId], isNotNull);
+  });
+
+  test('late prompt response from old turn does not overwrite active turn or new turn reservation', () {
+    const conversationId = 3803;
+    const oldTaskId = 'task-old-3803';
+    const oldTurnId = 'turn-old-3803';
+    const newTaskId = 'task-new-3803';
+    const newTurnId = 'turn-new-3803';
+    const sessionId = 'sess-3803';
+
+    // Start new turn
+    coordinator.beginAcpTurn(
+      taskId: newTaskId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+    runtime.activeAcpSessionId = sessionId;
+    runtime.activeAcpTurnId = newTurnId;
+
+    // Late response for old turn arrives
+    final lateResult = coordinator.applyAcpPromptResponse(
+      taskId: oldTaskId,
+      conversationId: conversationId,
+      sessionId: sessionId,
+      turnId: oldTurnId,
+      stopReason: 'end_turn',
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(lateResult.handled, isFalse);
+    expect(lateResult.affectsActiveTurn, isFalse);
+    // Active turn must strictly remain new turn!
+    expect(runtime.activeAcpTurnId, newTurnId);
+    expect(coordinator.isTaskActive(taskId: newTaskId, conversationId: conversationId, mode: kChatRuntimeModeAgent), isTrue);
+  });
+
+  test('A completes and triggers B host admission: B streams and completes with single assistant reply, user message placed after A, does not resurrect A', () async {
+    coordinator.ensureInitialized();
+    final conversationId = 16601;
+    final sessionId = 'session-outbox-chain-1';
+    final taskAId = 'task-A-local';
+    final turnAId = 'turn-A-official';
+    final turnBId = 'turn-B-official';
+    final userBMessageId = 'req-B-user';
+
+    // 1. Turn A starts locally and has in-flight work
+    coordinator.beginAcpTurn(
+      taskId: taskAId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.bindAcpSession(
+      taskId: taskAId,
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+      sessionId: sessionId,
+    );
+    final runtime = coordinator.runtimeFor(
+      conversationId: conversationId,
+      mode: kChatRuntimeModeAgent,
+    )!;
+
+    // Turn A streams output
+    coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      event: {
+        'method': 'session/update',
+        'sessionId': sessionId,
+        'turnId': turnAId,
+        'allowImplicitTurnAdmission': true,
+        'params': {
+          'sessionId': sessionId,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'turnId': turnAId,
+            'content': {'type': 'text', 'text': 'Answer A'},
+          },
+        },
+      },
+      mode: kChatRuntimeModeAgent,
+    );
+    expect(runtime.isAiResponding, isTrue);
+
+    // Turn A settles officially
+    final resA = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': sessionId,
+        'turnId': turnAId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': taskAId,
+          'result': {'status': 'completed', 'stopReason': 'end_turn'},
+        },
+      },
+      mode: kChatRuntimeModeAgent,
+    );
+    coordinator.unregisterTask(taskAId, conversationId: conversationId, mode: kChatRuntimeModeAgent);
+    expect(resA.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.activeAcpTurnId, isNull);
+    expect(runtime.completedAcpTurnIds.contains(turnAId), isTrue);
+
+    // 2. Outbox B admits in background: external user message appended
+    // Outbox B passes actual admission time (updatedAt) upon dequeue
+    final admissionTime = DateTime.now().add(const Duration(milliseconds: 10));
+    final binaryMessenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    await binaryMessenger.handlePlatformMessage(
+      channelName,
+      codec.encodeMethodCall(
+        MethodCall('onExternalUserMessageAppended', <String, dynamic>{
+          'conversationId': conversationId,
+          'mode': 'agent',
+          'entryId': userBMessageId,
+          'text': 'User prompt B',
+          'createdAt': admissionTime.millisecondsSinceEpoch,
+        }),
+      ),
+      (ByteData? data) {},
+    );
+
+    // Verify user B message is at index 0 (newest), placed AFTER Turn A
+    expect(runtime.messages.first.id, userBMessageId);
+    expect(runtime.messages.first.text, 'User prompt B');
+    expect(runtime.messages.where((m) => m.id == userBMessageId).length, 1);
+
+    // 3. Outbox B streams via host implicit admission (no local dispatch reservation)
+    final streamChunkResult = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      event: {
+        'method': 'session/update',
+        'sessionId': sessionId,
+        'turnId': turnBId,
+        'allowImplicitTurnAdmission': true,
+        'params': {
+          'sessionId': sessionId,
+          'update': {
+            'sessionUpdate': 'agent_message_chunk',
+            'turnId': turnBId,
+            'content': {'type': 'text', 'text': 'Answer B streaming...'},
+          },
+        },
+      },
+      mode: kChatRuntimeModeAgent,
+    );
+
+    // B is properly admitted, affects active turn, and sets isAiResponding to true
+    expect(streamChunkResult.handled, isTrue);
+    expect(streamChunkResult.affectsActiveTurn, isTrue);
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, turnBId);
+
+    // Turn A is NOT resurrected
+    expect(runtime.completedAcpTurnIds.contains(turnAId), isTrue);
+
+    // 4. Outbox B officially completes
+    final resB = coordinator.applyAgentEvent(
+      conversationId: conversationId,
+      event: {
+        'method': 'session/prompt',
+        'sessionId': sessionId,
+        'turnId': turnBId,
+        'allowImplicitTurnAdmission': true,
+        'message': {
+          'jsonrpc': '2.0',
+          'id': 'req-B-official',
+          'result': {'status': 'completed', 'stopReason': 'end_turn'},
+        },
+      },
+      mode: kChatRuntimeModeAgent,
+    );
+
+    expect(resB.handled, isTrue);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.completedAcpTurnIds.contains(turnBId), isTrue);
+
+    // Exactly one assistant message for B, exactly one user message for B
+    final userBMessages = runtime.messages.where((m) => m.id == userBMessageId);
+    expect(userBMessages.length, 1);
+    final bAssistantMessages = runtime.messages.where((m) => m.text?.contains('Answer B') == true);
+    expect(bAssistantMessages.length, 1);
+
+    // 5. Conversation isolation: events never leak into another conversation
+    final otherConversationId = 16602;
+    final otherRuntime = coordinator.runtimeFor(
+      conversationId: otherConversationId,
+      mode: kChatRuntimeModeAgent,
+    );
+    expect(otherRuntime, isNull);
   });
 }

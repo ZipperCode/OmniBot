@@ -321,15 +321,23 @@ class EnvironmentSetupLogicTest {
     fun buildSetupScript_isShellSafeForEveryPackageCombination() {
         val packageIds = EnvironmentSetupLogic.packageDefinitions.map { it.id }
         val workingModes = listOf(WorkingMode.ALPINE, WorkingMode.UBUNTU)
-        val processes = workingModes.associateWith { workingMode ->
-            // 使用测试 helper 定位本机 POSIX sh 执行语法校验
-            PosixShellTestHelper.processBuilder("/bin/sh", "-n")
-                .redirectErrorStream(true)
-                .start()
+        val tempFiles = workingModes.associateWith { workingMode ->
+            File.createTempFile("setup_test_${workingMode}_", ".sh").apply {
+                deleteOnExit()
+            }
         }
-        val writers = processes.mapValues { (_, process) ->
-            process.outputStream.bufferedWriter()
+        val writers = tempFiles.mapValues { (_, file) ->
+            file.bufferedWriter(Charsets.UTF_8)
         }
+        val opencodeInstall = File("src/main/assets/acp/install/opencode.sh").readText()
+        val piInstall = File("src/main/assets/acp/install/pi.sh").readText()
+        val harnessInstallCommands = mapOf(
+            "opencode" to opencodeInstall,
+            "pi" to piInstall,
+        )
+        val ubuntuRepoCommand = UbuntuRepositoryManager.buildRepositorySetupCommand(
+            UbuntuPackageMirror.TSINGHUA
+        )
 
         try {
             val total = 1 shl packageIds.size
@@ -339,9 +347,7 @@ class EnvironmentSetupLogicTest {
                 }
                 workingModes.forEach { workingMode ->
                     val repositorySetupCommand = if (workingMode == WorkingMode.UBUNTU) {
-                        UbuntuRepositoryManager.buildRepositorySetupCommand(
-                            UbuntuPackageMirror.TSINGHUA
-                        )
+                        ubuntuRepoCommand
                     } else {
                         ""
                     }
@@ -349,10 +355,7 @@ class EnvironmentSetupLogicTest {
                         selectedPackageIds = selectedPackageIds,
                         repositorySetupCommand = repositorySetupCommand,
                         workingMode = workingMode,
-                        harnessInstallCommands = mapOf(
-                            "opencode" to File("src/main/assets/acp/install/opencode.sh").readText(),
-                            "pi" to File("src/main/assets/acp/install/pi.sh").readText(),
-                        ),
+                        harnessInstallCommands = harnessInstallCommands,
                     )
                     val script = EnvironmentSetupLogic.buildSetupScript(
                         commands = distroCommands,
@@ -371,15 +374,30 @@ class EnvironmentSetupLogicTest {
             }
         }
 
-        processes.forEach { (workingMode, process) ->
-            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-            val exitCode = process.waitFor()
+        try {
+            workingModes.forEach { workingMode ->
+                val scriptFile = tempFiles.getValue(workingMode)
+                val targetPath = if (PosixShellTestHelper.isWindows) {
+                    PosixShellTestHelper.toPosixPath(scriptFile.absolutePath)
+                } else {
+                    scriptFile.absolutePath
+                }
+                val process = PosixShellTestHelper.processBuilder("/bin/sh", "-n", targetPath)
+                    .redirectErrorStream(true)
+                    .start()
+                val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+                val exitCode = process.waitFor()
 
-            assertEquals(
-                "Shell syntax check failed for mode=$workingMode: $output",
-                0,
-                exitCode
-            )
+                assertEquals(
+                    "Shell syntax check failed for mode=$workingMode: $output",
+                    0,
+                    exitCode
+                )
+            }
+        } finally {
+            tempFiles.values.forEach { file ->
+                runCatching { file.delete() }
+            }
         }
     }
 }

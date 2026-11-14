@@ -409,11 +409,17 @@ object LsposedManagementBridge {
             )
         }
 
-        val deployMessage = if (hookVerified) {
-            "LSPosed 模块部署成功：已安装、已启用、作用域已配置并已重载目标，且读回确认 Hook 行为已生效。"
+        val configSummary = if (reloadTarget) {
+            "LSPosed 模块配置与重载已完成"
         } else {
-            "LSPosed 模块配置部署已完全验证生效 (模块启用与作用域已确认)；目标已重载。业务 Hook 行为将在目标应用实际运行触发后读回。"
+            "LSPosed 模块配置已完成"
         }
+        val evidenceSummary = if (hookVerified) {
+            "已观察到框架加载证据"
+        } else {
+            "未观察到框架加载证据"
+        }
+        val deployMessage = "$configSummary；$evidenceSummary；业务功能尚未在目标应用中核验"
 
         DeploymentResult(
             success = true,

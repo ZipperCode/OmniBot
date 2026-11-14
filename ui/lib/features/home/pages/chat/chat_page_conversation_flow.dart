@@ -711,49 +711,65 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       // The preserved composer remains editable for the user to send later.
       if (!mounted || !switched) return;
     }
-    // Acquire the per-target submit lock immediately after the transition
-    // barrier. Two queued UI submit paths wake in the same microtask turn, so
-    // only the first may continue into bootstrap/model loading.
     // The target request id changes whenever the page moves to another
     // conversation, allowing independent ACP sessions to send concurrently.
     final sendTargetId = _conversationTargetRequestId;
+    // The chat surface is rendered before the asynchronous conversation
+    // bootstrap finishes. Wait for it before inserting the optimistic user
+    // row; otherwise bootstrap can restore/reset the target immediately after
+    // this method and make the row flash and disappear.
+    final bootstrapFuture = _conversationBootstrapFuture;
+    // _sendInitialMessageIfNeeded is called from inside this very bootstrap
+    // future. Waiting for it here would await the current Future forever,
+    // leaving enhancement/replay prompts with no user message or request.
+    if (waitForBootstrap && bootstrapFuture != null) {
+      await bootstrapFuture;
+    }
+    // A panel may still be preparing the draft's official session when the
+    // user submits. Reuse that request before freezing the prompt target.
+    final configurationSession = _configurationSessionCreation;
+    if (configurationSession != null &&
+        _configurationSessionCreationTarget == sendTargetId) {
+      try {
+        await configurationSession;
+      } catch (_) {
+        // A failed settings read owns no turn. Normal send admission still
+        // reports its own canonical session/prompt result.
+      }
+    }
+    if (!_isConversationTargetRequestCurrent(sendTargetId)) return;
+    // ACP owns admission for both new and existing conversations. Optional
+    // terminal capabilities prepare their environment when a tool uses them.
+    final unavailableMessage = _activeAgentUnavailableMessage;
+    if (unavailableMessage != null) {
+      showToast(unavailableMessage, type: ToastType.error);
+      return;
+    }
+    final messageText = submittedText.trim();
+    final inputAttachments = submittedAttachments;
+    final hasAttachments = inputAttachments.isNotEmpty;
+    if (messageText.isEmpty && !hasAttachments) return;
+    if (_isAiResponding) {
+      if (!_enqueueInFlightTargetIds.add(sendTargetId)) return;
+      try {
+        await _enqueuePendingOutboxMessage(
+          messageText,
+          inputAttachments,
+          sendTargetId: sendTargetId,
+          submittedText: submittedText,
+          submittedAttachments: submittedAttachments,
+        );
+      } finally {
+        _enqueueInFlightTargetIds.remove(sendTargetId);
+      }
+      return;
+    }
+    // Acquire the per-target submit lock immediately after confirming that this
+    // prompt will be dispatched as a regular turn. The turn remains in flight
+    // until ACP finishes, which prevents duplicate send submissions while
+    // allowing running-state queueing to branch above.
     if (!_sendMessageInFlightTargetIds.add(sendTargetId)) return;
     try {
-      // The chat surface is rendered before the asynchronous conversation
-      // bootstrap finishes. Wait for it before inserting the optimistic user
-      // row; otherwise bootstrap can restore/reset the target immediately after
-      // this method and make the row flash and disappear.
-      final bootstrapFuture = _conversationBootstrapFuture;
-      // _sendInitialMessageIfNeeded is called from inside this very bootstrap
-      // future. Waiting for it here would await the current Future forever,
-      // leaving enhancement/replay prompts with no user message or request.
-      if (waitForBootstrap && bootstrapFuture != null) {
-        await bootstrapFuture;
-      }
-      // A panel may still be preparing the draft's official session when the
-      // user submits. Reuse that request before freezing the prompt target.
-      final configurationSession = _configurationSessionCreation;
-      if (configurationSession != null &&
-          _configurationSessionCreationTarget == sendTargetId) {
-        try {
-          await configurationSession;
-        } catch (_) {
-          // A failed settings read owns no turn. Normal send admission still
-          // reports its own canonical session/prompt result.
-        }
-      }
-      if (!_isConversationTargetRequestCurrent(sendTargetId)) return;
-      // ACP owns admission for both new and existing conversations. Optional
-      // terminal capabilities prepare their environment when a tool uses them.
-      final unavailableMessage = _activeAgentUnavailableMessage;
-      if (unavailableMessage != null) {
-        showToast(unavailableMessage, type: ToastType.error);
-        return;
-      }
-      final messageText = submittedText.trim();
-      final inputAttachments = submittedAttachments;
-      final hasAttachments = inputAttachments.isNotEmpty;
-      if ((messageText.isEmpty && !hasAttachments) || _isAiResponding) return;
       if (!hasAttachments &&
           ManualRecordingFlowController.isCommand(messageText)) {
         await _startManualRecordingCommand(messageText);
@@ -775,6 +791,76 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
       _sendMessageInFlightTargetIds.remove(sendTargetId);
     }
   }
+  Future<void> _enqueuePendingOutboxMessage(
+    String messageText,
+    List<ChatInputAttachment> inputAttachments, {
+    required int sendTargetId,
+    required String submittedText,
+    required List<ChatInputAttachment> submittedAttachments,
+  }) async {
+    final conversationId = _currentConversationId;
+    if (conversationId == null) {
+      showToast('当前任务正在执行，无法排队发送', type: ToastType.warning);
+      return;
+    }
+
+    try {
+      final attachments =
+          inputAttachments.map((item) => item.toMap()).toList();
+      final dispatchSelection =
+          _activeConversationModelOverrideSelection ??
+          _activeDispatchSceneSelection;
+      await _outboxService.enqueue(
+        text: messageText,
+        attachments: attachments,
+        model: dispatchSelection?.modelId,
+        effort: _activeConversationReasoningEffort,
+        conversationMode: activeConversationModeValue.storageValue,
+      );
+
+      if (mounted) {
+        final isSameConversation = _currentConversationId == conversationId &&
+            _isConversationTargetRequestCurrent(sendTargetId);
+
+        if (isSameConversation) {
+          // 仅全文完全一致才清文本（保守原则：不凭文本猜 identity，不重复/不截断推断）
+          if (_messageController.text == submittedText) {
+            _messageController.clear();
+            _modeState(_activeMode).draftMessage = '';
+          }
+
+          setState(() {
+            final queuedIds = submittedAttachments.map((a) => a.id).toSet();
+            _pendingAttachments.removeWhere((a) => queuedIds.contains(a.id));
+            _modeState(_activeMode).consumeMessageAttachments(attachments);
+          });
+        } else {
+          // 用户已切换到其他会话：保留新会话的草稿和附件，仅在原会话的 modeState 中清理原稿
+          final targetMode = _pageModeForConversationMode(activeConversationModeValue);
+          final state = _modeState(targetMode);
+          if (state.currentConversationId == conversationId) {
+            state.draftMessage = '';
+            state.consumeMessageAttachments(attachments);
+          }
+        }
+        showToast('已排队发送');
+      }
+    } on OutboxMutationException catch (e) {
+      if (mounted) {
+        final errorMsg = e.isRevisionConflict
+            ? '待发队列发生冲突，请重试'
+            : (e.isAttachmentUnavailable
+                ? '附件不可用，请重新选择'
+                : (e.isEmpty ? '待发内容为空' : '排队失败: ${e.message}'));
+        showToast(errorMsg, type: ToastType.error);
+      }
+    } catch (e) {
+      if (mounted) {
+        showToast('排队失败: $e', type: ToastType.error);
+      }
+    }
+  }
+
 
   @override
   Future<void> _startManualRecordingCommand(String messageText) async {
@@ -1479,12 +1565,12 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
     } catch (e) {
       if (conversationId != null) {
         final runtime = _runtimeCoordinator.runtimeFor(
-          conversationId: conversationId!,
+          conversationId: conversationId,
           mode: dispatchModeKey,
         );
         _runtimeCoordinator.applyAcpPromptResponse(
           taskId: aiMessageId,
-          conversationId: conversationId!,
+          conversationId: conversationId,
           mode: dispatchModeKey,
           sessionId: runtime?.activeAcpSessionId,
           turnId: runtime?.activeAcpTurnId,

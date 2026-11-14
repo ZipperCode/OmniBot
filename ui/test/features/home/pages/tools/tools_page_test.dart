@@ -10,6 +10,7 @@ import 'package:ui/widgets/omni_circle_button.dart';
 
 const _local = MethodChannel('cn.com.omnimind.bot/PluginPlatform');
 const _remote = MethodChannel('cn.com.omnimind.bot/RemoteMcpConfig');
+const _special = MethodChannel('cn.com.omnimind.bot/special_permission');
 
 final _tool = {
   'name': 'file_read',
@@ -42,10 +43,17 @@ void main() {
       expect(call.method, 'listToolCatalog');
       return [];
     });
+    messenger.setMockMethodCallHandler(_special, (call) async {
+      if (call.method == 'getRootStatus') {
+        return {'enabled': true, 'status': 'GRANTED'};
+      }
+      return null;
+    });
   });
   tearDown(() {
     messenger.setMockMethodCallHandler(_local, null);
     messenger.setMockMethodCallHandler(_remote, null);
+    messenger.setMockMethodCallHandler(_special, null);
   });
 
   testWidgets('tablet tool search and toolbar stay aligned through resize', (
@@ -209,6 +217,43 @@ void main() {
       expect(find.text('Disabled server · 未启用'), findsOneWidget);
       expect(find.text('远程 MCP · 0'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'phone development card explains LSPosed and provides Xiaowan session entry without su',
+    (tester) async {
+      int suCalls = 0;
+      messenger.setMockMethodCallHandler(
+        _special,
+        (call) async {
+          if (call.method == 'requestRootAccess') {
+            suCalls++;
+          }
+          if (call.method == 'getRootStatus') {
+            return {'enabled': true, 'status': 'GRANTED'};
+          }
+          return null;
+        },
+      );
+
+      await tester.pumpWidget(_app());
+      await tester.pumpAndSettle();
+
+      // 验证手机开发/LSPosed 卡片已展示
+      expect(find.text('手机开发 / LSPosed'), findsOneWidget);
+      expect(
+        find.textContaining('支持在手机本地执行编译构建、APK 静态分析与 LSPosed 模块作用域管理'),
+        findsOneWidget,
+      );
+      expect(find.text('前往小万会话'), findsOneWidget);
+      // 验证未开页调用 su
+      expect(suCalls, 0);
+
+      // 搜索筛选保留卡片
+      await tester.enterText(find.byType(TextField), 'lsposed');
+      await tester.pumpAndSettle();
+      expect(find.text('手机开发 / LSPosed'), findsOneWidget);
     },
   );
 }

@@ -1018,10 +1018,18 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
             : visualProfile.secondaryTextColor,
         child: ChatMessageList(
           messages: resolvedMessages,
+          conversationId: _currentConversationId,
           hideToolCards: chatOnly,
           activeAgentTurnIds: activeAgentTurnIds,
           useAcpPresentation: useAcpPresentation,
           activeAcpAgentId: activeAcpAgentId,
+          currentDraft: _messageController.text,
+          onFillDraft: (prompt) async {
+            _messageController.text = prompt;
+            _modeState(mode).draftMessage = prompt;
+            return true;
+          },
+          isProcessing: _isAiResponding,
           onRetryAgentMessage: this._retryFailedAgentTurn,
           showEmptyGreeting:
               homeGreetingSettings.greetingEnabled &&
@@ -1376,99 +1384,132 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                   ),
                   child: Container(
                     key: _inputAreaKey,
-                    child: ChatInputWrapper(
-                      unavailableMessage: _activeAgentUnavailableMessage,
-                      inputAreaKey: _chatInputAreaKey,
-                      controller: _messageController,
-                      focusNode: _inputFocusNode,
-                      onRequestFocus: _armComposerLiftIntent,
-                      isProcessing:
-                          _isAiResponding &&
-                          _editingUserMessageId == null &&
-                          !_hasPendingAgentUserInputRequest,
-                      onSendMessage: this._handleComposerSendMessage,
-                      onCancelTask: _onCancelTask,
-                      onPopupVisibilityChanged: _onPopupVisibilityChanged,
-                      topBanner: _showNewConversationModeSelector
-                          ? NewConversationModeSelector(
-                              selectedId: _newConversationModeId,
-                              agentModes: _chatAcpAgentModeOptions,
-                              enabled: _canSwitchNewConversationMode,
-                              onSelected: (modeId) {
-                                unawaited(_selectNewConversationMode(modeId));
-                              },
-                              onPopupVisibilityChanged: (visible) {
-                                if (!mounted) return;
-                                _chatInputAreaKey.currentState
-                                    ?.setAuxiliaryPopupVisible(visible);
-                                _onPopupVisibilityChanged(visible);
-                              },
-                            )
-                          : null,
-                      onTerminalTap: _showLocalTerminalActions
-                          ? _handleTerminalToolTap
-                          : null,
-                      useLargeComposerStyle: true,
-                      useAttachmentPickerForPlus: true,
-                      onPickAttachment: _pickAttachments,
-                      onPickImages: () =>
-                          _pickAttachments(type: FileType.image),
-                      onTriggerSlashCommand: _triggerSlashCommandPanel,
-                      attachments: _pendingAttachments,
-                      hasExternalSendPayload: _editingUserMessageHasAttachments,
-                      isEditingUserMessage: _editingUserMessageId != null,
-                      onCancelUserMessageEditing: this._stopUserMessageEditing,
-                      onRemoveAttachment: _removePendingAttachment,
-                      selectedModelOverrideId:
-                          _activeMode == ChatPageMode.normal &&
-                              _showConversationModelMentionChip
-                          ? _activeConversationModelOverrideSelection?.modelId
-                          : null,
-                      contextUsageRatio: _activeMode == ChatPageMode.openclaw
-                          ? null
-                          : _currentConversation?.contextUsageRatio,
-                      contextUsageTooltipMessage:
-                          _activeMode == ChatPageMode.openclaw
-                          ? null
-                          : _buildContextUsageTooltipMessage(),
-                      onLongPressContextUsageRing:
-                          _activeMode == ChatPageMode.openclaw
-                          ? null
-                          : this._handleContextUsageRingLongPress,
-                      modelPickerSettings: null,
-                      runtimeConfigButton: KeyedSubtree(
-                        key: _firstUseTourModelAnchorKey,
-                        child: _buildAcpConfigButton(),
-                      ),
-                      agentRunSettings: null,
-                      onAgentRunSettingsOpened: null,
-                      onAgentRunSettingsChanged: null,
-                      agentPermissionMode:
-                          _activeMode == ChatPageMode.agent
-                          ? _agentPermissionMode
-                          : null,
-                      agentPermissionModes:
-                          _activeMode == ChatPageMode.agent &&
-                              !_activeAgentTargetIsRemote
-                          ? const <AgentPermissionMode>[
-                              AgentPermissionMode.readOnly,
-                              AgentPermissionMode.defaultMode,
-                              AgentPermissionMode.fullAccess,
-                            ]
-                          : AgentPermissionMode.values,
-                      onAgentPermissionModeChanged:
-                          _activeMode == ChatPageMode.agent
-                          ? _selectAgentPermissionMode
-                          : null,
-                      onInputHeightChanged: _handleInputAreaHeightChanged,
-                      onClearSelectedModelOverride:
-                          _activeMode == ChatPageMode.normal &&
-                              _activeConversationModelOverrideSelection != null
-                          ? () {
-                              unawaited(_clearConversationModelOverride());
-                            }
-                          : null,
-                      translucent: backgroundActive,
+                    child: Builder(
+                      builder: (context) {
+                        final isCompact = isCompactLayoutHeight(context);
+                        final outboxBar = ChatOutboxPendingBar(
+                          outboxService: _outboxService,
+                          observedSessionId: _runtimeCoordinator.runtimeFor(
+                            conversationId: _currentConversationId ?? 0,
+                            mode: _modeKey(_activeMode),
+                          )?.activeAcpSessionId ?? _normalAcpSessionId,
+                          observedTurnId: _runtimeCoordinator.runtimeFor(
+                            conversationId: _currentConversationId ?? 0,
+                            mode: _modeKey(_activeMode),
+                          )?.activeAcpTurnId ?? _normalAcpTurnId,
+                          isProcessing: _isAiResponding,
+                          onShowToast: (msg, {isError = false}) {
+                            showToast(
+                              msg,
+                              type: isError ? ToastType.error : ToastType.info,
+                            );
+                          },
+                        );
+
+                        return ChatCompactInputWrapper(
+                          outboxCount: _outboxService.activeItems.length,
+                          attachmentCount: _pendingAttachments.length,
+                          outboxPendingBar: outboxBar,
+                          attachments: _pendingAttachments,
+                          onRemoveAttachment: _removePendingAttachment,
+                          inputChild: ChatInputWrapper(
+                            unavailableMessage: _activeAgentUnavailableMessage,
+                            inputAreaKey: _chatInputAreaKey,
+                            controller: _messageController,
+                            focusNode: _inputFocusNode,
+                            onRequestFocus: _armComposerLiftIntent,
+                            isProcessing:
+                                _isAiResponding &&
+                                _editingUserMessageId == null &&
+                                !_hasPendingAgentUserInputRequest,
+                            onSendMessage: this._handleComposerSendMessage,
+                            onCancelTask: _onCancelTask,
+                            onPopupVisibilityChanged: _onPopupVisibilityChanged,
+                            topBanner: _showNewConversationModeSelector
+                                ? NewConversationModeSelector(
+                                    selectedId: _newConversationModeId,
+                                    agentModes: _chatAcpAgentModeOptions,
+                                    enabled: _canSwitchNewConversationMode,
+                                    onSelected: (modeId) {
+                                      unawaited(_selectNewConversationMode(modeId));
+                                    },
+                                    onPopupVisibilityChanged: (visible) {
+                                      if (!mounted) return;
+                                      _chatInputAreaKey.currentState
+                                          ?.setAuxiliaryPopupVisible(visible);
+                                      _onPopupVisibilityChanged(visible);
+                                    },
+                                  )
+                                : null,
+                            outboxPendingBar: null,
+                            showAttachments: !isCompact,
+                            onTerminalTap: _showLocalTerminalActions
+                                ? _handleTerminalToolTap
+                                : null,
+                            useLargeComposerStyle: true,
+                            useAttachmentPickerForPlus: true,
+                            onPickAttachment: _pickAttachments,
+                            onPickImages: () =>
+                                _pickAttachments(type: FileType.image),
+                            onTriggerSlashCommand: _triggerSlashCommandPanel,
+                            attachments: _pendingAttachments,
+                            hasExternalSendPayload: _editingUserMessageHasAttachments,
+                            isEditingUserMessage: _editingUserMessageId != null,
+                            onCancelUserMessageEditing: this._stopUserMessageEditing,
+                            onRemoveAttachment: _removePendingAttachment,
+                            selectedModelOverrideId:
+                                _activeMode == ChatPageMode.normal &&
+                                    _showConversationModelMentionChip
+                                ? _activeConversationModelOverrideSelection?.modelId
+                                : null,
+                            contextUsageRatio: _activeMode == ChatPageMode.openclaw
+                                ? null
+                                : _currentConversation?.contextUsageRatio,
+                            contextUsageTooltipMessage:
+                                _activeMode == ChatPageMode.openclaw
+                                ? null
+                                : _buildContextUsageTooltipMessage(),
+                            onLongPressContextUsageRing:
+                                _activeMode == ChatPageMode.openclaw
+                                ? null
+                                : this._handleContextUsageRingLongPress,
+                            modelPickerSettings: null,
+                            runtimeConfigButton: KeyedSubtree(
+                              key: _firstUseTourModelAnchorKey,
+                              child: _buildAcpConfigButton(),
+                            ),
+                            agentRunSettings: null,
+                            onAgentRunSettingsOpened: null,
+                            onAgentRunSettingsChanged: null,
+                            agentPermissionMode:
+                                _activeMode == ChatPageMode.agent
+                                ? _agentPermissionMode
+                                : null,
+                            agentPermissionModes:
+                                _activeMode == ChatPageMode.agent &&
+                                    !_activeAgentTargetIsRemote
+                                ? const <AgentPermissionMode>[
+                                    AgentPermissionMode.readOnly,
+                                    AgentPermissionMode.defaultMode,
+                                    AgentPermissionMode.fullAccess,
+                                  ]
+                                : AgentPermissionMode.values,
+                            onAgentPermissionModeChanged:
+                                _activeMode == ChatPageMode.agent
+                                ? _selectAgentPermissionMode
+                                : null,
+                            onInputHeightChanged: _handleInputAreaHeightChanged,
+                            onClearSelectedModelOverride:
+                                _activeMode == ChatPageMode.normal &&
+                                    _activeConversationModelOverrideSelection != null
+                                ? () {
+                                    unawaited(_clearConversationModelOverride());
+                                  }
+                                : null,
+                            translucent: backgroundActive,
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -1535,9 +1576,6 @@ mixin _ChatPageUiMixin on _ChatPageStateBase {
                   const SizedBox.shrink(),
             ),
           ),
-        // Keep auxiliary browser content below the anchor spotlight so an
-        // expanded fan dims every non-anchor surface consistently.
-        _buildBrowserOverlay(constraints),
         Positioned.fill(
           child: _buildNormalSurfaceTransition(
             viewportWidth: constraints.maxWidth,

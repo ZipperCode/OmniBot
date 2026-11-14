@@ -169,6 +169,9 @@ bool shouldReloadConversationMessagesChanged({
   if (isRuntimeStreamSnapshot && (hasInFlightTask || hasRuntimeMessages)) {
     return false;
   }
+  if (reason == 'host_messages_replaced') {
+    return true;
+  }
   // A local send persists its optimistic user row through the native history
   // channel, which echoes a generic messages_replaced event. While the turn is
   // active that database snapshot can still be older than the live runtime;

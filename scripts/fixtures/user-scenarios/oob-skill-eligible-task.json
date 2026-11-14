@@ -1,0 +1,3 @@
+{
+  "prompt": "Run a reusable handoff validation: file_write candidate-verify-{{MARKER}}.txt containing project=demo,status=ready,artifact=report.txt; file_list to confirm; file_read to verify each field. Do not touch other files. In final answer report actual checks and generalize steps using workspace, filename, required fields and expected values as parameters. Explain stop conditions: missing file, mismatch or unauthorized overwrite. Never repair silently."
+}

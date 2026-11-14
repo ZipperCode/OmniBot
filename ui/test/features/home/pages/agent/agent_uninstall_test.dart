@@ -87,6 +87,8 @@ void main() {
     for (var frame = 0; frame < 10 && action.evaluate().isEmpty; frame++) {
       await tester.pump(const Duration(milliseconds: 100));
     }
+    // 确保页面滚动找到对应的操作按钮
+    await tester.scrollUntilVisible(action, 200);
     await tester.tap(action);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
@@ -120,8 +122,25 @@ void main() {
       size(tester, height: 3000);
       await tester.pumpWidget(page());
       await tester.pumpAndSettle();
+      // 折叠状态下，未启用的 disabled 与未安装的 missing 默认收起
+      expect(find.byKey(const Key('agent-uninstall-disabled')), findsNothing);
+      expect(find.byKey(const Key('agent-config-missing')), findsNothing);
+
+      // 展开“添加其他 Agent”分组以显示未启用及未安装的条目
+      final expandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+      final toggleButton = find.byKey(const Key('agent-toggle-add-others'));
+      if (expandTile.evaluate().isNotEmpty) {
+        await tester.tap(expandTile);
+        await tester.pumpAndSettle();
+      } else if (toggleButton.evaluate().isNotEmpty) {
+        await tester.tap(toggleButton);
+        await tester.pumpAndSettle();
+      }
+
       for (final id in [...supported, 'disabled', 'version-only']) {
-        expect(find.byKey(Key('agent-uninstall-$id')), findsOneWidget);
+        final key = Key('agent-uninstall-$id');
+        await tester.scrollUntilVisible(find.byKey(key), 200);
+        expect(find.byKey(key), findsOneWidget);
       }
       for (final id in [
         'missing',
@@ -129,7 +148,9 @@ void main() {
         'custom',
         'old-catalog',
       ]) {
-        expect(find.byKey(Key('agent-config-$id')), findsOneWidget);
+        final configKey = Key('agent-config-$id');
+        await tester.scrollUntilVisible(find.byKey(configKey), 200);
+        expect(find.byKey(configKey), findsOneWidget);
         expect(find.byKey(Key('agent-uninstall-$id')), findsNothing);
       }
       expect(tester.takeException(), isNull);
@@ -174,6 +195,18 @@ void main() {
         find.byKey(const Key('agent-uninstall-result-close-pi-acp')),
       );
       await tester.pumpAndSettle();
+      // 卸载后进入未安装状态并归入折叠的“添加其他 Agent”分组
+      expect(find.text('未安装'), findsNothing);
+      final expandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+      final toggleButton = find.byKey(const Key('agent-toggle-add-others'));
+      if (expandTile.evaluate().isNotEmpty) {
+        await tester.tap(expandTile);
+        await tester.pumpAndSettle();
+      } else if (toggleButton.evaluate().isNotEmpty) {
+        await tester.tap(toggleButton);
+        await tester.pumpAndSettle();
+      }
+      await tester.scrollUntilVisible(find.text('未安装'), 200);
       expect(find.text('未安装'), findsOneWidget);
       expect(find.text('安装'), findsOneWidget);
       expect(find.textContaining('1.0.0'), findsNothing);
@@ -251,6 +284,18 @@ void main() {
         'agent': agent('pi-acp', installed: false),
       });
       await tester.pumpAndSettle();
+      // 卸载后进入未安装状态并归入折叠的“添加其他 Agent”分组
+      expect(find.text('未安装'), findsNothing);
+      final expandTile = find.byKey(const Key('agent-expand-add-others-tile'));
+      final toggleButton = find.byKey(const Key('agent-toggle-add-others'));
+      if (expandTile.evaluate().isNotEmpty) {
+        await tester.tap(expandTile);
+        await tester.pumpAndSettle();
+      } else if (toggleButton.evaluate().isNotEmpty) {
+        await tester.tap(toggleButton);
+        await tester.pumpAndSettle();
+      }
+      await tester.scrollUntilVisible(find.text('未安装'), 200);
       expect(find.text('未安装'), findsOneWidget);
       expect(find.byKey(const Key('agent-check-pi-acp')), findsOneWidget);
       expect(find.byKey(const Key('agent-uninstall-pi-acp')), findsNothing);
@@ -328,6 +373,10 @@ void main() {
     size(tester);
     await tester.pumpWidget(page());
     await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('agent-uninstall-pi-acp')),
+      200,
+    );
     await tester.tap(find.byKey(const Key('agent-uninstall-pi-acp')));
     await tester.pumpAndSettle();
     expect(find.text('请刷新 Agent 列表后重试。'), findsOneWidget);
@@ -387,6 +436,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Uninstall'), findsOneWidget);
     expect(find.text('Update'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('agent-uninstall-Custom Long Agent Name')),
+      200,
+    );
     await tester.tap(
       find.byKey(const Key('agent-uninstall-Custom Long Agent Name')),
     );

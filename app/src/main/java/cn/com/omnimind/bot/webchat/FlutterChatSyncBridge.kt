@@ -58,6 +58,41 @@ object FlutterChatSyncBridge {
             arguments = snapshot
         )
     }
+    fun dispatchConversationOutboxChanged(
+        conversationId: Long,
+        revision: Long
+    ) {
+        val args = mapOf(
+            "conversationId" to conversationId,
+            "revision" to revision
+        )
+        dispatch(
+            method = "conversation_outbox_changed",
+            arguments = args
+        )
+    }
+
+    fun dispatchSkillAssetsChanged(
+        conversationId: Long?,
+        turnId: String?,
+        candidateId: String?,
+        state: String?,
+        revision: Long?,
+        enabled: Boolean? = null
+    ) {
+        val args = mutableMapOf<String, Any?>()
+        if (conversationId != null) args["conversationId"] = conversationId
+        if (turnId != null) args["turnId"] = turnId
+        if (candidateId != null) args["candidateId"] = candidateId
+        if (state != null) args["state"] = state
+        if (revision != null) args["revision"] = revision
+        if (enabled != null) args["enabled"] = enabled
+        dispatch(
+            method = "skill_assets_changed",
+            arguments = args
+        )
+    }
+
 
     /**
      * 把一条已经落库的外部用户消息（IM/微信/Telegram 等）直接推送给 Flutter 端，

@@ -1,5 +1,8 @@
 import 'dart:convert';
-
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:ui/theme/app_theme.dart';
+import 'package:ui/features/home/pages/command_overlay/widgets/cards/workspace_change_preview_sheet.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ui/features/home/pages/command_overlay/widgets/cards/agent_tool_transcript.dart';
 
@@ -154,5 +157,81 @@ void main() {
     expect(transcript.outputText, contains('"fact": "fact-0"'));
     expect(transcript.outputText, contains('"fact": "fact-127"'));
     expect(transcript.outputText, isNot(contains('[truncated]')));
+  });
+
+  testWidgets('AgentToolDetailBody renders workspace_change action button and triggers sheet', (tester) async {
+    const channel = MethodChannel('cn.com.omnimind.bot/AssistCoreEvent');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'workspaceChangePreview') {
+        return <String, dynamic>{
+          'item': {
+            'changeId': 'change-uuid-test',
+            'conversationId': 1,
+            'sessionId': 'session-test-1',
+            'turnId': 'turn-test-1',
+            'toolCallId': 'call-1',
+            'workspaceRoot': '/workspace',
+            'operation': 'write',
+            'targetRelativePath': 'lib/main.dart',
+            'snapshotStatus': 'ready',
+            'revision': 1,
+            'createdAt': 1700000000000,
+          },
+          'relativePath': 'lib/main.dart',
+          'diffText': '--- a/lib/main.dart\n+++ b/lib/main.dart\n@@ -1,1 +1,2 @@\n+// modified\n',
+          'isBinary': false,
+          'canRestore': true,
+          'expectedAfterHashes': {
+            'lib/main.dart': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+          },
+        };
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.lightTheme,
+        home: Scaffold(
+          body: AgentToolDetailBody(
+            cardData: {
+              'toolName': 'file_edit',
+              'displayName': '文件编辑',
+              'status': 'success',
+              'actions': [
+                {
+                  'type': 'workspace_change',
+                  'label': '查看变更',
+                  'payload': {
+                    'changeId': 'change-uuid-test',
+                    'conversationId': 1,
+                  },
+                },
+              ],
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final actionBtn = find.byKey(const ValueKey('agent-tool-action-0'));
+    expect(actionBtn, findsOneWidget);
+    expect(find.text('查看变更'), findsOneWidget);
+
+    await tester.tap(actionBtn);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(WorkspaceChangePreviewSheet), findsOneWidget);
+    expect(find.text('lib/main.dart'), findsWidgets);
+
+    // Dismiss sheet to cleanly unmount
+    Navigator.of(tester.element(find.byType(WorkspaceChangePreviewSheet))).pop();
+    await tester.pumpAndSettle();
   });
 }

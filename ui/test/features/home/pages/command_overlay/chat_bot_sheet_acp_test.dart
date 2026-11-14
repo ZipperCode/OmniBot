@@ -437,7 +437,14 @@ void main() {
           );
           expect(contents, contains('工具已经读取的完整结果'));
           if (scenario.result == 'error') {
-            expect(contents, contains('ACP transport disconnected'));
+            expect(
+              runtime.messages.any(
+                (message) =>
+                    message.cardData?['toolName'] == 'agent.status' &&
+                    message.cardData?['status'] == 'error',
+              ),
+              isTrue,
+            );
           }
           expect(
             runtime.messages.where(

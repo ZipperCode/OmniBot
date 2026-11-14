@@ -23,7 +23,7 @@ enum ChatComposerPopup {
   runtimeConfiguration,
 }
 
-enum ChatComposerPrimaryAction { cancel, send, addAttachment, disabled }
+enum ChatComposerPrimaryAction { cancel, send, addAttachment, disabled, queue }
 
 @immutable
 class ChatComposerState {
@@ -66,14 +66,17 @@ class ChatComposerState {
     bool supportsAttachmentFallback = false,
     bool? hasTextOverride,
   }) {
-    if (isProcessing) {
-      return ChatComposerPrimaryAction.cancel;
-    }
-    if (hasPayload(
+    final payloadPresent = hasPayload(
       hasAttachments: hasAttachments,
       hasExternalPayload: hasExternalPayload,
       hasTextOverride: hasTextOverride,
-    )) {
+    );
+    if (isProcessing) {
+      return payloadPresent
+          ? ChatComposerPrimaryAction.queue
+          : ChatComposerPrimaryAction.cancel;
+    }
+    if (payloadPresent) {
       return ChatComposerPrimaryAction.send;
     }
     return supportsAttachmentFallback

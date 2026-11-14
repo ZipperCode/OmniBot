@@ -6,6 +6,15 @@ import cn.com.omnimind.bot.webchat.ConversationDomainService
 import cn.com.omnimind.bot.webchat.RealtimeHub
 import cn.com.omnimind.bot.webchat.WebChatAvatarService
 import cn.com.omnimind.bot.webchat.WorkspaceFileService
+import cn.com.omnimind.bot.agent.conversation.OutboxMutation
+import cn.com.omnimind.bot.agent.conversation.OutboxException
+import cn.com.omnimind.bot.agent.runtime.AgentRuntimeManager
+import cn.com.omnimind.bot.agent.SkillAssetManagementException
+import cn.com.omnimind.bot.agent.manageAssets
+import cn.com.omnimind.bot.agent.workspace.WorkspaceChangeException
+import cn.com.omnimind.bot.agent.workspace.WorkspaceChangeService
+import cn.com.omnimind.bot.agent.workspace.manageChanges
+import cn.com.omnimind.bot.workspace.WorkspaceStorageAccess
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParseException
@@ -25,6 +34,7 @@ import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondText
 import io.ktor.server.response.respondTextWriter
 import io.ktor.server.routing.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.collect
 
 /**
@@ -69,6 +79,7 @@ object WebChatRoutes {
         webChatAvatarService: WebChatAvatarService
     ) {
         route("/webchat/api") {
+            registerAssetRoutes(conversationService)
             get("/bootstrap") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@get
                 call.respondJson(
@@ -176,6 +187,95 @@ object WebChatRoutes {
                 )
             }
 
+            get("/conversations/{conversationId}/outbox") {
+                if (!McpServerManager.requireWebChatAuth(call)) return@get
+                val conversationId = (call.parameters["conversationId"] ?: call.parameters["id"])?.toLongOrNull()
+                if (conversationId == null || conversationId <= 0L) {
+                    call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
+                    return@get
+                }
+                if (!conversationService.canReadConversation(conversationId)) {
+                    call.respondJson(mapOf("error" to "CONVERSATION_NOT_FOUND"), HttpStatusCode.NotFound)
+                    return@get
+                }
+                val runtime = AgentRuntimeManager.getInstance(conversationService.context)
+                val snapshot = runtime.conversationOutboxService.list(conversationId)
+                call.respondJson(snapshot.toMap())
+            }
+
+            post("/conversations/{conversationId}/outbox/attachments") {
+                if (!McpServerManager.requireWebChatAuth(call)) return@post
+                val conversationId = call.parameters["conversationId"]?.toLongOrNull()
+                if (conversationId == null || conversationId <= 0L) {
+                    call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
+                    return@post
+                }
+                val body = call.receiveJson()
+                val attachments = (body["attachments"] as? List<*>)?.map { item ->
+                    @Suppress("UNCHECKED_CAST")
+                    (item as? Map<String, Any?>) ?: throw BadRequestException("附件格式无效")
+                } ?: throw BadRequestException("缺少附件")
+                try {
+                    val imported = conversationService.importOutboxAttachments(
+                        conversationId, attachments, importedOrDataOnly = true
+                    )
+                    call.respondJson(mapOf("attachments" to imported))
+                } catch (error: OutboxException) {
+                    call.respondJson(
+                        mapOf("error" to error.errorCode, "message" to error.message),
+                        HttpStatusCode.BadRequest
+                    )
+                }
+            }
+
+            post("/conversations/{conversationId}/outbox") {
+                if (!McpServerManager.requireWebChatAuth(call)) return@post
+                val conversationId = (call.parameters["conversationId"] ?: call.parameters["id"])?.toLongOrNull()
+                if (conversationId == null || conversationId <= 0L) {
+                    call.respondJson(mapOf("error" to "INVALID_CONVERSATION_ID"), HttpStatusCode.BadRequest)
+                    return@post
+                }
+                if (!conversationService.canReadConversation(conversationId)) {
+                    call.respondJson(mapOf("error" to "CONVERSATION_NOT_FOUND"), HttpStatusCode.NotFound)
+                    return@post
+                }
+                val body = call.receiveJson()
+                val operation = (body["operation"] as? String)?.trim().orEmpty()
+                val requestMap = (body["request"] as? Map<String, Any?>) ?: body
+                val mutation = OutboxMutation(
+                    id = requestMap["id"] as? String,
+                    expectedRevision = (requestMap["expectedRevision"] as? Number)?.toLong(),
+                    payload = (requestMap["payload"] as? Map<String, Any?>)
+                        ?: (requestMap["promptSession"] as? Map<String, Any?>),
+                    expectedSessionId = requestMap["expectedSessionId"] as? String,
+                    expectedTurnId = requestMap["expectedTurnId"] as? String
+                )
+                val runtime = AgentRuntimeManager.getInstance(conversationService.context)
+                try {
+                    val snapshot = runtime.conversationOutboxService.mutate(conversationId, operation, mutation)
+                    call.respondJson(snapshot.toMap())
+                } catch (e: OutboxException) {
+                    val status = when (e.errorCode) {
+                        "outbox_revision_conflict", "outbox_target_changed" -> HttpStatusCode.Conflict
+                        "outbox_item_not_found" -> HttpStatusCode.NotFound
+                        "outbox_limit_exceeded", "outbox_empty", "outbox_payload_too_large",
+                        "outbox_attachment_unavailable", "outbox_invalid_operation", "outbox_immutable_state" -> HttpStatusCode.BadRequest
+                        else -> HttpStatusCode.BadRequest
+                    }
+                    val errPayload = mutableMapOf<String, Any?>(
+                        "error" to e.errorCode,
+                        "message" to e.message
+                    )
+                    e.snapshot?.let { errPayload["snapshot"] = it.toMap() }
+                    call.respondJson(errPayload, status)
+                } catch (e: Exception) {
+                    call.respondJson(
+                        mapOf("error" to (e.message ?: "OUTBOX_ERROR")),
+                        HttpStatusCode.InternalServerError
+                    )
+                }
+            }
+
             post("/conversations/{conversationId}/runs") {
                 if (!McpServerManager.requireWebChatAuth(call)) return@post
                 val conversationId = call.parameters["conversationId"]?.toLongOrNull()
@@ -233,6 +333,100 @@ object WebChatRoutes {
 
             registerWorkspaceRoutes(workspaceFileService)
             registerBrowserRoutes(browserMirrorService)
+        }
+    }
+
+    private fun Route.registerAssetRoutes(conversationService: ConversationDomainService) {
+        val context = conversationService.context
+        suspend fun ApplicationCall.skillAssets(operation: String, arguments: Map<String, Any?>) {
+            try {
+                if (!WorkspaceStorageAccess.isGranted(context)) {
+                    respondJson(mapOf("code" to "forbidden", "message" to "请先授予工作区访问权限"), HttpStatusCode.Forbidden)
+                    return
+                }
+                val conversationId = (arguments["conversationId"] as? Number)?.toLong()
+                if (conversationId != null && conversationService.getConversationPayload(conversationId) == null) {
+                    respondJson(mapOf("code" to "not_found", "message" to "来源对话已不可用"), HttpStatusCode.NotFound)
+                    return
+                }
+                respondJson(AgentRuntimeManager.getInstance(context).skillSuggestionService.manageAssets(operation, arguments))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: SkillAssetManagementException) {
+                val status = when (error.code) {
+                    "skill_candidate_not_found" -> HttpStatusCode.NotFound
+                    "skill_revision_conflict", "skill_name_conflict", "skill_content_conflict",
+                    "skill_content_modified", "skill_feedback_ineligible", "skill_revision_retired" -> HttpStatusCode.Conflict
+                    "skill_asset_invalid" -> HttpStatusCode.InternalServerError
+                    else -> HttpStatusCode.BadRequest
+                }
+                respondJson(mapOf("code" to error.code, "message" to error.message), status)
+            }
+        }
+        suspend fun ApplicationCall.workspaceChanges(operation: String, arguments: Map<String, Any?>) {
+            try {
+                respondJson(WorkspaceChangeService.getInstance(context).manageChanges(context, operation, arguments))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: WorkspaceChangeException) {
+                val status = when (error.errorCode) {
+                    "not_found" -> HttpStatusCode.NotFound
+                    "forbidden" -> HttpStatusCode.Forbidden
+                    "workspace_change_busy", "workspace_change_conflict" -> HttpStatusCode.Conflict
+                    else -> HttpStatusCode.BadRequest
+                }
+                respondJson(mapOf("code" to error.errorCode, "message" to error.message, "snapshot" to error.snapshot), status)
+            }
+        }
+        fun ApplicationCall.assetQuery(): Map<String, Any?> {
+            val query = request.queryParameters
+            fun number(key: String): Long? = query[key]?.let {
+                it.toLongOrNull() ?: throw BadRequestException("数值字段无效：$key")
+            }
+            return buildMap {
+                number("conversationId")?.let { put("conversationId", it) }
+                number("offset")?.let { put("offset", it) }
+                number("limit")?.let { put("limit", it) }
+                query["turnId"]?.let { put("turnId", it) }
+                query["skillId"]?.let { put("skillId", it) }
+                query["workspaceId"]?.let { put("workspaceId", it) }
+            }
+        }
+        get("/skills/suggestions") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@get
+            call.skillAssets("list", call.assetQuery())
+        }
+        post("/skills/suggestions") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@post
+            val body = call.receiveJson()
+            call.skillAssets(body["operation"] as? String ?: "", body)
+        }
+        get("/conversations/{conversationId}/workspace-changes") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@get
+            val id = call.parameters["conversationId"]?.toLongOrNull()
+                ?: throw BadRequestException("来源对话标识无效")
+            call.workspaceChanges("list", call.assetQuery() + ("conversationId" to id))
+        }
+        get("/workspaces/{workspaceId}/changes") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@get
+            val workspaceId = call.parameters["workspaceId"]
+                ?: throw BadRequestException("缺少工作区标识")
+            call.workspaceChanges("list_by_workspace", call.assetQuery() + ("workspaceId" to workspaceId))
+        }
+        get("/workspace-changes/{changeId}") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@get
+            val id = call.parameters["changeId"] ?: throw BadRequestException("缺少变更标识")
+            call.workspaceChanges("preview", call.assetQuery() + ("changeId" to id))
+        }
+        post("/workspace-changes/{changeId}") {
+            if (!McpServerManager.requireWebChatAuth(call)) return@post
+            val id = call.parameters["changeId"] ?: throw BadRequestException("缺少变更标识")
+            val body = call.receiveJson()
+            val operation = body["operation"] as? String ?: ""
+            if (operation != "restore" && operation != "discard") {
+                throw BadRequestException("未知变更管理操作")
+            }
+            call.workspaceChanges(operation, body + ("changeId" to id))
         }
     }
 

@@ -7,7 +7,6 @@ import android.content.SharedPreferences
 import org.junit.Assert.*
 import org.junit.Test
 import org.mockito.Mockito.*
-
 class WorkspaceScheduledTaskContractTest {
     @Test
     fun `create owns identity and update cannot resurrect deleted tasks`() {
@@ -54,4 +53,5 @@ class WorkspaceScheduledTaskContractTest {
             assertFalse(reopened.listTasks().any { it["taskId"] == id })
         }
     }
+
 }

@@ -183,7 +183,10 @@ data class SkillIndexEntry(
     val hasEvals: Boolean,
     val enabled: Boolean = true,
     val source: String = "user",
-    val installed: Boolean = true
+    val installed: Boolean = true,
+    val verificationStatus: String = "unverified",
+    val revisionId: String? = null,
+    val previousRevisionId: String? = null
 )
 
 data class ResolvedSkillContext(

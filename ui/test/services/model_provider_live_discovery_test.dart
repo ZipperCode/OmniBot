@@ -62,6 +62,12 @@ void main() {
         calls.add(id);
         return fetch(id);
       }
+      if (call.method == 'getModelCapabilityOverrides') {
+        return <String, dynamic>{};
+      }
+      if (call.method == 'syncProviderCatalogMetadata') {
+        return true;
+      }
       throw StateError('Unexpected method ${call.method}');
     });
   });

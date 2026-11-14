@@ -62,10 +62,7 @@ class WorkspaceScheduledTaskScheduler(
     private val gson = Gson()
     private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val agentRunBridge by lazy {
-        WebAgentRunBridge(
-            context = appContext,
-            manager = AgentRuntimeManager.getInstance(appContext)
-        )
+        AgentRuntimeManager.getInstance(appContext).conversationRunBridge
     }
 
     /** Model-facing creation owns the new identity; sync/import retains upsert. */

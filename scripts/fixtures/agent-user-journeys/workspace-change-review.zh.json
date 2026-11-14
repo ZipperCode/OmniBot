@@ -1,0 +1,130 @@
+{
+  "name": "受管工作区文件变更检查、冲突保护与明确确认恢复",
+  "preconditions": "中文聊天页，空闲小万会话，空输入框。真实模型 Provider 已配置就绪，工作区处于受管状态。",
+  "requireClockSync": true,
+  "requireProvider": true,
+  "steps": [
+    {
+      "action": "precondition",
+      "check": "provider-configured"
+    },
+    {
+      "action": "send",
+      "marker": "OOB_WORKSPACE_CHANGE",
+      "scenario": "oob-workspace-change-task.json"
+    },
+    {
+      "action": "reply",
+      "text": "OOB_WORKSPACE_CHANGE_DONE",
+      "timeoutMs": 180000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_WORKSPACE_CHANGE",
+      "expected": "done"
+    },
+    {
+      "action": "expect",
+      "containsText": "查看变更",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "tap",
+      "label": "查看变更"
+    },
+    {
+      "action": "expect",
+      "containsText": "受管工作区变更",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "expect",
+      "text": "仅恢复这些文件；不撤销命令、消息或模块部署。"
+    },
+    {
+      "action": "modify-file",
+      "path": "workspace/managed-change-OOB_WORKSPACE_CHANGE.txt",
+      "content": "EXTERNAL_DIRTY_CONTENT"
+    },
+    {
+      "action": "tap",
+      "label": "确认恢复"
+    },
+    {
+      "action": "expect",
+      "text": "确认恢复文件？",
+      "timeoutMs": 10000
+    },
+    {
+      "action": "tap",
+      "label": "确认恢复"
+    },
+    {
+      "action": "expect",
+      "containsText": "恢复冲突",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "assert-file",
+      "path": "workspace/managed-change-OOB_WORKSPACE_CHANGE.txt",
+      "contains": "EXTERNAL_DIRTY_CONTENT"
+    },
+    {
+      "action": "back"
+    },
+    {
+      "action": "send",
+      "marker": "OOB_WORKSPACE_CLEAN_RESTORE",
+      "scenario": "oob-workspace-restore-task.json"
+    },
+    {
+      "action": "reply",
+      "text": "OOB_WORKSPACE_CLEAN_RESTORE_DONE",
+      "timeoutMs": 180000
+    },
+    {
+      "action": "turn-outcome",
+      "marker": "OOB_WORKSPACE_CLEAN_RESTORE",
+      "expected": "done"
+    },
+    {
+      "action": "expect",
+      "containsText": "查看变更",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "tap",
+      "label": "查看变更",
+      "matchIndex": 1,
+      "expectedMatches": 2
+    },
+    {
+      "action": "expect",
+      "containsText": "受管工作区变更",
+      "timeoutMs": 15000
+    },
+    {
+      "action": "tap",
+      "label": "确认恢复"
+    },
+    {
+      "action": "expect",
+      "text": "确认恢复文件？",
+      "timeoutMs": 10000
+    },
+    {
+      "action": "tap",
+      "label": "确认恢复"
+    },
+    {
+      "action": "assert-file",
+      "path": "workspace/clean-restore-OOB_WORKSPACE_CLEAN_RESTORE.txt",
+      "exists": false
+    },
+    {
+      "action": "expect",
+      "text": "发送",
+      "timeoutMs": 15000
+    }
+  ]
+}

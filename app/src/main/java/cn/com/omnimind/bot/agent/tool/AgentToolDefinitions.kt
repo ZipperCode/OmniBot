@@ -499,8 +499,8 @@ object AgentToolDefinitions {
             "Role: general inherits parent capabilities; explorer reads and observes; memory-curator manages memory; planner creates plans without executing tools. Role permissions impose no round or token budgets.",
         "子任务省略 profileId 时使用的可选任务提示，默认 general。" to
             "Optional task guidance used when a subtask omits profileId. Defaults to general.",
-        "并发度，可选；省略时按本次子任务数并行执行。" to
-            "Optional concurrency. When omitted, all subtasks in this request run in parallel.",
+        "可选并发度（默认2，最大4）。" to
+            "Optional concurrency limit (default 2, maximum 4).",
         "结果聚合要求，可选。" to "Optional instructions for result aggregation.",
         "创建新的定时任务。`targetKind=subagent` 为唯一支持的执行类型；`subagentPrompt` 必须写成任务触发时要立即执行的动作，不要重复填写“每天几点提醒我/定时去做”这类调度描述。" to
             "Create a new scheduled task. `targetKind=subagent` is the only supported execution type; `subagentPrompt` must describe the concrete action to execute at trigger time instead of repeating scheduling phrasing such as daily at a given time or remind me to do it.",
@@ -2483,7 +2483,9 @@ object AgentToolDefinitions {
                     }
                     putJsonObject("concurrency") {
                         put("type", "integer")
-                        put("description", "可选并发度；省略时按本次子任务数并行执行。")
+                        put("minimum", 1)
+                        put("maximum", 4)
+                        put("description", "可选并发度（默认2，最大4）。")
                     }
                     putJsonObject("mergeInstruction") {
                         put("type", "string")
@@ -2679,12 +2681,14 @@ object AgentToolDefinitions {
                         }
                         putJsonObject("concurrency") {
                             put("type", "integer")
+                            put("minimum", 1)
+                            put("maximum", 4)
                             put(
                                 "description",
                                 if (locale == PromptLocale.EN_US)
-                                    "Optional concurrency limit; runs all tasks in parallel when omitted."
+                                    "Optional concurrency limit (default 2, maximum 4)."
                                 else
-                                    "可选并发度；省略时按本次子任务数并行执行。"
+                                    "可选并发度（默认2，最大4）。"
                             )
                         }
                         putJsonObject("mergeInstruction") {

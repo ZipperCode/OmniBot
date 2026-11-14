@@ -1,0 +1,3 @@
+{
+  "prompt": "Run terminal_execute with command 'sleep 180' to wait. Next, use file_write to create outbox-run-{{MARKER}}.txt in workspace with content OUTBOX_RUN_CONTENT_{{MARKER}}. Finally, use file_list to list workspace files and verify."
+}

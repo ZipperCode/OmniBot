@@ -1,5 +1,6 @@
 package cn.com.omnimind.bot.agent
 
+import cn.com.omnimind.bot.agent.skill.SkillSuggestionRedactor
 import java.io.File
 import java.security.MessageDigest
 import java.time.Instant
@@ -419,17 +420,7 @@ object SelfImprovingSkillFailureHook {
             .toList()
     }
 
-    private fun redactSensitiveText(raw: String): String {
-        if (raw.isBlank()) return raw
-        val sensitiveAssignment = Regex(
-            "(?i)([\\\"']?(?:(?:x[-_])?api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|authorization|cookie|credential|private[_-]?key)[\\\"']?\\s*[:=]\\s*)([\\\"'][^\\\"'\\n]*[\\\"']|[^\\s,}]+)"
-        )
-        return sensitiveAssignment.replace(raw) { match ->
-            "${match.groupValues[1]}\"[REDACTED]\""
-        }
-            .replace(Regex("(?i)Bearer\\s+[A-Za-z0-9._~+/=-]+"), "Bearer [REDACTED]")
-            .replace(Regex("\\bsk-[A-Za-z0-9_-]{12,}\\b"), "[REDACTED_KEY]")
-    }
+    private fun redactSensitiveText(raw: String): String = SkillSuggestionRedactor.redact(raw)
 
     private fun persistBlocks(file: File, blocks: List<String>) {
         val pendingIndexes = blocks.indices

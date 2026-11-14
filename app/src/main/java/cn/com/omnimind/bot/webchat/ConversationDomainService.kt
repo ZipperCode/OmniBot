@@ -14,6 +14,12 @@ import cn.com.omnimind.bot.agent.AgentConversationHistorySupport
 import cn.com.omnimind.bot.agent.AgentConversationModePolicy
 import cn.com.omnimind.bot.agent.AgentModelOverride
 import cn.com.omnimind.bot.agent.AgentTextSanitizer
+import cn.com.omnimind.bot.agent.AgentWorkspaceAttachmentSupport
+import cn.com.omnimind.bot.agent.AgentWorkspaceManager
+import cn.com.omnimind.bot.agent.conversation.OutboxException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import cn.com.omnimind.bot.agent.runtime.AcpAgentProfileStore
 import cn.com.omnimind.bot.agent.runtime.NA_AGENT_ID
 import cn.com.omnimind.bot.agent.runtime.REMOTE_CODEX_AGENT_ID
@@ -62,7 +68,7 @@ private fun isDefaultWebConversationTitle(title: String): Boolean {
 }
 
 class ConversationDomainService(
-    private val context: Context
+    internal val context: Context
 ) {
     private val historyRepository by lazy {
         AgentConversationHistoryRepository(context)
@@ -414,6 +420,9 @@ class ConversationDomainService(
             updatedAt = System.currentTimeMillis()
         )
         DatabaseHelper.updateConversation(updated)
+        if (archived) {
+            AgentRuntimeManager.getIfInitialized()?.conversationOutboxService?.pausePendingItems(conversationId, "conversation_archived")
+        }
         publishConversationEvent("conversation_updated", updated)
         return conversationToPayload(updated)
     }
@@ -428,6 +437,7 @@ class ConversationDomainService(
         )
         DatabaseHelper.updateConversation(updated)
         publishConversationEvent("conversation_updated", updated)
+        AgentRuntimeManager.getIfInitialized()?.conversationOutboxService?.pausePendingItems(conversationId, "conversation_completed")
         return conversationToPayload(updated)
     }
 
@@ -444,6 +454,7 @@ class ConversationDomainService(
         // this deleted thread.
         DatabaseHelper.deleteAgentSessionBindingByConversationId(conversationId)
         acpAgentProfileStore.unbindConversation(conversationId)
+        AgentRuntimeManager.getIfInitialized()?.conversationOutboxService?.clearQueueForConversation(conversationId)
         val payload = conversationToPayload(existing)
         RealtimeHub.publish(
             "conversation_deleted",
@@ -499,17 +510,95 @@ class ConversationDomainService(
         messages: List<Map<String, Any?>>,
         allowHistoryRemoval: Boolean = false,
         removedMessageIds: List<String>? = null,
+        settledPromptReceipt: Map<String, Any?>? = null,
     ) {
         check(canReadConversation(conversationId)) { "此云端会话已退役，无法访问。" }
         val normalizedMode = normalizeConversationMode(conversationMode)
-        historyRepository.replaceThreadMessagesFromUiSnapshot(
-            conversationId = conversationId,
-            conversationMode = normalizedMode,
-            messages = messages,
-            allowHistoryRemoval = allowHistoryRemoval,
-            removedMessageIds = removedMessageIds,
-        )
-        publishMessagesReplaced(conversationId, normalizedMode)
+        if (messages.isNotEmpty() || allowHistoryRemoval) {
+            historyRepository.replaceThreadMessagesFromUiSnapshot(
+                conversationId = conversationId,
+                conversationMode = normalizedMode,
+                messages = messages,
+                allowHistoryRemoval = allowHistoryRemoval,
+                removedMessageIds = removedMessageIds,
+            )
+            publishMessagesReplaced(conversationId, normalizedMode)
+        }
+        if (settledPromptReceipt != null) {
+            val sessionId = settledPromptReceipt["sessionId"]?.toString()
+            val turnId = settledPromptReceipt["turnId"]?.toString()
+            val requestId = settledPromptReceipt["requestId"]?.toString()
+            if (sessionId.isNullOrBlank() || turnId.isNullOrBlank() || requestId.isNullOrBlank()) {
+                throw OutboxException("outbox_history_unconfirmed", "历史回执缺少请求身份")
+            }
+            val confirmed = AgentRuntimeManager.getIfInitialized()?.onHistoryCommitted(
+                conversationId = conversationId,
+                sessionId = sessionId,
+                turnId = turnId,
+                requestId = requestId
+            ) ?: false
+            if (!confirmed) {
+                throw OutboxException("outbox_history_unconfirmed", "尚未确认正式请求终态，保留历史回执")
+            }
+        }
+    }
+
+    suspend fun importOutboxAttachments(
+        conversationId: Long,
+        attachments: List<Map<String, Any?>>,
+        importedOrDataOnly: Boolean = false
+    ): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
+        if (!canReadConversation(conversationId) || DatabaseHelper.getConversationById(conversationId) == null) {
+            throw OutboxException("conversation_not_found", "会话不存在")
+        }
+        if (attachments.isEmpty()) return@withContext emptyList()
+        val root = AgentWorkspaceManager(context).attachmentsDirectory().canonicalFile
+        val inputs = attachments.map { attachment ->
+            val path = attachment["path"]?.toString()?.takeIf { it.isNotBlank() }
+            val dataUrl = attachment["dataUrl"]?.toString()?.takeIf { it.startsWith("data:") }
+            if (importedOrDataOnly && dataUrl == null) {
+                val file = path?.let(::File)?.canonicalFile
+                if (file == null || !file.toPath().startsWith(root.toPath()) ||
+                    !file.isFile || !file.canRead()) {
+                    throw OutboxException("outbox_attachment_unavailable", "附件已失效，请重新选择")
+                }
+            }
+            linkedMapOf<String, Any?>().apply {
+                listOf("id", "name", "fileName", "mimeType", "size", "isImage").forEach { key ->
+                    attachment[key]?.let { put(key, it) }
+                }
+                if (dataUrl == null && path != null) {
+                    val file = File(path).canonicalFile
+                    if (file.toPath().startsWith(root.toPath()) && file.isFile && file.canRead()) {
+                        put("promptPath", AgentWorkspaceManager(context).shellPathForAndroid(file) ?: file.absolutePath)
+                    }
+                }
+                if (dataUrl != null) put("dataUrl", dataUrl)
+                else if (path != null) put("path", path)
+                else throw OutboxException("outbox_attachment_unavailable", "附件已失效，请重新选择")
+            }
+        }
+        val prepared = try {
+            AgentWorkspaceAttachmentSupport.prepareAttachmentsForRuntime(
+                context, "outbox-$conversationId", inputs
+            )
+        } catch (_: Exception) {
+            throw OutboxException("outbox_attachment_unavailable", "附件导入失败，请重新选择")
+        }
+        prepared.map { attachment ->
+            val file = attachment["path"]?.toString()?.let(::File)?.canonicalFile
+            if (file == null || !file.toPath().startsWith(root.toPath()) ||
+                !file.isFile || !file.canRead()) {
+                throw OutboxException("outbox_attachment_unavailable", "附件导入失败，请重新选择")
+            }
+            buildMap {
+                listOf("id", "name", "fileName", "mimeType", "isImage", "promptPath", "workspacePath", "sendToModel").forEach { key ->
+                    attachment[key]?.let { put(key, it) }
+                }
+                put("path", file.absolutePath)
+                put("size", file.length())
+            }
+        }
     }
 
     suspend fun appendUserMessage(
