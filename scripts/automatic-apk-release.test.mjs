@@ -4,7 +4,7 @@ import {mkdtemp, mkdir, writeFile, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {resolvePublication, parseManifest, readSourceVersion, createGitHubClient, preparePublication, publishPublication, verifyArtifactSet} from './automatic-apk-release.mjs';
+import {resolvePublication, parseManifest, readSourceVersion, createGitHubClient, preparePublication, publishPublication, verifyArtifactSet, parseSigningCertificate} from './automatic-apk-release.mjs';
 
 const sha = 'a'.repeat(40), otherSha = 'b'.repeat(40), cert = 'c'.repeat(64);
 const base = {channel: 'version', sourceVersion: '0.8.0', sourceSha: sha, beijingDate: '20261116', runNumber: 1, runAttempt: 1, releases: []};
@@ -218,4 +218,15 @@ test('缺资产或额外资产均不能上传', async t => {
   await assert.rejects(verifyArtifactSet(f.plan, f.artifacts, {inspect: f.inspect}), /三个资产/);
   await rm(join(f.artifacts, 'unexpected.log')); await rm(join(f.artifacts, f.name));
   await assert.rejects(verifyArtifactSet(f.plan, f.artifacts, {inspect: f.inspect}), /三个资产/);
+});
+
+test('官方 apksigner 编号与 SDK 范围格式均核验唯一证书，拒绝歧义', () => {
+  const numbered = `Signer #1 certificate SHA-256 digest: ${cert}\n`;
+  const ranged = `Signer (minSdkVersion=29, maxSdkVersion=2147483647) certificate SHA-256 digest: ${cert}\n`;
+  assert.equal(parseSigningCertificate(numbered), cert);
+  assert.equal(parseSigningCertificate(ranged), cert);
+  assert.equal(parseSigningCertificate(numbered + ranged), cert);
+  assert.throws(() => parseSigningCertificate(numbered + `Signer #2 certificate SHA-256 digest: ${'d'.repeat(64)}\n`));
+  assert.throws(() => parseSigningCertificate(`Source Stamp Signer certificate SHA-256 digest: ${cert}\n`));
+  assert.throws(() => parseSigningCertificate(''));
 });

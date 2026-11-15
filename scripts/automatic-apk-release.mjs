@@ -237,6 +237,11 @@ async function sdkTool(name, env) {
   }
   fail(`缺少 SDK ${name}`);
 }
+export function parseSigningCertificate(output) {
+  const certificates = [...new Set([...output.matchAll(/^Signer (?:#[0-9]+|\([^\r\n)]*\)) certificate SHA-256 digest: ([0-9a-fA-F]{64})\r?$/gm)].map(match => match[1].toLowerCase()))];
+  requireValue(certificates.length === 1, 'APK 签名证书摘要缺失或不唯一');
+  return certificates[0];
+}
 export async function inspectApk(path, env = process.env) {
   const aapt = await sdkTool('aapt', env);
   const apksigner = await sdkTool('apksigner', env);
@@ -251,7 +256,7 @@ export async function inspectApk(path, env = process.env) {
   const badging = run(aapt, ['dump', 'badging', path]);
   const cert = run(apksigner, ['verify', '--print-certs', path]);
   return {application_id: /^package: name='([^']+)'/m.exec(badging)?.[1], version_code: /^package: .*versionCode='([^']+)'/m.exec(badging)?.[1],
-    version_name: /^package: .*versionName='([^']+)'/m.exec(badging)?.[1], signing_certificate_sha256: /^Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]{64})\r?$/m.exec(cert)?.[1]?.toLowerCase()};
+    version_name: /^package: .*versionName='([^']+)'/m.exec(badging)?.[1], signing_certificate_sha256: parseSigningCertificate(cert)};
 }
 function validatePlan(plan, identity) {
   requireValue(plan.repository === identity.repository && plan.sourceSha === identity.sourceSha && plan.certificateSha256 === identity.certificateSha256, '发布计划与当前仓库、源码或证书不一致');
