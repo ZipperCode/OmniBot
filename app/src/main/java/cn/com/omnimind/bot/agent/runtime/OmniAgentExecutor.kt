@@ -252,9 +252,10 @@ class OmniAgentExecutor(
                 null
             }
             pluginSession = activePluginSession
-            // 每个用户 Turn 读取一次配置快照，统一送至 Registry 与 Dispatcher
+            // 目录以当前配置启动；管理工具提交后刷新目录，分派时读取新的配置快照。
+            val subagentConfigStore = XiaowanSubagentConfigStore(context)
             val subagentConfigResult = runCatching {
-                XiaowanSubagentConfigStore(context).read()
+                subagentConfigStore.read()
             }
             val subagentConfig = subagentConfigResult.getOrNull()
             val effectiveSubagentConfig = if (subagentConfig != null && subagentConfigResult.isSuccess) {
@@ -328,6 +329,7 @@ class OmniAgentExecutor(
                 contextCompactorFactory = contextCompactorFactory,
                 config = effectiveSubagentConfig,
                 configError = subagentConfigError,
+                configProvider = subagentConfigStore::read,
                 subagentLlmClientFactory = { _, subagentOverride ->
                     HttpAgentLlmClient(
                         scope = scope,
@@ -372,6 +374,7 @@ class OmniAgentExecutor(
                 subagentDispatcher = subagentDispatcher,
                 toolCatalog = toolRegistry,
                 terminalDistribution = terminalDistribution,
+                subagentConfigChanged = toolRegistry::refreshSubagentTools,
                 capabilityModules = buildList {
                     addAll(sessionCapabilityModules)
                     if (activePluginSession != null) {

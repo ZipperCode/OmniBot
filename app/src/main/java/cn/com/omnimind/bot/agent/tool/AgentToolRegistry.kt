@@ -44,8 +44,9 @@ class AgentToolRegistry(
     private val toolSchemas = linkedMapOf<String, JsonObject>()
     private val runtimeDescriptors = linkedMapOf<String, RuntimeToolDescriptor>()
     private val allToolsByName = linkedMapOf<String, ChatCompletionTool>()
+    private var modelToolsSnapshot: List<ChatCompletionTool> = emptyList()
     override val toolsForModel: List<ChatCompletionTool>
-        get() = allToolsByName.values.toList()
+        get() = modelToolsSnapshot
 
     init {
         val locale = AppLocaleManager.resolvePromptLocale(context)
@@ -174,6 +175,7 @@ class AgentToolRegistry(
         conversationDefinitions.forEach { definition ->
             registerModelDefinition(definition)
         }
+        modelToolsSnapshot = allToolsByName.values.toList()
 
         // Debug dump: full registered tool list to verify which ones the LLM actually receives.
         OmniLog.i(
@@ -184,6 +186,23 @@ class AgentToolRegistry(
                 "memory_load_present=${"memory_load" in runtimeDescriptors.keys} " +
                 "names=[${runtimeDescriptors.keys.joinToString(",")}]"
         )
+    }
+
+    fun refreshSubagentTools(config: XiaowanSubagentConfig) {
+        val subagentToolNames = setOf("subagent_dispatch", "subagent_manage")
+        subagentToolNames.forEach { name ->
+            toolSchemas.remove(name)
+            runtimeDescriptors.remove(name)
+            allToolsByName.remove(name)
+        }
+        val definitions = AgentToolDefinitions.subagentTools(
+            locale = AppLocaleManager.resolvePromptLocale(context),
+            config = config,
+        )
+        AgentConversationModePolicy
+            .filterToolDefinitionsForConversationMode(definitions, conversationMode)
+            .forEach(::registerModelDefinition)
+        modelToolsSnapshot = allToolsByName.values.sortedBy { it.function.name.lowercase() }
     }
 
     private fun registerModelDefinition(

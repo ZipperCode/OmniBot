@@ -1,0 +1,25 @@
+{
+  "name": "小万对话创建、同轮执行、重启更新与删除子代理",
+  "requireDevice": true,
+  "requireProvider": true,
+  "steps": [
+    {"action": "send", "marker": "OOB_LIVE_SUBAGENT_MODELS", "scenario": "xiaowan-subagent-models.json", "timeoutMs": 180000},
+    {"action": "reply", "containsText": "SUBAGENT_MODELS_LOCAL_45", "timeoutMs": 180000},
+    {"action": "reply", "text": "OOB_LIVE_SUBAGENT_MODELS_DONE", "timeoutMs": 180000},
+    {"action": "turn-outcome", "marker": "OOB_LIVE_SUBAGENT_MODELS", "expected": "done"},
+    {"action": "send", "marker": "OOB_LIVE_SUBAGENT_CREATE", "scenario": "xiaowan-subagent-create.json", "timeoutMs": 180000},
+    {"action": "reply", "containsText": "SUBAGENT_CREATED_42", "timeoutMs": 180000},
+    {"action": "reply", "text": "OOB_LIVE_SUBAGENT_CREATE_DONE", "timeoutMs": 180000},
+    {"action": "turn-outcome", "marker": "OOB_LIVE_SUBAGENT_CREATE", "expected": "done"},
+    {"action": "restart"},
+    {"action": "tap", "label": "smoke-review-{{RUN_ID}}"},
+    {"action": "send", "marker": "OOB_LIVE_SUBAGENT_UPDATE", "scenario": "xiaowan-subagent-update.json", "timeoutMs": 180000},
+    {"action": "reply", "containsText": "SUBAGENT_UPDATED_43", "timeoutMs": 180000},
+    {"action": "reply", "text": "OOB_LIVE_SUBAGENT_UPDATE_DONE", "timeoutMs": 180000},
+    {"action": "turn-outcome", "marker": "OOB_LIVE_SUBAGENT_UPDATE", "expected": "done"},
+    {"action": "send", "marker": "OOB_LIVE_SUBAGENT_DELETE", "scenario": "xiaowan-subagent-delete.json", "timeoutMs": 180000},
+    {"action": "reply", "containsText": "SUBAGENT_REMOVED_44", "timeoutMs": 180000},
+    {"action": "reply", "text": "OOB_LIVE_SUBAGENT_DELETE_DONE", "timeoutMs": 180000},
+    {"action": "turn-outcome", "marker": "OOB_LIVE_SUBAGENT_DELETE", "expected": "done"}
+  ]
+}

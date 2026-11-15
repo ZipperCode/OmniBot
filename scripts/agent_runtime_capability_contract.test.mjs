@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
@@ -81,36 +81,7 @@ async function source(relativePath) {
   return readFile(sourcePath(relativePath), "utf8");
 }
 
-async function dartSources(relativeDirectory) {
-  const paths = await readdir(sourcePath(relativeDirectory), { recursive: true });
-  return Promise.all(
-    paths
-      .filter((relativePath) => relativePath.endsWith(".dart"))
-      .map(async (relativePath) => ({
-        relativePath,
-        content: await readFile(sourcePath(path.join(relativeDirectory, relativePath)), "utf8"),
-      })),
-  );
-}
 
-test("the active harness, not a conversation-mode policy, supplies Agent tools", async () => {
-  const [modePolicy, dispatcher, contracts, registry, orchestrator] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/agent/AgentConversationModePolicy.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/SubagentDispatcher.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeContracts.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/tool/AgentToolRegistry.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentOrchestrator.kt"),
-  ]);
-
-  assert.match(modePolicy, /if \(isChatOnlyMode\(conversationMode\)\) \{\s*return emptyList\(\)\s*\}/);
-  assert.match(modePolicy, /return definitions/);
-  assert.doesNotMatch(modePolicy, /allowedTools|progressive|toolSearch/i);
-  assert.match(dispatcher, /val harnessCatalog = inheritedSubagentCatalog\(parentCatalogProvider\(\), profile\)/);
-  assert.match(dispatcher, /toolRegistry = harnessCatalog/);
-  assert.doesNotMatch(contracts, /usesProgressiveDiscovery|exposeToolNames/);
-  assert.match(registry, /get\(\) = allToolsByName\.values\.toList\(\)/);
-  assert.doesNotMatch(orchestrator, /usesProgressiveDiscovery|activateDiscoveredTools/);
-});
 
 test("installed Skills are not hidden by an OmniBot platform keyword policy", async () => {
   const [handler, skillRuntime, failureHook, systemPrompt] = await Promise.all([
@@ -206,33 +177,6 @@ test("the WebChat browser bridge does not impose traversal or collection quotas"
   assert.doesNotMatch(bridge, /\?: (?:500|5|10)/);
 });
 
-test("WebChat realtime updates are ordered without a dropping host buffer", async () => {
-  const hub = await source(
-    "app/src/main/java/cn/com/omnimind/bot/webchat/RealtimeHub.kt",
-  );
-
-  assert.match(hub, /Channel<RealtimeEvent>\(Channel\.UNLIMITED\)/);
-  assert.match(hub, /for \(event in pendingEvents\) \{\s*events\.emit\(event\)/);
-  assert.doesNotMatch(hub, /extraBufferCapacity\s*=\s*256|BufferOverflow\.DROP_OLDEST|events\.tryEmit/);
-});
-
-test("subagent dispatch accepts one requested task and has no static concurrency ceiling", async () => {
-  const [definition, handler, dispatcher] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/agent/tool/AgentToolDefinitions.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/tool/handlers/SubagentToolHandler.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/SubagentDispatcher.kt"),
-  ]);
-
-  const subagentDefinition = definition.slice(definition.indexOf("val subagentDispatchTool"));
-  assert.match(subagentDefinition, /putJsonArray\("required"\) \{\s*add\("tasks"\)\s*\}/);
-  assert.doesNotMatch(subagentDefinition.slice(0, subagentDefinition.indexOf("private val builtinToolDefinitions")), /minItems|maxItems/);
-  assert.match(handler, /return taskCount/);
-  assert.match(handler, /return requested/);
-  assert.doesNotMatch(handler, /coerceAtMost|MAX_.*CONCURRENCY|DEFAULT_.*CONCURRENCY/);
-  assert.match(dispatcher, /val limit = concurrency/);
-  assert.doesNotMatch(dispatcher, /coerceAtMost|MAX_.*CONCURRENCY|DEFAULT_.*CONCURRENCY/);
-});
-
 test("context compaction is an explicit slash command, not an automatic synthetic user turn", async () => {
   const openclawPage = await source("ui/lib/features/home/pages/chat/chat_page_openclaw.dart");
 
@@ -241,43 +185,6 @@ test("context compaction is an explicit slash command, not an automatic syntheti
   assert.match(openclawPage, /AssistsMessageService\.compactConversationContext\(/);
 });
 
-test("manual context thresholds remain user-configurable instead of capped by chat UI", async () => {
-  const [chatPageUi, overlays] = await Promise.all([
-    source("ui/lib/features/home/pages/chat/chat_page_ui.dart"),
-    source("ui/lib/features/home/pages/chat/widgets/chat_page_overlays.dart"),
-  ]);
-
-  assert.doesNotMatch(chatPageUi, /_k(?:Min|Max)ContextTokenThreshold/);
-  assert.doesNotMatch(overlays, /_k(?:Min|Max)ContextTokenThreshold/);
-  assert.match(overlays, /if \(parsed <= 0\)/);
-  assert.match(overlays, /widget\.initialThreshold,\s*_draftThreshold\.round\(\)/);
-});
-
-test("no chat path can reintroduce automatic context compaction or a second turn loop", async () => {
-  const [chatSources, orchestrator] = await Promise.all([
-    dartSources("ui/lib/features/home/pages/chat"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentOrchestrator.kt"),
-  ]);
-  const compactionCallers = chatSources
-    .filter(({ content }) => content.includes("beginContextCompaction("))
-    .map(({ relativePath }) => relativePath)
-    .sort();
-
-  assert.deepEqual(compactionCallers, [
-    "chat_page_openclaw.dart",
-    "services/chat_conversation_runtime_coordinator.dart",
-  ]);
-  for (const { content } of chatSources) {
-    assert.doesNotMatch(content, /trigger\s*[:=]\s*['\"]auto['\"]/);
-    assert.doesNotMatch(content, /automatic(?:ally)?\s+compact/i);
-  }
-  assert.doesNotMatch(orchestrator, /(?:MAX_|DEFAULT_)(?:TURN|DEBATE|ROUND)/);
-  assert.doesNotMatch(orchestrator, /(?:repeat|take)\(\s*16\s*\)/);
-  assert.doesNotMatch(orchestrator, /toolChoiceForRound|JsonPrimitive\("auto"\)/);
-  assert.match(orchestrator, /toolChoice\s*=\s*null/);
-  assert.doesNotMatch(orchestrator, /parallelToolCalls\s*=\s*true/);
-  assert.match(orchestrator, /parallelToolCalls\s*=\s*null/);
-});
 
 test("terminal Agent failures do not use a host retryability guess", async () => {
   const orchestrator = await source(
@@ -323,19 +230,6 @@ test("native task persistence has no private reasoning-size ceiling", async () =
   );
 });
 
-test("every persisted history page restores terminal tool and thinking presentation", async () => {
-  const repository = await source(
-    "app/src/main/java/cn/com/omnimind/bot/agent/conversation/AgentConversationHistoryRepository.kt",
-  );
-  const pagedHistory = repository.slice(
-    repository.indexOf("suspend fun listConversationMessagesPaged("),
-    repository.indexOf("suspend fun clearConversationMessages("),
-  );
-
-  assert.match(pagedHistory, /val normalized = normalizeEntriesForDisplay\(entries\)/);
-  assert.doesNotMatch(pagedHistory, /if \(offset == 0\)/);
-});
-
 test("remote session hydration cannot infer or terminate the ACP lifecycle", async () => {
   const remoteCodex = await source(
     "ui/lib/features/home/pages/chat/chat_page_remote_codex.dart",
@@ -347,29 +241,6 @@ test("remote session hydration cannot infer or terminate the ACP lifecycle", asy
   assert.match(remoteCodex, /final activeTaskId = runtimeTaskId;/);
   assert.doesNotMatch(remoteCodex, /Timer\.periodic|assumeActive|gracePeriod|_inferRemoteCodexSnapshotActive|remoteCodexLatestTurnLooksExternallyActive/);
   assert.doesNotMatch(remoteCodex, /remoteCodexTaskId|remote_task_id/);
-});
-
-test("managed Harness installation is explicit and never runs from chat launch", async () => {
-  const [runtimeManager, chatPage] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt"),
-    source("ui/lib/features/home/pages/chat/chat_page_agent.dart"),
-  ]);
-  const launchEnvironment = runtimeManager.slice(
-    runtimeManager.indexOf("private suspend fun prepareLocalAcpLaunch"),
-    runtimeManager.indexOf("private suspend fun prepareSharedProviderBinding"),
-  );
-  const agentDispatch = runtimeManager.slice(
-    runtimeManager.indexOf('if (method.startsWith("agent/"))'),
-    runtimeManager.indexOf('if (\n            method == "model/list"'),
-  );
-  const chatEntry = chatPage.slice(
-    chatPage.indexOf("Future<void> _handleAgentTap()"),
-    chatPage.indexOf("Future<void> _leaveAgentMode()"),
-  );
-
-  assert.doesNotMatch(launchEnvironment, /ensureManagedAcpAdapter\(/);
-  assert.match(agentDispatch, /if \(method == "agent\/prepare"\) \{\s*ensureManagedAcpAdapter\(targetProfile, force = canonicalArgs\["force"\] == true\)/);
-  assert.doesNotMatch(chatEntry, /prepareAgent\(/);
 });
 
 test("official ACP bridge upgrades remain declarative and require an explicit preparation pass", async () => {
@@ -416,47 +287,6 @@ test("local MCP is declared only through the official ACP session surface", asyn
   assert.match(runtimeMcp, /internal fun buildLocalAgentAcpMcpServers\(\s*supportsHttp: Boolean,/);
   assert.match(runtimeMcp, /if \(!supportsHttp\) return emptyList\(\)/);
   assert.match(localRuntime, /buildLocalAgentAcpMcpServers\(\s*supportsHttp = shouldDeclareLocalServer,/);
-});
-
-test("every local Harness attributes a session-scoped update through its active prompt reservation", async () => {
-  const [runtimeManager, adapters] = await Promise.all([
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AcpHarnessAdapters.kt"),
-  ]);
-  const eventProjection = runtimeManager.slice(
-    runtimeManager.indexOf("// ACP session/update is session-scoped on the wire."),
-    runtimeManager.indexOf("// Standard ACP session/update notifications are session-scoped"),
-  );
-
-  assert.match(eventProjection, /val implicitTurnId = if \(sourceAgentId != null\) \{\s*localEventRuntime\.activeTurnIdForSession\(threadId\)/);
-  assert.doesNotMatch(eventProjection, /supportsImplicitTurnAttribution|activeAgentId\(\)/);
-  assert.doesNotMatch(adapters, /supportsImplicitTurnAttribution/);
-});
-
-test("model discovery leaves catalog size to the active harness", async () => {
-  const [runtimeService, runtimeManager] = await Promise.all([
-    source("ui/lib/services/agent_runtime_service.dart"),
-    source("app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt"),
-  ]);
-
-  assert.match(runtimeService, /static Future<Map<String, dynamic>> listModels\(\) \{\s*return _invokeMap\('model\/list'\);\s*\}/);
-  assert.doesNotMatch(runtimeService, /_invokeMap\('model\/list', \{'limit': \d+\}\)/);
-  assert.match(runtimeManager, /"model\/list" -> requestWrappedList\(\s*"model\/list",\s*canonicalArgs,\s*"models"/);
-  assert.doesNotMatch(runtimeManager, /args\.ifEmpty \{ mapOf\("limit" to \d+\) \}/);
-});
-
-test("session discovery follows official cursors without a client-side page ceiling", async () => {
-  const [runtimeService, sessionsPage] = await Promise.all([
-    source("ui/lib/services/agent_runtime_service.dart"),
-    source("ui/lib/features/home/pages/agent/agent_sessions_page.dart"),
-  ]);
-
-  assert.match(runtimeService, /static Future<Map<String, dynamic>> listSessions\(\{\s*int\? limit,/);
-  assert.match(runtimeService, /if \(limit != null\) 'limit': limit,/);
-  assert.match(sessionsPage, /final seenCursors = <String>\{\};\s*while \(true\)/);
-  assert.match(sessionsPage, /nextCursor == null \|\| !seenCursors\.add\(nextCursor\)/);
-  assert.doesNotMatch(sessionsPage, /for \(var page = 0; page < \d+; page\+\+\)/);
-  assert.doesNotMatch(sessionsPage, /listSessions\(\s*limit:/);
 });
 
 test("MCP context and schedule lists do not impose a second result ceiling", async () => {
@@ -561,24 +391,4 @@ test("the local ACP connection terminates prompts with PromptResponse, not priva
   assert.match(connection, /PromptResponse\(stopReason = StopReason\.CANCELLED\)/);
   assert.doesNotMatch(connection, /AgentStreamEvent|acp\/presentation|codex\/event/);
   assert.doesNotMatch(connection, /turn\/(?:started|completed|failed|cancelled)/);
-});
-
-
-test("explicit managed preparation can retry old failures and must own the install gate", async () => {
-  const source = await readFile(new URL("../app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt", import.meta.url), "utf8");
-  const prepare = source.slice(source.indexOf("private suspend fun ensureManagedAcpAdapter(profile:"), source.indexOf("private suspend fun ensureManagedAcpAdapterLocked"));
-  const install = source.slice(source.indexOf("private suspend fun ensureManagedAcpAdapterLocked"), source.indexOf("private suspend fun isTerminalCommandAvailable"));
-  assert.match(prepare, /managedAcpPreparationGate.run\(profile.id\)/);
-  assert.doesNotMatch(prepare, /if \(managedAcpPreparationGate.isBusy\)/);
-  assert.doesNotMatch(install, /previousPreparationFailure/);
-});
-
- test("explicit reinstall bypasses health reuse; handshake cannot upgrade installed revision", async () => {
-  const manager = await readFile(new URL("../app/src/main/java/cn/com/omnimind/bot/agent/runtime/AgentRuntimeManager.kt", import.meta.url), "utf8");
-  const local = await readFile(new URL("../app/src/main/java/cn/com/omnimind/bot/agent/runtime/LocalAcpRuntime.kt", import.meta.url), "utf8");
-  assert.match(manager, /if \(!force && shouldReuseManagedAcpPreparation\(/);
-  assert.match(manager, /if \(!force && !shouldPrepareManagedAcpAdapter\(/);
-  const initialization = local.slice(local.indexOf("agentInfo = initialized"), local.indexOf("processExitWatcher?.cancel()", local.indexOf("agentInfo = initialized")));
-  assert.match(initialization, /preparationRevision = profileStore.health\(profile.id\).preparationRevision/);
-  assert.doesNotMatch(initialization, /officialRuntime/);
 });

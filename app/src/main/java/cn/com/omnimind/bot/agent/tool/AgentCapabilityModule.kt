@@ -20,6 +20,9 @@ import cn.com.omnimind.bot.agent.tool.handlers.SharedHelper
 import cn.com.omnimind.bot.agent.tool.handlers.SkillsToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.StickerToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.SubagentToolHandler
+import cn.com.omnimind.bot.agent.XiaowanSubagentConfig
+import cn.com.omnimind.bot.agent.XiaowanSubagentConfigStore
+import cn.com.omnimind.bot.agent.tool.handlers.SubagentConfigToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.SystemToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.TerminalToolHandler
 import cn.com.omnimind.bot.agent.tool.handlers.ToolHandler
@@ -63,6 +66,7 @@ class BuiltInAgentCapabilityModule(
     subagentDispatcher: SubagentDispatcher,
     helper: SharedHelper,
     includeVlmTool: Boolean,
+    subagentConfigChanged: (XiaowanSubagentConfig) -> Unit = {},
 ) : AgentCapabilityModule {
     private val terminalHandler = TerminalToolHandler(helper, workspaceManager, scope)
     private val privilegedHandler = PrivilegedToolHandler(
@@ -89,6 +93,12 @@ class BuiltInAgentCapabilityModule(
         MemoryToolHandler(helper),
         MemoryLoadToolHandler(helper),
         SubagentToolHandler(helper, subagentDispatcher),
+        SubagentConfigToolHandler(
+            helper = helper,
+            configStore = XiaowanSubagentConfigStore(context),
+            context = context,
+            onConfigChanged = subagentConfigChanged,
+        ),
     )
 
     override val toolDefinitions: List<AgentCapabilityToolDefinition>

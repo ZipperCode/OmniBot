@@ -22,12 +22,15 @@ import org.robolectric.annotation.Config
 class AgentToolDefinitionsSubagentTest {
 
     @Test
-    fun `disabled subagent config produces empty tool list`() {
+    fun `disabled subagent config hides dispatch but keeps manage tool`() {
         val tools = AgentToolDefinitions.subagentTools(
             PromptLocale.ZH_CN,
             XiaowanSubagentConfig(enabled = false)
         )
-        assertTrue(tools.isEmpty())
+        assertEquals(1, tools.size)
+        val tool = tools.first()
+        val function = tool["function"] as JsonObject
+        assertEquals("subagent_manage", function["name"]?.jsonPrimitive?.contentOrNull)
     }
 
     @Test
@@ -52,7 +55,8 @@ class AgentToolDefinitionsSubagentTest {
             profiles = SubagentProfileRegistry.all() + listOf(customProfile, disabledProfile)
         )
 
-        val tool = AgentToolDefinitions.subagentTools(PromptLocale.ZH_CN, config).single()
+        val tool = AgentToolDefinitions.subagentTools(PromptLocale.ZH_CN, config)
+            .first { it["function"]?.let { f -> (f as JsonObject)["name"]?.jsonPrimitive?.contentOrNull } == "subagent_dispatch" }
         val function = tool["function"] as JsonObject
         val parameters = function["parameters"] as JsonObject
         val properties = parameters["properties"] as JsonObject
@@ -104,5 +108,63 @@ class AgentToolDefinitionsSubagentTest {
             })
         }
         assertTrue(runCatching { registry.validateArguments("subagent_dispatch", unknownArgs) }.isFailure)
+    }
+
+    @Test
+    fun `registry refreshSubagentTools dynamically updates custom roles, disabling leaves manage, and chat_only stays empty`() {
+        val context = RuntimeEnvironment.getApplication()
+        val baseConfig = XiaowanSubagentConfig(
+            enabled = true,
+            profiles = SubagentProfileRegistry.all()
+        )
+        val registry = AgentToolRegistry(
+            context = context,
+            subagentConfig = baseConfig
+        )
+
+        // 初始时 dispatch 和 manage 工具均存在
+        assertTrue(registry.toolsForModel.any { it.function.name == "subagent_dispatch" })
+        assertTrue(registry.toolsForModel.any { it.function.name == "subagent_manage" })
+
+        val customProfile = SubagentProfile(
+            id = "custom-worker",
+            displayName = "自定义工作者",
+            systemPrompt = "do custom work",
+            baseProfileId = "general",
+            enabled = true
+        )
+        val updatedConfig = baseConfig.copy(
+            profiles = baseConfig.profiles + customProfile
+        )
+
+        // 动态 refreshSubagentTools 加入自定义角色
+        registry.refreshSubagentTools(updatedConfig)
+
+        // 验证 profileId 接受自定义角色
+        val validArgs = buildJsonObject {
+            put("tasks", buildJsonArray {
+                add(buildJsonObject {
+                    put("instruction", "test custom profile")
+                    put("profileId", "custom-worker")
+                })
+            })
+        }
+        registry.validateArguments("subagent_dispatch", validArgs)
+
+        // 禁用总开关后 refreshSubagentTools：只保留 subagent_manage，subagent_dispatch 移除
+        val disabledConfig = updatedConfig.copy(enabled = false)
+        registry.refreshSubagentTools(disabledConfig)
+        assertTrue(registry.toolsForModel.any { it.function.name == "subagent_manage" })
+        assertTrue(registry.toolsForModel.none { it.function.name == "subagent_dispatch" })
+
+        // chat_only 模式下 refreshSubagentTools 后仍没有工具
+        val chatOnlyRegistry = AgentToolRegistry(
+            context = context,
+            conversationMode = AgentConversationModePolicy.CHAT_ONLY_MODE,
+            subagentConfig = updatedConfig
+        )
+        assertTrue(chatOnlyRegistry.toolsForModel.none { it.function.name == "subagent_manage" || it.function.name == "subagent_dispatch" })
+        chatOnlyRegistry.refreshSubagentTools(updatedConfig)
+        assertTrue(chatOnlyRegistry.toolsForModel.none { it.function.name == "subagent_manage" || it.function.name == "subagent_dispatch" })
     }
 }

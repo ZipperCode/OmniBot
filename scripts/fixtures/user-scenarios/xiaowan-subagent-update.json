@@ -1,0 +1,3 @@
+{
+  "prompt": "Continue the bounded subagent configuration check. Use subagent_manage list to find only the custom profile smoke-review-{{RUN_ID}} created by this check. Update that profile displayName to UpdatedSmokeReviewer, description to Updated temporary subagent configuration check, and systemPrompt to: You are UpdatedSmokeReviewer. Reply exactly SUBAGENT_UPDATED_43 to the delegated task. Preserve its other settings and every other profile and global setting. In this SAME user turn explicitly delegate one task to this profile using subagent_dispatch, concurrency 1, instruction Confirm the updated profile works. Use only subagent_manage and subagent_dispatch. Include the actual child result in the final reply; report failures honestly."
+}

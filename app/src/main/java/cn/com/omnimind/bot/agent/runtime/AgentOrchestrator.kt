@@ -137,18 +137,28 @@ class AgentOrchestrator(
         // unit).  Allow exactly one pre-output recovery through the canonical
         // compactor; never replay a round after visible model output.
         var contextOverflowRecoveryAttempted = false
-        val toolBudget = AgentContextBudget.textTokens(json.encodeToString(toolRegistry.toolsForModel))
+        var budgetedTools = toolRegistry.toolsForModel
+        var toolBudget = AgentContextBudget.textTokens(json.encodeToString(budgetedTools))
             .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
         try {
             roundLoop@ while (true) {
                 completedModelRounds += 1
                 val round = completedModelRounds
+                val roundTools = toolRegistry.toolsForModel
+                if (roundTools !== budgetedTools) {
+                    toolBudget = AgentContextBudget.textTokens(json.encodeToString(roundTools))
+                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    budgetedTools = roundTools
+                    // 旧 Provider 用量包含旧工具定义，不能用于新的目录预算。
+                    usageContextTokens = null
+                    usageMessageCount = 0
+                }
                 val assistantContentPrefix = accumulatedAssistantContent
                 callback.onThinkingStart()
                 logInfo(
                     tag,
-                    "round=$round request_tools=${toolRegistry.toolsForModel.size}"
+                    "round=$round request_tools=${roundTools.size}"
                 )
                 val before = memory.snapshot()
                 val estimatedContext = AgentContextBudget.estimate(before, usageContextTokens, usageMessageCount, toolBudget)
@@ -197,7 +207,7 @@ class AgentOrchestrator(
                                 null
                             },
                             promptCacheKey = input.promptCacheKey,
-                            tools = toolRegistry.toolsForModel,
+                            tools = roundTools,
                             // These optional controls belong to the active
                             // Harness/Provider. The shared loop supplies the
                             // tool surface and preserves all tool results,

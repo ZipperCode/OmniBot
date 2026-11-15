@@ -1,0 +1,3 @@
+{
+  "prompt": "Finish the bounded subagent configuration check. Use subagent_manage list to locate only the custom profile smoke-review-{{RUN_ID}} created by this check, then delete ONLY that profile with the current expectedRevision. Do not delete or change any other profile, global settings, model or permissions. Use subagent_manage list again and confirm that this exact profile is absent. Use no other tools. Report SUBAGENT_REMOVED_44 only after successful deletion and read-back; otherwise report the actual failure."
+}

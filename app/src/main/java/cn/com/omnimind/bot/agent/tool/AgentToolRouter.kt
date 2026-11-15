@@ -23,6 +23,7 @@ class AgentToolRouter(
     // The handler is a gated entry point: it returns manual-enable guidance
     // while the operation module is disabled and executes only when enabled.
     includeVlmTool: Boolean = true,
+    subagentConfigChanged: (XiaowanSubagentConfig) -> Unit = {},
 ) : AgentToolExecutor {
 
     private val json = Json {
@@ -42,6 +43,7 @@ class AgentToolRouter(
         subagentDispatcher = subagentDispatcher,
         helper = helper,
         includeVlmTool = includeVlmTool,
+        subagentConfigChanged = subagentConfigChanged,
     )
 
     private val allHandlers: List<ToolHandler> =

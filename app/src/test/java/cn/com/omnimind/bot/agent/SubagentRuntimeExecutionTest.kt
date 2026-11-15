@@ -198,6 +198,141 @@ class SubagentRuntimeExecutionTest {
     }
 
     @Test
+    fun `configProvider dynamically provides config across dispatches and reports error on provider failure`() = runBlocking {
+        var currentConfig: XiaowanSubagentConfig = XiaowanSubagentConfig(enabled = false)
+        var shouldThrow = false
+        val llmClient = RecordingTurnLlmClient("done")
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = llmClient,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            config = XiaowanSubagentConfig(enabled = true),
+            configProvider = {
+                if (shouldThrow) error("I/O error reading config")
+                currentConfig
+            }
+        )
+
+        val env = FakeExecutionEnvironment()
+
+        // 1. 初始为 disabled -> 失败抛出子代理功能未启用
+        val result1 = runCatching {
+            dispatcher.dispatch(
+                parentEnv = env,
+                tasks = listOf(SubagentDispatcher.SubagentTaskSpec("general", "task 1")),
+                concurrency = 1
+            )
+        }
+        assertTrue(result1.isFailure)
+        assertTrue(result1.exceptionOrNull()?.message?.contains("子代理功能未启用") == true)
+
+        // 2. 动态启用并新增自定义角色 -> 下一次 dispatch 立即生效
+        val customProfile = SubagentProfile(
+            id = "dynamic-worker",
+            displayName = "动态角色",
+            systemPrompt = "sys",
+            baseProfileId = "general",
+            enabled = true
+        )
+        currentConfig = XiaowanSubagentConfig(
+            enabled = true,
+            profiles = SubagentProfileRegistry.all() + customProfile
+        )
+
+        val result2 = dispatcher.dispatch(
+            parentEnv = env,
+            tasks = listOf(SubagentDispatcher.SubagentTaskSpec("dynamic-worker", "task 2")),
+            concurrency = 1
+        )
+        assertEquals(1, result2.size)
+        assertEquals("completed", result2[0].status)
+        assertEquals("dynamic-worker", result2[0].profileId)
+
+        // 3. configProvider 读取抛出异常 -> 显式抛出配置读取失败
+        shouldThrow = true
+        val result3 = runCatching {
+            dispatcher.dispatch(
+                parentEnv = env,
+                tasks = listOf(SubagentDispatcher.SubagentTaskSpec("dynamic-worker", "task 3")),
+                concurrency = 1
+            )
+        }
+        assertTrue(result3.isFailure)
+        val msg = result3.exceptionOrNull()?.message.orEmpty()
+        assertTrue(msg.contains("子代理配置读取失败"))
+        assertTrue(msg.contains("I/O error reading config"))
+    }
+
+    @Test
+    fun `running dispatch captures config snapshot unaffected by subsequent config changes`() = runBlocking {
+        var currentConfig = XiaowanSubagentConfig(
+            enabled = true,
+            profiles = SubagentProfileRegistry.all(),
+            reasoningEffort = "low"
+        )
+        val slowLlm = object : AgentLlmClient {
+            val observedEfforts = mutableListOf<String?>()
+            override suspend fun streamTurn(
+                request: ChatCompletionRequest,
+                onReasoningUpdate: (suspend (String) -> Unit)?,
+                onContentUpdate: (suspend (String) -> Unit)?,
+                onToolCallInput: (suspend (AssistantToolCall) -> Unit)?,
+                allowTransportRetry: Boolean
+            ): ChatCompletionTurn {
+                observedEfforts.add(request.reasoningEffort)
+                // 模拟子任务执行中途外部修改了配置
+                currentConfig = XiaowanSubagentConfig(
+                    enabled = false,
+                    reasoningEffort = "high"
+                )
+                onContentUpdate?.invoke("subagent completed")
+                return ChatCompletionTurn(
+                    message = ChatCompletionMessage(
+                        role = "assistant",
+                        content = JsonPrimitive("subagent completed")
+                    )
+                )
+            }
+        }
+
+        val dispatcher = SubagentDispatcher(
+            llmClient = slowLlm,
+            toolExecutorProvider = { FakeToolExecutor() },
+            parentCatalogProvider = { FakeCatalog() },
+            eventAdapter = AgentEventAdapter(json),
+            model = "test-model",
+            configProvider = { currentConfig }
+        )
+
+        val env = FakeExecutionEnvironment()
+        val results = dispatcher.dispatch(
+            parentEnv = env,
+            tasks = listOf(
+                SubagentDispatcher.SubagentTaskSpec("general", "task 1"),
+                SubagentDispatcher.SubagentTaskSpec("general", "task 2")
+            ),
+            concurrency = 1
+        )
+
+        assertEquals(2, results.size)
+        // 两次调用均捕获了启动时的 reasoningEffort = "low"，未被中途修改的 "high" 干扰
+        assertEquals(listOf("low", "low"), slowLlm.observedEfforts)
+
+        // 但下一次 dispatch 时，读取已修改的 currentConfig（enabled = false），会被拦截
+        val nextResult = runCatching {
+            dispatcher.dispatch(
+                parentEnv = env,
+                tasks = listOf(SubagentDispatcher.SubagentTaskSpec("general", "task 3")),
+                concurrency = 1
+            )
+        }
+        assertTrue(nextResult.isFailure)
+        assertTrue(nextResult.exceptionOrNull()?.message?.contains("子代理功能未启用") == true)
+    }
+    @Test
     fun `same dispatch runs multiple roles with different models and reuses model client`() = runBlocking {
         val providerAlpha = ModelProviderProfile(
             id = "prov-alpha",

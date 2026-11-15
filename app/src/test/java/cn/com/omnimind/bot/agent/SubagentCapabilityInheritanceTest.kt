@@ -12,20 +12,21 @@ import org.junit.Test
 class SubagentCapabilityInheritanceTest {
 
     @Test
-    fun `child inherits parent capabilities except subagent_dispatch recursion`() {
+    fun `child inherits parent capabilities except subagent recursion and management`() {
         val parent = FakeCatalog(
             toolNames = listOf(
                 "terminal_execute",
                 "file_delete",
                 "schedule_task_create",
                 "plugin_custom_action",
-                "subagent_dispatch"
+                "subagent_dispatch",
+                "subagent_manage"
             )
         )
 
         val child = inheritedSubagentCatalog(parent)
 
-        // child 必须收窄，拒绝 subagent_dispatch 递归
+        // child 必须收窄，拒绝 subagent_dispatch 与 subagent_manage
         val childNames = child.toolsForModel.map { it.function.name }
         assertEquals(
             listOf(
@@ -37,14 +38,42 @@ class SubagentCapabilityInheritanceTest {
             childNames
         )
         assertTrue("subagent_dispatch must not be exposed to child", "subagent_dispatch" !in childNames)
+        assertTrue("subagent_manage must not be exposed to child", "subagent_manage" !in childNames)
         assertTrue(
             "child must reject subagent_dispatch invocation",
             runCatching { child.validateArguments("subagent_dispatch", JsonObject(emptyMap())) }.isFailure
         )
         assertTrue(
+            "child must reject subagent_manage invocation",
+            runCatching { child.validateArguments("subagent_manage", JsonObject(emptyMap())) }.isFailure
+        )
+        assertTrue(
             "searchTools must not return subagent_dispatch",
             child.searchTools("subagent_dispatch").none { it.name == "subagent_dispatch" }
         )
+        assertTrue(
+            "searchTools must not return subagent_manage",
+            child.searchTools("subagent_manage").none { it.name == "subagent_manage" }
+        )
+    }
+
+    @Test
+    fun `child profile attempting to allow subagent management or recursion is strictly filtered`() {
+        val parent = FakeCatalog(
+            listOf("file_read", "subagent_manage", "subagent_dispatch")
+        )
+        val child = inheritedSubagentCatalog(
+            parent,
+            SubagentProfile(
+                id = "escalation-attempt",
+                displayName = "越权尝试",
+                systemPrompt = "",
+                allowedTools = listOf("file_read", "subagent_manage", "subagent_dispatch")
+            )
+        )
+        assertEquals(listOf("file_read"), child.toolsForModel.map { it.function.name })
+        assertTrue(runCatching { child.validateArguments("subagent_manage", JsonObject(emptyMap())) }.isFailure)
+        assertTrue(runCatching { child.validateArguments("subagent_dispatch", JsonObject(emptyMap())) }.isFailure)
     }
 
     @Test

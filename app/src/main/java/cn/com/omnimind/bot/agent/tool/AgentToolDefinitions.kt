@@ -5,6 +5,7 @@ import cn.com.omnimind.baselib.privileged.PrivilegedProvider
 import cn.com.omnimind.baselib.privileged.PrivilegedActionPolicy
 import cn.com.omnimind.bot.agent.personal.PersonalContextTools
 import cn.com.omnimind.bot.agent.tool.search.WebSearchToolDefinitions
+import cn.com.omnimind.bot.agent.tool.handlers.SubagentConfigToolHandler
 import cn.com.omnimind.baselib.i18n.AppLocaleManager
 import cn.com.omnimind.baselib.i18n.PromptLocale
 import com.rk.terminal.runtime.TerminalDistribution
@@ -2419,85 +2420,6 @@ object AgentToolDefinitions {
         }
     }
 
-    val subagentDispatchTool: JsonObject = buildJsonObject {
-        put("type", "function")
-        putJsonObject("function") {
-            put("name", "subagent_dispatch")
-            put("displayName", "分派子任务")
-            put("toolType", "subagent")
-            put(
-                "description",
-                "仅当用户明确要求分派或并行时，把多个相互独立的小任务交给具有隔离上下文的 subagent，并返回聚合结果。"
-            )
-            put("postToolRule", "分派后等待工具结果，再汇总给用户。")
-            putJsonObject("parameters") {
-                put("type", "object")
-                putJsonObject("properties") {
-                    putJsonObject("tasks") {
-                        put("type", "array")
-                        putJsonObject("items") {
-                            put("type", "object")
-                            putJsonObject("properties") {
-                                putJsonObject("instruction") {
-                                    put("type", "string")
-                                    put(
-                                        "description",
-                                        "子任务的完整、自足指令，不要依赖主会话中未写入此处的上下文。"
-                                    )
-                                }
-                                putJsonObject("profileId") {
-                                    put("type", "string")
-                                    putJsonArray("enum") {
-                                        add("general")
-                                        add("explorer")
-                                        add("memory-curator")
-                                        add("planner")
-                                    }
-                                    put(
-                                        "description",
-                                        "角色：general 继承父级能力；explorer 读取与观察；memory-curator 整理记忆；planner 只生成计划、不执行工具。角色权限不设置运行轮数或 Token 预算。"
-                                    )
-                                }
-                            }
-                            putJsonArray("required") {
-                                add("instruction")
-                            }
-                        }
-                        put(
-                            "description",
-                            "要分派的子任务列表。每项都要包含自足的 instruction；profileId 为可选任务提示。"
-                        )
-                    }
-                    putJsonObject("defaultProfileId") {
-                        put("type", "string")
-                        putJsonArray("enum") {
-                            add("general")
-                            add("explorer")
-                            add("memory-curator")
-                            add("planner")
-                        }
-                        put(
-                            "description",
-                            "子任务省略 profileId 时使用的可选任务提示，默认 general。"
-                        )
-                    }
-                    putJsonObject("concurrency") {
-                        put("type", "integer")
-                        put("minimum", 1)
-                        put("maximum", 4)
-                        put("description", "可选并发度（默认2，最大4）。")
-                    }
-                    putJsonObject("mergeInstruction") {
-                        put("type", "string")
-                        put("description", "结果聚合要求，可选。")
-                    }
-                }
-                putJsonArray("required") {
-                    add("tasks")
-                }
-            }
-        }
-    }
 
     private val builtinToolDefinitions: List<JsonObject> = listOf(
         contextTimeNowTool,
@@ -2560,9 +2482,6 @@ object AgentToolDefinitions {
         memoryLoadTool
     )
 
-    private val subagentToolDefinitions: List<JsonObject> = listOf(
-        subagentDispatchTool
-    )
 
     fun builtinTools(
         locale: PromptLocale = currentLocale(),
@@ -2713,11 +2632,14 @@ object AgentToolDefinitions {
     fun subagentTools(
         locale: PromptLocale = currentLocale(),
         config: XiaowanSubagentConfig = XiaowanSubagentConfig(),
-    ): List<JsonObject> {
-        if (!config.enabled) return emptyList()
-        val enabledProfiles = config.profiles.filter { it.enabled }
-        if (enabledProfiles.isEmpty()) return emptyList()
-        return listOf(buildSubagentDispatchTool(enabledProfiles, locale))
+    ): List<JsonObject> = buildList {
+        add(SubagentConfigToolHandler.definition(locale))
+        if (config.enabled) {
+            val enabledProfiles = config.profiles.filter { it.enabled }
+            if (enabledProfiles.isNotEmpty()) {
+                add(buildSubagentDispatchTool(enabledProfiles, locale))
+            }
+        }
     }
 
     fun staticTools(
@@ -2734,7 +2656,7 @@ object AgentToolDefinitions {
         val definitions = buildList {
             addAll(staticTools(locale))
             addAll(memoryTools(locale))
-            addAll(subagentTools(locale))
+            addAll(subagentTools(locale, XiaowanSubagentConfig(enabled = true)))
             add(androidPrivilegedActionTool(emptyList(), ShizukuBackend.NONE, locale))
             add(androidPrivilegedSessionStartTool(ShizukuBackend.NONE, locale))
             add(androidPrivilegedSessionExecTool(ShizukuBackend.NONE, locale))

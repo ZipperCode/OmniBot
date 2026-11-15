@@ -51,6 +51,32 @@ class AndroidDeviceMcpServerTest {
     }
 
     @Test
+    fun `外部设备调用不能读取或修改小万子代理配置`() = runBlocking<Unit> {
+        val context = org.mockito.Mockito.mock(android.content.Context::class.java)
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        val callers = listOf(McpDeviceCaller.Global, McpDeviceCaller.Acp("test-lease", "test-token"))
+        for (caller in callers) {
+            val tools = AndroidDeviceMcpServer.modernToolDescriptors(context, scope, caller)
+            assertFalse(tools.any { it.name == "subagent_manage" })
+            for (action in listOf("list", "create")) {
+                val result = AndroidDeviceMcpServer.modernCallTool(
+                    context = context,
+                    scope = scope,
+                    name = "subagent_manage",
+                    arguments = mapOf("action" to kotlinx.serialization.json.JsonPrimitive(action)),
+                    caller = caller,
+                )
+                assertTrue(result.isError == true)
+            }
+        }
+        org.mockito.Mockito.verify(context, org.mockito.Mockito.never())
+            .getSharedPreferences(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            )
+    }
+
+    @Test
     fun `calling system action tool with Global caller returns error`() = runBlocking {
         val context = org.mockito.Mockito.mock(android.content.Context::class.java)
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)

@@ -16,7 +16,7 @@ internal class SubagentToolCatalogView(
     private val allowedToolNames: Set<String> = buildSet {
         for (tool in parent.toolsForModel) {
             val name = tool.function.name
-            if (name == "subagent_dispatch") continue
+            if (name in FORBIDDEN_CHILD_TOOLS) continue
             if (name in disallowedToolsSet) continue
             if (allowedToolsSet != null && name !in allowedToolsSet) continue
 
@@ -45,8 +45,8 @@ internal class SubagentToolCatalogView(
     override fun runtimeDescriptor(toolName: String) = parent.runtimeDescriptor(toolName)
 
     override fun validateArguments(toolName: String, arguments: JsonObject) {
-        require(toolName != "subagent_dispatch") {
-            "Tool 'subagent_dispatch' is outside the ${profile.id} role permissions"
+        require(toolName !in FORBIDDEN_CHILD_TOOLS) {
+            "Tool '$toolName' is outside the ${profile.id} role permissions"
         }
         require(toolName in allowedToolNames) {
             "Tool '$toolName' is outside the ${profile.id} role permissions"
@@ -66,6 +66,7 @@ internal class SubagentToolCatalogView(
         }
 
     companion object {
+        private val FORBIDDEN_CHILD_TOOLS = setOf("subagent_dispatch", "subagent_manage")
         private val OBSERVATION_ACTIONS = setOf(
             "navigate", "screenshot", "get_text", "get_page_info", "find_elements",
             "get_readable", "get_backbone", "list_tabs", "scroll", "go_back",

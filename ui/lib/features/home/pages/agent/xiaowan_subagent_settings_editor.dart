@@ -498,8 +498,8 @@ class _XiaowanSubagentSettingsEditorState
               icon: LucideIcons.bot,
               title: _text('启用 Subagent 子代理', 'Enable Subagents'),
               subtitle: _text(
-                '小万可在复杂任务中分派子任务并行执行；禁用后仍可编辑配置，保存后下一轮生效。',
-                'Allows Xiaowan to spawn subagents for parallel tasks. Settings stay editable when disabled.',
+                '关闭后停止接受新的子任务，仍可在此或对话中编辑配置；已启动的子任务不受影响。',
+                'Turning this off blocks new subtasks. Configuration remains editable here or in chat; running subtasks are unchanged.',
               ),
               trailing: OmniSettingsSwitch(
                 key: const Key('xiaowan-subagent-enabled-switch'),

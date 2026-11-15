@@ -50,6 +50,7 @@ class SubagentDispatcher(
     private val providerProfileResolver: (String) -> ModelProviderProfile? = ModelProviderConfigStore::getProfile,
     private val subagentImagePolicyResolver: ((model: String, override: AgentModelOverride?) -> AgentToolImageContinuationPolicy)? = null,
     private val subagentCompactorFactory: ((model: String, override: AgentModelOverride?, reasoningEffort: String?) -> AgentContextCompactionController)? = null,
+    private val configProvider: (() -> XiaowanSubagentConfig)? = null,
 ) {
 
     data class SubagentTaskSpec(
@@ -175,19 +176,30 @@ class SubagentDispatcher(
         parentToolCallId: String? = null,
         progressReporter: (suspend (SubagentProgressEvent) -> Unit)? = null
     ): List<SubagentRunResult> {
-        if (configError != null) {
-            throw IllegalStateException("子代理配置读取失败，请检查配置: ${configError.message}", configError)
+        val effectiveConfig = if (configProvider != null) {
+            try {
+                configProvider.invoke()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                throw IllegalStateException("子代理配置读取失败，请检查配置: ${error.message}", error)
+            }
+        } else {
+            if (configError != null) {
+                throw IllegalStateException("子代理配置读取失败，请检查配置: ${configError.message}", configError)
+            }
+            config
         }
-        require(config.enabled) { "子代理功能未启用" }
+        require(effectiveConfig.enabled) { "子代理功能未启用" }
         if (tasks.isEmpty()) return emptyList()
         require(concurrency > 0) { "concurrency must be positive" }
 
         // 校验所有任务的角色均存在且已启用
         val specsWithProfiles = tasks.map { spec ->
-            spec to config.requireProfile(spec.profileId)
+            spec to effectiveConfig.requireProfile(spec.profileId)
         }
 
-        val reasoningEffort = config.reasoningEffort?.trim()?.ifEmpty { null }
+        val reasoningEffort = effectiveConfig.reasoningEffort?.trim()?.ifEmpty { null }
             ?: parentEnv.reasoningEffort
 
         // 逐角色按本次启用的 Profile 解析模型上下文：
@@ -201,7 +213,7 @@ class SubagentDispatcher(
 
         for ((_, profile) in specsWithProfiles) {
             if (modelContextsByProfileId.containsKey(profile.id)) continue
-            val route = resolveEffectiveModelRoute(profile, config)
+            val route = resolveEffectiveModelRoute(profile, effectiveConfig)
             val context = contextsByRoute.getOrPut(route) {
                 if (route.isCustom) {
                     resolveCustomModelContext(

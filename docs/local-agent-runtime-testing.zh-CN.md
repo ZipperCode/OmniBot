@@ -181,11 +181,13 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 
 ## 小万 Subagent 配置与执行
 
-入口为 `Agents → 小万 → 配置`，读写仍走既有 `agent/config/read`、`agent/config/write`。配置按 Turn 读取同一快照，保存只影响下一轮；Provider/模型只保存引用，不复制认证信息。模型列表在用户主动点开选择器时由现有 Provider 入口加载。其他 Harness 与公共设备 MCP 不提供分派能力。
+入口包括 `Agents → 小万 → 配置` 和小万对话内的 `subagent_manage`，共用 `XiaowanSubagentConfigStore` 与 revision。工具动作是 `list`、`models`、`create`、`update`、`delete`、`configure`；写动作必须携带 `list` 返回的 `expectedRevision`，只修改指定字段，陈旧版本拒绝写入。模型引用可成对设为 null 恢复继承；`allowedTools: null` 继承基础权限，`[]` 不开放工具。其他非 nullable 字段传 null 会被拒绝，避免意外重新启用或放宽权限。
+
+目录在管理工具成功后刷新，每次分派读取一份已提交配置；同一用户 Turn 可创建后立即执行，正在运行的子任务不受后续配置更改影响。目录变化使旧 Provider 用量基线失效，下一轮按新工具定义重新计算上下文预算。Provider/模型只保存引用，`models` 仅投影本地缓存与手工模型的 id/name/model ids，不输出地址、认证或请求远端目录。其他 Harness、公共设备 MCP 与子代理均不能获取管理能力。
 
 配置包括总开关、默认子代理模型、思考档位、内置与自定义角色提示词以及工具允许/禁止列表。每个角色可保存独立 Provider/模型引用，完整组合优先于默认子代理模型；两层均未配置时继承父 Agent 当前模型。清空角色模型恢复继承，Provider 与模型必须成对设置或成对留空，显式配置失效时不静默回退。只解析本批实际使用的模型，全部角色均有专用模型时，不使用的失效默认 Provider 不阻断执行。基础角色权限与父目录是上限，空允许列表表示无工具，所有子角色均禁止递归分派。配置损坏、禁用角色、已删除 Provider 与过期 revision 明确报错，不重新启用较宽的默认权限。
 
-维护入口已包含 `SubagentRuntimeExecutionTest` 和 `XiaowanSubagentConfigBehaviorTest`；后者覆盖失败提交后的旧快照、跨实例 revision 冲突、冷读取、损坏配置与 null/空工具策略。`AgentOrchestratorTest` 覆盖父审批允许/拒绝的实际副作用，以及父取消后仍可挂起发送且只发送一次的子取消终态。
+维护入口包含 `SubagentRuntimeExecutionTest`、`XiaowanSubagentConfigBehaviorTest`、`SubagentConfigToolHandlerTest` 和 `SubagentConfigurationJourneyTest`。覆盖原子配置补丁、陈旧 revision、损坏配置、nullable 权限边界、模型安全投影、同一父回合创建后立即执行与工具预算刷新。`AndroidDeviceMcpServerTest` 验证外部调用不可读写小万子代理配置；`AgentOrchestratorTest` 保留父审批及取消边界回归。
 
 基础功能实际执行结果：
 
@@ -208,6 +210,15 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 - 在角色详情点击“使用默认子模型”，保存并重新加载后 planner 恢复继承。同一聊天验收再次完成两个子任务及主回复；17:51:08–17:51:13 的四条本轮请求标题均为 Pro。
 - 本轮安装 APK SHA256 为 `58e1dfa2d2be128cfd0282359091c7a52052807bd104d5fd06a2eb2745c094b3`，与本机构建产物一致。已恢复默认子代理模型跟随主 Agent、角色无专用模型、思考档位 `low`；保留验收对话，未删除用户历史，未改 Provider 或长期记忆。
 - 以上功能验收来自真实 Android 应用流程，不以单元测试、HTTP 200 或卡片存在代替；其他 Agent、全部 ROM 与发布全量门禁未做真机验收。
+
+### 对话内管理子代理验收（2026-11-15）
+
+- 原生 12 个测试类共 167 项通过，失败、错误、跳过均为 0；离线执行 `:app:testDevelopStandardDebugUnitTest` 与 `:app:assembleDevelopStandardDebug -Ptarget=lib/main_standard.dart`，排除两个依赖安装任务，结果 `BUILD SUCCESSFUL`。真实工具链回归经过父 Orchestrator、管理 handler、持久 store、目录刷新、Dispatcher 与子 Orchestrator，不以 mock 工具回声代替执行。
+- Flutter 配置页、工具卡片、共享 reducer 和角色序列化共 261 项通过；两处配置页分析 `No issues found!`。Node 旅程与输入器 24 项、单轮验收器 39 项通过。扩展源码合约最初有 10 项既有实现正则失败，删除这些实现固化用例而非重新钉住源码；剩余 30 项通过，不将删除用例计为功能验证。
+- 真实 Android 应用聊天先以 `models` 查询本地目录，再 `list → create → dispatch`，同一父 Turn 的子任务完成并返回 `SUBAGENT_CREATED_42`，revision 从 10 到 11。应用重启后重新打开该测试对话，`list → update → dispatch` 返回 `SUBAGENT_UPDATED_43`，revision 到 12；最后 `list → delete → list` 只删除本次角色，revision 到 13，完整配置与验收前一致。
+- 真机读回证明默认模型、思考档位、总开关与原有四个角色未变；测试对话保留，未修改 Provider 认证或长期记忆。安装 APK SHA256 为 `41874d4fa9e54b830af7b56334b6faa8ebee41e4af5d98cc0606659808ed0cda`，与本机构建产物一致。
+- 复用场景为 `scripts/fixtures/agent-user-journeys/xiaowan-subagent-config.zh.json`。首次运行因重启返回会话列表而缺少输入框，维护场景已补重开本次会话步骤；更新输入时 ADB 少输入末尾 3 个字符，输入器拒绝发送，补齐并精确核对本次合成草稿后仅发送一次。随后更新、分派、删除与官方终态均实际通过，未自动重放用户请求。
+- 真实设置页已检查新生效提示，退出时未保存改动。仓库未配置 LSP，使用 Kotlin 编译与 Flutter analyze；全部 ROM、其他 Agent 真机与发布全量门禁未执行。已有聊天页不展示紧凑模型控件，恢复阶段的模型前置检查未通过，复用先前已实际调用成功的 Provider 继续验证；这不是模型配置写入或路由切换。证据保留在本机临时目录 `C:/Users/Zipper/AppData/Local/Temp/oob-subagent-config-iqPdq6`，不包含认证输出。
 
 ## 待发箱、受管文件与技能资产旅程
 

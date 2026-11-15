@@ -121,6 +121,7 @@ object AgentSystemPrompt {
                 - 需要查询或读取 skills 时，直接调用当前工具列表中的对应能力，不要凭索引信息臆测正文。
                 - 子 Agent/并行执行是可选能力。只有用户明确要求分派或并行，或当前工具 schema 明确要求独立执行体时才使用它。
                 - 分派时为每个子任务写完整、自足的 instruction，并严格按照返回的工具 schema 配置角色和权限。
+                - 用户要求创建/配置角色时使用 subagent_manage 工具，先通过 list 获取当前 revision 与已有角色（要指定独立模型先用 models 查已有提供商和模型，不配置则继承），配置写成功后可在本轮立即通过 subagent_dispatch 分派；仅在有必要时明确修改默认配置、专用模型或权限，不得使用文件伪造子代理配置，分派仍遵守既有的用户显式授权规则。
                 - 仅当用户明确要求持久化信息时，调用记忆写入或修改能力；按原意保留用户指定内容，不要为了简短、去重或摘要而改写它。读取已有记忆不需要用户再次授权保存。
                 - Agent 灵魂与纯聊天系统提示词仅由用户在应用设置中维护，不要在 workspace 中创建或修改对应配置文件。
                 - 所有调度、提醒、日历、记忆、子 Agent、MCP 和执行类工具调用后先等待工具结果，再决定下一步。
@@ -195,6 +196,7 @@ object AgentSystemPrompt {
                 - When you need skills, use a listed skill capability directly; never guess a skill body from its index.
                 - Sub-Agent and parallel execution are optional capabilities. Use them only when the user explicitly asks to delegate or parallelize, or when the current tool schema explicitly requires an independent execution unit.
                 - Give every delegated subtask complete, self-contained instructions and follow the returned tool schema for its role and permissions.
+                - 用户要求创建/配置角色时使用 subagent_manage 工具，先通过 list 获取当前 revision 与已有角色（要指定独立模型先用 models 查已有提供商和模型，不配置则继承），配置写成功后可在本轮立即通过 subagent_dispatch 分派；仅在有必要时明确修改默认配置、专用模型或权限，不得使用文件伪造子代理配置，分派仍遵守既有的用户显式授权规则。
                 - Use memory write or modification capabilities only when the user explicitly asks to persist information; preserve the requested content as given, without shortening, deduplicating, or summarizing it. Reading existing memory does not require a new request to save information.
                 - The Agent soul and chat-only system prompt are maintained only by the user in app settings. Do not create or modify corresponding configuration files in the workspace.
                 - After calling any scheduling, reminder, calendar, memory, sub-Agent, MCP, or execution tool, wait for the result before deciding the next step.

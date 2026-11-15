@@ -1,0 +1,3 @@
+{
+  "prompt": "Use subagent_manage action models once to inspect only the existing local Provider and model catalog. Do not create, update, configure, delete, refresh or select anything. Do not request network access or use other tools. Report SUBAGENT_MODELS_LOCAL_45 only if the tool completed successfully. Do not repeat Provider addresses, keys, headers or any authentication data."
+}

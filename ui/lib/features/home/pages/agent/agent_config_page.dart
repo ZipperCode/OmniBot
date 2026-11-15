@@ -626,8 +626,8 @@ class _AgentConfigPageState extends State<AgentConfigPage> {
         'Saving does not interrupt the current conversation. Command, arguments, and environment changes apply when the Agent process next starts. Provider and model settings are managed by the Agent itself.',
       ),
       'xiaowan' => _text(
-        '配置小万在复杂任务中可调用的子代理、独立模型与推理档位。保存后下一轮对话生效。',
-        'Configure the subagents, dedicated model, and reasoning effort for Xiaowan. Changes apply on the next turn.',
+        '也可直接让小万创建和配置子代理。保存后用于后续分派，不中断已启动的子任务。',
+        'Ask Xiaowan to create and configure subagents directly. Saved changes apply to later dispatches without interrupting running subtasks.',
       ),
       _ => '',
     };

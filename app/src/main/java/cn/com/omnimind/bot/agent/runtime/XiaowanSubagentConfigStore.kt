@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.google.gson.Gson
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -93,6 +94,272 @@ class XiaowanSubagentConfigStore(
         }
     }
 
+    fun manage(
+        action: String,
+        profileId: String? = null,
+        profilePatch: JsonObject? = null,
+        settingsPatch: JsonObject? = null,
+        expectedRevision: Long? = null
+    ): Pair<Map<String, Any?>, XiaowanSubagentConfig> {
+        val actionNorm = action.trim().lowercase()
+        require(actionNorm in SUPPORTED_MANAGE_ACTIONS) {
+            "Unsupported manage action '$action'. Must be one of $SUPPORTED_MANAGE_ACTIONS."
+        }
+
+        synchronized(writeLock) {
+            if (actionNorm == "list") {
+                require(profileId == null) { "Action 'list' does not accept profileId." }
+                require(profilePatch == null) { "Action 'list' does not accept profile patch." }
+                require(settingsPatch == null) { "Action 'list' does not accept settings patch." }
+                return Pair(readPayload(), read())
+            }
+
+            requireNotNull(expectedRevision) {
+                "Field 'expectedRevision' is required for write action '$actionNorm'."
+            }
+
+            val currentConfig = read()
+            val rootObj = JsonParser.parseString(serializeConfig(currentConfig)).asJsonObject
+            val profilesArray = rootObj.getAsJsonArray("profiles")
+
+            when (actionNorm) {
+                "create" -> {
+                    require(settingsPatch == null) { "Action 'create' does not accept settings patch." }
+                    require(!profileId.isNullOrBlank()) { "Field 'profileId' is required for create." }
+                    val id = profileId.trim()
+                    require(ID_REGEX.matches(id)) {
+                        "Profile id '$id' is invalid. Must match pattern ${ID_REGEX.pattern}."
+                    }
+                    require(!SubagentProfileRegistry.isBuiltIn(id)) {
+                        "Cannot create built-in profile '$id'."
+                    }
+                    require(currentConfig.profiles.none { it.id == id }) {
+                        "Profile with id '$id' already exists."
+                    }
+                    requireNotNull(profilePatch) { "Field 'profile' is required for create." }
+                    validateProfilePatch(profilePatch, id, isCreate = true)
+
+                    val newProfileObj = JsonObject().apply {
+                        addProperty("id", id)
+                        for (entry in profilePatch.entrySet()) {
+                            if (entry.key != "id") {
+                                add(entry.key, entry.value)
+                            }
+                        }
+                        if (!has("baseProfileId")) {
+                            addProperty("baseProfileId", "general")
+                        }
+                        if (!has("enabled")) {
+                            addProperty("enabled", true)
+                        }
+                        if (!has("disallowedTools")) {
+                            add("disallowedTools", JsonArray())
+                        }
+                    }
+                    profilesArray.add(newProfileObj)
+                }
+                "update" -> {
+                    require(settingsPatch == null) { "Action 'update' does not accept settings patch." }
+                    require(!profileId.isNullOrBlank()) { "Field 'profileId' is required for update." }
+                    val id = profileId.trim()
+                    requireNotNull(profilePatch) { "Field 'profile' is required for update." }
+                    validateProfilePatch(profilePatch, id, isCreate = false)
+
+                    val targetProfileObj = profilesArray.firstOrNull { elem ->
+                        elem.isJsonObject && elem.asJsonObject.get("id")?.takeIf { it.isJsonPrimitive }?.asString == id
+                    }?.asJsonObject ?: throw IllegalArgumentException("Profile with id '$id' not found in config.")
+
+                    for (entry in profilePatch.entrySet()) {
+                        if (entry.key != "id") {
+                            targetProfileObj.add(entry.key, entry.value)
+                        }
+                    }
+                }
+                "delete" -> {
+                    require(profilePatch == null) { "Action 'delete' does not accept profile patch." }
+                    require(settingsPatch == null) { "Action 'delete' does not accept settings patch." }
+                    require(!profileId.isNullOrBlank()) { "Field 'profileId' is required for delete." }
+                    val id = profileId.trim()
+                    require(!SubagentProfileRegistry.isBuiltIn(id)) {
+                        "Built-in profile '$id' cannot be deleted."
+                    }
+                    require(currentConfig.profiles.any { it.id == id }) {
+                        "Profile with id '$id' does not exist."
+                    }
+                    var removeIndex = -1
+                    for (i in 0 until profilesArray.size()) {
+                        val elem = profilesArray.get(i)
+                        if (elem.isJsonObject && elem.asJsonObject.get("id")?.takeIf { it.isJsonPrimitive }?.asString == id) {
+                            removeIndex = i
+                            break
+                        }
+                    }
+                    if (removeIndex >= 0) {
+                        profilesArray.remove(removeIndex)
+                    }
+                }
+                "configure" -> {
+                    require(profileId == null) { "Action 'configure' does not accept profileId." }
+                    require(profilePatch == null) { "Action 'configure' does not accept profile patch." }
+                    requireNotNull(settingsPatch) { "Field 'settings' is required for configure." }
+                    validateSettingsPatch(settingsPatch)
+
+                    for (entry in settingsPatch.entrySet()) {
+                        rootObj.add(entry.key, entry.value)
+                    }
+                }
+                else -> throw IllegalArgumentException("Unsupported manage action '$actionNorm'.")
+            }
+
+            val payload = write(rootObj.toString(), expectedRevision)
+            val newConfig = read()
+            return Pair(payload, newConfig)
+        }
+    }
+
+    private fun validateProfilePatch(patch: JsonObject, id: String, isCreate: Boolean) {
+        for (entry in patch.entrySet()) {
+            require(entry.key in ALLOWED_PROFILE_KEYS) {
+                "Unknown field '${entry.key}' in profile patch."
+            }
+            require(!entry.value.isJsonNull || entry.key in setOf("allowedTools", "providerProfileId", "modelId")) {
+                "角色字段 '${entry.key}' 不接受 null；请省略该字段以保留原值。"
+            }
+        }
+        if (patch.has("id") && !patch.get("id").isJsonNull) {
+            val patchId = requireString(patch.get("id"), "id", "profile")
+            require(patchId == id) { "Field 'profile.id' ($patchId) must match profileId ($id)." }
+        }
+        if (isCreate) {
+            require(patch.has("displayName")) { "Field 'displayName' is required for create." }
+            require(patch.has("systemPrompt")) { "Field 'systemPrompt' is required for create." }
+        }
+        if (patch.has("displayName") && !patch.get("displayName").isJsonNull) {
+            requireString(patch.get("displayName"), "displayName", "profile '$id'")
+        }
+        if (patch.has("systemPrompt") && !patch.get("systemPrompt").isJsonNull) {
+            requireString(patch.get("systemPrompt"), "systemPrompt", "profile '$id'")
+        }
+        if (patch.has("description") && !patch.get("description").isJsonNull) {
+            val elem = patch.get("description")
+            require(elem.isJsonPrimitive && elem.asJsonPrimitive.isString) {
+                "Field 'description' in profile '$id' must be a string."
+            }
+        }
+        if (patch.has("baseProfileId") && !patch.get("baseProfileId").isJsonNull) {
+            val base = requireString(patch.get("baseProfileId"), "baseProfileId", "profile '$id'")
+            require(SubagentProfileRegistry.isBuiltIn(base)) {
+                "Invalid baseProfileId '$base'. Must be one of ${SubagentProfileRegistry.BUILT_IN_IDS}."
+            }
+        }
+        if (patch.has("enabled") && !patch.get("enabled").isJsonNull) {
+            val elem = patch.get("enabled")
+            require(elem.isJsonPrimitive && elem.asJsonPrimitive.isBoolean) {
+                "Field 'enabled' in profile '$id' must be a boolean."
+            }
+        }
+        if (patch.has("allowedTools") && !patch.get("allowedTools").isJsonNull) {
+            val elem = patch.get("allowedTools")
+            require(elem.isJsonArray) { "Field 'allowedTools' in profile '$id' must be an array or null." }
+            elem.asJsonArray.forEach { tool ->
+                require(tool.isJsonPrimitive && tool.asJsonPrimitive.isString) {
+                    "Tool name in allowedTools of profile '$id' must be a string."
+                }
+                val name = tool.asString.trim()
+                require(name.isNotEmpty()) { "Tool name in allowedTools cannot be empty." }
+                require(name !in FORBIDDEN_SUBAGENT_TOOLS) {
+                    "Tool '$name' cannot be granted in allowedTools."
+                }
+            }
+        }
+        if (patch.has("disallowedTools") && !patch.get("disallowedTools").isJsonNull) {
+            val elem = patch.get("disallowedTools")
+            require(elem.isJsonArray) { "Field 'disallowedTools' in profile '$id' must be an array." }
+            elem.asJsonArray.forEach { tool ->
+                require(tool.isJsonPrimitive && tool.asJsonPrimitive.isString) {
+                    "Tool name in disallowedTools of profile '$id' must be a string."
+                }
+                require(tool.asString.trim().isNotEmpty()) { "Tool name in disallowedTools cannot be empty." }
+            }
+        }
+        val hasProvider = patch.has("providerProfileId")
+        val hasModel = patch.has("modelId")
+        if (hasProvider || hasModel) {
+            require(hasProvider && hasModel) {
+                "Field 'providerProfileId' and 'modelId' in profile '$id' must both be provided or both omitted."
+            }
+            val pNull = patch.get("providerProfileId").isJsonNull
+            val mNull = patch.get("modelId").isJsonNull
+            require(pNull == mNull) {
+                "Field 'providerProfileId' and 'modelId' in profile '$id' must both be null (to clear) or both non-null (to set)."
+            }
+            if (!pNull) {
+                requireString(patch.get("providerProfileId"), "providerProfileId", "profile '$id'")
+                requireString(patch.get("modelId"), "modelId", "profile '$id'")
+            }
+        }
+    }
+
+    private fun validateSettingsPatch(patch: JsonObject) {
+        for (entry in patch.entrySet()) {
+            require(entry.key in ALLOWED_SETTINGS_KEYS) {
+                "Unknown field '${entry.key}' in settings patch."
+            }
+            require(!entry.value.isJsonNull || entry.key in setOf("providerProfileId", "modelId", "reasoningEffort")) {
+                "全局字段 '${entry.key}' 不接受 null；请省略该字段以保留原值。"
+            }
+        }
+        if (patch.has("enabled") && !patch.get("enabled").isJsonNull) {
+            val elem = patch.get("enabled")
+            require(elem.isJsonPrimitive && elem.asJsonPrimitive.isBoolean) {
+                "Field 'enabled' in settings must be a boolean."
+            }
+        }
+        val hasProvider = patch.has("providerProfileId")
+        val hasModel = patch.has("modelId")
+        if (hasProvider || hasModel) {
+            require(hasProvider && hasModel) {
+                "Field 'providerProfileId' and 'modelId' in settings must both be provided or both omitted."
+            }
+            val pNull = patch.get("providerProfileId").isJsonNull
+            val mNull = patch.get("modelId").isJsonNull
+            require(pNull == mNull) {
+                "Field 'providerProfileId' and 'modelId' in settings must both be null (to clear) or both non-null (to set)."
+            }
+            if (!pNull) {
+                requireString(patch.get("providerProfileId"), "providerProfileId", "settings")
+                requireString(patch.get("modelId"), "modelId", "settings")
+            }
+        }
+        if (patch.has("reasoningEffort") && !patch.get("reasoningEffort").isJsonNull) {
+            val raw = requireString(patch.get("reasoningEffort"), "reasoningEffort", "settings").lowercase()
+            if (raw.isNotEmpty() && raw != "inherit") {
+                require(raw in XiaowanSubagentConfig.SUPPORTED_REASONING_EFFORTS) {
+                    "Unsupported reasoningEffort: $raw. Must be one of ${XiaowanSubagentConfig.SUPPORTED_REASONING_EFFORTS}."
+                }
+            }
+        }
+    }
+
+    private fun requireString(elem: JsonElement?, fieldName: String, context: String): String {
+        requireNotNull(elem) { "Field '$fieldName' in $context is required." }
+        require(!elem.isJsonNull) { "Field '$fieldName' in $context cannot be null." }
+        require(elem.isJsonPrimitive && elem.asJsonPrimitive.isString) {
+            "Field '$fieldName' in $context must be a string."
+        }
+        val s = elem.asString.trim()
+        require(s.isNotEmpty()) { "Field '$fieldName' in $context cannot be blank." }
+        return s
+    }
+
+    private fun optionalString(elem: JsonElement?, fieldName: String, context: String): String? {
+        if (elem == null || elem.isJsonNull) return null
+        require(elem.isJsonPrimitive && elem.asJsonPrimitive.isString) {
+            "Field '$fieldName' in $context must be a string."
+        }
+        return elem.asString.trim()
+    }
+
     private fun parseAndValidate(content: String): XiaowanSubagentConfig {
         require(content.isNotBlank()) { "Configuration content cannot be empty." }
         val root = try {
@@ -133,17 +400,13 @@ class XiaowanSubagentConfigStore(
         val hasTopModel = obj.has("modelId") && !obj.get("modelId").isJsonNull
 
         val providerProfileId = if (hasTopProvider) {
-            val raw = obj.get("providerProfileId").asString
-            require(raw.isNotBlank()) { "Field 'providerProfileId' must not be blank." }
-            raw.trim()
+            requireString(obj.get("providerProfileId"), "providerProfileId", "settings")
         } else {
             null
         }
 
         val modelId = if (hasTopModel) {
-            val raw = obj.get("modelId").asString
-            require(raw.isNotBlank()) { "Field 'modelId' must not be blank." }
-            raw.trim()
+            requireString(obj.get("modelId"), "modelId", "settings")
         } else {
             null
         }
@@ -153,7 +416,7 @@ class XiaowanSubagentConfigStore(
         }
 
         val reasoningEffort = if (obj.has("reasoningEffort") && !obj.get("reasoningEffort").isJsonNull) {
-            val raw = obj.get("reasoningEffort").asString.trim().lowercase()
+            val raw = requireString(obj.get("reasoningEffort"), "reasoningEffort", "settings").lowercase()
             if (raw.isEmpty() || raw == "inherit") {
                 null
             } else {
@@ -188,21 +451,16 @@ class XiaowanSubagentConfigStore(
     }
 
     private fun parseProfile(obj: JsonObject): SubagentProfile {
-        val id = obj.get("id")?.takeIf { !it.isJsonNull }?.asString?.trim().orEmpty()
-        require(id.isNotEmpty()) { "Profile id cannot be empty." }
+        val id = requireString(obj.get("id"), "id", "profile")
         require(ID_REGEX.matches(id)) {
             "Profile id '$id' is invalid. Must match pattern ${ID_REGEX.pattern}."
         }
 
-        val displayName = obj.get("displayName")?.takeIf { !it.isJsonNull }?.asString?.trim().orEmpty()
-        require(displayName.isNotEmpty()) { "displayName cannot be empty for profile '$id'." }
+        val displayName = requireString(obj.get("displayName"), "displayName", "profile '$id'")
+        val systemPrompt = requireString(obj.get("systemPrompt"), "systemPrompt", "profile '$id'")
+        val description = optionalString(obj.get("description"), "description", "profile '$id'").orEmpty()
 
-        val systemPrompt = obj.get("systemPrompt")?.takeIf { !it.isJsonNull }?.asString?.trim().orEmpty()
-        require(systemPrompt.isNotEmpty()) { "systemPrompt cannot be empty for profile '$id'." }
-
-        val description = obj.get("description")?.takeIf { !it.isJsonNull }?.asString?.trim().orEmpty()
-
-        val rawBase = obj.get("baseProfileId")?.takeIf { !it.isJsonNull }?.asString?.trim()
+        val rawBase = optionalString(obj.get("baseProfileId"), "baseProfileId", "profile '$id'")
         val baseProfileId = if (rawBase.isNullOrEmpty()) {
             if (SubagentProfileRegistry.isBuiltIn(id)) id else "general"
         } else {
@@ -223,8 +481,8 @@ class XiaowanSubagentConfigStore(
             obj.getAsJsonArray("allowedTools").map { elem ->
                 val name = elem.asString.trim()
                 require(name.isNotEmpty()) { "Tool name in allowedTools cannot be empty." }
-                require(name != "subagent_dispatch") {
-                    "subagent_dispatch recursion is forbidden in allowedTools."
+                require(name !in FORBIDDEN_SUBAGENT_TOOLS) {
+                    "Tool '$name' cannot be granted in allowedTools."
                 }
                 name
             }
@@ -245,17 +503,13 @@ class XiaowanSubagentConfigStore(
         val hasRoleModel = obj.has("modelId") && !obj.get("modelId").isJsonNull
 
         val providerProfileId = if (hasRoleProvider) {
-            val raw = obj.get("providerProfileId").asString
-            require(raw.isNotBlank()) { "Profile '$id' providerProfileId cannot be blank." }
-            raw.trim()
+            requireString(obj.get("providerProfileId"), "providerProfileId", "profile '$id'")
         } else {
             null
         }
 
         val modelId = if (hasRoleModel) {
-            val raw = obj.get("modelId").asString
-            require(raw.isNotBlank()) { "Profile '$id' modelId cannot be blank." }
-            raw.trim()
+            requireString(obj.get("modelId"), "modelId", "profile '$id'")
         } else {
             null
         }
@@ -393,5 +647,15 @@ class XiaowanSubagentConfigStore(
         const val XIAOWAN_AGENT_ID = "xiaowan-acp"
         const val XIAOWAN_KIND = "xiaowan"
         val ID_REGEX = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
+        val FORBIDDEN_SUBAGENT_TOOLS = setOf("subagent_dispatch", "subagent_manage")
+        val SUPPORTED_MANAGE_ACTIONS = setOf("list", "create", "update", "delete", "configure")
+        val ALLOWED_PROFILE_KEYS = setOf(
+            "id", "displayName", "systemPrompt", "description",
+            "baseProfileId", "enabled", "allowedTools", "disallowedTools",
+            "providerProfileId", "modelId"
+        )
+        val ALLOWED_SETTINGS_KEYS = setOf(
+            "enabled", "providerProfileId", "modelId", "reasoningEffort"
+        )
     }
 }
