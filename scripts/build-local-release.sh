@@ -298,12 +298,6 @@ find_sdk_tool() {
   local candidate=""
   local dir=""
 
-  for candidate in "$tool_name" "${tool_name}.exe" "${tool_name}.bat" "${tool_name}.cmd"; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return 0
-    fi
-  done
 
   local sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
   if [[ -n "$sdk_root" && -d "$sdk_root/build-tools" ]]; then
@@ -317,6 +311,12 @@ find_sdk_tool() {
       done
     done < <(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V -r)
   fi
+  for candidate in "$tool_name" "${tool_name}.exe" "${tool_name}.bat" "${tool_name}.cmd"; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
 
   return 1
 }
@@ -380,13 +380,15 @@ read_and_verify_apk_identity() {
   fi
 
   local certs_out=""
-  if ! certs_out="$("$apksigner_tool" verify --print-certs "$apk_file" 2>/dev/null)"; then
+  if ! certs_out="$("$apksigner_tool" verify --print-certs "$apk_file" 2>&1)"; then
     echo "APK 签名验证失败: $apk_file" >&2
     exit 1
   fi
-  apk_cert_sha256="$(sed -n -E 's/^Signer (#[0-9]+|\([^)]*\)) certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]{64})[[:space:]]*$/\2/p' <<< "$certs_out" | tr '[:upper:]' '[:lower:]' | sort -u)"
+  apk_cert_sha256="$(sed -n -E 's/^Signer .*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]{64})[[:space:]]*$/\1/p' <<< "$certs_out" | tr '[:upper:]' '[:lower:]' | sort -u)"
 
   if [[ ! "$apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'apksigner=%s\n' "$apksigner_tool" >&2
+    printf '%s\n' "$certs_out" | sed -n -E '/certificate (SHA-256 digest|DN):/p' >&2
     echo "无法读取 APK 签名证书 SHA-256（APK 可能未签名或签名损坏）: $apk_file" >&2
     exit 1
   fi

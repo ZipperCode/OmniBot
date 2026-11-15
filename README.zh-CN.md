@@ -329,6 +329,7 @@ CI 保留完整历史 gitleaks 扫描；已核实的测试夹具/生成摘要误
 更新禁用变量只注入签名构建；签名前 debug 门禁使用普通构建配置。
 原生恢复测试显式模拟重启前后 boot ID，读取能力测试不授予 Root，避免依赖 CI 宿主环境。
 签名校验兼容 SDK 的 signer 编号及 min/max SDK 范围输出，但必须得到唯一证书摘要并与仓库变量一致。
+元数据校验优先使用已安装 Android SDK build-tools 中的工具，避免 runner PATH 的同名程序改变输出语义。
 首次启用 fork 时，还需确认仓库级 Actions 已允许运行：
 `gh api -X PUT repos/ZipperCode/OmniBot/actions/permissions -F enabled=true -f allowed_actions=all`。
 单独 dispatch 成功不代表 push/schedule 已生效；以之后一次真实 main 推送产生的 `event=push` 运行验收。

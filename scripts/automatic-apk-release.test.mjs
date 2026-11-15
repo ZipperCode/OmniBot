@@ -225,6 +225,7 @@ test('官方 apksigner 编号与 SDK 范围格式均核验唯一证书，拒绝�
   const ranged = `Signer (minSdkVersion=29, maxSdkVersion=2147483647) certificate SHA-256 digest: ${cert}\n`;
   assert.equal(parseSigningCertificate(numbered), cert);
   assert.equal(parseSigningCertificate(ranged), cert);
+  assert.equal(parseSigningCertificate(`Signer (minSdkVersion=33 (dev release=true), maxSdkVersion=2147483647) certificate SHA-256 digest: ${cert}\n`), cert);
   assert.equal(parseSigningCertificate(numbered + ranged), cert);
   assert.throws(() => parseSigningCertificate(numbered + `Signer #2 certificate SHA-256 digest: ${'d'.repeat(64)}\n`));
   assert.throws(() => parseSigningCertificate(`Source Stamp Signer certificate SHA-256 digest: ${cert}\n`));

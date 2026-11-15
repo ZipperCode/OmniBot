@@ -238,7 +238,7 @@ async function sdkTool(name, env) {
   fail(`缺少 SDK ${name}`);
 }
 export function parseSigningCertificate(output) {
-  const certificates = [...new Set([...output.matchAll(/^Signer (?:#[0-9]+|\([^\r\n)]*\)) certificate SHA-256 digest: ([0-9a-fA-F]{64})\r?$/gm)].map(match => match[1].toLowerCase()))];
+  const certificates = [...new Set([...output.matchAll(/^Signer [^\r\n]*certificate SHA-256 digest:\s*([0-9a-fA-F]{64})[ \t]*\r?$/gm)].map(match => match[1].toLowerCase()))];
   requireValue(certificates.length === 1, 'APK 签名证书摘要缺失或不唯一');
   return certificates[0];
 }
