@@ -321,6 +321,9 @@ fork 自动签名包设置 `OMNI_DISABLE_APP_UPDATES=1`，关闭上游不同签�
 自动发布禁用内置 Provider 凭据（`OOB_BUNDLE_LLMTHU_PROVIDER=0`）。
 构建或上传失败仅保留 draft，同一源码 SHA 可重跑恢复；不同提交不能接管同 tag 的旧 draft，
 需要修复源码时提升源码版本。发布过程不上传上游 Worker，fork 不镜像 CNB。
+内置 Pi ACP 安装资产通过 `tools/pi-acp` 的 `npm run package:android` 生成，
+发布前 `package:check` 核验源码、锁文件和运行时修订。打包文本及摘要统一为 LF，
+Windows CRLF 与 Linux 检出应生成相同身份，不能通过关闭检查规避 stale 资产。
 
 <h2 id="architecture">架构概览</h2>
 ```text

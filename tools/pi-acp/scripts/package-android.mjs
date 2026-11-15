@@ -10,9 +10,9 @@ const repo = resolve(root, "../..");
 const files = Object.fromEntries([
   "package.json", "package-lock.json", "LICENSE",
   ...readdirSync(join(root, "dist")).filter((file) => file.endsWith(".js")).sort().map((file) => `dist/${file}`),
-].map((file) => [file, readFileSync(join(root, file), "utf8")]));
+].map((file) => [file, readFileSync(join(root, file), "utf8").replaceAll("\r\n", "\n")]));
 const archive = JSON.stringify(files);
-const digest = createHash("sha256").update(archive).update(readFileSync(fileURLToPath(import.meta.url))).digest("hex").slice(0, 20);
+const digest = createHash("sha256").update(archive).update(readFileSync(fileURLToPath(import.meta.url), "utf8").replaceAll("\r\n", "\n")).digest("hex").slice(0, 20);
 const payload = gzipSync(archive, { level: 9 }).toString("base64");
 // A self-contained asset keeps deployment on the existing catalog installer
 // seam. There is no npm publication or network download of adapter source.

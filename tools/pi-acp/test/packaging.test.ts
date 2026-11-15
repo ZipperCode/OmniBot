@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, copyFileSync } from "node:fs";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { matchesAndroidInstaller } from "../scripts/installer-validation.mjs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const files = {
   "package-lock.json": '{"lockfileVersion":3}\n',
@@ -68,4 +71,37 @@ test("the shipped Android installer verifies after Linux-style recompression", (
   assert.notEqual(linux, shipped);
   assert.equal(matchesAndroidInstaller(shipped, linux, contents), true);
   assert.equal(matchesAndroidInstaller(linux, shipped, contents), true);
+});
+
+test("打包在 LF 与 CRLF 检出下产生相同安装身份并可检查", () => {
+  const temporary = mkdtempSync(join(tmpdir(), "omnibot-pi-newlines-"));
+  try {
+    const results: Array<{revision: string; archive: string}> = [];
+    for (const newline of ["\n", "\r\n"]) {
+      const repo = join(temporary, newline.length === 1 ? "lf" : "crlf");
+      const tool = join(repo, "tools/pi-acp");
+      mkdirSync(join(tool, "scripts"), {recursive: true});
+      mkdirSync(join(tool, "dist"));
+      mkdirSync(join(repo, "app/src/main/assets/acp/install"), {recursive: true});
+      for (const filename of ["package.json", "package-lock.json", "LICENSE"]) {
+        writeFileSync(join(tool, filename), JSON.stringify({name: "fixture", license: "MIT"}) + newline);
+      }
+      writeFileSync(join(tool, "dist/index.js"), "console.log('fixture');" + newline);
+      const generator = readFileSync(new URL("../scripts/package-android.mjs", import.meta.url), "utf8").replaceAll("\r\n", "\n").replaceAll("\n", newline);
+      writeFileSync(join(tool, "scripts/package-android.mjs"), generator);
+      copyFileSync(new URL("../scripts/installer-validation.mjs", import.meta.url), join(tool, "scripts/installer-validation.mjs"));
+      const catalog = join(repo, "app/src/main/assets/acp/agents.json");
+      writeFileSync(catalog, JSON.stringify({agents: [{id: "pi-acp", runtime: {preparationRevision: "old"}}]}));
+      execFileSync(process.execPath, [join(tool, "scripts/package-android.mjs")]);
+      execFileSync(process.execPath, [join(tool, "scripts/package-android.mjs"), "--check"]);
+      const shipped = readFileSync(join(repo, "app/src/main/assets/acp/install/pi.sh"), "utf8");
+      const payload = shipped.match(/Buffer\.from\('([A-Za-z0-9+/=]+)', 'base64'\)/)![1];
+      results.push({revision: JSON.parse(readFileSync(catalog, "utf8")).agents[0].runtime.preparationRevision, archive: gunzipSync(Buffer.from(payload, "base64")).toString()});
+    }
+    assert.equal(results[0].revision, results[1].revision);
+    assert.equal(results[0].archive, results[1].archive);
+    assert.equal(JSON.parse(results[0].archive)["dist/index.js"], "console.log('fixture');\n");
+  } finally {
+    rmSync(temporary, {recursive: true, force: true});
+  }
 });
