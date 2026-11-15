@@ -6,3 +6,11 @@ a6aebf900488107126b24f1d9eda333cd832efc2:docs/reference/openclaw-deploy.md:gener
 # The fixtures now construct the port through URI; these fingerprints cover the original commit only.
 364a8f9385effce44eaadff4940eac980ad837da:baselib/src/test/java/cn/com/omnimind/baselib/llm/ProviderModelCapabilitiesTest.kt:generic-api-key:31
 364a8f9385effce44eaadff4940eac980ad837da:baselib/src/test/java/cn/com/omnimind/baselib/llm/ProviderModelCapabilitiesTest.kt:generic-api-key:61
+
+# 历史脱敏/回环认证测试使用虚构凭据，PEM 示例为不可解析的截断内容。
+dc4118875bab66b21a55c28470740faedb6dfb0c:app/src/test/java/cn/com/omnimind/bot/agent/workspace/WorkspaceChangeServiceTest.kt:generic-api-key:161
+dc4118875bab66b21a55c28470740faedb6dfb0c:app/src/test/java/cn/com/omnimind/bot/agent/workspace/WorkspaceChangeServiceTest.kt:private-key:109
+6f15cd552267f033ddbde9adcb2b5ceb52254184:app/src/test/java/cn/com/omnimind/bot/plugin/official/agentweb/AgentWebRuntimeTest.kt:generic-api-key:29
+
+# 已移除的 OpenCL 生成表：kernel 名称映射到内容摘要，不是外部服务凭据。
+9336787f23e245f89c32a0e3b4158dc3190ac619:third_party/mnn_android/source/backend/opencl/execution/cl/opencl_source_map.hpp:linear-client-secret:365

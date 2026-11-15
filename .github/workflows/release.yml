@@ -40,7 +40,6 @@ jobs:
     env:
       ORG_GRADLE_PROJECT_OMNI_NDK_VERSION: '28.2.13676358'
       OOB_BUNDLE_LLMTHU_PROVIDER: '0'
-      OMNI_DISABLE_APP_UPDATES: '1'
 
     steps:
       - name: 检查发布分支
@@ -200,6 +199,7 @@ jobs:
           RELEASE_TAG: ${{ steps.publication.outputs.tag }}
           OMNI_VERSION_NAME: ${{ steps.publication.outputs.version_name }}
           OMNI_VERSION_CODE: ${{ steps.publication.outputs.version_code }}
+          OMNI_DISABLE_APP_UPDATES: '1'
           RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
           OMNI_RELEASE_STORE_FILE: ${{ runner.temp }}/release.p12
           OMNI_RELEASE_STORE_PWD: ${{ secrets.RELEASE_PASSWORD }}

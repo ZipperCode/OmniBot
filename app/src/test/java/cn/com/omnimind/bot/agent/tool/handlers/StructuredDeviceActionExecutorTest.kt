@@ -592,6 +592,8 @@ class StructuredDeviceActionExecutorTest {
 
     @Test
     fun readActionsDoNotPromptForPermission() = runBlocking {
+        // 只读免授权路径不得借用其他写操作测试的 Root 授权夹具。
+        revokeRootForTest()
         val requested = AtomicBoolean(false)
         val requester = AgentPermissionRequester { _, _, _ ->
             requested.set(true)

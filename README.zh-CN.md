@@ -324,6 +324,10 @@ fork 自动签名包设置 `OMNI_DISABLE_APP_UPDATES=1`，关闭上游不同签�
 内置 Pi ACP 安装资产通过 `tools/pi-acp` 的 `npm run package:android` 生成，
 发布前 `package:check` 核验源码、锁文件和运行时修订。打包文本及摘要统一为 LF，
 Windows CRLF 与 Linux 检出应生成相同身份，不能通过关闭检查规避 stale 资产。
+CI 保留完整历史 gitleaks 扫描；已核实的测试夹具/生成摘要误报只在
+`.gitleaksignore` 按历史提交、路径、规则和行号精确排除，不忽略整个文件或规则。
+更新禁用变量只注入签名构建；签名前 debug 门禁使用普通构建配置。
+原生恢复测试显式模拟重启前后 boot ID，读取能力测试不授予 Root，避免依赖 CI 宿主环境。
 
 <h2 id="architecture">架构概览</h2>
 ```text

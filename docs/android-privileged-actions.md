@@ -36,6 +36,7 @@
 - **热点 (`hotspot`)**：严格依赖 Android 16+（API 36+）标准 `TetheringManager`（`PrivilegedTetheringApi36`），构造 `TetheringRequest.Builder(TETHERING_WIFI).build()` 下发，不读取也不修改热点 SSID 与密码配置。无 Tethering 服务或 SDK < 36 明确返回 `unsupported_action`。真机必须在辅助进程退出后持续保持生效；若 ROM 把热点绑定在辅助进程生命周期，则判定不支持持久修改并返回 `state_change_unconfirmed`。
 - **响铃模式 (`device_control.set_ringer_mode`)**：通过 `AudioManager.ringerMode` 读写系统整数值；系统因通知策略限制拒绝修改时返回 `permission_denied`，绝不擅自修改通知策略权限或开关勿扰模式进行“兜底”。
 - **能力探测 (`device_control.capabilities`)**：只读返回各 `target` 的可读写状态及受控动作可用性，结果复用 `PrivilegedResult`，错误码统一采用 `ok`、`unsupported_action`、`permission_denied` 或 `state_unavailable`。探测为严格的只读查询（零写操作，不修改系统设置）；未授权路径下零命令执行、不触发 `su` 或隐式提权，直接返回当前权限状态；已授权状态下通过现有 `cmd <service> help`、只读状态查询命令与固定辅助进程探测支持性。
+  受管 ACP 的 `android_system_action` 同样复用 `Access.execute` 的无权限 capabilities 路径，宿主不提前用后端代次拦住此只读探测；会话、Turn、取消与其他动作的权限代次核验保持不变。
 
 保留原有 Wi-Fi/移动数据动作别名以及应用启动/停止、权限授予/撤销、AppOps、设备输入和诊断动作。普通 Android API 能完成的查询和音量操作在应用进程中执行；需要特权的修改使用所选后端中的固定系统命令或白名单辅助进程（`PrivilegedDeviceApiMain`），没有开放任意 Android API 反射执行入口。
 

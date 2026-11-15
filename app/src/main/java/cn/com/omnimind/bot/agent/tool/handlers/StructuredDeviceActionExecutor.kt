@@ -376,8 +376,8 @@ internal class StructuredDeviceActionExecutor(
                     }
                 }
 
-                // 6. 每次执行/写入前无条件再次强校验 context.isValid()、turnJob.isActive 与 access.isValid()
-                // 覆盖审批后撤权、审批挂起期间断连、以及 FullPower/TurnGrant 免审批分支下的代次失效保护
+                // 6. 会话与 Turn 始终有效；写操作及依赖后端的读取仍校验权限代次。
+                // capabilities 的无权限查询由 Access.execute 持有，不在宿主提前拦截其既有只读路径。
                 if (!context.isValid()) {
                     return@withContext PrivilegedResult(
                         requestId = UUID.randomUUID().toString(),
@@ -396,7 +396,7 @@ internal class StructuredDeviceActionExecutor(
                         message = "执行前 Turn 任务已停止，操作未执行。",
                     )
                 }
-                if (!access.isValid()) {
+                if (normalizedAction != PrivilegedActionPolicy.ACTION_DEVICE_CAPABILITIES && !access.isValid()) {
                     return@withContext PrivilegedResult(
                         requestId = UUID.randomUUID().toString(),
                         action = normalizedAction,

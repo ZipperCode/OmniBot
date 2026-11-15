@@ -49,7 +49,7 @@ class TaskContinuationCoordinatorTest {
         TaskRuntime.resetForTesting()
         TaskContinuationCoordinator.setDispatcherForTesting(null)
         TaskContinuationCoordinator.setBootCompletedForTesting(true)
-        TaskContinuationCoordinator.setCurrentBootIdForTesting(null)
+        TaskContinuationCoordinator.setCurrentBootIdForTesting("test-before-reboot")
     }
 
     @After
@@ -117,6 +117,7 @@ class TaskContinuationCoordinatorTest {
             )
         )
 
+        TaskContinuationCoordinator.setCurrentBootIdForTesting("test-after-reboot")
         val mockDispatcher = ContinuationDispatcher { _, _, _ ->
             Result.success(
                 mapOf(
@@ -173,6 +174,7 @@ class TaskContinuationCoordinatorTest {
             )
         )
 
+        TaskContinuationCoordinator.setCurrentBootIdForTesting("test-after-reboot")
         TaskRuntime.start(
             context = context,
             taskId = "agent-turn:session-1003:turn-4",
@@ -242,6 +244,7 @@ class TaskContinuationCoordinatorTest {
             )
         )
 
+        TaskContinuationCoordinator.setCurrentBootIdForTesting("test-after-reboot")
         val newTurnId = "turn-new-continuation-1005"
         val mockDispatcher = ContinuationDispatcher { _, _, _ ->
             Result.success(
@@ -305,6 +308,7 @@ class TaskContinuationCoordinatorTest {
             )
         )
 
+        TaskContinuationCoordinator.setCurrentBootIdForTesting("test-after-reboot")
         val resumeResult = TaskContinuationCoordinator.resumePendingContinuationIfAny(context)
         assertTrue(resumeResult is ContinuationResumeResult.Resumed)
 
