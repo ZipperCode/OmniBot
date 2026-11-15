@@ -3908,6 +3908,129 @@ void main() {
     expect(cardData['terminalOutput'], 'partial output');
   });
 
+  test('GUI 授权保持原回合并在同工具卡继续且不重复用户问题', () {
+    const session = 'gui-permission-session';
+    const turn = 'gui-permission-turn';
+    const call = 'gui-permission-call';
+    runtime.currentDispatchTurnId = turn;
+    runtime.activeAcpTurnId = turn;
+    runtime.isAiResponding = true;
+    final query = ChatMessageModel(
+      id: 'gui-user',
+      type: 1,
+      user: 1,
+      content: {'text': '打开系统设置'},
+    );
+    runtime.messages.add(query);
+    void update(Map<String, dynamic> value) {
+      reducer.reduce(runtime: runtime, event: {
+        'method': 'session/update',
+        'turnId': turn,
+        'params': {
+          'sessionId': session,
+          'update': {'toolCallId': call, ...value},
+        },
+      });
+    }
+    update({
+      'sessionUpdate': 'tool_call',
+      'kind': 'other',
+      'title': 'vlm_task',
+      'status': 'in_progress',
+      'rawInput': {'goal': '打开系统设置'},
+    });
+    final cardId = runtime.messages.firstWhere((m) => m.id != query.id).id;
+    final permission = {
+      'sessionUpdate': 'tool_call_update',
+      'status': 'in_progress',
+      'rawOutput': {
+        'type': 'permission_section',
+        'requiredPermissionIds': ['overlay'],
+        'missing': ['悬浮窗权限'],
+      },
+    };
+    update(permission);
+    update(permission);
+    final waiting = runtime.messages.singleWhere((m) => m.id == cardId);
+    expect(waiting.cardData?['type'], 'permission_section');
+    expect(waiting.streamMeta?['isFinal'], isNot(true));
+    expect(waiting.cardData?['toolCallId'], call);
+    expect(waiting.cardData?['sessionId'], session);
+    expect(waiting.cardData?['turnId'], turn);
+    expect(runtime.isAiResponding, isTrue);
+    expect(runtime.activeAcpTurnId, turn);
+    update({
+      'sessionUpdate': 'tool_call_update',
+      'status': 'in_progress',
+      'rawOutput': {'type': 'gui_progress', 'stage': 'vlm_runtime_prepare'},
+    });
+    final resumed = runtime.messages.singleWhere((m) => m.id == cardId);
+    expect(resumed.cardData?['type'], 'agent_tool_summary');
+    expect(resumed.cardData?['status'], 'running');
+    expect(jsonDecode(resumed.cardData!['argsJson'] as String), {
+      'goal': '打开系统设置',
+    });
+    update({
+      'sessionUpdate': 'tool_call_update',
+      'status': 'completed',
+      'rawOutput': {'success': true, 'summary': '已打开设置'},
+    });
+    final completed = runtime.messages.singleWhere((m) => m.id == cardId);
+    expect(completed.cardData?['status'], 'success');
+    expect(completed.cardData?['toolCallId'], call);
+    expect(runtime.messages.where((m) => m.cardData != null).single.id, cardId);
+    expect(runtime.messages.where((m) => m.id == query.id).single, same(query));
+    expect(runtime.isAiResponding, isTrue);
+    reducer.reducePromptResponse(
+      runtime: runtime,
+      sessionId: session,
+      turnId: turn,
+      stopReason: 'end_turn',
+    );
+    expect(runtime.isAiResponding, isFalse);
+  });
+
+  test('取消 GUI 授权等待后迟到更新不会重新打开权限卡或激活回合', () {
+    const session = 'gui-cancel-session';
+    const turn = 'gui-cancel-turn';
+    runtime.currentDispatchTurnId = turn;
+    runtime.activeAcpTurnId = turn;
+    final event = <String, dynamic>{
+      'method': 'session/update',
+      'turnId': turn,
+      'params': {
+        'sessionId': session,
+        'update': {
+          'sessionUpdate': 'tool_call_update',
+          'toolCallId': 'gui-cancel-call',
+          'status': 'in_progress',
+          'rawOutput': {
+            'type': 'permission_section',
+            'requiredPermissionIds': ['overlay'],
+          },
+        },
+      },
+    };
+    reducer.reduce(runtime: runtime, event: event);
+    reducer.reducePromptResponse(
+      runtime: runtime,
+      sessionId: session,
+      turnId: turn,
+      stopReason: 'cancelled',
+    );
+    final permissionCard = runtime.messages.singleWhere(
+      (m) => m.cardData?['type'] == 'permission_section',
+    );
+    expect(permissionCard.cardData?['autoOpenAuthorization'], isFalse);
+    expect(permissionCard.cardData?['isHistorical'], isTrue);
+    expect(permissionCard.cardData?['status'], 'interrupted');
+    final settled = runtime.messages.map((m) => m.toJson()).toList();
+    reducer.reduce(runtime: runtime, event: event);
+    expect(runtime.messages.map((m) => m.toJson()).toList(), settled);
+    expect(runtime.isAiResponding, isFalse);
+    expect(runtime.completedAcpTurnIds, contains(turn));
+  });
+
   test(
     'turns an ACP missing-accessibility result into an authorization card',
     () {

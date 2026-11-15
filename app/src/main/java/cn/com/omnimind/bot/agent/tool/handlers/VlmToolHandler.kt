@@ -42,7 +42,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
             explicitNulls = false
         },
     )
-
     override val toolNames: Set<String> = setOf(OmniVlmPlugin.RUN_LOG_TOOL)
 
     override suspend fun execute(
@@ -63,7 +62,82 @@ class VlmToolHandler(context: Context) : ToolHandler {
         val runId = "gui-${UUID.randomUUID()}"
         val sessionKey = env.acpSessionId ?: env.agentRunId
         val displayTarget = args["display"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty)
-        val targetDisplayId = try {
+        val normalizedTarget = displayTarget?.lowercase()
+        val isExplicitTarget = normalizedTarget != null && normalizedTarget != DeviceDisplayManager.DISPLAY_VIRTUAL
+
+        // 明确 main/0 及无效/其他会话 numeric 目标仍立即拒绝且不等待
+        var preResolvedDisplayId: Int? = null
+        if (isExplicitTarget) {
+            preResolvedDisplayId = try {
+                DeviceDisplayManager.resolveOrPrepareDisplayId(
+                    context = helper.context,
+                    target = displayTarget,
+                    sessionKey = sessionKey,
+                    acpSessionId = env.acpSessionId,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val msg = e.message ?: "指定的显示屏 '$displayTarget' 不可用或准备失败"
+                val reason = if (msg.contains("background_display_required")) "background_display_required" else "display_unavailable"
+                persistFailure(runId, goal, reason, msg)
+                return failedRunResult(runId, goal, reason, msg)
+            }
+        }
+
+        toolHandle.bindStopAction {
+            OmniVlmPlugin.stop(runId)
+        }
+
+        if (!OmniFlowPluginRuntime.isEnabled()) {
+            val message = "手机操作模块未启用。请打开插件市场 → OmniFlow → 启用插件（若尚未安装则先安装），确认无障碍服务已开启，并在模型场景中配置 Agent Provider/模型后重试。"
+            persistFailure(runId, goal, "omniflow_disabled", message)
+            return failedRunResult(
+                runId = runId,
+                goal = goal,
+                doneReason = "omniflow_disabled",
+                message = message,
+            )
+        }
+
+        // 缺权限挂起等待真实授权，保持 IN_PROGRESS，授权齐后继续同 Turn 执行
+        val initialPermission = AndroidAutomationPermissionGate.check(helper.context)
+        if (!initialPermission.granted) {
+            AndroidAutomationPermissionGate.awaitPermissions(
+                context = helper.context,
+                checkStop = { toolHandle.throwIfStopRequested() },
+                onMissing = { missingCheck ->
+                    toolHandle.recordProgress(missingCheck.getMessage())
+                    callback.onToolCallProgress(
+                        toolCall.id,
+                        OmniVlmPlugin.RUN_LOG_TOOL,
+                        missingCheck.getMessage(),
+                        mapOf(
+                            "type" to "permission_section",
+                            "requiredPermissionIds" to missingCheck.missingIds,
+                            "missing" to missingCheck.getDisplayNames(),
+                            "run_id" to runId,
+                        ),
+                    )
+                },
+            )
+            // 授权全部就绪后，发送 gui_progress 清除等待形态，同 toolCallId 恢复执行
+            callback.onToolCallProgress(
+                toolCall.id,
+                OmniVlmPlugin.RUN_LOG_TOOL,
+                "权限已授予，正在继续执行",
+                mapOf(
+                    "type" to "gui_progress",
+                    "run_id" to runId,
+                    "stage" to "vlm_runtime_prepare",
+                ),
+            )
+        }
+        helper.ensureRunActive()
+        toolHandle.throwIfStopRequested()
+
+        // 权限就绪后准备虚拟显示屏（合法默认/virtual 目标在此处创建，避免在权限检查前抢先失败）
+        val targetDisplayId = preResolvedDisplayId ?: try {
             DeviceDisplayManager.resolveOrPrepareDisplayId(
                 context = helper.context,
                 target = displayTarget,
@@ -82,6 +156,7 @@ class VlmToolHandler(context: Context) : ToolHandler {
             OmniVlmPlugin.stop(runId)
             DisplayInputCoordinator.cancelActiveOperation(targetDisplayId, ownerId = runId)
         }
+
         helper.reportToolProgress(
             callback = callback,
             toolName = OmniVlmPlugin.RUN_LOG_TOOL,
@@ -93,25 +168,6 @@ class VlmToolHandler(context: Context) : ToolHandler {
             ),
             toolHandle = toolHandle,
         )
-        if (!OmniFlowPluginRuntime.isEnabled()) {
-            val message = "手机操作模块未启用。请打开插件市场 → OmniFlow → 启用插件（若尚未安装则先安装），确认无障碍服务已开启，并在模型场景中配置 Agent Provider/模型后重试。"
-            persistFailure(runId, goal, "omniflow_disabled", message)
-            return failedRunResult(
-                runId = runId,
-                goal = goal,
-                doneReason = "omniflow_disabled",
-                message = message,
-            )
-        }
-        val permission = AndroidAutomationPermissionGate.check(helper.context)
-        if (!permission.granted) {
-            persistFailure(runId, goal, "permission_required", helper.context.getString(cn.com.omnimind.bot.R.string.permission_accessibility_missing))
-            // Keep the typed result all the way through the Agent executor.
-            // Calling the callback alone is not enough: the ACP adapter uses
-            // PermissionRequired to project a permission_section card instead
-            // of letting the model turn this into an assistant-only sentence.
-            return helper.permissionRequiredResult(callback, permission.getDisplayNames())
-        }
         if (KeyguardStateMonitor.isKeyguardLocked(helper.context)) {
             val convId = env.conversationId
             if (convId != null) {

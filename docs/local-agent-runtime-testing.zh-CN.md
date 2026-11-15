@@ -179,6 +179,14 @@ stdout/错误、离开返回与重启后的历史。每项标明通过/失败/�
 每次提交的测试报告必须单独标记：已验证不变量、尚未验证的不变量、属于上游环境
 还是本地代码、可修改项、不可修改项，以及哪些行为已经对齐官方且以后不得重新引入旁路。
 
+## GUI 权限返回后的同回合继续
+
+- 修复前真机复现：`vlm_task` 缺少悬浮窗权限，开启并返回后权限卡显示“已开启”，但所属 Turn 已提交 `end_turn`，GUI 目标未执行。
+- 维护回归：`VlmPermissionWaitRegressionTest` 覆盖未授权挂起、部分授权、完整授权和取消后迟到授权；`VlmToolHandlerDisplayAdmissionTest` 保持主屏与陌生显示编号立即拒绝。共享 reducer 与权限卡测试覆盖同卡恢复、用户问题保留、官方取消后的历史卡和异步权限检查期间取消不跳转。
+- 本次聚焦验证：原生 129 项、Flutter 352 项通过；离线 `assembleDevelopStandardDebug` 成功，排除 `installWebChatDependencies`、`installPiAcpDependencies`，未安装依赖。定向 Flutter 分析无 error / warning，保留 67 条 info；仓库未配置 LSP。未运行全量发布门禁。
+- 真机覆盖安装后，从实际聊天发送只读 GUI 请求，在后台虚拟屏打开系统设置。未授权返回时原工具卡非终态、原 Turn 无终态且“停止”可用；开启权限后未发送任何继续消息，原调用自行完成并返回设置页结果。另一独立请求在权限等待中停止，恢复权限后仍显示“任务已取消”，未重新执行。测试结束恢复原悬浮窗授权，未修改无障碍配置，保留合成验证对话，不删除历史。
+- 验收 APK SHA256：`b1799b34fe38a2c03421141a4863eba0b78b3e4173afd5039073eb26c8af7b0d`。取证时 `DebugAgentDatabaseSnapshotReceiver` 广播曾超时并触发系统 ANR，等待后应用恢复；授权后结果以真实聊天交互与正文核验，最终数据库取证未完成，不将广播失败算通过。未验证全部 ROM、进程被杀后的等待恢复或 Root / Shizuku 配置往返自动继续。
+
 ## 小万 Subagent 配置与执行
 
 入口包括 `Agents → 小万 → 配置` 和小万对话内的 `subagent_manage`，共用 `XiaowanSubagentConfigStore` 与 revision。工具动作是 `list`、`models`、`create`、`update`、`delete`、`configure`；写动作必须携带 `list` 返回的 `expectedRevision`，只修改指定字段，陈旧版本拒绝写入。模型引用可成对设为 null 恢复继承；`allowedTools: null` 继承基础权限，`[]` 不开放工具。其他非 nullable 字段传 null 会被拒绝，避免意外重新启用或放宽权限。

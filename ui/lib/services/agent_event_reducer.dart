@@ -654,6 +654,7 @@ class AgentEventReducer {
     if (method == 'item/started' || method == 'item/updated') {
       final item = _asStringMap(params['item']) ?? params;
       final itemType = canonicalAgentItemType(_string(item['type']));
+      final permissionCard = _permissionCardFromAcpItem(item);
       final startedItemId =
           _firstString([
             item['id'],
@@ -709,7 +710,7 @@ class AgentEventReducer {
             isFinal: false,
           );
         }
-      } else if (isAgentToolItemType(itemType)) {
+      } else if (isAgentToolItemType(itemType) || permissionCard != null) {
         _finalizeActiveThinkingCardForTask(runtime, parentTaskId);
         final existingCardId = _findToolCardIdForCallId(
           runtime,
@@ -761,25 +762,51 @@ class AgentEventReducer {
                 ),
               ),
             );
-        _upsertToolCard(
-          runtime,
-          cardId: cardId,
-          taskId: parentTaskId,
-          toolType: toolInfo.toolType,
-          title: toolInfo.toolTitle,
-          status: toolInfo.status,
-          summary: toolInfo.summary,
-          progress: toolInfo.progress,
-          terminalOutput: toolInfo.terminalOutput,
-          raw: mergedItem,
-          streamMeta: _streamMeta(
+        if (permissionCard != null) {
+          _upsertPermissionCard(
             runtime,
-            parentTaskId: parentTaskId,
-            entryId: cardId,
-            kind: method == 'item/updated' ? 'tool_progress' : 'tool_started',
-            existingMessage: existingMessage,
-          ),
-        );
+            cardId: cardId,
+            taskId: parentTaskId,
+            permission: permissionCard,
+            rawTool: mergedItem,
+            toolInfo: toolInfo,
+            toolCallId: startedItemId,
+            sessionId: _firstString([
+              item['sessionId'],
+              item['session_id'],
+              sessionId,
+            ]),
+            turnId: turnId,
+            streamMeta: _streamMeta(
+              runtime,
+              parentTaskId: parentTaskId,
+              entryId: cardId,
+              kind: 'permission_required',
+              isFinal: false,
+              existingMessage: existingMessage,
+            ),
+          );
+        } else {
+          _upsertToolCard(
+            runtime,
+            cardId: cardId,
+            taskId: parentTaskId,
+            toolType: toolInfo.toolType,
+            title: toolInfo.toolTitle,
+            status: toolInfo.status,
+            summary: toolInfo.summary,
+            progress: toolInfo.progress,
+            terminalOutput: toolInfo.terminalOutput,
+            raw: mergedItem,
+            streamMeta: _streamMeta(
+              runtime,
+              parentTaskId: parentTaskId,
+              entryId: cardId,
+              kind: method == 'item/updated' ? 'tool_progress' : 'tool_started',
+              existingMessage: existingMessage,
+            ),
+          );
+        }
       } else if (itemType.contains('requestApproval')) {
         final requestId = _acpRequestId(
           params: params,
@@ -2431,11 +2458,18 @@ class AgentEventReducer {
     required String taskId,
     required Map<String, dynamic> permission,
     required Map<String, dynamic> streamMeta,
+    Map<String, dynamic>? rawTool,
+    AgentToolCallInfo? toolInfo,
+    String? toolCallId,
+    String? sessionId,
+    String? turnId,
+    bool? autoOpenAuthorization,
   }) {
     final index = runtime.messages.indexWhere(
       (message) => message.id == cardId,
     );
     final existing = index == -1 ? null : runtime.messages[index];
+    final existingCardData = existing?.cardData ?? const <String, dynamic>{};
     final requiredPermissionIds = resolveExecutionPermissionIds(
       permission['requiredPermissionIds'] as Iterable<dynamic>?,
     );
@@ -2445,6 +2479,79 @@ class AgentEventReducer {
             .where((value) => value.trim().isNotEmpty)
             .toList(growable: false) ??
         const <String>[];
+
+    final effectiveToolCallId = _firstString([
+      toolCallId,
+      existingCardData['toolCallId'],
+      permission['toolCallId'],
+      rawTool?['toolCallId'],
+      rawTool?['id'],
+    ]);
+    final effectiveSessionId = _firstString([
+      sessionId,
+      existingCardData['sessionId'],
+      permission['sessionId'],
+      rawTool?['sessionId'],
+      rawTool?['session_id'],
+    ]);
+    final effectiveTurnId = _firstString([
+      turnId,
+      existingCardData['turnId'],
+      permission['turnId'],
+      rawTool?['turnId'],
+      rawTool?['turn_id'],
+    ]);
+
+    final isTurnCompleted = runtime.completedAgentTurnIds.contains(taskId) ||
+        (effectiveTurnId != null &&
+            (runtime.completedAgentTurnIds.contains(effectiveTurnId) ||
+                runtime.completedAcpTurnIds.contains(effectiveTurnId)));
+    final isHistorical = existingCardData['isHistorical'] == true ||
+        permission['isHistorical'] == true ||
+        isTurnCompleted;
+    final canAutoOpen =
+        autoOpenAuthorization ?? (!isHistorical && !isTurnCompleted);
+
+    final effectiveToolType = _firstString([
+      toolInfo?.toolType,
+      existingCardData['toolType'],
+      rawTool?['toolType'],
+      rawTool?['type'],
+    ]);
+    final effectiveTitle = _firstString([
+      toolInfo?.toolTitle,
+      existingCardData['toolTitle'],
+      existingCardData['title'],
+      rawTool?['toolTitle'],
+      rawTool?['title'],
+    ]);
+    final effectiveDisplayName = _firstString([
+      toolInfo?.displayName,
+      existingCardData['displayName'],
+      rawTool?['displayName'],
+    ]);
+    final effectiveToolName = _firstString([
+      toolInfo?.toolName,
+      existingCardData['toolName'],
+      rawTool?['toolName'],
+    ]);
+
+    final isFinal = streamMeta['isFinal'] == true;
+    final effectiveStatus = isFinal ? 'error' : 'running';
+
+    final effectiveArgsJson = toolInfo?.argsJson.isNotEmpty == true
+        ? toolInfo!.argsJson
+        : (existingCardData['argsJson'] ??
+                (rawTool?['rawInput'] != null
+                    ? _safeJson(rawTool!['rawInput'])
+                    : (rawTool != null ? _safeJson(rawTool) : '')))
+            .toString();
+    final effectiveRawResultJson = toolInfo?.rawResultJson.isNotEmpty == true
+        ? toolInfo!.rawResultJson
+        : (existingCardData['rawResultJson'] ??
+                (rawTool != null ? _safeJson(rawTool) : ''))
+            .toString();
+
     final cardData = <String, dynamic>{
       'type': 'permission_section',
       'taskId': taskId,
@@ -2452,18 +2559,38 @@ class AgentEventReducer {
       'cardId': cardId,
       'requiredPermissionIds': requiredPermissionIds,
       'missing': missing,
-      // This flag is intentionally live-only. Permission cards restored from
-      // history do not carry it, so reopening a conversation cannot launch a
-      // settings page unexpectedly.
-      'autoOpenAuthorization': true,
-      'permissionSource': 'acp_tool_result',
-      if (existing?.cardData?['requestId'] != null)
-        'requestId': existing!.cardData!['requestId'],
-      if (existing?.cardData?['toolCallId'] != null)
-        'toolCallId': existing!.cardData!['toolCallId'],
-      if (existing?.cardData?['sessionId'] != null)
-        'sessionId': existing!.cardData!['sessionId'],
+      // 仅在非历史、未终结的活跃回合设置自动跳转，避免重复 progress 重新触发
+      'autoOpenAuthorization': canAutoOpen,
+      'permissionSource': isFinal ? 'acp_tool_result' : 'acp_tool_progress',
+      if (isHistorical) 'isHistorical': true,
+      if (effectiveToolCallId != null) 'toolCallId': effectiveToolCallId,
+      if (effectiveSessionId != null) 'sessionId': effectiveSessionId,
+      if (effectiveTurnId != null) 'turnId': effectiveTurnId,
+      'status': effectiveStatus,
+      if (effectiveToolType != null) 'toolType': effectiveToolType,
+      if (effectiveTitle != null) ...<String, dynamic>{
+        'toolTitle': effectiveTitle,
+        'title': effectiveTitle,
+      },
+      if (effectiveDisplayName != null) 'displayName': effectiveDisplayName,
+      if (effectiveToolName != null) 'toolName': effectiveToolName,
+      if (effectiveArgsJson.isNotEmpty) 'argsJson': effectiveArgsJson,
+      if (effectiveRawResultJson.isNotEmpty)
+        'rawResultJson': effectiveRawResultJson,
+      if (rawTool?['rawInput'] != null)
+        'rawInput': rawTool!['rawInput']
+      else if (existingCardData['rawInput'] != null)
+        'rawInput': existingCardData['rawInput'],
+      if (rawTool?['rawOutput'] != null)
+        'rawOutput': rawTool!['rawOutput']
+      else if (existingCardData['rawOutput'] != null)
+        'rawOutput': existingCardData['rawOutput'],
+      if (existingCardData['requestId'] != null)
+        'requestId': existingCardData['requestId'],
+      if (existingCardData['terminalSessionId'] != null)
+        'terminalSessionId': existingCardData['terminalSessionId'],
     };
+
     final message = ChatMessageModel.cardMessage(
       cardData,
       id: cardId,
@@ -2479,6 +2606,9 @@ class AgentEventReducer {
     }
     runtime.isAiResponding = true;
     runtime.lastAgentToolType = 'permission';
+    if (!isFinal) {
+      runtime.activeToolCardId = cardId;
+    }
   }
 
   void _upsertToolCard(
@@ -3182,6 +3312,10 @@ class AgentEventReducer {
         cardId: cardId,
         taskId: taskId,
         permission: permissionCard,
+        rawTool: item,
+        toolCallId: completedItemId,
+        sessionId: _firstString([item['sessionId'], params['sessionId']]),
+        turnId: _firstString([item['turnId'], params['turnId']]),
         streamMeta: _streamMeta(
           runtime,
           parentTaskId: taskId,
@@ -3679,14 +3813,23 @@ class AgentEventReducer {
           final settleRequest =
               card?['type'] == 'agent_request' &&
               !_isTerminalRequestStatus(card?['status']?.toString());
+          final settlePermission = card?['type'] == 'permission_section' &&
+              card?['permissionSource'] == 'acp_tool_progress';
           runtime.messages[index] = message.copyWith(
-            content: settleRequest
+            content: settleRequest || settlePermission
                 ? {
                     ...?message.content,
-                    'cardData': {...?card, 'status': 'cancelled'},
+                    'cardData': {
+                      ...?card,
+                      'status': settlePermission ? 'interrupted' : 'cancelled',
+                      if (settlePermission) ...{
+                        'autoOpenAuthorization': false,
+                        'isHistorical': true,
+                      },
+                    },
                   }
                 : message.content,
-            isLoading: settleRequest ? false : message.isLoading,
+            isLoading: settleRequest || settlePermission ? false : message.isLoading,
             streamMeta: {
               ...?message.streamMeta,
               'stopReason': promptStopReason,
@@ -4231,7 +4374,8 @@ class AgentEventReducer {
       return null;
     }
     final cardData = runtime.messages[index].cardData;
-    if (cardData?['type'] != 'agent_tool_summary') {
+    if (cardData?['type'] != 'agent_tool_summary' &&
+        cardData?['type'] != 'permission_section') {
       return null;
     }
     return cardData;
@@ -4337,6 +4481,7 @@ class AgentEventReducer {
       final cardData = message.cardData;
       if (cardData == null ||
           (cardData['type'] != 'agent_tool_summary' &&
+              cardData['type'] != 'permission_section' &&
               cardData['type'] != kAgentRequestCardType) ||
           !_cardBelongsToTask(cardData, normalizedTaskId)) {
         continue;

@@ -30,24 +30,23 @@ class _PermissionSectionCardState extends State<PermissionSectionCard>
   bool _isChecking = false;
   bool _isNavigating = false;
 
+  bool get _canAutoOpen => widget.cardData['autoOpenAuthorization'] == true &&
+      widget.cardData['isHistorical'] != true &&
+      widget.onRequestAuthorize != null;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initPermissions();
 
-    final isHistorical = widget.cardData['isHistorical'] == true;
-    final canAutoOpen = widget.cardData['autoOpenAuthorization'] == true &&
-        !isHistorical &&
-        widget.onRequestAuthorize != null;
-
-    if (canAutoOpen) {
+    if (_canAutoOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
+        if (!mounted || !_canAutoOpen) return;
         // 先执行真实只读检查；若已全满足，零 push；仅在非历史卡且确实缺失权限时才自动开启
         await _refreshPermissions();
-        if (mounted && !_isAllGranted) {
-          await _onTapAuthorize();
+        if (mounted && _canAutoOpen && !_isAllGranted) {
+          await _onTapAuthorize(automatic: true);
         }
       });
     } else {
@@ -138,12 +137,12 @@ class _PermissionSectionCardState extends State<PermissionSectionCard>
     });
   }
 
-  Future<void> _onTapAuthorize() async {
-    if (_isChecking || _isNavigating) return;
+  Future<void> _onTapAuthorize({bool automatic = false}) async {
+    if (_isChecking || _isNavigating || (automatic && !_canAutoOpen)) return;
 
     // 点击前再次检查真实状态，防止后台已授权导致的竞态跳页
     await _refreshPermissions();
-    if (!mounted) return;
+    if (!mounted || (automatic && !_canAutoOpen)) return;
 
     if (_isAllGranted) {
       return;

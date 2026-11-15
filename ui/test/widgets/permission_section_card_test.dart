@@ -292,6 +292,41 @@ void main() {
     },
   );
 
+  for (final cancelDuringCheck in [1, 2]) {
+    testWidgets('第 $cancelDuringCheck 次权限检查中取消不再自动打开设置', (tester) async {
+      final pending = Completer<bool>();
+      var checks = 0;
+      var navigations = 0;
+      methodHandlers['isOverlayPermission'] = (_) {
+        checks++;
+        return checks == cancelDuringCheck ? pending.future : false;
+      };
+      Widget card(bool active) => MaterialApp(
+        home: Scaffold(
+          body: PermissionSectionCard(
+            cardData: {
+              'type': 'permission_section',
+              'requiredPermissionIds': ['overlay'],
+              'autoOpenAuthorization': active,
+              'isHistorical': !active,
+            },
+            onRequestAuthorize: (_) async { navigations++; },
+          ),
+        ),
+      );
+      await tester.pumpWidget(card(true));
+      await tester.pump();
+      expect(checks, cancelDuringCheck);
+      await tester.pumpWidget(card(false));
+      pending.complete(false);
+      await tester.pumpAndSettle();
+      expect(navigations, 0);
+      await tester.tap(find.text('前往开启'));
+      await tester.pumpAndSettle();
+      expect(navigations, 1);
+    });
+  }
+
   testWidgets(
     'partial grant and unknown ids are never treated as fully granted',
     (tester) async {

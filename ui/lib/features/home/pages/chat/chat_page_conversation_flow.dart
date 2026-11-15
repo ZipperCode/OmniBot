@@ -1935,10 +1935,7 @@ mixin _ChatPageConversationFlowMixin on _ChatPageStateBase {
           requiredPermissionIds: targetIds,
         ),
       );
-      // Granting a device permission changes only that permission. It is not
-      // a new user prompt, and must not delete/recreate the visible turn or
-      // silently replay its actions. The retained user message provides the
-      // explicit retry affordance if the user wants to continue.
+      // 原生等待原工具并复查权限，Flutter 不重发 prompt，不自动重放已终止 Turn。无需新增 resume 通道。
     } finally {
       _isAwaitingAuthorizeResult = false;
     }
