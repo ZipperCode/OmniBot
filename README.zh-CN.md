@@ -284,6 +284,44 @@ export LLMTHU_API_KEY='你的密钥'
 ./scripts/install_release_llmthu_device.sh
 ```
 
+### Fork 自动 APK 发布
+
+`ZipperCode/OmniBot` 的 `main` 每次推送都运行 CI，成功后在
+[Actions](https://github.com/ZipperCode/OmniBot/actions) 提供保留 14 天的
+`debug-apk-<sha>` 下载；它使用调试签名，不是正式渠道升级包。
+
+唯一签名发布入口为 `.github/workflows/release.yml`：
+
+- `main` 推送自动检查 `app/build.gradle.kts` 中的源码 `versionName`：
+  三段数字发布 stable，四段数字发布 beta。首次版本为 `v0.7.0.4` beta；
+  后续修改版本并推送即可，不需要手工打标签。相同公开版本不会重发或替换资产，旧同渠道版本跳过。
+- 每天 UTC 22:00（北京时间次日 06:00）生成 `nightly-YYYYMMDD`，即使无新提交；
+  GitHub 调度是尽力执行，不能保证准点完成。手动验收可选择 `channel=nightly`，仅允许 `main`。
+- stable 更新 latest，beta/nightly 均为预发布且不改 latest；历史版本保留。
+- [Releases](https://github.com/ZipperCode/OmniBot/releases) 每个版本提供 APK、
+  `.apk.sha256` 和 `manifest.txt`。清单记录源码提交及从最终 APK 实读的包名、版本、
+  CODE、渠道和签名证书摘要；先在 draft 校验全部资产，再公开。
+
+三个渠道共用 `cn.com.omnimind.bot` 和仓库独立签名，安装 CODE 跨渠道递增。
+新签名不能覆盖现有上游或 debug 签名应用；不应通过卸载或清数据绕过。
+从较新 nightly 回到较早 stable 属于 Android 降级，需等待后续更高 CODE 的 stable。
+fork 自动签名包设置 `OMNI_DISABLE_APP_UPDATES=1`，关闭上游不同签名 APK 的更新提示，
+不包含 App 内自动下载安装或新更新服务；普通本地/上游构建维持原更新配置。
+
+维护配置为 Secrets `RELEASE_KEYSTORE`（PKCS12 的 base64）、`RELEASE_PASSWORD`、
+`RELEASE_KEY_ALIAS`，以及公开变量 `RELEASE_CERT_SHA256`。缺失或证书不符直接失败，
+不会回退 debug 签名。签名备份在
+`%LOCALAPPDATA%/OmniBot/release-signing/ZipperCode-OmniBot/`：
+`release.p12`、当前 Windows 用户 DPAPI 加密的 `password.dpapi`、`certificate.sha256`；
+必须保留，DPAPI 文件不能单独交给其他 Windows 用户解密。不得提交或输出私密签名材料。
+
+本地仍保留源码默认 `versionCode=21`、`versionName=0.7.0.4`。
+可用 `OMNI_VERSION_CODE`（1..2100000000）和 `OMNI_VERSION_NAME` 覆盖最终 APK 身份；
+版本名只接受三/四段数字或 `<源码版本>-nightly.YYYYMMDD.<run_number>`。
+自动发布禁用内置 Provider 凭据（`OOB_BUNDLE_LLMTHU_PROVIDER=0`）。
+构建或上传失败仅保留 draft，同一源码 SHA 可重跑恢复；不同提交不能接管同 tag 的旧 draft，
+需要修复源码时提升源码版本。发布过程不上传上游 Worker，fork 不镜像 CNB。
+
 <h2 id="architecture">架构概览</h2>
 ```text
 OpenOmniBot/

@@ -2,20 +2,23 @@ name: Release APK
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+  schedule:
+    - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Optional release tag to create/update. Leave empty to upload artifacts only.'
-        required: false
-        type: string
+      channel:
+        description: '发布渠道：源码版本或每日 nightly'
+        required: true
+        default: version
+        type: choice
+        options: [version, nightly]
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.ref }}
+  group: apk-publication-${{ github.repository }}
   cancel-in-progress: false
 
 env:
@@ -24,7 +27,6 @@ env:
   PNPM_VERSION: '10.28.0'
   FLUTTER_VERSION: '3.47.2'
   ANDROID_BUILD_TOOLS_VERSION: '36.0.0'
-  # API 37 is published by sdkmanager as the minor-version package 37.0.
   ANDROID_PLATFORM_VERSION: '37.0'
   ANDROID_CMAKE_VERSION: '3.22.1'
   NDK_VERSION: '28.2.13676358'
@@ -32,108 +34,30 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'ZipperCode/OmniBot'
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      ORG_GRADLE_PROJECT_OMNI_NDK_VERSION: '28.2.13676358'
+      OOB_BUNDLE_LLMTHU_PROVIDER: '0'
+      OMNI_DISABLE_APP_UPDATES: '1'
 
     steps:
+      - name: 检查发布分支
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main || "$DEFAULT_BRANCH" != main ]]; then
+            echo '签名发布只允许默认 main 分支' >&2
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
-
-      - name: Resolve release reference
-        id: release_ref
-        shell: bash
-        env:
-          DISPATCH_TAG_NAME: ${{ inputs.tag_name }}
-        run: |
-          set -euo pipefail
-
-          release_tag_name=""
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            release_tag_name="${GITHUB_REF_NAME}"
-          elif [[ -n "${DISPATCH_TAG_NAME:-}" ]]; then
-            release_tag_name="${DISPATCH_TAG_NAME#refs/tags/}"
-          fi
-
-          artifact_ref_name="${release_tag_name:-${GITHUB_REF_NAME}}"
-          safe_ref_name="$(printf '%s' "${artifact_ref_name}" | sed 's#[^A-Za-z0-9._-]#-#g')"
-
-          if [[ -z "${safe_ref_name}" ]]; then
-            echo "Unable to derive a non-empty artifact reference name." >&2
-            exit 1
-          fi
-
-          if [[ -n "${release_tag_name}" && "${release_tag_name}" =~ [[:space:]] ]]; then
-            echo "Release tag name must not contain whitespace: ${release_tag_name}" >&2
-            exit 1
-          fi
-
-          echo "artifact_ref_name=${artifact_ref_name}" >> "$GITHUB_OUTPUT"
-          echo "safe_ref_name=${safe_ref_name}" >> "$GITHUB_OUTPUT"
-          echo "release_tag_name=${release_tag_name}" >> "$GITHUB_OUTPUT"
-
-          if [[ -n "${release_tag_name}" ]]; then
-            echo "publish_release=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish_release=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Determine release mode
-        id: release_mode
-        shell: bash
-        env:
-          RELEASE_REF_NAME: ${{ steps.release_ref.outputs.artifact_ref_name }}
-        run: |
-          set -euo pipefail
-
-          normalized_ref="${RELEASE_REF_NAME#v}"
-          if [[ "$normalized_ref" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "track=beta" >> "$GITHUB_OUTPUT"
-            echo "draft=false" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$normalized_ref" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "track=stable" >> "$GITHUB_OUTPUT"
-            echo "draft=false" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "track=custom" >> "$GITHUB_OUTPUT"
-            echo "draft=true" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Prepare artifact directory
-        id: artifacts
-        shell: bash
-        env:
-          SAFE_REF_NAME: ${{ steps.release_ref.outputs.safe_ref_name }}
-        run: |
-          set -euo pipefail
-
-          release_asset_dir="${RUNNER_TEMP}/release-artifacts/${SAFE_REF_NAME}"
-          mkdir -p "${release_asset_dir}"
-          echo "dir=${release_asset_dir}" >> "$GITHUB_OUTPUT"
-          echo "RELEASE_ASSET_DIR=${release_asset_dir}" >> "$GITHUB_ENV"
-          echo "SAFE_REF_NAME=${SAFE_REF_NAME}" >> "$GITHUB_ENV"
-
-      - name: Free runner disk space
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          df -h
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android/sdk/ndk/* || true
-          if [[ -n "${AGENT_TOOLSDIRECTORY:-}" ]]; then
-            sudo rm -rf "${AGENT_TOOLSDIRECTORY}/CodeQL" || true
-          fi
-          df -h
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -148,17 +72,38 @@ jobs:
           cache: pnpm
           cache-dependency-path: webchat/pnpm-lock.yaml
 
+      - name: 计算唯一发布计划
+        id: publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
+          PUBLICATION_CHANNEL: ${{ github.event_name == 'schedule' && 'nightly' || inputs.channel || 'version' }}
+        run: |
+          node scripts/automatic-apk-release.mjs prepare \
+            --channel "$PUBLICATION_CHANNEL" \
+            --output "$RUNNER_TEMP/apk-publication-plan.json"
+
+      - name: Set up JDK 21
+        if: steps.publication.outputs.publish == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
       - name: Validate Gradle wrappers
+        if: steps.publication.outputs.publish == 'true'
         uses: gradle/actions/wrapper-validation@v4
         with:
           allow-checksums: ${{ env.ALLOWED_THIRD_PARTY_WRAPPER_SHA }}
 
       - name: Set up Gradle
+        if: steps.publication.outputs.publish == 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
           validate-wrappers: false
 
       - name: Set up Flutter
+        if: steps.publication.outputs.publish == 'true'
         uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -166,13 +111,13 @@ jobs:
           cache: true
 
       - name: Set up Android SDK
+        if: steps.publication.outputs.publish == 'true'
         uses: android-actions/setup-android@v3
         with:
-          # The legacy "tools" package was removed from Google's SDK
-          # repository; only platform-tools is needed from the defaults.
           packages: platform-tools
 
       - name: Cache Android SDK release packages
+        if: steps.publication.outputs.publish == 'true'
         id: cache-android-sdk
         uses: actions/cache@v4
         with:
@@ -185,248 +130,109 @@ jobs:
           key: ${{ runner.os }}-android-release-sdk-${{ env.NDK_VERSION }}-${{ env.ANDROID_PLATFORM_VERSION }}-${{ env.ANDROID_BUILD_TOOLS_VERSION }}-${{ env.ANDROID_CMAKE_VERSION }}
 
       - name: Ensure required Android SDK components
+        if: steps.publication.outputs.publish == 'true'
         shell: bash
         run: |
           set -euo pipefail
-
           set +o pipefail
           yes | sdkmanager --licenses >/dev/null
           license_status=$?
           set -o pipefail
-
           if [[ "$license_status" -ne 0 ]]; then
-            echo "sdkmanager --licenses failed with exit code ${license_status}" >&2
+            echo 'Android SDK 许可确认失败' >&2
             exit "$license_status"
           fi
-
           declare -a MISSING_PACKAGES=()
-
-          if [[ ! -d "$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" ]]; then
-            MISSING_PACKAGES+=("ndk;${{ env.NDK_VERSION }}")
+          for package in "ndk;$NDK_VERSION" "platforms;android-$ANDROID_PLATFORM_VERSION" "build-tools;$ANDROID_BUILD_TOOLS_VERSION" "cmake;$ANDROID_CMAKE_VERSION"; do
+            if [[ ! -d "$ANDROID_SDK_ROOT/${package/;/\/}" ]]; then
+              MISSING_PACKAGES+=("$package")
+            fi
+          done
+          if (( ${#MISSING_PACKAGES[@]} > 0 )); then
+            sdkmanager "${MISSING_PACKAGES[@]}"
           fi
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-          if [[ ! -d "$ANDROID_SDK_ROOT/platforms/android-${{ env.ANDROID_PLATFORM_VERSION }}" ]]; then
-            MISSING_PACKAGES+=("platforms;android-${{ env.ANDROID_PLATFORM_VERSION }}")
-          fi
-
-          if [[ ! -d "$ANDROID_SDK_ROOT/build-tools/${{ env.ANDROID_BUILD_TOOLS_VERSION }}" ]]; then
-            MISSING_PACKAGES+=("build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }}")
-          fi
-
-          if [[ ! -d "$ANDROID_SDK_ROOT/cmake/${{ env.ANDROID_CMAKE_VERSION }}" ]]; then
-            MISSING_PACKAGES+=("cmake;${{ env.ANDROID_CMAKE_VERSION }}")
-          fi
-
-          if (( ${#MISSING_PACKAGES[@]} == 0 )); then
-            echo "Required Android SDK components are already installed."
-            exit 0
-          fi
-
-          echo "Installing missing Android SDK components:"
-          printf '%s\n' "${MISSING_PACKAGES[@]}"
-          sdkmanager "${MISSING_PACKAGES[@]}"
-
-      - name: Export Android NDK environment
-        shell: bash
+      - name: 验证发布策略与源码打包
+        if: steps.publication.outputs.publish == 'true'
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+          node --test scripts/automatic-apk-release.test.mjs
+          node --test scripts/source-packaging.test.mjs
+
+      - name: Install Flutter dependencies
+        if: steps.publication.outputs.publish == 'true'
+        working-directory: ui
+        run: flutter pub get --enforce-lockfile
+
+      - name: Flutter test
+        if: steps.publication.outputs.publish == 'true'
+        working-directory: ui
+        run: flutter test
+
+      - name: Gradle unit tests and lint
+        if: steps.publication.outputs.publish == 'true'
+        run: >-
+          ./gradlew --no-daemon --parallel --build-cache --max-workers=2
+          -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8 --enable-native-access=ALL-UNNAMED"
+          :app:testDevelopStandardDebugUnitTest :app:lintDevelopStandardDebug
+          -Ptarget=lib/main_standard.dart
 
       - name: Decode release keystore
-        shell: bash
+        if: steps.publication.outputs.publish == 'true'
         env:
           RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE }}
+          RELEASE_PASSWORD: ${{ secrets.RELEASE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
         run: |
           set -euo pipefail
-
-          if [[ -z "${RELEASE_KEYSTORE_B64}" ]]; then
-            echo "Missing RELEASE_KEYSTORE secret." >&2
+          if [[ -z "$RELEASE_KEYSTORE_B64" || -z "$RELEASE_PASSWORD" || -z "$RELEASE_KEY_ALIAS" || ! "$RELEASE_CERT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo '签名 Secrets 或证书变量缺失' >&2
             exit 1
           fi
+          umask 077
+          printf '%s' "$RELEASE_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.p12"
 
-          printf '%s' "${RELEASE_KEYSTORE_B64}" | base64 --decode > "${RUNNER_TEMP}/release.jks"
-          chmod 600 "${RUNNER_TEMP}/release.jks"
-
-      - name: Build production release APKs
-        shell: bash
+      - name: Build verified production release APK
+        if: steps.publication.outputs.publish == 'true'
         env:
-          RELEASE_REF_NAME: ${{ steps.release_ref.outputs.artifact_ref_name }}
-          RELEASE_ASSET_DIR: ${{ steps.artifacts.outputs.dir }}
-          GRADLE_OPTS: >-
-            -Dorg.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 --enable-native-access=ALL-UNNAMED
-          OMNI_RELEASE_STORE_FILE: ${{ runner.temp }}/release.jks
+          RELEASE_TAG: ${{ steps.publication.outputs.tag }}
+          OMNI_VERSION_NAME: ${{ steps.publication.outputs.version_name }}
+          OMNI_VERSION_CODE: ${{ steps.publication.outputs.version_code }}
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
+          OMNI_RELEASE_STORE_FILE: ${{ runner.temp }}/release.p12
           OMNI_RELEASE_STORE_PWD: ${{ secrets.RELEASE_PASSWORD }}
           OMNI_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           OMNI_RELEASE_KEY_PWD: ${{ secrets.RELEASE_PASSWORD }}
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 --enable-native-access=ALL-UNNAMED
         run: |
-          set -euo pipefail
+          bash scripts/build-local-release.sh --edition standard --tag "$RELEASE_TAG" \
+            --out-dir "$RUNNER_TEMP/release-artifacts" --non-interactive
 
-          bash scripts/build-local-release.sh \
-            --edition standard \
-            --tag "${RELEASE_REF_NAME}" \
-            --out-dir "${RELEASE_ASSET_DIR}" \
-            --non-interactive
-
-      - name: Verify release artifacts
-        shell: bash
-        env:
-          RELEASE_ASSET_DIR: ${{ steps.artifacts.outputs.dir }}
-          SAFE_REF_NAME: ${{ steps.release_ref.outputs.safe_ref_name }}
-        run: |
-          set -euo pipefail
-
-          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-standard.apk"
-          test -f "${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-standard.apk.sha256"
-          test -f "${RELEASE_ASSET_DIR}/manifest.txt"
-          find "${RELEASE_ASSET_DIR}" -maxdepth 1 -type f -print | sort
-
-      # A tagged/manual release already uploads the same files to the GitHub
-      # Release below. Keep the artifact-only manual mode, but do not pay for
-      # a second upload on the normal release path.
-      - name: Upload release artifacts for artifact-only runs
-        if: steps.release_ref.outputs.publish_release != 'true'
+      - name: Preserve verified APK artifacts
+        if: steps.publication.outputs.publish == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk-${{ steps.release_ref.outputs.safe_ref_name }}
+          name: release-apk-${{ steps.publication.outputs.tag }}-${{ github.sha }}
+          retention-days: 14
           if-no-files-found: error
           path: |
-            ${{ steps.artifacts.outputs.dir }}/*.apk
-            ${{ steps.artifacts.outputs.dir }}/*.sha256
-            ${{ steps.artifacts.outputs.dir }}/manifest.txt
+            ${{ runner.temp }}/release-artifacts/*.apk
+            ${{ runner.temp }}/release-artifacts/*.sha256
+            ${{ runner.temp }}/release-artifacts/manifest.txt
 
-      - name: Create GitHub Release
-        if: steps.release_ref.outputs.publish_release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_ref.outputs.release_tag_name }}
-          target_commitish: ${{ github.sha }}
-          draft: ${{ steps.release_mode.outputs.draft == 'true' }}
-          prerelease: ${{ steps.release_mode.outputs.prerelease == 'true' }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-standard.apk
-            ${{ steps.artifacts.outputs.dir }}/OpenOmniBot-${{ steps.release_ref.outputs.safe_ref_name }}-standard.apk.sha256
-            ${{ steps.artifacts.outputs.dir }}/manifest.txt
-
-      - name: Upload APKs to OmniBot website backend
-        if: steps.release_ref.outputs.publish_release == 'true'
-        shell: bash
+      - name: 验证 draft 资产并公开 Release
+        if: steps.publication.outputs.publish == 'true'
         env:
-          APP_UPDATE_WORKER_URL: ${{ vars.OMNIBOT_BACKEND_URL || 'https://omnibot.omnimind.com.cn' }}
-          APP_UPDATE_WORKER_TOKEN: ${{ secrets.APP_UPDATE_WORKER_TOKEN }}
-          RELEASE_TAG_NAME: ${{ steps.release_ref.outputs.release_tag_name }}
-          RELEASE_ASSET_DIR: ${{ steps.artifacts.outputs.dir }}
-          SAFE_REF_NAME: ${{ steps.release_ref.outputs.safe_ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_CERT_SHA256: ${{ vars.RELEASE_CERT_SHA256 }}
         run: |
-          set -euo pipefail
+          node scripts/automatic-apk-release.mjs publish \
+            --plan "$RUNNER_TEMP/apk-publication-plan.json" \
+            --artifacts "$RUNNER_TEMP/release-artifacts"
 
-          if [[ -z "${APP_UPDATE_WORKER_URL}" || -z "${APP_UPDATE_WORKER_TOKEN}" ]]; then
-            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are required to upload APKs." >&2
-            exit 1
-          fi
-
-          PYTHON_BIN=python3
-          if command -v python3.11 >/dev/null 2>&1; then
-            PYTHON_BIN=python3.11
-          fi
-
-          for edition in standard; do
-            apk_path="${RELEASE_ASSET_DIR}/OpenOmniBot-${SAFE_REF_NAME}-${edition}.apk"
-            sha_path="${apk_path}.sha256"
-            sha256="$(awk '{print $1}' "${sha_path}")"
-            sha_file_sha256="$(sha256sum "${sha_path}" | awk '{print $1}')"
-
-            "${PYTHON_BIN}" scripts/upload_release_asset_to_worker.py \
-              --worker-url "${APP_UPDATE_WORKER_URL}" \
-              --token "${APP_UPDATE_WORKER_TOKEN}" \
-              --tag "${RELEASE_TAG_NAME}" \
-              --file "${apk_path}" \
-              --content-type "application/vnd.android.package-archive" \
-              --sha256 "${sha256}"
-
-            "${PYTHON_BIN}" scripts/upload_release_asset_to_worker.py \
-              --worker-url "${APP_UPDATE_WORKER_URL}" \
-              --token "${APP_UPDATE_WORKER_TOKEN}" \
-              --tag "${RELEASE_TAG_NAME}" \
-              --file "${sha_path}" \
-              --content-type "text/plain; charset=utf-8" \
-              --sha256 "${sha_file_sha256}"
-          done
-
-      - name: Publish release tag to OmniBot website backend
-        if: steps.release_ref.outputs.publish_release == 'true'
-        shell: bash
-        env:
-          APP_UPDATE_WORKER_URL: ${{ vars.OMNIBOT_BACKEND_URL || 'https://omnibot.omnimind.com.cn' }}
-          APP_UPDATE_WORKER_TOKEN: ${{ secrets.APP_UPDATE_WORKER_TOKEN }}
-          RELEASE_TAG_NAME: ${{ steps.release_ref.outputs.release_tag_name }}
-          RELEASE_TRACK: ${{ steps.release_mode.outputs.track }}
-          RELEASE_DRAFT: ${{ steps.release_mode.outputs.draft }}
-          RELEASE_PRERELEASE: ${{ steps.release_mode.outputs.prerelease }}
-          RELEASE_ASSET_DIR: ${{ steps.artifacts.outputs.dir }}
-          SAFE_REF_NAME: ${{ steps.release_ref.outputs.safe_ref_name }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${APP_UPDATE_WORKER_URL}" || -z "${APP_UPDATE_WORKER_TOKEN}" ]]; then
-            echo "APP_UPDATE_WORKER_URL and APP_UPDATE_WORKER_TOKEN secrets are required to publish update metadata." >&2
-            exit 1
-          fi
-
-          PYTHON_BIN=python3
-          if command -v python3.11 >/dev/null 2>&1; then
-            PYTHON_BIN=python3.11
-          fi
-
-          payload_file="${RUNNER_TEMP}/app-update-worker-payload.json"
-          "${PYTHON_BIN}" - <<'PY' > "${payload_file}"
-          import json
-          import os
-          import time
-          from pathlib import Path
-
-          tag = os.environ["RELEASE_TAG_NAME"]
-          safe_ref = os.environ["SAFE_REF_NAME"]
-          github_repo = os.environ["GITHUB_REPOSITORY"]
-          asset_dir = Path(os.environ["RELEASE_ASSET_DIR"])
-
-          def env_bool(name):
-              return os.environ.get(name, "").lower() == "true"
-
-          def apk_asset(edition):
-              name = f"OpenOmniBot-{safe_ref}-{edition}.apk"
-              apk_path = asset_dir / name
-              sha256 = (asset_dir / f"{name}.sha256").read_text(encoding="utf-8").split()[0]
-              return {
-                  "name": name,
-                  "githubDownloadUrl": f"https://github.com/{github_repo}/releases/download/{tag}/{name}",
-                  "sha256": sha256,
-                  "size": apk_path.stat().st_size,
-              }
-
-          payload = {
-              "tag": tag,
-              "track": os.environ["RELEASE_TRACK"],
-              "draft": env_bool("RELEASE_DRAFT"),
-              "prerelease": env_bool("RELEASE_PRERELEASE"),
-              "publishedAt": int(time.time() * 1000),
-              "releaseUrl": f"https://github.com/{github_repo}/releases/tag/{tag}",
-              # releaseNotes is intentionally omitted: the worker keeps the
-              # changelog curated in the admin console (/admin) across republishes.
-              "assets": [
-                  apk_asset("standard"),
-              ],
-          }
-          print(json.dumps(payload, ensure_ascii=False))
-          PY
-
-          api_url="${APP_UPDATE_WORKER_URL%/}"
-          api_url="${api_url%/updates}"
-          api_url="${api_url%/admin/releases}/admin/releases"
-
-          curl --fail --show-error --silent --location \
-            --request POST "${api_url}" \
-            --header "Authorization: Bearer ${APP_UPDATE_WORKER_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data-binary @"${payload_file}"
+      - name: 清理临时签名
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.p12"

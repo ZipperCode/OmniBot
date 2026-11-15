@@ -20,8 +20,13 @@ fun buildConfigString(value: String): String {
     return "\"$escaped\""
 }
 
-val appUpdateWorkerUrl = prop("OMNIBOT_UPDATE_WORKER_URL")
-    .ifBlank { "https://omnibot.omnimind.com.cn" }
+val disableAppUpdates = prop("OMNI_DISABLE_APP_UPDATES") == "1"
+val appUpdateWorkerUrl = if (disableAppUpdates) {
+    ""
+} else {
+    prop("OMNIBOT_UPDATE_WORKER_URL")
+        .ifBlank { "https://omnibot.omnimind.com.cn" }
+}
 val llmThuApiBase = prop("LLMTHU_API_BASE")
     .ifBlank { "https://llmapi.paratera.com" }
 val llmThuApiKey = prop("LLMTHU_API_KEY")
@@ -196,6 +201,28 @@ android {
         // Keep the Android version code monotonic for installable updates.
         versionCode = 21
         versionName = "0.7.0.4"
+
+        val rawVersionCode = prop("OMNI_VERSION_CODE")
+        if (rawVersionCode.isNotEmpty()) {
+            val codePattern = Regex("^[0-9]+$")
+            require(rawVersionCode.matches(codePattern)) {
+                "OMNI_VERSION_CODE 必须全为 ASCII 数字: '$rawVersionCode'"
+            }
+            val parsedCode = rawVersionCode.toLongOrNull()
+            require(parsedCode != null && parsedCode in 1L..2100000000L) {
+                "OMNI_VERSION_CODE 超出合法范围 (1..2100000000): '$rawVersionCode'"
+            }
+            versionCode = parsedCode.toInt()
+        }
+
+        val rawVersionName = prop("OMNI_VERSION_NAME")
+        if (rawVersionName.isNotEmpty()) {
+            val versionNamePattern = Regex("^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?(-nightly\\.[0-9]{8}\\.[0-9]+)?$")
+            require(rawVersionName.matches(versionNamePattern)) {
+                "OMNI_VERSION_NAME 格式非法: '$rawVersionName'。必须为精确三/四段数字或契约 nightly（如 0.7.0、0.7.0.4、0.7.0.4-nightly.20261115.1）"
+            }
+            versionName = rawVersionName
+        }
         buildConfigField("String", "DEBUG_OMNIMIND_API_BASE", buildConfigString(""))
         buildConfigField("String", "DEBUG_OMNIMIND_API_KEY", buildConfigString(""))
         buildConfigField("String", "DEBUG_OMNIMIND_MODEL", buildConfigString(""))

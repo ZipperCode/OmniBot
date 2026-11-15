@@ -16,6 +16,7 @@ env:
 
 jobs:
   sync:
+    if: github.repository == 'omnimind-ai/OmniBot'
     runs-on: ubuntu-latest
 
     steps:

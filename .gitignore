@@ -48,3 +48,6 @@ reports/
 # Optional local on-device model checkout is not part of the host app.
 /third_party/omniinfer/
 .slim/deepwork/
+/.codegraph/
+__pycache__/
+*.pyc

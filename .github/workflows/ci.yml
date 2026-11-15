@@ -1,6 +1,8 @@
 name: Pull Request CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches:
       - main
@@ -26,6 +28,8 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      ORG_GRADLE_PROJECT_OMNI_NDK_VERSION: '28.2.13676358'
 
     steps:
       - name: Checkout repository
@@ -147,3 +151,11 @@ jobs:
           :app:lintDevelopStandardDebug
           :app:assembleDevelopStandardDebug
           -Ptarget=lib/main_standard.dart
+
+      - name: 上传 main 调试 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: app/build/outputs/apk/developStandard/debug/app-develop-standard-debug.apk

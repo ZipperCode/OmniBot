@@ -255,7 +255,11 @@ detect_github_repo() {
 determine_release_mode() {
   local normalized_ref="${REF_NAME#v}"
 
-  if [[ "$normalized_ref" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if [[ "$REF_NAME" =~ ^nightly-[0-9]{8}$ || "$normalized_ref" =~ ^nightly-[0-9]{8}$ ]]; then
+    RELEASE_TRACK="nightly"
+    RELEASE_DRAFT="false"
+    RELEASE_PRERELEASE="true"
+  elif [[ "$normalized_ref" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     RELEASE_TRACK="beta"
     RELEASE_DRAFT="false"
     RELEASE_PRERELEASE="true"
@@ -267,6 +271,144 @@ determine_release_mode() {
     RELEASE_TRACK="custom"
     RELEASE_DRAFT="true"
     RELEASE_PRERELEASE="false"
+  fi
+}
+
+resolve_android_sdk() {
+  if [[ -z "${ANDROID_SDK_ROOT:-}" && -f "$ROOT_DIR/local.properties" ]]; then
+    local sdk_dir=""
+    sdk_dir="$(sed -n 's/^sdk\.dir=//p' "$ROOT_DIR/local.properties" | tail -n 1)"
+    if [[ -n "$sdk_dir" ]]; then
+      sdk_dir="$(printf '%s' "$sdk_dir" | sed 's/\\:/:/g' | tr '\\' '/' | sed -e 's|/\+|/|g')"
+      export ANDROID_SDK_ROOT="$sdk_dir"
+    fi
+  fi
+
+  if [[ -z "${ANDROID_SDK_ROOT:-}" && -n "${ANDROID_HOME:-}" ]]; then
+    export ANDROID_SDK_ROOT="$(printf '%s' "$ANDROID_HOME" | tr '\\' '/' | sed -e 's|/\+|/|g')"
+  fi
+
+  if [[ -n "${ANDROID_SDK_ROOT:-}" ]]; then
+    export ANDROID_SDK_ROOT="$(printf '%s' "$ANDROID_SDK_ROOT" | tr '\\' '/' | sed -e 's|/\+|/|g')"
+  fi
+}
+
+find_sdk_tool() {
+  local tool_name="$1"
+  local candidate=""
+  local dir=""
+
+  for candidate in "$tool_name" "${tool_name}.exe" "${tool_name}.bat" "${tool_name}.cmd"; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+
+  local sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+  if [[ -n "$sdk_root" && -d "$sdk_root/build-tools" ]]; then
+    while IFS= read -r dir; do
+      [[ -d "$dir" ]] || continue
+      for candidate in "$dir/$tool_name" "$dir/${tool_name}.exe" "$dir/${tool_name}.bat" "$dir/${tool_name}.cmd"; do
+        if [[ -f "$candidate" ]]; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+      done
+    done < <(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V -r)
+  fi
+
+  return 1
+}
+
+read_and_verify_apk_identity() {
+  local apk_file="$1"
+
+  resolve_android_sdk
+
+  local aapt_tool=""
+  aapt_tool="$(find_sdk_tool aapt || find_sdk_tool aapt2 || true)"
+  if [[ -z "$aapt_tool" ]]; then
+    echo "无法找到 aapt 或 aapt2，无法解析 APK 身份信息" >&2
+    exit 1
+  fi
+
+  local badging=""
+  if ! badging="$("$aapt_tool" dump badging "$apk_file" 2>/dev/null)"; then
+    echo "aapt dump badging 解析失败: $apk_file" >&2
+    exit 1
+  fi
+
+  apk_application_id="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$badging")"
+  apk_version_code="$(sed -n "s/^package: .*versionCode='\([^']*\)'.*/\1/p" <<< "$badging")"
+  apk_version_name="$(sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p" <<< "$badging")"
+
+  if [[ -z "$apk_application_id" ]]; then
+    echo "无法从 APK 读取包名 (application_id): $apk_file" >&2
+    exit 1
+  fi
+
+  if [[ "$apk_application_id" != "cn.com.omnimind.bot" ]]; then
+    echo "APK 包名不符: 期望 cn.com.omnimind.bot，实际为 '$apk_application_id'" >&2
+    exit 1
+  fi
+
+  if [[ -n "${OMNI_VERSION_NAME:-}" ]]; then
+    if [[ "$apk_version_name" != "$OMNI_VERSION_NAME" ]]; then
+      echo "APK versionName 与输入不符: 期望 '$OMNI_VERSION_NAME'，实际为 '$apk_version_name'" >&2
+      exit 1
+    fi
+  else
+    if ! [[ "$apk_version_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-nightly\.[0-9]{8}\.[0-9]+)?$ ]]; then
+      echo "APK versionName 格式非法: '$apk_version_name'" >&2
+      exit 1
+    fi
+  fi
+
+  if [[ -n "${OMNI_VERSION_CODE:-}" ]]; then
+    if [[ "$apk_version_code" != "$OMNI_VERSION_CODE" ]]; then
+      echo "APK versionCode 与输入不符: 期望 '$OMNI_VERSION_CODE'，实际为 '$apk_version_code'" >&2
+      exit 1
+    fi
+  fi
+
+  local apksigner_tool=""
+  apksigner_tool="$(find_sdk_tool apksigner || true)"
+  if [[ -z "$apksigner_tool" ]]; then
+    echo "无法找到 apksigner，无法验证签名证书" >&2
+    exit 1
+  fi
+
+  local certs_out=""
+  if ! certs_out="$("$apksigner_tool" verify --print-certs "$apk_file" 2>/dev/null)"; then
+    echo "APK 签名验证失败: $apk_file" >&2
+    exit 1
+  fi
+  apk_cert_sha256="$(sed -n 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*\([0-9a-fA-F]*\).*/\1/p' <<< "$certs_out" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ ! "$apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "无法读取 APK 签名证书 SHA-256（APK 可能未签名或签名损坏）: $apk_file" >&2
+    exit 1
+  fi
+
+  local is_ci=0
+  if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    is_ci=1
+  fi
+
+  local expected_cert=""
+  if [[ -n "${RELEASE_CERT_SHA256:-}" ]]; then
+    expected_cert="$(printf '%s' "$RELEASE_CERT_SHA256" | sed 's/://g' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  fi
+
+  if [[ -n "$expected_cert" ]]; then
+    if [[ "$apk_cert_sha256" != "$expected_cert" ]]; then
+      echo "APK 签名证书 SHA-256 不符: 期望 '$expected_cert'，实际为 '$apk_cert_sha256'，拒绝后备 debug 签名" >&2
+      exit 1
+    fi
+  elif [[ "$is_ci" -eq 1 ]]; then
+    echo "CI 环境必须配置 RELEASE_CERT_SHA256 变量进行签名比对" >&2
+    exit 1
   fi
 }
 
@@ -651,6 +793,23 @@ elif [[ "$OUT_DIR" != /* ]]; then
 fi
 
 determine_release_mode
+if [[ "$RELEASE_TRACK" == "stable" || "$RELEASE_TRACK" == "beta" ]]; then
+  if [[ -n "${OMNI_VERSION_NAME:-}" && "$OMNI_VERSION_NAME" != "${REF_NAME#v}" ]]; then
+    echo "发布标签与 OMNI_VERSION_NAME 不一致" >&2
+    exit 1
+  fi
+  export OMNI_VERSION_NAME="${REF_NAME#v}"
+elif [[ "$RELEASE_TRACK" == "nightly" ]]; then
+  if [[ -z "${OMNI_VERSION_NAME:-}" ]]; then
+    echo "nightly 构建必须显式设置 OMNI_VERSION_NAME" >&2
+    exit 1
+  fi
+  nightly_date="${REF_NAME#nightly-}"
+  if [[ ! "$OMNI_VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?-nightly\.${nightly_date}\.[0-9]+$ ]]; then
+    echo "nightly 标签日期与 APK 版本不一致" >&2
+    exit 1
+  fi
+fi
 if [[ "$PUBLISH_GITHUB" -eq 1 || "$PUBLISH_WORKER" -eq 1 ]]; then
   GITHUB_REPO="$(detect_github_repo)"
 fi
@@ -711,18 +870,7 @@ export ORG_GRADLE_PROJECT_OMNI_RELEASE_STORE_PWD="$OMNI_RELEASE_STORE_PWD"
 export ORG_GRADLE_PROJECT_OMNI_RELEASE_KEY_ALIAS="$OMNI_RELEASE_KEY_ALIAS"
 export ORG_GRADLE_PROJECT_OMNI_RELEASE_KEY_PWD="$OMNI_RELEASE_KEY_PWD"
 
-if [[ -z "${ANDROID_SDK_ROOT:-}" && -f "$ROOT_DIR/local.properties" ]]; then
-  sdk_dir="$(sed -n 's/^sdk\.dir=//p' "$ROOT_DIR/local.properties" | tail -n 1)"
-  if [[ -n "$sdk_dir" ]]; then
-    sdk_dir="${sdk_dir//\\:/:}"
-    sdk_dir="${sdk_dir//\\\\/\\}"
-    export ANDROID_SDK_ROOT="$sdk_dir"
-  fi
-fi
-
-if [[ -z "${ANDROID_SDK_ROOT:-}" && -n "${ANDROID_HOME:-}" ]]; then
-  export ANDROID_SDK_ROOT="$ANDROID_HOME"
-fi
+resolve_android_sdk
 
 if [[ -z "${ANDROID_SDK_ROOT:-}" ]]; then
   echo "Missing ANDROID_SDK_ROOT and could not detect it from local.properties" >&2
@@ -836,6 +984,12 @@ for edition in "${EDITIONS[@]}"; do
   write_sha256 "$target_apk" >/dev/null
   sha256="$(awk '{print $1}' "${target_apk}.sha256")"
   size_bytes="$(wc -c < "$target_apk" | tr -d ' ')"
+  read_and_verify_apk_identity "$target_apk"
+  printf 'version_name=%s\n' "$apk_version_name" >> "$MANIFEST_PATH"
+  printf 'version_code=%s\n' "$apk_version_code" >> "$MANIFEST_PATH"
+  printf 'channel=%s\n' "$RELEASE_TRACK" >> "$MANIFEST_PATH"
+  printf 'application_id=%s\n' "$apk_application_id" >> "$MANIFEST_PATH"
+  printf 'signing_certificate_sha256=%s\n' "$apk_cert_sha256" >> "$MANIFEST_PATH"
   printf 'asset=%s sha256=%s size=%s\n' "$(basename "$target_apk")" "$sha256" "$size_bytes" >> "$MANIFEST_PATH"
 done
 
