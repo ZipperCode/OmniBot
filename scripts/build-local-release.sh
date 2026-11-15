@@ -384,7 +384,7 @@ read_and_verify_apk_identity() {
     echo "APK 签名验证失败: $apk_file" >&2
     exit 1
   fi
-  apk_cert_sha256="$(sed -n -E 's/^Signer .*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]{64})[[:space:]]*$/\1/p' <<< "$certs_out" | tr '[:upper:]' '[:lower:]' | sort -u)"
+  apk_cert_sha256="$(sed -n -E 's/^(V[0-9.]+ )?Signer.*certificate SHA-256 digest:[[:space:]]*([0-9a-fA-F]{64})[[:space:]]*$/\2/p' <<< "$certs_out" | tr '[:upper:]' '[:lower:]' | sort -u)"
 
   if [[ ! "$apk_cert_sha256" =~ ^[0-9a-f]{64}$ ]]; then
     printf 'apksigner=%s\n' "$apksigner_tool" >&2
